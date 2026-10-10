@@ -1,6 +1,7 @@
 import { FleetOpsState, holdAction, stopAction, type FleetAgent, type FleetTask } from "../src/fleet-ops";
 import { agentControls, headerControls, taskControls, undoBar, type FleetOpsViewContext } from "../src/fleet-ops-view";
 import type { Scope } from "../src/types";
+import { WriteGrantState } from "../src/write-grant";
 
 /**
  * cas-a474: the rail's fleet controls, drawn by the real view in the
@@ -29,10 +30,21 @@ export function renderFleetOpsFixture(app: HTMLElement, name: string): void {
     state.preview = { rowKey: "task:cas-1999", task: TASKS[2]! };
   }
   const noop = () => undefined;
+  // cas-ab04: the Write access panel, open (fleet-ops-write-access) and at
+  // its confirmation (fleet-ops-write-access-confirm).
+  const grant = new WriteGrantState();
+  grant.reset(TASKS);
+  if (name === "fleet-ops-write-access-confirm") {
+    grant.draft.path = "~/soundwave-config/docs/requests";
+    grant.draft.reason = "INGEST request files";
+    grant.review();
+  }
+  const writing = name.startsWith("fleet-ops-write-access");
   const context: FleetOpsViewContext = {
-    state, scopes: name === "fleet-ops-confirm" ? [...SCOPES, "factory-manage"] : SCOPES, origin: "https://commander.example", now: Date.now(),
+    state, scopes: name === "fleet-ops-confirm" || writing ? [...SCOPES, "factory-manage"] : SCOPES, origin: "https://commander.example", now: Date.now(),
     agents: AGENTS, tasks: TASKS, epics: ["cas-f29b", "cas-c4d3"], currentEpic: "cas-f29b", asked: new Map(), relative: () => "2m ago",
     on: { toggleMenu: noop, choose: noop, confirm: noop, cancelConfirm: noop, openPreview: noop, sendMerge: noop, closePanels: noop, toggleAssign: noop, toggleHeader: noop, undo: noop },
+    writeAccess: { state: grant, tasks: TASKS, on: { changed: noop, review: noop, revoke: noop, confirm: noop, cancel: noop } },
   };
   const rail = document.createElement("aside");
   rail.className = "conversation-context";
@@ -41,7 +53,7 @@ export function renderFleetOpsFixture(app: HTMLElement, name: string): void {
   const view = document.createElement("div"); view.id = "status-view";
   const undo = undoBar(document, context);
   if (undo) view.append(undo);
-  view.append(headerControls(document, context, undefined));
+  view.append(headerControls(document, context, writing ? "grant" : undefined));
   const label = (text: string) => { const p = document.createElement("p"); p.className = "status-section-label"; p.textContent = text; return p; };
   const identifier = (text: string) => { const span = document.createElement("span"); span.className = "status-identifier"; span.textContent = text; return span; };
   const chip = (text: string) => { const span = document.createElement("span"); span.className = `status-chip status-chip--${text.replaceAll("_", "-")}`; span.textContent = text.replaceAll("_", " "); return span; };

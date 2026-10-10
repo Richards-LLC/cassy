@@ -183,6 +183,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             post(session_operation::<R>).options(preflight::<R>),
         )
         .route(
+            "/v1/sessions/{session}/write-grants",
+            post(session_write_grant::<R>).options(preflight::<R>),
+        )
+        .route(
             "/v1/sessions/{session}/status",
             get(status::<R>).options(preflight::<R>),
         )
@@ -1219,6 +1223,188 @@ async fn session_operation<R: SessionReadModel>(
 /// Run one operation through the shared facade, checking `expected` first.
 /// Store work runs on a blocking thread; worker operations then await the
 /// same `CasService` body their MCP action runs.
+/// cas-ab04 (GH #1169 part 2): body of `POST /v1/sessions/{session}/write-grants`.
+#[derive(Debug, serde::Deserialize)]
+struct WriteGrantRequest {
+    action: String,
+    task: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn session_write_grant<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<WriteGrantRequest>,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/write-grants");
+    // Widening an agent's write access is a management action.
+    let scope = Scope::FactoryManage;
+    let context = match authorize(&state, HubAction::Mutation, scope, &headers, "POST", &uri) {
+        Ok(Some(context)) => context,
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) if error.to_string() == "scope denied" => {
+            return with_cors(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error":"scope_denied", "required_scope":scope.as_str()})),
+                )
+                    .into_response(),
+                &headers,
+            );
+        }
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    let Some(auth) = state.auth.clone() else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let grant = match request.action.as_str() {
+        "grant" => true,
+        "revoke" => false,
+        other => {
+            return with_cors(
+                launch_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_action",
+                    &format!("action must be grant or revoke, not {other}"),
+                ),
+                &headers,
+            );
+        }
+    };
+    let sessions = match state.catalog.list().await {
+        Ok(sessions) => sessions,
+        Err(error) => return with_cors(internal_error(error), &headers),
+    };
+    let Some(cas_dir) = sessions
+        .iter()
+        .find(|candidate| candidate.name == session)
+        .and_then(|candidate| candidate.project_dir.as_deref())
+        .map(|project| std::path::Path::new(project).join(".cas"))
+    else {
+        return with_cors(generic_not_found(), &headers);
+    };
+    let now = chrono::Utc::now();
+    if auth.ensure_active_context(&context, now).is_err() {
+        return with_cors(
+            launch_error(StatusCode::UNAUTHORIZED, "revoked", "device credential is no longer active"),
+            &headers,
+        );
+    }
+    let action = if grant { "write_grant" } else { "write_revoke" };
+    let subject = format!(
+        "task={} path={}",
+        request.task,
+        request.path.as_deref().unwrap_or("*")
+    );
+    if let Err(error) =
+        auth.audit_operation(&context, "requested", action, scope, &session, Some(subject.clone()), now)
+    {
+        return with_cors(
+            launch_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_unavailable", &error.to_string()),
+            &headers,
+        );
+    }
+
+    // The hub, not the caller, writes the grant, with the authenticated
+    // device as its source. Agents hold no device credential.
+    let attribution = verified_attribution(&context);
+    let source = crate::config::operator_policy::GrantSource::CommanderDevice {
+        device_id: context.device_id.clone(),
+    };
+    let blocking_session = session.clone();
+    let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let task_store = crate::store::open_task_store(&cas_dir)?;
+        let (body, receipt) = if grant {
+            let recorded = crate::config::operator_policy::record_operator_grant(
+                &cas_dir,
+                task_store.as_ref(),
+                &request.task,
+                request.path.as_deref().unwrap_or_default(),
+                request.mode.as_deref().unwrap_or_default(),
+                request.reason.as_deref().unwrap_or_default(),
+                &source,
+            )?;
+            let modes = recorded
+                .modes
+                .iter()
+                .map(|mode| format!("{mode:?}").to_lowercase())
+                .collect::<Vec<_>>()
+                .join("+");
+            let receipt = format!(
+                "Operator from Commander granted write access for {}: {} ({modes}) until the task closes. Reason: {}",
+                recorded.task,
+                recorded.path.display(),
+                recorded.reason
+            );
+            (serde_json::json!({"grant": recorded}), receipt)
+        } else {
+            let removed = crate::config::operator_policy::revoke_operator_grants(
+                &cas_dir,
+                task_store.as_ref(),
+                &request.task,
+                request.path.as_deref(),
+                &source,
+            )?;
+            let receipt = format!(
+                "Operator from Commander revoked write access for {}: {removed} grant(s) removed.",
+                request.task
+            );
+            (serde_json::json!({"removed": removed}), receipt)
+        };
+        // The receipt row in the conversation: a verified operator turn.
+        let summary = format!("Write access {} for {}", if grant { "granted" } else { "revoked" }, request.task);
+        if let Ok(outcome) = crate::ops::fleet::enqueue_commander_message(
+            &cas_dir,
+            &blocking_session,
+            "supervisor",
+            &receipt,
+            Some(&summary),
+            false,
+            None,
+            &attribution,
+        ) && matches!(outcome, cas_store::EnqueueOutcome::Created(_))
+        {
+            crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(&cas_dir);
+        }
+        Ok(body)
+    })
+    .await;
+    let (status, body, audit_outcome) = match outcome {
+        Ok(Ok(body)) => (StatusCode::OK, body, "allowed"),
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "invalid_write_grant", "detail": error.to_string()}),
+            "invalid",
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "write_grant_failed", "detail": error.to_string()}),
+            "failed",
+        ),
+    };
+    if let Err(error) = auth.audit_operation(
+        &context,
+        audit_outcome,
+        action,
+        scope,
+        &session,
+        Some(subject),
+        chrono::Utc::now(),
+    ) {
+        tracing::warn!(%error, %session, action, "cas-ab04: write-grant outcome audit row could not be written");
+    }
+    if status == StatusCode::OK {
+        state.events.fleet_changed(&session);
+    }
+    with_cors((status, Json(body)).into_response(), &headers)
+}
+
 async fn run_fleet_operation(
     cas_dir: std::path::PathBuf,
     session: String,

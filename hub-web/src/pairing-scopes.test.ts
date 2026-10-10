@@ -400,6 +400,8 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
     const expected: Record<FleetOperation, Scope> = {
       "ask-merge": "message-send", "focus-epic": "factory-operate", "add-workers": "factory-operate", "pause-worker": "factory-operate",
       "assign-task": "factory-operate", "restart-worker": "factory-manage", "stop-worker": "factory-manage", "end-session": "factory-manage",
+      // cas-ab04: widening an agent's write access is a management action.
+      "write-access": "factory-manage",
     };
     for (const [operation, scope] of Object.entries(expected) as [FleetOperation, Scope][]) expect(fleetOperationScope(operation), operation).toBe(scope);
   });

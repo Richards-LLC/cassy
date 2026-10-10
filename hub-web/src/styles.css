@@ -828,6 +828,18 @@ main {
 .fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
+/* cas-ab04: Write access — task, folder, modes and reason; then confirm. */
+.write-grant { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); align-items: stretch; }
+.write-grant-field { display: grid; gap: var(--space-1); font-size: var(--fs-meta); color: var(--text-mid); }
+.write-grant-field select, .write-grant-field input { min-height: var(--rail-item-min); width: 100%; min-width: 0; box-sizing: border-box; padding: 0 var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-regular) var(--fs-base)/1.3 var(--font-ui); }
+.write-grant-path { font-family: var(--font-mono); }
+.write-grant-modes { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: 0; padding: 0; border: 0; font-size: var(--fs-meta); color: var(--text-hi); }
+.write-grant-modes legend { padding: 0; margin-bottom: var(--space-1); color: var(--text-mid); }
+.write-grant-modes label { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--rail-item-min); }
+.write-grant-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.write-grant-confirm p { margin: 0; color: var(--text-hi); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.write-grant-result { margin: 0; overflow-wrap: anywhere; }
+.fleet-ops-note--ok { color: var(--state-ok); }
 .fleet-ops-undo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); }
 /* cas-97d58 F12: a destructive action's result, where the Undo would be. */
 .fleet-ops-result { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); scroll-margin-block: var(--space-4); }

@@ -206,6 +206,8 @@ export class HubDouble {
   readonly upstreamRefusals: string[] = [];
   /** Refusal frames actually delivered, distinct from sends received/refused. */
   readonly deliveredRefusals: string[] = [];
+  /** POST /v1/sessions/<s>/write-grants calls, in order, with what the double answered (cas-ab04). */
+  readonly writeGrants: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
   /** POST /v1/sessions/<s>/operations calls, in order, with what the double answered (cas-a474). */
   readonly operations: Array<{ machine: string; session: string; body: Record<string, unknown>; status: number }> = [];
   private readonly operationOutcomes = new Map<string, Record<string, unknown>>();
@@ -374,6 +376,30 @@ export class HubDouble {
       epics: fleet.epics.map((epic) => ({ ...epic, focused: epic.id === fleet.focused_epic })),
       focused_epic: fleet.focused_epic,
     };
+  }
+
+  /**
+   * cas-ab04: the hub's write-grant endpoint. factory:manage, a reason and an
+   * absolute or ~/ path are required; the double answers like the hub.
+   */
+  private async writeGrant(route: Route, machineId: string, session: string): Promise<void> {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    const answer = async (status: number, json: Record<string, unknown>) => {
+      this.writeGrants.push({ machine: machineId, session, body, status });
+      this.observed();
+      await route.fulfill({ status, json });
+    };
+    if (!this.scopesFor(machineId).includes("factory-manage")) return answer(403, { error: "scope_denied", required_scope: "factory:manage" });
+    const task = String(body.task ?? "");
+    if (body.action === "revoke") {
+      const removed = this.writeGrants.filter((call) => call.status === 200 && call.body.action === "grant" && call.body.task === task).length;
+      return answer(200, { removed });
+    }
+    const path = String(body.path ?? "");
+    if (!String(body.reason ?? "").trim()) return answer(400, { error: "invalid_write_grant", detail: "a reason is required: it is recorded on the task" });
+    if (!(path.startsWith("/") || path.startsWith("~/"))) return answer(400, { error: "invalid_write_grant", detail: `write root \`${path}\` must be an absolute path (or start with ~/)` });
+    const resolved = path.startsWith("~/") ? `/home/operator/${path.slice(2)}` : path;
+    return answer(200, { grant: { task, path: resolved, modes: String(body.mode ?? "create+edit").split("+"), reason: body.reason, granted_by: "commander-device:journey-device" } });
   }
 
   /** The brief's operations endpoint: scope, op_id dedupe, `expected` preconditions (409 stale), effects, FleetChanged. */
@@ -845,6 +871,7 @@ export class HubDouble {
       return route.fulfill({ json: { tasks_in_progress: [{ id: "task-journey", title: "Journey suite", status: "in_progress" }], tasks_ready: [], agents: [] } });
     }
     if (path.endsWith("/operations") && method === "POST") return this.operation(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
+    if (path.endsWith("/write-grants") && method === "POST") return this.writeGrant(route, machineId, decodeURIComponent(path.split("/")[3] ?? ""));
     return route.fulfill({ json: {} });
   }
 

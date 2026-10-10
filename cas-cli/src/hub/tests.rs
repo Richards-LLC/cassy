@@ -4117,6 +4117,113 @@ async fn operations_request_merge_reuses_message_send() {
     assert_eq!(body["required_scope"], "factory:operate", "assign_task needs factory:operate");
 }
 
+/// cas-ab04 (GH #1169 part 2): a paired device holding factory:manage grants
+/// a task write access to a folder. The hub itself writes the grant to the
+/// project's operator policy, recording the device; the task gets a note,
+/// the supervisor gets a verified operator receipt in the conversation, and
+/// every step is audited. Revoke removes it.
+#[tokio::test]
+async fn cas_ab04_paired_device_grants_and_revokes_write_access() {
+    let mut scopes = control_scopes();
+    scopes.insert(Scope::FactoryManage);
+    let fixture = ops_fixture(scopes);
+    let granted = fixture._temp.path().join("soundwave-config/docs/requests");
+    std::fs::create_dir_all(&granted).unwrap();
+    let granted = granted.canonicalize().unwrap();
+    let uri = format!("/v1/sessions/{OPS_SESSION}/write-grants");
+
+    let (status, body) = fixture
+        .call(
+            "POST",
+            &uri,
+            Some(serde_json::json!({
+                "action": "grant",
+                "task": OPS_TASK,
+                "path": granted.display().to_string(),
+                "mode": "create+edit",
+                "reason": "INGEST request files",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let device = format!("commander-device:{}", fixture.device_id);
+    assert_eq!(body["grant"]["granted_by"], device.as_str(), "{body}");
+    assert_eq!(body["grant"]["task"], OPS_TASK);
+
+    let policy = crate::config::operator_policy::load_operator_policy(&fixture.cas_dir).unwrap();
+    assert_eq!(policy.grants.len(), 1, "{policy:?}");
+    assert_eq!(policy.grants[0].path, granted);
+    assert_eq!(policy.grants[0].granted_by.as_deref(), Some(device.as_str()));
+    let notes = crate::store::open_task_store(&fixture.cas_dir).unwrap().get(OPS_TASK).unwrap().notes;
+    assert!(notes.contains("operator write grant") && notes.contains(&fixture.device_id), "{notes}");
+
+    let rows = fixture.queued();
+    let receipt = rows.iter().find(|row| row.prompt.contains("write access")).expect("a receipt to the supervisor");
+    assert!(receipt.prompt.contains(OPS_TASK) && receipt.prompt.contains(&granted.display().to_string()), "{}", receipt.prompt);
+    let stamp = receipt.operator.as_ref().expect("the device's operator stamp");
+    assert!(stamp.verified);
+    assert_eq!(stamp.device_id, fixture.device_id);
+    let outcomes: Vec<_> = fixture
+        .audit("write_grant")
+        .iter()
+        .map(|row| row["outcome"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(outcomes, ["requested", "allowed"]);
+
+    let (status, body) = fixture
+        .call(
+            "POST",
+            &uri,
+            Some(serde_json::json!({"action": "revoke", "task": OPS_TASK})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], 1, "{body}");
+    assert!(crate::config::operator_policy::load_operator_policy(&fixture.cas_dir).unwrap().grants.is_empty());
+
+    let (status, body) = fixture
+        .call(
+            "POST",
+            &uri,
+            Some(serde_json::json!({"action": "grant", "task": OPS_TASK, "path": granted.display().to_string(), "reason": " "})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a grant needs a reason: {body}");
+}
+
+/// cas-ab04: no device session, or a device without factory:manage, cannot
+/// create a grant. An agent has no device credential, so it lands here.
+#[tokio::test]
+async fn cas_ab04_write_grants_refuse_unauthenticated_and_unscoped_callers() {
+    let fixture = ops_fixture(control_scopes());
+    let uri = format!("/v1/sessions/{OPS_SESSION}/write-grants");
+    let body = serde_json::json!({
+        "action": "grant",
+        "task": OPS_TASK,
+        "path": fixture._temp.path().display().to_string(),
+        "reason": "agent forging a grant",
+    });
+
+    let (status, response) = fixture.call("POST", &uri, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    assert_eq!(response["required_scope"], "factory:manage");
+
+    let bare = Request::builder()
+        .method("POST")
+        .uri(&uri)
+        .header("origin", "https://controller.example")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = fixture.app.clone().oneshot(bare).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    assert!(
+        !crate::config::operator_policy::operator_policy_path(&fixture.cas_dir).exists(),
+        "no grant was written"
+    );
+}
+
 /// A retried `op_id` returns the first outcome and sends nothing twice.
 #[tokio::test]
 async fn operations_op_id_is_idempotent() {

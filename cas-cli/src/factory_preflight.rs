@@ -2403,6 +2403,10 @@ mod tests {
                     last_error: Some("token=cache-secret\ncontrol".to_string()),
                     last_attempt_at_ms: Some(40),
                     next_retry_at_ms: Some(50),
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 cmcp_core::UpstreamHealth {
                     name: second_name.to_string(),
@@ -2416,6 +2420,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(40),
                     next_retry_at_ms: Some(50),
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
             ],
         };

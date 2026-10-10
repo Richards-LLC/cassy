@@ -800,6 +800,10 @@ async fn system_proxy_health_cache_fallback_is_sanitized() {
             last_error: Some("token=cache-secret\ncontrol".to_string()),
             last_attempt_at_ms: Some(40),
             next_retry_at_ms: Some(50),
+            connected: false,
+            last_success_at_ms: None,
+            last_failure_code: Some("token=cache-secret\ncontrol".to_string()),
+            last_failure_at_ms: Some(40),
         }],
     };
     let mut config = cmcp_core::config::Config::default();
@@ -849,6 +853,7 @@ async fn system_proxy_health_cache_fallback_is_sanitized() {
     assert_eq!(health["session_id"], "proxy-unknown");
     assert_eq!(health["servers"][0]["transport"], "unknown");
     assert_eq!(health["servers"][0]["last_error_code"], "unknown");
+    assert_eq!(health["servers"][0]["last_failure_code"], "unknown", "cas-53ce: sanitized too");
     assert_eq!(
         health["servers"][0]["last_error"],
         "token=[redacted] control"

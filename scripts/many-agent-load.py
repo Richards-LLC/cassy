@@ -874,6 +874,19 @@ def write_markdown(receipt: dict, path: Path) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def harness_commit() -> str:
+    """Commit of this script (with `+dirty` when it differs from that commit)."""
+    here = Path(__file__).resolve().parent
+    try:
+        sha = subprocess.run(["git", "-C", str(here), "rev-parse", "HEAD"], capture_output=True,
+                             text=True, timeout=30).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(here), "diff", "--quiet", "HEAD", "--",
+                                Path(__file__).name], timeout=30).returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    return f"{sha}+dirty" if dirty else sha
+
+
 def cas_version(cas_bin: str) -> str:
     try:
         return subprocess.run([cas_bin, "--version"], capture_output=True, text=True,
@@ -947,6 +960,7 @@ def run(args: argparse.Namespace) -> int:
         "label": args.label,
         "cas_bin": args.cas_bin,
         "cas_version": cas_version(args.cas_bin),
+        "harness_commit": harness_commit(),
         "started_at": started_at,
         "finished_at": utc_now(),
         "agents": args.agents,

@@ -549,6 +549,14 @@ pub fn resolve_owning_supervisor(
     })
 }
 
+/// The supervisor a worker of `factory_session` reports to (GH #1171).
+pub fn resolve_worker_supervisor(
+    agent_store: &dyn AgentStore,
+    factory_session: Option<&str>,
+) -> Option<OwningSupervisor> {
+    resolve_owning_supervisor(agent_store, factory_session)
+}
+
 /// Resolve the factory session represented by a lifecycle actor.
 ///
 /// Factory workers sometimes reach the MCP server through a shared clone

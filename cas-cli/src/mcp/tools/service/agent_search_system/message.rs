@@ -794,7 +794,7 @@ impl CasService {
             {
                 // Do not let CAS_SUPERVISOR_NAME or roster order override a
                 // worker's registered factory owner.
-                return crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_owning_supervisor(
+                return crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
                     store.as_ref(),
                     Some(session),
                 )
@@ -4397,6 +4397,125 @@ mod cas_89e1_post_merge_message_type_tests {
             .find(|row| row.target == "supervisor-b")
             .expect("explicit supervisor target remains accepted");
         assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
+    }
+
+    /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve
+    /// 'supervisor'" while its supervisor was live and messaging it, because
+    /// that supervisor's row carried no factory session and a second
+    /// supervisor shared the clone. Resolution stays session-scoped: the
+    /// worker's session metadata names its supervisor, a sole sessionless
+    /// live supervisor is accepted, and another stamped session's supervisor
+    /// is never chosen.
+    fn register_gh_1171_fleet(core: &crate::mcp::server::CasCore, with_b: bool) -> Agent {
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).expect("register worker");
+        let mut supervisor_a = Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        // Registered from a process without CAS_FACTORY_SESSION.
+        supervisor_a.factory_session = None;
+        agents.register(&supervisor_a).expect("register unstamped supervisor");
+        if with_b {
+            let mut supervisor_b =
+                Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+            supervisor_b.role = AgentRole::Supervisor;
+            supervisor_b.factory_session = Some("factory-b".to_string());
+            agents.register(&supervisor_b).expect("register sibling supervisor");
+        }
+        worker
+    }
+
+    fn gh_1171_service(core: &crate::mcp::server::CasCore) -> CasService {
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+        service
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_supervisor_target_follows_session_metadata_to_an_unstamped_supervisor_gh_1171()
+    {
+        let env = TestEnvGuard::temp_home();
+        let sessions = env.home().join(".cas").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        std::fs::write(
+            sessions.join("factory-a.json"),
+            r#"{"name":"factory-a","supervisor":{"name":"supervisor-a"},"workers":[]}"#,
+        )
+        .expect("session metadata");
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let worker = register_gh_1171_fleet(&core, true);
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        let result = gh_1171_service(&core)
+            .message_send(message_request_to("supervisor"))
+            .await
+            .expect("target=supervisor resolves while the owning supervisor is live");
+        assert!(response_text(result).contains("Message queued"));
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "supervisor-a", "never the sibling session's supervisor");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_supervisor_target_accepts_the_sole_sessionless_live_supervisor_gh_1171() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let worker = register_gh_1171_fleet(&core, true);
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        gh_1171_service(&core)
+            .message_send(message_request_to("supervisor"))
+            .await
+            .expect("the only sessionless live supervisor owns the worker");
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "supervisor-a");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_supervisor_target_never_borrows_another_sessions_supervisor_gh_1171() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).expect("register worker");
+        let mut supervisor_b = Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents.register(&supervisor_b).expect("register sibling supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        let error = gh_1171_service(&core)
+            .message_send(message_request_to("supervisor"))
+            .await
+            .expect_err("another session's supervisor is not this worker's");
+        assert!(error.message.contains("Cannot resolve 'supervisor'"), "{}", error.message);
+        assert!(
+            error.message.contains("supervisor-b"),
+            "the refusal names the live supervisors that can be addressed by name: {}",
+            error.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

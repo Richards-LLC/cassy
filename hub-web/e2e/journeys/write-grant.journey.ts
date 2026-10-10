@@ -88,7 +88,9 @@ test.describe("write access without factory:manage cas_ab04", () => {
       await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
       const grant = page.locator("#status-view").getByRole("button", { name: "Write access…" });
       await expect(grant).toHaveAttribute("aria-disabled", "true");
-      await grant.click();
+      // A disabled control still says why; activating it does nothing.
+      await grant.focus();
+      await page.keyboard.press("Enter");
       await expect(page.locator("#status-view .write-grant")).toHaveCount(0);
       await expect(page.locator("#fleet-reason-header-grant")).toContainText("Not allowed on this pairing");
       expect(hub.writeGrants).toHaveLength(0);

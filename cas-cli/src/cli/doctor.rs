@@ -247,6 +247,7 @@ impl CheckGroup {
             | "symbol index"
             | "embedding drain"
             | "embeddings"
+            | "code index copies"
             | "code history index" => Self::Indexes,
             "canonical id"
             | "canonical id collision"
@@ -9832,6 +9833,8 @@ mod tests {
         let empty = code_index_copies_check(&[], &canonical);
         assert!(matches!(empty.status, CheckStatus::Ok), "{}", empty.message);
         assert!(!empty.message.is_empty());
+        // cas-415c: a code index row belongs in Indexes, not the Store fallback.
+        assert!(matches!(check.group(), CheckGroup::Indexes));
     }
 
     /// A freshly-indexed tree reports Ok with the counts, not a warning.

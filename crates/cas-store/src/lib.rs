@@ -36,13 +36,14 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod shared_db;
+pub mod wait_budget;
 
 mod agent_store;
+mod artifact_store;
 mod code_store;
 mod code_vector_store;
 mod commit_link_store;
 mod delegation_receipt_store;
-mod artifact_store;
 mod delivery_store;
 mod entity_store;
 pub mod error;
@@ -108,6 +109,10 @@ pub use event_store::{
 };
 
 // Code store for indexed source code
+pub use artifact_store::{
+    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
+    SqliteArtifactStore, looks_like_signed_upload_url,
+};
 pub use code_store::CodeStore;
 pub use code_vector_store::{
     CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorCoverage,
@@ -119,29 +124,24 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
-pub use qa_pass_store::{
-    NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, claim_qa_pass,
-    latest_qa_pass, list_qa_passes, open_qa_pass, open_qa_pass_reporting_superseded,
-    release_qa_claim_for_reviewer, release_qa_claim_for_task, resolve_qa_pass, satisfying_qa_pass_for_head,
-    satisfying_qa_passes, set_qa_task,
-    waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
-};
-pub use artifact_store::{
-    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
-    SqliteArtifactStore, looks_like_signed_upload_url,
-};
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
     get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
-    record_observed_delivery_merge,
-    transition_worker_delivery, transition_worker_delivery_verification_with_conn,
-    worker_delivery_transaction_id,
+    record_observed_delivery_merge, transition_worker_delivery,
+    transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
 };
 pub use external_verification_gate::{
     EXTERNAL_PRODUCTION_VERIFICATION_GATE, ExternalVerificationOutcome,
     ExternalVerificationRequest, GateAssessment, RequiredCheck, assess_response,
     assessment_for_outcome, authorize_request, record_assessment,
+};
+pub use qa_pass_store::{
+    NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, claim_qa_pass,
+    latest_qa_pass, list_qa_passes, open_qa_pass, open_qa_pass_reporting_superseded,
+    release_qa_claim_for_reviewer, release_qa_claim_for_task, resolve_qa_pass,
+    satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task, waive_qa_pass,
+    withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
 };
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
@@ -197,8 +197,8 @@ pub use verification_store::{
     bind_server_verifier_handoff, bind_server_verifier_handoff_and_register_child,
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
-    consume_verifier_capability_with_conn, correct_parked_delivery_proof_scope,
-    correct_parked_delivery_proof_targets, correct_parked_delivery_execution_note,
+    consume_verifier_capability_with_conn, correct_parked_delivery_execution_note,
+    correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, get_latest_verification_dispatch,
     get_latest_verification_dispatch_with_conn, get_verification_dispatch,
@@ -208,8 +208,7 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_new_cycle,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
-    reopen_closed_task_atomic,
-    reopen_terminal_task_atomic, request_changes_for_parked_delivery,
+    reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_for_parked_delivery,
     resolve_verification_dispatch_for_add, resolve_verification_dispatch_for_add_with_conn,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
     timeout_verification_dispatch, update_system_verification,
@@ -250,20 +249,19 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    AdmissionOutcome, OperatorCommandAdmission,
-    OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
-    OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
-    session_routing_id,
-    OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
-    OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorRelayReceipt,
-    OperatorTurn, OperatorTurnMetadata, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
-    ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
-    MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
-    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptRetentionSweep, RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, PromptQueueStore, PromptRetryDisposition,
-    OperatorStamp, QueueOrigin, QueuedPrompt, RelayAlertState, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
-    UndeliveredLifecycleRelay, WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt,
-    WorkerPeerMessageEnqueue, inbox_signal_file_name, read_inbox_signal,
-    reply_confirms_delivered_message,
+    AdmissionOutcome, ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
+    MessageDeliveryReport, MessageStatus, OPERATOR_CLOUD_SCHEMA_STATEMENTS,
+    OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
+    ObservationStatus, OperatorCloudBacklog, OperatorCloudClaim, OperatorCloudSettlement,
+    OperatorCommandAdmission, OperatorDeliveryClaim, OperatorDeliveryEvent,
+    OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorFeedBinding,
+    OperatorRelayReceipt, OperatorSealedBytes, OperatorStamp, OperatorTurn, OperatorTurnMetadata,
+    PROMPT_QUEUE_STALE_TTL_SECS, PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore,
+    PromptRetentionSweep, PromptRetryDisposition, QueueOrigin, QueuedPrompt,
+    RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, RelayAlertState, RetriedPrompt,
+    SqlitePromptQueueStore, SurfacingSource, UndeliveredLifecycleRelay,
+    WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt, WorkerPeerMessageEnqueue, inbox_signal_file_name,
+    is_routing_id, read_inbox_signal, reply_confirms_delivered_message, session_routing_id,
 };
 
 // Reminder store for supervisor "Remind Me" feature

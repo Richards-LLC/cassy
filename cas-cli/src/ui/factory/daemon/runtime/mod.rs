@@ -8,6 +8,8 @@ mod delivery_matrix_tests;
 mod gui_client;
 mod injection_events;
 mod lifecycle;
+#[cfg(test)]
+mod loop_latency_tests;
 pub(crate) mod loop_watchdog;
 pub(super) mod merge_sweep;
 mod output;
@@ -18,6 +20,7 @@ pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod send_dedupe;
 pub(super) mod session_summarizer;
+pub(crate) mod store_worker;
 pub(crate) mod teams;
 pub(super) mod terminal_exchange;
 mod violet_activity;

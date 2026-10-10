@@ -689,8 +689,13 @@ impl FactoryDaemon {
                         Ok(Some(message)) => self.broadcast_daemon_message(
                             &crate::ui::factory::DaemonMessage::OperatorMessage(message),
                         ),
-                        Ok(None) => tracing::warn!(notification_id = receipt.notification_id, "queued operator send could not be projected for live viewers"),
-                        Err(error) => tracing::warn!(notification_id = receipt.notification_id, %error, "queued operator send could not be loaded for live viewers"),
+                        Ok(None) => tracing::warn!(
+                            notification_id = receipt.notification_id,
+                            "queued operator send could not be projected for live viewers"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(notification_id = receipt.notification_id, %error, "queued operator send could not be loaded for live viewers")
+                        }
                     }
                 }
                 Ok(Some(crate::ui::factory::DaemonMessage::MessageQueued {
@@ -1533,7 +1538,7 @@ mod tests {
     fn terminal_assignment_is_suppressed_at_the_final_transport_boundary() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let task_id = "cas-2b0b";
         let mut task = cas_types::Task::new(task_id.to_string(), "closed before delivery".into());
         task.status = cas_types::TaskStatus::Closed;
@@ -1554,7 +1559,7 @@ mod tests {
     fn started_assignment_is_suppressed_for_the_current_worker_at_transport() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let task_id = "cas-7c1d";
         let mut task = cas_types::Task::new(task_id.to_string(), "already delivered".into());
         task.status = cas_types::TaskStatus::AwaitingMerge;
@@ -1579,10 +1584,7 @@ mod tests {
         assert_eq!(stored.assignee.as_deref(), Some("worker-1"));
         assert_eq!(
             assignment_stale_status(&cas_dir, &prompt, "worker-1"),
-            Some((
-                task_id.to_string(),
-                cas_types::TaskStatus::AwaitingMerge
-            )),
+            Some((task_id.to_string(), cas_types::TaskStatus::AwaitingMerge)),
             "the direct and durable transports must suppress an old spawn brief for its assignee"
         );
         assert_eq!(
@@ -1777,7 +1779,11 @@ mod tests {
     /// only as good as the harness it was measured against.
     #[test]
     fn idle_nudge_fires_only_for_claude_teams_recipients() {
-        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
+        for harness in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+        ] {
             for teams_active in [true, false] {
                 let channel = choose_channel(harness, teams_active);
                 let expect_nudge = harness == SupervisorCli::Claude && teams_active;
@@ -1884,12 +1890,9 @@ mod tests {
             Some(24535),
         );
 
-        let provenance = crate::hooks::delivery_provenance::consume(
-            temp.path(),
-            "rapid-leopard-25",
-            &payload,
-        )
-        .expect("the wake must register provenance the hook can consume");
+        let provenance =
+            crate::hooks::delivery_provenance::consume(temp.path(), "rapid-leopard-25", &payload)
+                .expect("the wake must register provenance the hook can consume");
         assert_eq!(
             provenance.notification_id, 24535,
             "a synthesised id cannot be traced back to the queued row"

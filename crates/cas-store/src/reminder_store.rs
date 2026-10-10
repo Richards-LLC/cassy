@@ -564,7 +564,7 @@ pub fn expire_stale_bounded(
 
     conn.busy_timeout(busy_budget)?;
     let expiry_result = expire_stale_with_conn(&conn);
-    conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT)?;
+    crate::shared_db::install_busy_handler(&conn)?;
 
     match expiry_result {
         Ok(expired) => Ok(ReminderExpiryOutcome::Expired(expired)),

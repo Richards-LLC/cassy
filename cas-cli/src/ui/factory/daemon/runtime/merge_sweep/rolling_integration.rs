@@ -551,7 +551,8 @@ fn integrate(
     let base_label = format!("origin/{trunk}");
     receipt.base = base.clone();
     receipt.trunk = trunk.clone();
-    let store = crate::store::open_task_store(&shared_cas).map_err(|error| error.to_string())?;
+    let store =
+        crate::store::open_task_store_cached(&shared_cas).map_err(|error| error.to_string())?;
     let mut tasks = store.list(None).map_err(|error| error.to_string())?;
     if let Some(focused_id) = focused_epic_id_for_project(main_root) {
         if !tasks.iter().any(|task| task.id == focused_id) {
@@ -868,7 +869,7 @@ pub(super) fn recovery_request_for_focus(
     session_name: &str,
     epic_id: &str,
 ) -> Result<SweepRequest, String> {
-    let tasks = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
+    let tasks = crate::store::open_task_store_cached(cas_dir).map_err(|error| error.to_string())?;
     let task = tasks
         .get(epic_id)
         .map_err(|error| format!("recovery focus {epic_id} is not a known task: {error}"))?;
@@ -953,7 +954,7 @@ pub(super) fn recovery_request_for_any_open_epic(
     cas_dir: &Path,
     session_name: &str,
 ) -> Result<SweepRequest, String> {
-    let tasks = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
+    let tasks = crate::store::open_task_store_cached(cas_dir).map_err(|error| error.to_string())?;
     let open_epics = open_epics(tasks.list(None).map_err(|error| error.to_string())?)
         .into_iter()
         .filter_map(|task| {
@@ -1318,7 +1319,7 @@ pub(super) fn record_result(cas_dir: &Path, result: &SweepResult) {
     if result.status == SweepStatus::Superseded {
         return;
     }
-    let Ok(tasks) = crate::store::open_task_store(cas_dir) else {
+    let Ok(tasks) = crate::store::open_task_store_cached(cas_dir) else {
         return;
     };
     let mut owners = std::collections::BTreeSet::new();
@@ -1592,7 +1593,7 @@ exit "$failed"
         let _env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(only.id.clone(), only.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(only.branch.clone());
@@ -1698,7 +1699,7 @@ exit "$failed"
         owner.role = cas_types::AgentRole::Supervisor;
         owner.factory_session = Some("session-fab3".to_owned());
         agents.register(&owner).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(only.id.clone(), only.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(only.branch.clone());
@@ -1898,7 +1899,7 @@ exit "$failed"
         let temp = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for id in ["a", "b"] {
             let mut agent = cas_types::Agent::new(format!("owner-{id}"), format!("lead-{id}"));
             agent.role = cas_types::AgentRole::Supervisor;
@@ -2073,7 +2074,7 @@ exit "$failed"
         let temp = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut agent = cas_types::Agent::new("owner".to_owned(), "lead".to_owned());
         agent.role = cas_types::AgentRole::Supervisor;
         agent.factory_session = Some("session".to_owned());
@@ -2193,7 +2194,7 @@ exit "$failed"
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(added.id.clone(), added.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(added.branch.clone());
@@ -2258,7 +2259,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for epic in [&first, &second] {
             let mut task = Task::new(epic.id.clone(), epic.id.clone());
             task.task_type = TaskType::Epic;
@@ -2363,7 +2364,7 @@ echo 'Summary: 1 passed'
         owner.role = cas_types::AgentRole::Supervisor;
         owner.factory_session = Some("session-45de".to_owned());
         agents.register(&owner).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(only.id.clone(), only.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(only.branch.clone());
@@ -2505,7 +2506,7 @@ echo 'Summary: 1 passed'
         let current = git(repo.path(), &["rev-parse", "HEAD"]);
         git(repo.path(), &["checkout", "--detach", "main"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(initial.id.clone(), initial.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(initial.branch.clone());
@@ -2591,7 +2592,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(initial.id.clone(), initial.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(initial.branch.clone());
@@ -2637,7 +2638,7 @@ echo 'Summary: 1 passed'
             &["remote", "add", "origin", repo.path().to_str().unwrap()],
         );
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-recov1".to_owned(), "recovery epic".to_owned());
         task.task_type = TaskType::Epic;
         task.branch = Some("epic/cas-recov1".to_owned());
@@ -2692,7 +2693,7 @@ echo 'Summary: 1 passed'
         let epic = epic(repo.path(), "cas-ambig1", "feature", "merged\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(epic.id.clone(), epic.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(epic.branch.clone());
@@ -2739,7 +2740,7 @@ echo 'Summary: 1 passed'
         let open_delivery = epic(repo.path(), "cas-open-delivery", "open", "open\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut closed_task = Task::new(closed_focus.id.clone(), closed_focus.id.clone());
         closed_task.task_type = TaskType::Epic;
         closed_task.status = TaskStatus::Closed;
@@ -2842,7 +2843,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut open_task = Task::new("cas-master-open".to_owned(), "cas-master-open".to_owned());
         open_task.task_type = TaskType::Epic;
         open_task.branch = Some("epic/cas-master-open".to_owned());
@@ -2907,7 +2908,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut open_task = Task::new(open.id.clone(), open.id.clone());
         open_task.task_type = TaskType::Epic;
         open_task.branch = Some(open.branch.clone());

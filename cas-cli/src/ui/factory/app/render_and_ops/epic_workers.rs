@@ -1,4 +1,4 @@
-use crate::store::{open_agent_store, open_task_store};
+use crate::store::{open_agent_store, open_task_store_cached};
 use crate::ui::factory::app::imports::*;
 use crate::worktree::RemoveOutcome;
 
@@ -432,17 +432,15 @@ pub(crate) fn resolve_spawn_worktree_repo(
         repo_selector: target.repo_selector.clone(),
         target_branch: target.target_branch.clone(),
     };
-    let context = crate::mcp::tools::core::task::repo_context::resolve_repo_context(
-        cas_dir,
-        &work_target,
-    )
-    .map_err(|reason| {
-        anyhow::anyhow!(
-            "cross-repo spawn: target_repo {} — {}",
-            target.repo_selector,
-            reason
-        )
-    })?;
+    let context =
+        crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_dir, &work_target)
+            .map_err(|reason| {
+                anyhow::anyhow!(
+                    "cross-repo spawn: target_repo {} — {}",
+                    target.repo_selector,
+                    reason
+                )
+            })?;
     let target_root = context.repo_root;
     let target_git = crate::worktree::GitOperations::new(target_root.clone());
     if !target_git.has_commits().unwrap_or(false) {
@@ -524,7 +522,7 @@ pub(crate) fn task_epic_base(
     repo_root: &std::path::Path,
     task_id: &str,
 ) -> TaskBase {
-    let store = match open_task_store(cas_dir) {
+    let store = match open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(error) => {
             tracing::warn!(
@@ -1197,11 +1195,9 @@ fn recorded_epic_parent_branch(
     cas_dir: &std::path::Path,
     epic_id: &str,
 ) -> Option<(String, String)> {
-    let store = open_task_store(cas_dir).ok()?;
+    let store = open_task_store_cached(cas_dir).ok()?;
     let epic = store.get(epic_id).ok()?;
-    let epic_branch = epic
-        .branch
-        .filter(|branch| !branch.trim().is_empty())?;
+    let epic_branch = epic.branch.filter(|branch| !branch.trim().is_empty())?;
     let parent_branch = epic
         .deliverables
         .work_target
@@ -1221,7 +1217,7 @@ fn recorded_epic_parent_branch_for_resolved_base(
     cas_dir: &std::path::Path,
     resolved_base: &str,
 ) -> Option<(String, String)> {
-    let store = open_task_store(cas_dir).ok()?;
+    let store = open_task_store_cached(cas_dir).ok()?;
     store
         .list(None)
         .ok()?
@@ -1294,7 +1290,7 @@ fn flag_agent_dirty_on_shutdown(
 /// graceful shutdown can reclaim the worktree. On lookup failure we err on the
 /// side of caution and treat the worker as still-busy so we never destroy work.
 fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
-    match open_task_store(cas_dir) {
+    match open_task_store_cached(cas_dir) {
         Ok(store) => match store.list(None) {
             Ok(tasks) => tasks
                 .iter()
@@ -1307,7 +1303,9 @@ fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
             }
         },
         Err(e) => {
-            tracing::warn!("worker_has_open_tasks: open_task_store failed: {e} — assuming busy");
+            tracing::warn!(
+                "worker_has_open_tasks: open_task_store_cached failed: {e} — assuming busy"
+            );
             true
         }
     }
@@ -1333,7 +1331,7 @@ pub(crate) fn assign_task_to_new_worker(
     task_id: &str,
     worker_name: &str,
 ) -> bool {
-    let store = match open_task_store(cas_dir) {
+    let store = match open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(e) => {
             tracing::error!(
@@ -1451,7 +1449,7 @@ fn reset_stale_preassign_holder(
         .release_lease_for_task(&task.id, "Stale pre-assignment force-release")
         .map_err(|e| format!("could not release stale holder '{holder}' lease: {e}"))?;
 
-    let store = open_task_store(cas_dir)
+    let store = open_task_store_cached(cas_dir)
         .map_err(|e| format!("could not open task store for stale-holder reset: {e}"))?;
     let mut reset = store
         .get(&task.id)
@@ -1546,7 +1544,7 @@ pub(crate) fn settle_retired_worker_bindings(
 /// The brief a recycled worker receives so its fresh conversation resumes its
 /// assigned work (cas-a622). `None` when it holds no nonterminal task.
 pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
-    let task_store = open_task_store(cas_dir).ok()?;
+    let task_store = open_task_store_cached(cas_dir).ok()?;
     let mut held: Vec<cas_types::Task> = task_store
         .list(None)
         .ok()?
@@ -1561,7 +1559,10 @@ pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str)
         "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
             .to_string();
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
-    for task in held.iter().filter(|task| task.status == cas_types::TaskStatus::InProgress) {
+    for task in held
+        .iter()
+        .filter(|task| task.status == cas_types::TaskStatus::InProgress)
+    {
         brief.push_str(&format!(
             "{}\n  Resume it: run `task action=start id={}` to re-take its lease, read its notes with \
              `task action=notes id={}`, then continue from the last checkpoint.\n",
@@ -1634,7 +1635,7 @@ pub(crate) fn enqueue_recycle_resume_brief(
 ///
 /// Best-effort: store failures are logged; returns the number of tasks cleared.
 pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_name: &str) -> usize {
-    let task_store = match open_task_store(cas_dir) {
+    let task_store = match open_task_store_cached(cas_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
@@ -1736,7 +1737,7 @@ pub(crate) fn release_preassign_if_bound(
     task_id: &str,
     worker_name: &str,
 ) {
-    let store = match open_task_store(cas_dir) {
+    let store = match open_task_store_cached(cas_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
@@ -1793,7 +1794,6 @@ fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
         "count"
     }
 }
-
 
 impl WorkerSpawnContext {
     pub(crate) fn resolve(mut self) -> anyhow::Result<WorkerSpawnPrep> {
@@ -1986,9 +1986,7 @@ impl WorkerSpawnContext {
                 // branch it names can be far behind trunk. Surface that at
                 // spawn time instead of leaving it to whoever happens to read
                 // `behind:` in worker_status.
-                if let Some(notice) =
-                    stale_spawn_base_notice(&repo_root, effective_base, &trunk)
-                {
+                if let Some(notice) = stale_spawn_base_notice(&repo_root, effective_base, &trunk) {
                     notices.push(notice);
                 }
                 (
@@ -2437,10 +2435,7 @@ impl FactoryApp {
     /// immediate in-place recycle. Ordinary shutdowns reclaim a clean tree
     /// once all tasks are terminal; recycling must preserve that path so the
     /// replacement starts from the same checkout and branch.
-    pub async fn shutdown_worker_for_recycle(
-        &mut self,
-        name: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn shutdown_worker_for_recycle(&mut self, name: &str) -> anyhow::Result<()> {
         self.shutdown_worker_inner(name, false, true).await
     }
 
@@ -2587,8 +2582,13 @@ impl FactoryApp {
             false
         } else {
             match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
-                Ok(removed) => removed || agent.metadata.get("clone_path")
-                    .is_some_and(|path| !std::path::Path::new(path).join("target").exists()),
+                Ok(removed) => {
+                    removed
+                        || agent
+                            .metadata
+                            .get("clone_path")
+                            .is_some_and(|path| !std::path::Path::new(path).join("target").exists())
+                }
                 Err(error) => {
                     tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
                     false
@@ -2601,7 +2601,9 @@ impl FactoryApp {
         // work. Dirty trees are preserved for the daemon reaper (Unit 3) to
         // salvage later, and we flag the agent record + warn the supervisor so
         // nothing is silently abandoned.
-        if target_retired && crate::worktree::should_finalize_worker_worktree(preserve_worktree, has_open_tasks) {
+        if target_retired
+            && crate::worktree::should_finalize_worker_worktree(preserve_worktree, has_open_tasks)
+        {
             self.finalize_worker_worktree(&agent_store, &agent_id, name);
         }
 
@@ -3019,7 +3021,7 @@ mod spawn_base_tests {
     }
 
     fn seed_epic(cas_dir: &std::path::Path, epic_id: &str, title: &str, branch: Option<&str>) {
-        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(cas_dir).unwrap();
         let mut epic = cas_types::Task::new(epic_id.to_string(), title.to_string());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = branch.map(str::to_string);
@@ -3027,7 +3029,7 @@ mod spawn_base_tests {
     }
 
     fn seed_child(cas_dir: &std::path::Path, task_id: &str, epic_id: &str) {
-        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(cas_dir).unwrap();
         let child = cas_types::Task::new(task_id.to_string(), format!("child {task_id}"));
         store.add(&child).unwrap();
         store
@@ -3067,11 +3069,11 @@ mod spawn_base_tests {
                 description: Some("round-trip spawn authority".to_string()),
                 priority: 2,
                 task_type: task_type.to_string(),
-            risk: Some("none".to_string()),
-            door: None,
-            proof_targets: None,
-            supervisor_override: None,
-            reason: None,
+                risk: Some("none".to_string()),
+                door: None,
+                proof_targets: None,
+                supervisor_override: None,
+                reason: None,
                 labels: None,
                 notes: None,
                 blocked_by: None,
@@ -3093,7 +3095,7 @@ mod spawn_base_tests {
         .await
         .expect("create long-title epic");
 
-        let store = core.open_task_store().unwrap();
+        let store = core.open_task_store_cached().unwrap();
         let epic = store
             .list(None)
             .unwrap()
@@ -3139,8 +3141,7 @@ mod spawn_base_tests {
         );
 
         let task_base = task_epic_base(&cas_dir, &repo, &child.id);
-        let (spawn_base, source) =
-            resolve_spawn_base(&task_base, Some("epic/stale-focus"), "main");
+        let (spawn_base, source) = resolve_spawn_base(&task_base, Some("epic/stale-focus"), "main");
         assert_eq!(spawn_base, branch);
         assert!(matches!(
             source,
@@ -3187,12 +3188,9 @@ mod spawn_base_tests {
                 target_branch: "cursor/target-only".into(),
                 owner: WorkTargetOwner::Task,
             };
-            let target_root = resolve_spawn_worktree_repo(
-                &session_cas,
-                &session_repo,
-                Some(&target),
-            )
-            .expect("target selector must resolve in the sibling checkout");
+            let target_root =
+                resolve_spawn_worktree_repo(&session_cas, &session_repo, Some(&target))
+                    .expect("target selector must resolve in the sibling checkout");
             assert_eq!(target_root, target_repo);
 
             let worker_path = target_root.join(".cas/worktrees/cross-repo-worker");
@@ -3215,7 +3213,12 @@ mod spawn_base_tests {
             assert!(worker_path.join(".git").is_file());
             assert_eq!(
                 std::process::Command::new("git")
-                    .args(["-C", worker_path.to_str().unwrap(), "branch", "--show-current"])
+                    .args([
+                        "-C",
+                        worker_path.to_str().unwrap(),
+                        "branch",
+                        "--show-current"
+                    ])
                     .output()
                     .unwrap()
                     .stdout,
@@ -3269,7 +3272,10 @@ mod spawn_base_tests {
             init_repo(&target_repo);
             let session_cas = crate::store::init_cas_dir(&session_repo).unwrap();
             let _target_cas = crate::store::init_cas_dir(&target_repo).unwrap();
-            add_origin(&target_repo, "https://github.com/example/target-missing.git");
+            add_origin(
+                &target_repo,
+                "https://github.com/example/target-missing.git",
+            );
             crate::store::known_repos::register_repo_strict(&target_repo).unwrap();
 
             let target = SpawnWorkTarget {
@@ -3278,20 +3284,16 @@ mod spawn_base_tests {
                 target_branch: "cursor/exists-nowhere".into(),
                 owner: WorkTargetOwner::Task,
             };
-            let error = resolve_spawn_worktree_repo(
-                &session_cas,
-                &session_repo,
-                Some(&target),
-            )
-            .expect_err("missing target branch must fail before git worktree add");
+            let error = resolve_spawn_worktree_repo(&session_cas, &session_repo, Some(&target))
+                .expect_err("missing target branch must fail before git worktree add");
             let text = error.to_string();
-            assert!(
-                text.starts_with("cross-repo spawn: target_repo "),
-                "{text}"
-            );
+            assert!(text.starts_with("cross-repo spawn: target_repo "), "{text}");
             assert!(text.contains(target_repo.to_str().unwrap()), "{text}");
             assert!(text.contains("cursor/exists-nowhere"), "{text}");
-            assert!(!text.contains("Refusing to create worktree branch"), "{text}");
+            assert!(
+                !text.contains("Refusing to create worktree branch"),
+                "{text}"
+            );
         });
     }
 
@@ -3312,7 +3314,10 @@ mod spawn_base_tests {
             base_provenance: None,
         };
         let receipt = spawn_provision_receipt(&prep);
-        assert!(receipt.contains("Worktree repository: /workspace/target-repo"), "{receipt}");
+        assert!(
+            receipt.contains("Worktree repository: /workspace/target-repo"),
+            "{receipt}"
+        );
         assert!(receipt.contains("Spawn base: 'main'"), "{receipt}");
         assert!(receipt.contains("merge-back parent 'main'"), "{receipt}");
     }
@@ -3453,7 +3458,7 @@ mod spawn_base_tests {
         branch_at(&repo, "staging", "main");
         branch_at(&repo, "epic/staging-target", "staging");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-staging".into(), "Staging epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/staging-target".into());
@@ -3485,7 +3490,7 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "epic/live-delivery", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-d22d-epic".into(), "delivery epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/live-delivery".into());
@@ -3536,7 +3541,7 @@ mod spawn_base_tests {
         branch_at(&repo, "epic/live-delivery", "main");
         branch_at(&repo, "release/operator-selected", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic =
             cas_types::Task::new("cas-d22d-explicit-epic".into(), "delivery epic".into());
         epic.task_type = cas_types::TaskType::Epic;
@@ -3587,7 +3592,7 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "staging", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-missing-epic".into(), "missing branch".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/not-created".into());
@@ -3625,7 +3630,7 @@ mod spawn_base_tests {
         branch_at(&repo, legacy_slug, "main");
         branch_at(&repo, declared_target, "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new(
             "cas-shockwave".into(),
             "Shockwave migrate AI stack home onto the new 4TB E".into(),
@@ -3704,7 +3709,7 @@ mod spawn_base_tests {
             .unwrap();
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-ad05-epic".into(), "Staging epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/staging-based".into());
@@ -3726,11 +3731,8 @@ mod spawn_base_tests {
             "focus resolution must preserve the live epic branch over its staging parent"
         );
 
-        let (base, source) = resolve_spawn_base(
-            &TaskBase::Unresolved,
-            Some(&focused_branch),
-            "main",
-        );
+        let (base, source) =
+            resolve_spawn_base(&TaskBase::Unresolved, Some(&focused_branch), "main");
         assert_eq!(base, "epic/staging-based");
         assert!(matches!(source, SpawnBaseSource::PinnedFocus));
     }
@@ -3849,7 +3851,7 @@ mod spawn_base_tests {
         commit_file(&repo, "main-only.txt", "main moved on");
 
         // A standalone task with no parent epic at all.
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&cas_types::Task::new(
                 "cas-loner".to_string(),
@@ -3921,7 +3923,7 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "staging", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-targeted".into(), "staging fix".into());
         task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:test".into(),
@@ -3947,18 +3949,27 @@ mod spawn_base_tests {
         std::fs::create_dir(&origin).unwrap();
         init_repo(&origin);
         let repo = tmp.path().join("repo");
-        assert!(Command::new("git")
-            .args(["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args([
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    repo.to_str().unwrap()
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
 
-        assert!(Command::new("git")
-            .args(["checkout", "-q", "-b", "epic/magic-links-followups"])
-            .current_dir(&origin)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["checkout", "-q", "-b", "epic/magic-links-followups"])
+                .current_dir(&origin)
+                .status()
+                .unwrap()
+                .success()
+        );
         commit_file(&origin, "epic-only.txt", "remote epic tip");
         let branch = "epic/magic-links-followups";
         assert!(full_sha(&repo, branch).is_none());
@@ -3968,13 +3979,24 @@ mod spawn_base_tests {
             .expect("origin-only branch should provision")
             .expect("materialization notice");
         assert!(notice.contains("SPAWN BASE MATERIALIZED"), "{notice}");
-        assert_eq!(full_sha(&repo, branch), full_sha(&repo, &format!("origin/{branch}")));
-        let (base_ref, _, _) = checkout_ref_for_spawn_base(&repo, branch, &SpawnBaseSource::PinnedFocus);
+        assert_eq!(
+            full_sha(&repo, branch),
+            full_sha(&repo, &format!("origin/{branch}"))
+        );
+        let (base_ref, _, _) =
+            checkout_ref_for_spawn_base(&repo, branch, &SpawnBaseSource::PinnedFocus);
         let worker_path = tmp.path().join("worker");
         crate::worktree::GitOperations::new(repo.clone())
-            .create_worktree(&worker_path, "factory/magic-worker", base_ref.as_deref().or(Some(branch)))
+            .create_worktree(
+                &worker_path,
+                "factory/magic-worker",
+                base_ref.as_deref().or(Some(branch)),
+            )
             .expect("worker worktree should use the fetched commit");
-        assert_eq!(std::fs::read_to_string(worker_path.join("epic-only.txt")).unwrap(), "remote epic tip");
+        assert_eq!(
+            std::fs::read_to_string(worker_path.join("epic-only.txt")).unwrap(),
+            "remote epic tip"
+        );
     }
 
     #[test]
@@ -4385,7 +4407,10 @@ mod spawn_base_tests {
         )
         .unwrap();
         let worker_base = worker_base_for_spawn(Some("epic/stacked"), &manager);
-        assert!(worker_base_mismatch_notice(manager.repo_root(), &worker_base, "epic/stacked").is_none());
+        assert!(
+            worker_base_mismatch_notice(manager.repo_root(), &worker_base, "epic/stacked")
+                .is_none()
+        );
 
         let worker_path = worktree_root.join("stacked-worker");
         let result = WorkerSpawnPrep {
@@ -4448,7 +4473,8 @@ mod spawn_base_tests {
             },
         )
         .unwrap();
-        let notice = worker_base_mismatch_notice(manager.repo_root(), "main", "epic/ahead").unwrap();
+        let notice =
+            worker_base_mismatch_notice(manager.repo_root(), "main", "epic/ahead").unwrap();
         assert!(notice.contains("WORKER BASE MISMATCH"));
         assert!(notice.contains("does not contain"));
         assert!(notice.contains("epic/ahead"));
@@ -4929,7 +4955,6 @@ mod spawn_base_tests {
 
     #[test]
     fn work_target_spawn_uses_unpublished_refreshed_epic_tip_after_push_rejection_cas_5504() {
-
         let tmp = TempDir::new().unwrap();
         let origin = tmp.path().join("origin");
         std::fs::create_dir(&origin).unwrap();
@@ -5074,7 +5099,7 @@ mod spawn_base_tests {
         let parent_tip = head_sha(&origin, "main");
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut outer_epic = cas_types::Task::new("cas-outer".into(), "outer epic".into());
         outer_epic.task_type = cas_types::TaskType::Epic;
         outer_epic.branch = Some("epic/outer".into());
@@ -5210,7 +5235,7 @@ mod spawn_base_tests {
         commit(&repo, "parent-only.txt", "current support playbook parent");
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-support-epic".into(), "support epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/diverged-support".into());
@@ -5503,7 +5528,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_true_when_assigned_and_not_closed() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("t-open", Some("agent-a"), TaskStatus::Open))
             .unwrap();
@@ -5514,7 +5539,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_true_for_in_progress() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "t-inprog",
@@ -5529,7 +5554,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_false_when_only_closed_tasks() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("t-done", Some("agent-c"), TaskStatus::Closed))
             .unwrap();
@@ -5540,7 +5565,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_false_when_open_task_belongs_to_other_agent() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("t-other", Some("agent-other"), TaskStatus::Open))
             .unwrap();
@@ -5549,7 +5574,7 @@ mod tests {
     }
 
     fn claimed_qa_fixture(cas_dir: &std::path::Path) -> cas_types::QaPass {
-        let store = open_task_store(cas_dir).unwrap();
+        let store = open_task_store_cached(cas_dir).unwrap();
         let mut task = task_with("cas-qa3172", Some("dead-reviewer"), TaskStatus::InProgress);
         task.labels.push("qa-pass".to_string());
         task.notes = "prior review evidence".into();
@@ -5577,7 +5602,9 @@ mod tests {
     }
 
     fn assert_pending_qa(cas_dir: &std::path::Path, before: &cas_types::QaPass) {
-        let pass = cas_store::latest_qa_pass(cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
+        let pass = cas_store::latest_qa_pass(cas_dir, &before.task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
         assert_eq!(pass.id, before.id);
         assert_eq!(pass.round, before.round);
         assert_eq!(pass.deadline_at, before.deadline_at);
@@ -5621,16 +5648,26 @@ mod tests {
         core.set_agent_id_for_testing("supervisor-id".into());
         let service = crate::mcp::CasService::new(core, None);
         let req = serde_json::from_value(serde_json::json!({"action":"spawn_workers", "task_id":"cas-qa3172", "count":1, "cli":"codex"})).unwrap();
-        service.factory_request(Parameters(req)).await.expect("MCP accepts replacement spawn");
+        service
+            .factory_request(Parameters(req))
+            .await
+            .expect("MCP accepts replacement spawn");
         let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
         let queued = queue.peek(1).unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].task_id.as_deref(), Some("cas-qa3172"));
         // The PTY boot is omitted; invoke exactly the preassignment seam that
         // early registration and finish_worker_spawn call with the queued id.
-        assert!(assign_task_to_new_worker(&cas_dir, queued[0].task_id.as_deref().unwrap(), "replacement-reviewer"));
+        assert!(assign_task_to_new_worker(
+            &cas_dir,
+            queued[0].task_id.as_deref().unwrap(),
+            "replacement-reviewer"
+        ));
         assert_pending_qa(&cas_dir, &before);
-        let task = open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap();
+        let task = open_task_store_cached(&cas_dir)
+            .unwrap()
+            .get("cas-qa3172")
+            .unwrap();
         assert_eq!(task.status, TaskStatus::Open);
         assert_eq!(task.assignee.as_deref(), Some("replacement-reviewer"));
         assert!(task.notes.contains("prior review evidence"));
@@ -5655,7 +5692,10 @@ mod tests {
             .unwrap();
         assert_eq!(pass.id, before.id);
         assert_eq!(pass.deadline_at, before.deadline_at);
-        assert_eq!(pass.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+        assert_eq!(
+            pass.reviewer_agent_id.as_deref(),
+            Some("replacement-reviewer")
+        );
     }
 
     #[test]
@@ -5663,10 +5703,20 @@ mod tests {
         for aborted in [false, true] {
             let (_temp, cas_dir) = seeded_cas_dir();
             let before = claimed_qa_fixture(&cas_dir);
-            if aborted { release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"); }
-            else { assert_eq!(release_worker_task_bindings(&cas_dir, "dead-reviewer"), 1); }
+            if aborted {
+                release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer");
+            } else {
+                assert_eq!(release_worker_task_bindings(&cas_dir, "dead-reviewer"), 1);
+            }
             assert_pending_qa(&cas_dir, &before);
-            assert_eq!(open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap().assignee, None);
+            assert_eq!(
+                open_task_store_cached(&cas_dir)
+                    .unwrap()
+                    .get("cas-qa3172")
+                    .unwrap()
+                    .assignee,
+                None
+            );
         }
     }
 
@@ -5688,7 +5738,9 @@ mod tests {
             "replacement"
         ));
         release_preassign_if_bound(&cas_dir, "cas-qa3172", "other-worker");
-        let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now()).unwrap().unwrap();
+        let pass = cas_store::latest_qa_pass(&cas_dir, &before.task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
         assert_eq!(pass.state, cas_types::QaPassState::Claimed);
         assert_eq!(pass.reviewer_agent_id.as_deref(), Some("dead-reviewer"));
     }
@@ -5717,7 +5769,7 @@ mod tests {
                 _ => release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"),
             };
             recover();
-            let task = open_task_store(&cas_dir)
+            let task = open_task_store_cached(&cas_dir)
                 .unwrap()
                 .get("cas-qa3172")
                 .unwrap();
@@ -5737,7 +5789,7 @@ mod tests {
                 .unwrap();
             recover();
             assert_pending_qa(&cas_dir, &before);
-            let task = open_task_store(&cas_dir)
+            let task = open_task_store_cached(&cas_dir)
                 .unwrap()
                 .get("cas-qa3172")
                 .unwrap();
@@ -5753,7 +5805,7 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_sets_assignee() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("cas-abc1", None, TaskStatus::Open))
             .unwrap();
@@ -5786,7 +5838,7 @@ mod tests {
         agent.role = cas_types::AgentRole::Worker;
         agents.register(&agent).unwrap();
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("cas-abc1", Some(holder), TaskStatus::Open))
             .unwrap();
@@ -5821,7 +5873,7 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_idempotent_for_same_worker() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("cas-abc1", None, TaskStatus::Open))
             .unwrap();
@@ -5846,7 +5898,7 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_refuses_terminal_tasks() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, status) in [
             ("cas-closed", TaskStatus::Closed),
             ("cas-cancelled", TaskStatus::Cancelled),
@@ -5866,7 +5918,7 @@ mod tests {
 
     /// The binding set wise-raven-87 held when its refresh was refused.
     fn seed_wise_raven_tasks(cas_dir: &std::path::Path) -> Vec<(&'static str, TaskStatus)> {
-        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(cas_dir).unwrap();
         let held = vec![
             ("cas-e0be", TaskStatus::InProgress),
             ("cas-7cb3", TaskStatus::AwaitingMerge),
@@ -5874,13 +5926,23 @@ mod tests {
             ("cas-96c0", TaskStatus::Blocked),
         ];
         for (id, status) in &held {
-            store.add(&task_with(id, Some("wise-raven"), *status)).unwrap();
+            store
+                .add(&task_with(id, Some("wise-raven"), *status))
+                .unwrap();
         }
         store
-            .add(&task_with("cas-done", Some("wise-raven"), TaskStatus::Closed))
+            .add(&task_with(
+                "cas-done",
+                Some("wise-raven"),
+                TaskStatus::Closed,
+            ))
             .unwrap();
         store
-            .add(&task_with("cas-peer", Some("other-worker"), TaskStatus::InProgress))
+            .add(&task_with(
+                "cas-peer",
+                Some("other-worker"),
+                TaskStatus::InProgress,
+            ))
             .unwrap();
         held
     }
@@ -5893,7 +5955,10 @@ mod tests {
         // so the stamp records nothing and the row stays unfingerprinted.
         agent.pid = Some(u32::MAX - 1);
         crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, u32::MAX - 1);
-        crate::store::open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
+        crate::store::open_agent_store(cas_dir)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
         agent
     }
 
@@ -5916,10 +5981,14 @@ mod tests {
         );
 
         assert_eq!(released, 0, "a recycle releases nothing");
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, status) in held {
             let task = store.get(id).unwrap();
-            assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
+            assert_eq!(
+                task.assignee.as_deref(),
+                Some("wise-raven"),
+                "{id} keeps its assignee"
+            );
             assert_eq!(task.status, status, "{id} keeps its status");
         }
     }
@@ -5930,18 +5999,29 @@ mod tests {
         seed_wise_raven_tasks(&cas_dir);
         let agent = retired_worker(&cas_dir);
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         // The task was held when recycling began, then reassigned before
         // retirement/death cleanup observed that old snapshot.
         let snapshot = vec!["cas-e0be".to_string()];
         let mut reassigned = tasks.get("cas-e0be").unwrap();
         reassigned.assignee = Some("replacement-worker".into());
         tasks.update(&reassigned).unwrap();
-        assert_eq!(settle_retired_worker_bindings(
-            &cas_dir, agents.as_ref(), &agent, &snapshot, WorkerRetirement::Recycle,
-        ), 0);
+        assert_eq!(
+            settle_retired_worker_bindings(
+                &cas_dir,
+                agents.as_ref(),
+                &agent,
+                &snapshot,
+                WorkerRetirement::Recycle,
+            ),
+            0
+        );
         crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
-            &cas_dir, agents.as_ref(), &agent, &snapshot, "late exit after recycle",
+            &cas_dir,
+            agents.as_ref(),
+            &agent,
+            &snapshot,
+            "late exit after recycle",
         );
         let after = tasks.get("cas-e0be").unwrap();
         assert_eq!(after.assignee, reassigned.assignee);
@@ -5965,8 +6045,12 @@ mod tests {
             WorkerRetirement::Shutdown,
         );
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
-        assert_eq!(store.get("cas-ed87").unwrap().assignee, None, "Open pre-assign released");
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        assert_eq!(
+            store.get("cas-ed87").unwrap().assignee,
+            None,
+            "Open pre-assign released"
+        );
         assert_eq!(
             store.get("cas-7cb3").unwrap().assignee.as_deref(),
             Some("wise-raven"),
@@ -6004,7 +6088,10 @@ mod tests {
             assert!(brief.contains(id), "{id} is named: {brief}");
         }
         for id in ["cas-done", "cas-peer"] {
-            assert!(!brief.contains(id), "{id} is not this worker's open work: {brief}");
+            assert!(
+                !brief.contains(id),
+                "{id} is not this worker's open work: {brief}"
+            );
         }
     }
 
@@ -6032,7 +6119,7 @@ mod tests {
     #[test]
     fn release_worker_task_bindings_clears_open_preassign() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-7f61",
@@ -6054,7 +6141,7 @@ mod tests {
     #[test]
     fn release_worker_task_bindings_resets_in_progress_ghost() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-3d23",
@@ -6075,7 +6162,7 @@ mod tests {
     #[test]
     fn release_preassign_if_bound_only_clears_matching_worker() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-abc1",
@@ -6108,7 +6195,7 @@ mod tests {
         agent.role = cas_types::AgentRole::Worker;
         agents.register(&agent).unwrap();
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-live-holder",
@@ -6130,7 +6217,7 @@ mod tests {
     #[test]
     fn release_worker_task_bindings_skips_closed() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-done",

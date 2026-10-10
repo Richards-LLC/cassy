@@ -1490,7 +1490,7 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
 }
 
 fn append_epic_note(cas_dir: &Path, result: &SweepResult) {
-    let Ok(task_store) = crate::store::open_task_store(cas_dir) else {
+    let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
         tracing::warn!(epic = %result.request.epic_id, "cannot open task store for merge sweep note");
         return;
     };
@@ -1630,7 +1630,7 @@ mod tests {
     #[test]
     fn unavailable_is_recorded_once_per_coordinator_session_across_merges() {
         let temp = tempfile::tempdir().unwrap();
-        let tasks = crate::store::open_task_store(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store_cached(temp.path()).unwrap();
         tasks
             .add(&cas_types::Task::new(
                 "cas-epic".to_owned(),

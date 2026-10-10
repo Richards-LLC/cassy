@@ -11,13 +11,42 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
-use crate::{Result, SQLITE_BUSY_TIMEOUT, StoreError};
+#[cfg(test)]
+use crate::SQLITE_BUSY_TIMEOUT;
+use crate::{Result, StoreError};
 
 /// Acquire a shared SQLite connection, converting a poisoned mutex into a
 /// recoverable store error instead of panicking the caller.
+///
+/// Under a thread wait budget ([`crate::wait_budget`]) the in-process mutex is
+/// polled only until the deadline: another thread of this process holding the
+/// connection across its own busy wait must not stall a UI thread (GH #1165).
 pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>> {
-    conn.lock()
-        .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()))
+    crate::wait_budget::note_store_access("sqlite connection");
+    if crate::wait_budget::wait_deadline().is_none() {
+        return conn
+            .lock()
+            .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()));
+    }
+    let mut pause = Duration::from_micros(200);
+    loop {
+        match conn.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(StoreError::Other(
+                    "shared SQLite connection lock poisoned".to_string(),
+                ));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let Some(sleep) = crate::wait_budget::clamp_wait(pause) else {
+            return Err(crate::wait_budget::budget_exhausted_store_error(
+                "shared SQLite connection held by another thread",
+            ));
+        };
+        std::thread::sleep(sleep);
+        pause = (pause * 2).min(Duration::from_millis(5));
+    }
 }
 
 /// Process-global pool of shared SQLite connections, keyed by canonical DB path.
@@ -314,6 +343,7 @@ fn assert_not_protected(db_path: &Path) {
 /// PRAGMAs (WAL, busy_timeout, etc.) are configured exactly once per connection.
 pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>> {
     assert_not_protected(db_path);
+    crate::wait_budget::note_store_access("shared_connection");
 
     let canonical = canonical_db_path(db_path);
 
@@ -376,7 +406,7 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
 /// Open a database and apply the PRAGMAs every shared connection carries.
 fn open_configured(db_path: &Path) -> crate::Result<Connection> {
     let conn = Connection::open(db_path)?;
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    install_busy_handler(&conn)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;\
          PRAGMA synchronous=NORMAL;\
@@ -388,6 +418,16 @@ fn open_configured(db_path: &Path) -> crate::Result<Connection> {
     // orders of magnitude larger than its live frames (cas-759f).
     conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
     Ok(conn)
+}
+
+/// Install the pooled connections' busy handler: SQLite's [`SQLITE_BUSY_TIMEOUT`]
+/// schedule, cut short by this thread's wait budget ([`crate::wait_budget`]).
+///
+/// Code that temporarily narrows a pooled connection with `busy_timeout` must
+/// restore with this, not `busy_timeout(SQLITE_BUSY_TIMEOUT)`, which would
+/// replace the budget-aware handler with SQLite's built-in one.
+pub fn install_busy_handler(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_handler(Some(crate::wait_budget::busy_handler))
 }
 
 /// RAII guard for an IMMEDIATE transaction.
@@ -500,18 +540,30 @@ pub fn begin_immediate_with_retry_bounded<'a>(
                 let jitter_range = base_ms / 2;
                 let jitter = cheap_random_u64() % (jitter_range * 2 + 1);
                 let delay_ms = base_ms - jitter_range + jitter;
+                // A thread with a wait budget (the factory UI loop) gives up
+                // instead of sleeping past it (GH #1165).
+                let Some(sleep) = crate::wait_budget::clamp_wait(Duration::from_millis(delay_ms))
+                else {
+                    break;
+                };
                 tracing::warn!(
                     base_ms,
                     delay_ms,
                     attempts,
                     "write lock held by another connection, retrying after backoff with jitter"
                 );
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                std::thread::sleep(sleep);
             }
             Err(error) => return Err(StoreError::Database(error)),
         }
     }
 
+    if crate::wait_budget::wait_budget_exhausted() {
+        // Keep the busy shape so callers that defer on busy do so here.
+        return Err(crate::wait_budget::budget_exhausted_store_error(
+            "BEGIN IMMEDIATE",
+        ));
+    }
     // The bare "database is locked" is what made the original report
     // un-triageable: it does not say whether anything waited. State it.
     Err(StoreError::Other(format!(
@@ -827,12 +879,18 @@ where
                 let jitter_range = base_ms / 2;
                 let jitter = cheap_random_u64() % (jitter_range * 2 + 1);
                 let delay_ms = base_ms - jitter_range + jitter;
+                // A thread with a wait budget returns the busy error once the
+                // budget is spent instead of sleeping (GH #1165).
+                let Some(sleep) = crate::wait_budget::clamp_wait(Duration::from_millis(delay_ms))
+                else {
+                    return f();
+                };
                 tracing::warn!(
                     base_ms,
                     delay_ms,
                     "SQLite busy, retrying after backoff with jitter"
                 );
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                std::thread::sleep(sleep);
             }
             Err(e) => return Err(e),
         }
@@ -1446,7 +1504,9 @@ mod tests {
             let other = Connection::open(&db_path).unwrap();
             other.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
             other.execute_batch("BEGIN IMMEDIATE").unwrap();
-            other.execute("INSERT INTO t VALUES (99, 'foreign')", []).unwrap();
+            other
+                .execute("INSERT INTO t VALUES (99, 'foreign')", [])
+                .unwrap();
             tx.send(()).unwrap();
             std::thread::sleep(hold);
             other.execute_batch("COMMIT").unwrap();
@@ -1537,7 +1597,8 @@ mod tests {
                 conn.busy_timeout(SQLITE_BUSY_TIMEOUT).unwrap();
                 for round in 0..5 {
                     with_immediate_write_txn(&conn, |tx| {
-                        let _: i64 = tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
+                        let _: i64 =
+                            tx.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))?;
                         tx.execute(
                             "INSERT INTO t (v) VALUES (?1)",
                             rusqlite::params![format!("w{worker}-r{round}")],
@@ -1576,15 +1637,13 @@ mod tests {
         let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(3_000));
         ready.recv().unwrap();
 
-        let result: crate::Result<()> = with_immediate_write_txn_bounded(
-            &conn,
-            &[10, 10],
-            |tx| {
-                tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
-                Ok(())
-            },
-        );
-        let message = result.expect_err("the holder outlasts the budget").to_string();
+        let result: crate::Result<()> = with_immediate_write_txn_bounded(&conn, &[10, 10], |tx| {
+            tx.execute("INSERT INTO t VALUES (2, 'ours')", [])?;
+            Ok(())
+        });
+        let message = result
+            .expect_err("the holder outlasts the budget")
+            .to_string();
         holder.join().unwrap();
 
         assert!(

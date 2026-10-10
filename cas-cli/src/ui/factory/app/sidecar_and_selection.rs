@@ -443,11 +443,7 @@ impl FactoryApp {
     }
 
     /// Mode-specific PTY content rect for a pane.
-    pub fn pty_content_area(
-        &self,
-        pane_name: &str,
-        geometry: ClientGeometryMode,
-    ) -> Option<Rect> {
+    pub fn pty_content_area(&self, pane_name: &str, geometry: ClientGeometryMode) -> Option<Rect> {
         match geometry {
             ClientGeometryMode::Full => self.full_pty_content_areas.get(pane_name).copied(),
             ClientGeometryMode::Compact => self.compact_pty_content_areas.get(pane_name).copied(),
@@ -735,6 +731,10 @@ impl FactoryApp {
     /// Open the task detail dialog for the selected task
     pub fn open_task_dialog(&mut self) {
         if let Some(task_id) = self.get_selected_task_id() {
+            self.task_dialog_load = super::task_dialog_load::TaskDialogLoad::start(
+                self.cas_dir.clone(),
+                task_id.clone(),
+            );
             self.task_dialog_id = Some(task_id);
             self.task_dialog_scroll = 0;
             self.show_task_dialog = true;
@@ -745,6 +745,7 @@ impl FactoryApp {
     pub fn close_task_dialog(&mut self) {
         self.show_task_dialog = false;
         self.task_dialog_id = None;
+        self.task_dialog_load = Default::default();
         self.task_dialog_scroll = 0;
     }
 
@@ -1567,8 +1568,7 @@ mod tests {
     fn mouse_click_forwards_sgr_only_when_already_focused_grok_alt_cas_7f6f() {
         let mut app = FactoryApp::for_test();
         // Placeholder first so the Grok pane is not auto-focused on add.
-        app.mux
-            .add_pane(Pane::director("other", 20, 40).unwrap());
+        app.mux.add_pane(Pane::director("other", 20, 40).unwrap());
         let mut pane = Pane::director("test-supervisor", 20, 40).unwrap();
         pane.set_harness(cas_mux::SupervisorCli::Grok);
         pane.feed(b"\x1b[?1049h").unwrap();
@@ -1616,7 +1616,8 @@ mod tests {
     /// `rows`×`cols` whose full-mode content rect starts at screen (1,1).
     fn app_with_claude_supervisor(rows: u16, cols: u16) -> FactoryApp {
         let mut app = FactoryApp::for_test();
-        app.mux.add_pane(Pane::director("other", rows, cols).unwrap());
+        app.mux
+            .add_pane(Pane::director("other", rows, cols).unwrap());
         let mut pane = Pane::director("test-supervisor", rows, cols).unwrap();
         pane.set_harness(cas_mux::SupervisorCli::Claude);
         app.mux.add_pane(pane);
@@ -1783,8 +1784,7 @@ while True:
     }
 
     fn overlay_open(rows: &[String]) -> bool {
-        rows.last().is_some_and(|r| r.starts_with("state:open"))
-            && rows[0].contains('\u{2715}')
+        rows.last().is_some_and(|r| r.starts_with("state:open")) && rows[0].contains('\u{2715}')
     }
 
     /// After close the pane must hold the full-width transcript again: no ✕,
@@ -1818,10 +1818,9 @@ while True:
         const ROWS: u16 = 16;
         const COLS: u16 = 60;
         let mut app = app_with_claude_supervisor(ROWS, COLS);
-        let mut runner =
-            cas_tui_test::PtyRunner::with_config(cas_tui_test::PtyRunnerConfig::with_size(
-                COLS, ROWS,
-            ));
+        let mut runner = cas_tui_test::PtyRunner::with_config(
+            cas_tui_test::PtyRunnerConfig::with_size(COLS, ROWS),
+        );
         runner
             .spawn("python3", &["-c", FAKE_DIFF_SIDEBAR_TUI])
             .expect("spawn fake fullscreen TUI (python3)");
@@ -1906,7 +1905,10 @@ while True:
         let full_after = app
             .screen_to_pty_coords("sup", 10, 10, ClientGeometryMode::Full)
             .unwrap();
-        assert_eq!(full, full_after, "compact map mutation must not clobber full");
+        assert_eq!(
+            full, full_after,
+            "compact map mutation must not clobber full"
+        );
 
         // Full-mode border is not content.
         assert_eq!(
@@ -1955,11 +1957,7 @@ while True:
 
         // Quiet active for >8s (long MCP/tool wait) must stay cancelable —
         // PTY quiet timers are forbidden as completion evidence.
-        app.mux
-            .get_mut("g")
-            .unwrap()
-            .feed(b"tool wait...")
-            .unwrap();
+        app.mux.get_mut("g").unwrap().feed(b"tool wait...").unwrap();
         // No events.jsonl → refresh must not clear.
         app.mux.get("g").unwrap().refresh_harness_turn_state();
         assert!(
@@ -1973,10 +1971,7 @@ while True:
         );
 
         // Authoritative completion via Grok events.jsonl turn_ended.
-        let dir = std::env::temp_dir().join(format!(
-            "cas-7f6f-events-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("cas-7f6f-events-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let events = dir.join("events.jsonl");
@@ -2082,10 +2077,14 @@ while True:
         // Full: supervisor at left, worker at right (stale full layout).
         app.supervisor_area = Some(Rect::new(0, 0, 40, 20));
         app.worker_areas = vec![Rect::new(40, 0, 40, 20)];
-        app.full_pty_content_areas
-            .insert("sup".to_string(), full_mode_pty_content(Rect::new(0, 0, 40, 20)));
-        app.full_pty_content_areas
-            .insert("w1".to_string(), full_mode_pty_content(Rect::new(40, 0, 40, 20)));
+        app.full_pty_content_areas.insert(
+            "sup".to_string(),
+            full_mode_pty_content(Rect::new(0, 0, 40, 20)),
+        );
+        app.full_pty_content_areas.insert(
+            "w1".to_string(),
+            full_mode_pty_content(Rect::new(40, 0, 40, 20)),
+        );
         // Compact paints only supervisor borderless in a different rect.
         app.compact_pty_content_areas
             .insert("sup".to_string(), Rect::new(0, 1, 40, 18));

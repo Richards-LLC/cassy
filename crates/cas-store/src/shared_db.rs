@@ -38,6 +38,17 @@ pub(crate) fn lock_connection_recovering(
     lock_connection_with(conn, true)
 }
 
+/// For stores whose `lock` cannot fail (history, knowledge): recovers a
+/// poisoned mutex and, past a thread's wait budget, falls back to a blocking
+/// lock. Neither store is reached from the factory daemon loop; a store that
+/// is must use [`lock_connection`] and propagate the budget error.
+pub(crate) fn lock_connection_infallible(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    match lock_connection_recovering(conn) {
+        Ok(guard) => guard,
+        Err(_) => conn.lock().unwrap_or_else(|error| error.into_inner()),
+    }
+}
+
 /// [`lock_connection`] for the pooled write path's bare mutex.
 pub(crate) fn lock_connection_mutex(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
     lock_connection(conn)

@@ -965,6 +965,7 @@ mod worker_attention_tests {
         // A read/ack and reopening the stores do not reset the durable window.
         for row in queue.peek_all(20).unwrap() {
             queue.ack(row.id).unwrap();
+            queue.mark_processed(row.id).unwrap();
         }
         assert!(matches!(
             enqueue_worker_delivery_stalled_relay(

@@ -766,7 +766,34 @@ pub fn open_rule_store_local(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
 
 /// Whether `cas_dir` already holds the Cassy store (its `cas.db`).
 pub fn cas_store_present(cas_dir: &Path) -> bool {
-    cas_dir.join("cas.db").exists()
+    // GH #1170: a `cas.db` file is not a store. A 3.49.0 `cas serve` in a
+    // `.cas` holding only `proxy.toml` created an empty (schema v0) database;
+    // counting that as initialized made `cas init` and even `cas init --force`
+    // return it untouched while serve kept refusing it. A store has its base
+    // tables. When the file cannot be read (locked, unreadable), keep the old
+    // answer rather than risk re-initializing over a real store.
+    let db_path = cas_dir.join("cas.db");
+    let Ok(metadata) = std::fs::metadata(&db_path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return true;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+         AND name IN ('entries', 'rules', 'tasks')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|tables| tables > 0)
+    .unwrap_or(true)
 }
 
 /// Whether `cas_dir` already holds a project configuration file.

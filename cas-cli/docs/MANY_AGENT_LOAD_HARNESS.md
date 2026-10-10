@@ -43,7 +43,7 @@ Hold and gap times are randomised between 0.5x and 1.5x. The receipt records the
 | Waits on `task-sync-intents.lock` and its per-task stripes (`task-sync-intents.d/*.lock`) of at least 0.4 s | `/proc/locks`, sampled every 200 ms |
 | Daemon loop pass health | `.cas/factory-daemon/<session>.loop.json`, plus the daemon main thread's `wchan` every 200 ms |
 
-The daemon writes `loop.json` every 5 s. If the daemon reports per-pass timings (`p99_pass_ms` or `max_pass_ms`), the verdict uses them. Otherwise the harness takes a lower bound: the larger of the longest pass seen in progress (minus the 0.5 s headless sleep) and the mean pass estimate.
+The daemon writes `loop.json` every 5 s. Builds with cas-04db add per-window pass timings to each snapshot: `window_passes`, `passes_over_100ms`, `p99_pass_ms` and `max_pass_ms`. With those fields, the run's pass p99 is under 100 ms exactly when fewer than 1% of the timed passes took 100 ms or more. Older builds such as 0d670c33c lack them, so the harness reports a lower bound instead: the larger of the longest pass seen in progress (minus the 0.5 s headless sleep) and the mean pass estimate.
 
 ## SLOs
 

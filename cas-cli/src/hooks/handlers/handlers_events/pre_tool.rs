@@ -101,6 +101,20 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", reason));
     }
 
+    // cas-3147 (GH #1169): write roots and grants are operator-only. Every
+    // harness tool call is an agent's, so the operator-only CLI is refused
+    // here for every role, before any auto-approval or root early return.
+    if tool_name == "Bash"
+        && let Some(reason) = input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .and_then(operator_policy_command_denial)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================
@@ -528,24 +542,38 @@ fn handle_pre_tool_use_inner(
             // Leave worktree operations and historical reads available.
             artifacts_root = Some(registered_worktree.as_deref().unwrap_or(Path::new(&input.cwd)).display().to_string());
         }
-        if let Some(violation) = factory_write_violation(
+        // cas-3147 (GH #1169): operator write roots and task grants.
+        let is_supervisor = crate::harness_policy::is_supervisor(input);
+        let (write_policy, write_task_ids) =
+            operator_write_policy_for(cas_root, &mut stores, input, is_supervisor);
+        match factory_write_decision(
             input,
             &artifacts_root,
             scratch_root.as_deref(),
-            crate::harness_policy::is_supervisor(input),
+            is_supervisor,
             registered_worktree.as_deref(),
+            &write_policy,
+            &write_task_ids,
         ) {
-            log_factory_workspace_rejection(cas_root, input, &violation);
-            return Ok(HookOutput::with_pre_tool_permission(
-                "deny",
-                &factory_workspace_contract_denial(
-                    input,
-                    &violation,
-                    artifacts_root.as_deref(),
-                    scratch_root.as_deref(),
-                    registered_worktree.as_deref(),
-                ),
-            ));
+            FactoryWriteDecision::Allowed => {}
+            FactoryWriteDecision::AllowedByRoot(uses) => {
+                log_write_root_uses(cas_root, input, &uses);
+            }
+            FactoryWriteDecision::Denied(violation) => {
+                log_factory_workspace_rejection(cas_root, input, &violation);
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "deny",
+                    &factory_workspace_contract_denial_with_roots(
+                        input,
+                        &violation,
+                        artifacts_root.as_deref(),
+                        scratch_root.as_deref(),
+                        registered_worktree.as_deref(),
+                        &write_policy,
+                        &write_task_ids,
+                    ),
+                ));
+            }
         }
     }
 
@@ -1411,6 +1439,14 @@ fn worker_command_rust_build_at_depth(command: &str, cwd: &Path, depth: usize) -
     for words in shell_statement_words(command) {
         if let Some(found) = rust_build_invocation(&words, cwd) {
             return Some(found);
+        }
+        if depth < 2 {
+            // `env -S 'cargo …'` runs its split string as the command (cas-cfd6).
+            if let Some(payload) = env_split_string_payload(&words) {
+                if let Some(found) = worker_command_rust_build_at_depth(&payload, cwd, depth + 1) {
+                    return Some(found);
+                }
+            }
         }
         if depth < 2 {
             // `sh -c '<script>'`, `bash -lc "<script>"`
@@ -2497,6 +2533,55 @@ fn shell_word_basename(word: &str) -> &str {
 
 /// Find the executable word after the small set of shell wrappers commonly
 /// used by worker commands. This is deliberately not a shell evaluator.
+/// `env` options whose value is the following word (cas-cfd6).
+const ENV_VALUE_OPTIONS: &[&str] = &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"];
+
+/// `sudo` options whose value is the following word (cas-cfd6).
+const SUDO_VALUE_OPTIONS: &[&str] = &[
+    "-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host",
+    "-p", "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U",
+    "--other-user", "-R", "--chroot",
+];
+
+/// The command string an `env -S STRING` / `--split-string[=]STRING` runs,
+/// for statements whose executable position is `env` (cas-cfd6).
+fn env_split_string_payload(words: &[String]) -> Option<String> {
+    // Only an `env` in command position: after leading assignments and the
+    // wrappers the build guard already unwraps, never a quoted argument.
+    let start = words.iter().position(|word| {
+        !(word
+            .split_once('=')
+            .is_some_and(|(name, _)| is_shell_variable_name(name))
+            || matches!(
+                shell_word_basename(word),
+                "sudo" | "command" | "nohup" | "setsid" | "time" | "exec" | "nice" | "timeout"
+            )
+            || word.starts_with('-')
+            || word.parse::<f64>().is_ok())
+    })?;
+    if shell_word_basename(&words[start]) != "env" {
+        return None;
+    }
+    let mut index = start + 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if let Some(value) = word.strip_prefix("--split-string=") {
+            return Some(value.to_string());
+        }
+        if word == "-S" || word == "--split-string" {
+            return words.get(index + 1).cloned();
+        }
+        if let Some(value) = word.strip_prefix("-S").filter(|value| !value.is_empty()) {
+            return Some(value.to_string());
+        }
+        if word == "--" || !(word.starts_with('-') || word.contains('=')) {
+            return None;
+        }
+        index += if ENV_VALUE_OPTIONS.contains(&word) { 2 } else { 1 };
+    }
+    None
+}
+
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
@@ -2504,20 +2589,41 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
         match shell_word_basename(word) {
             "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
             "env" => {
+                // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
+                // value; skipping only the flag made `env -u X cargo …` name
+                // `X` as the executable and miss the worker Rust build guard.
+                // An `-S` payload is itself inspected by the build guard.
                 index += 1;
-                while index < words.len()
-                    && (words[index].starts_with('-')
-                        || words[index]
+                while index < words.len() {
+                    let word = words[index].as_str();
+                    if word == "--" {
+                        index += 1;
+                        break;
+                    } else if ENV_VALUE_OPTIONS.contains(&word) {
+                        index += 2;
+                    } else if word.starts_with('-')
+                        || word
                             .split_once('=')
-                            .is_some_and(|(name, _)| is_shell_variable_name(name)))
-                {
-                    index += 1;
+                            .is_some_and(|(name, _)| is_shell_variable_name(name))
+                    {
+                        index += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
             "sudo" => {
                 index += 1;
                 while index < words.len() && words[index].starts_with('-') {
-                    index += 1;
+                    if words[index] == "--" {
+                        index += 1;
+                        break;
+                    }
+                    index += if SUDO_VALUE_OPTIONS.contains(&words[index].as_str()) {
+                        2
+                    } else {
+                        1
+                    };
                 }
             }
             "command" => index += 1,
@@ -3652,6 +3758,469 @@ fn live_runtime_rule(reason: &'static str) -> &'static str {
     }
 }
 
+/// cas-3147: one out-of-tree change admitted by an operator write root or
+/// task grant. Every one is audited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteRootUse {
+    path: std::path::PathBuf,
+    mode: super::write_roots::WriteMode,
+    root: std::path::PathBuf,
+    task_id: Option<String>,
+}
+
+/// cas-3147: the workspace contract's verdict for one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FactoryWriteDecision {
+    /// Every target is inside the default sanctioned set.
+    Allowed,
+    /// Some targets are outside it but admitted by operator write roots.
+    AllowedByRoot(Vec<WriteRootUse>),
+    Denied(FactoryWriteViolation),
+}
+
+/// cas-3147: [`factory_write_violation`] with the operator's write roots and
+/// the current agent's task grants. An empty policy decides exactly as the
+/// default contract does.
+fn factory_write_decision(
+    input: &HookInput,
+    configured_artifacts_root: &Option<String>,
+    configured_scratch_root: Option<&str>,
+    is_supervisor: bool,
+    registered_worktree_root: Option<&std::path::Path>,
+    policy: &super::write_roots::WritePolicy,
+    task_ids: &std::collections::HashSet<String>,
+) -> FactoryWriteDecision {
+    use super::write_roots::WriteMode;
+    let Some(tool) = input.tool_name.as_deref() else {
+        return FactoryWriteDecision::Allowed;
+    };
+    // cas-3147: the operator policy directory is never writable by an agent,
+    // whatever sanctions or roots would otherwise cover it.
+    // A delete also may not remove an ancestor of it (`rm -rf .cas`).
+    let protected_violation = |raw_path: &str, ancestors_too: bool| -> Option<FactoryWriteViolation> {
+        if policy.protected.is_empty() {
+            return None;
+        }
+        let expanded = match raw_path.strip_prefix("~/") {
+            Some(rest) => std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest),
+            None => std::path::PathBuf::from(raw_path),
+        };
+        let path = if expanded.is_absolute() {
+            lexically_normalize_path(expanded)
+        } else {
+            lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
+        };
+        let resolved = canonicalize_for_containment(&path).unwrap_or(path);
+        policy
+            .protected
+            .iter()
+            .filter_map(|dir| canonicalize_for_containment(dir))
+            .any(|dir| resolved.starts_with(&dir) || (ancestors_too && dir.starts_with(&resolved)))
+            .then(|| FactoryWriteViolation {
+                evaluated_path: raw_path.to_string(),
+                resolved_path: resolved,
+                matched_rule: "the operator write policy is operator-only",
+            })
+    };
+    let Some(tool_input) = input.tool_input.as_ref() else {
+        return FactoryWriteDecision::Allowed;
+    };
+    let mut uses = Vec::new();
+    let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
+        policy.matching(&resolved, mode, task_ids).map(|root| {
+            uses.push(WriteRootUse {
+                path: resolved.clone(),
+                mode,
+                root: root.path.clone(),
+                task_id: root.task_id.clone(),
+            });
+        })
+    };
+    // cas-cf4f: Bash deletions are judged as deletions, before creation.
+    if tool == "Bash"
+        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
+    {
+        for (raw_path, _recursive) in bash_delete_targets(command) {
+            if let Some(violation) = protected_violation(&raw_path, true) {
+                return FactoryWriteDecision::Denied(violation);
+            }
+            let Some(violation) = factory_delete_violation(
+                input,
+                configured_artifacts_root,
+                configured_scratch_root,
+                is_supervisor,
+                registered_worktree_root,
+                &raw_path,
+            ) else {
+                continue;
+            };
+            // Only an ordinary out-of-root delete can be admitted; protected
+            // roots and live runtime files stay refused whatever the policy.
+            let admitted = violation.matched_rule == "deletion outside sanctioned roots"
+                && admit(violation.resolved_path.clone(), WriteMode::Delete, &mut uses).is_some();
+            if !admitted {
+                return FactoryWriteDecision::Denied(violation);
+            }
+        }
+    }
+    let targets: Vec<(String, Option<WriteMode>)> = match tool {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("path"))
+            .and_then(|value| value.as_str())
+            .map(|path| vec![(path.to_string(), None)])
+            .unwrap_or_default(),
+        "Bash" => {
+            let Some(command) = tool_input.get("command").and_then(|value| value.as_str()) else {
+                return FactoryWriteDecision::Allowed;
+            };
+            // cas-3147 (GH #1169 item 4): once the operator has a policy file,
+            // in-place edits and rename sources are judged like any other
+            // write. Without one the default contract stays as it was.
+            let in_place = if policy.configured {
+                bash_in_place_edit_targets(command)
+            } else {
+                Vec::new()
+            };
+            bash_write_targets(command)
+                .into_iter()
+                .map(|path| (path, None))
+                .chain(in_place.into_iter().map(|path| (path, Some(WriteMode::Edit))))
+                .collect()
+        }
+        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
+        // text in `tool_input.command`.
+        "apply_patch" => {
+            let Some(patch) = tool_input.get("command").and_then(|value| value.as_str()) else {
+                return FactoryWriteDecision::Allowed;
+            };
+            apply_patch_write_targets_with_modes(patch)
+                .into_iter()
+                .map(|(path, mode)| (path, Some(mode)))
+                .collect()
+        }
+        _ => return FactoryWriteDecision::Allowed,
+    };
+    for (raw_path, mode) in targets {
+        if let Some(violation) = protected_violation(&raw_path, false) {
+            return FactoryWriteDecision::Denied(violation);
+        }
+        // A variable that survived the finite expansion above may resolve to
+        // an absolute path only when Bash runs it. Treating the literal
+        // `$NAME` as relative to the worktree would create an escape hatch.
+        if raw_path.contains('$') {
+            return FactoryWriteDecision::Denied(FactoryWriteViolation {
+                evaluated_path: raw_path.clone(),
+                resolved_path: std::path::PathBuf::from(&raw_path),
+                matched_rule: "unresolved shell variable",
+            });
+        }
+        let Some(resolved) = unsanctioned_factory_path_with_worktree(
+            input,
+            configured_artifacts_root,
+            configured_scratch_root,
+            is_supervisor,
+            &raw_path,
+            registered_worktree_root,
+        ) else {
+            continue;
+        };
+        let mode = mode.unwrap_or(if std::fs::symlink_metadata(&resolved).is_ok() {
+            WriteMode::Edit
+        } else {
+            WriteMode::Create
+        });
+        if admit(resolved.clone(), mode, &mut uses).is_none() {
+            return FactoryWriteDecision::Denied(FactoryWriteViolation {
+                evaluated_path: raw_path,
+                resolved_path: resolved,
+                matched_rule: "none",
+            });
+        }
+    }
+    if uses.is_empty() {
+        FactoryWriteDecision::Allowed
+    } else {
+        FactoryWriteDecision::AllowedByRoot(uses)
+    }
+}
+
+/// cas-3147: refusal for an agent shell command that would change the
+/// operator write policy through the operator-only CLI.
+fn operator_policy_command_denial(command: &str) -> Option<String> {
+    operator_policy_command_denial_at_depth(command, 0)
+}
+
+fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    for words in shell_statement_words(command) {
+        let Some(mut index) = executable_word_index(&words) else {
+            continue;
+        };
+        loop {
+            let name = shell_word_basename(&words[index]);
+            let args = &words[index + 1..];
+            match name {
+                // Wrappers that run their remaining words as the command.
+                "setsid" | "nohup" | "nice" | "time" | "exec" | "xargs" | "stdbuf" | "ionice" => {
+                    let Some(next) = args.iter().position(|arg| !arg.starts_with('-')) else {
+                        break;
+                    };
+                    let rest = &words[index + 1 + next..];
+                    let Some(offset) = executable_word_index(rest) else {
+                        break;
+                    };
+                    index += 1 + next + offset;
+                }
+                // Wrappers whose option value is itself a shell command.
+                "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
+                    for (position, arg) in args.iter().enumerate() {
+                        let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                        if (flags_c || arg == "--command")
+                            && let Some(payload) = args.get(position + 1)
+                            && let Some(denial) =
+                                operator_policy_command_denial_at_depth(payload, depth + 1)
+                        {
+                            return Some(denial);
+                        }
+                    }
+                    break;
+                }
+                "cas" => {
+                    let config = args.iter().position(|arg| arg == "config");
+                    let refused = config.is_some_and(|at| {
+                        let rest = &args[at + 1..];
+                        rest.first().is_some_and(|sub| sub == "grant-write" || sub == "revoke-write")
+                            || (rest.first().is_some_and(|sub| sub == "set")
+                                && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
+                    });
+                    if refused {
+                        return Some(
+                            "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    None
+}
+
+/// cas-3147: files a Bash command edits in place without naming them as a
+/// write destination: `sed -i` / `perl -i` operands and `mv` sources (a
+/// rename changes the source's directory entry).
+fn bash_in_place_edit_targets(command: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for words in shell_statement_words(command) {
+        let Some(index) = executable_word_index(&words) else {
+            continue;
+        };
+        let name = shell_word_basename(&words[index]);
+        let args = &words[index + 1..];
+        match name {
+            "sed" | "perl" => {
+                let in_place = args.iter().any(|arg| {
+                    arg == "--in-place"
+                        || arg.starts_with("--in-place=")
+                        || (arg.starts_with('-')
+                            && !arg.starts_with("--")
+                            && arg[1..].contains('i'))
+                });
+                if !in_place {
+                    continue;
+                }
+                // The program is `-e`/`-f` values or, without them, the
+                // first operand; every other operand is a file.
+                let mut operands = Vec::new();
+                let mut explicit_program = false;
+                let mut iter = args.iter();
+                while let Some(arg) = iter.next() {
+                    if matches!(arg.as_str(), "-e" | "-f" | "--expression" | "--file") {
+                        explicit_program = true;
+                        iter.next();
+                    } else if arg.starts_with("--expression=") || arg.starts_with("--file=") {
+                        explicit_program = true;
+                    } else if name == "perl"
+                        && arg.starts_with('-')
+                        && !arg.starts_with("--")
+                        && arg.ends_with('e')
+                    {
+                        // `perl -pie 'code' file`: the bundle ends in -e.
+                        explicit_program = true;
+                        iter.next();
+                    } else if !arg.starts_with('-') {
+                        operands.push(arg.clone());
+                    }
+                }
+                if !explicit_program && !operands.is_empty() {
+                    operands.remove(0);
+                }
+                targets.extend(operands);
+            }
+            "mv" => {
+                let mut operands: Vec<String> = args
+                    .iter()
+                    .filter(|arg| !arg.starts_with('-'))
+                    .cloned()
+                    .collect();
+                operands.pop();
+                targets.extend(operands);
+            }
+            _ => {}
+        }
+    }
+    targets
+}
+
+/// cas-3147: [`apply_patch_write_targets`] with the change each header makes.
+fn apply_patch_write_targets_with_modes(
+    patch: &str,
+) -> Vec<(String, super::write_roots::WriteMode)> {
+    use super::write_roots::WriteMode;
+    const HEADERS: [(&str, WriteMode); 4] = [
+        ("*** Add File: ", WriteMode::Create),
+        ("*** Update File: ", WriteMode::Edit),
+        ("*** Delete File: ", WriteMode::Delete),
+        ("*** Move to: ", WriteMode::Create),
+    ];
+    patch
+        .lines()
+        .filter_map(|line| {
+            HEADERS.iter().find_map(|(header, mode)| {
+                line.strip_prefix(header)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| (path.to_string(), *mode))
+            })
+        })
+        .collect()
+}
+
+/// cas-3147: the operator write policy in effect for this hook call, and the
+/// task IDs whose grants apply. Roots come only from the operator policy
+/// file, never from config.toml. A grant applies while its task is open: to
+/// the worker holding the task's lease, and to the supervisor. An unreadable
+/// policy file fails closed to "no roots", but the policy directory stays
+/// protected.
+fn operator_write_policy_for(
+    cas_root: &Path,
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+    is_supervisor: bool,
+) -> (super::write_roots::WritePolicy, std::collections::HashSet<String>) {
+    use super::write_roots::{WriteMode, WritePolicy, WriteRoot};
+    use crate::config::operator_policy::{OperatorWriteMode, load_operator_policy};
+    let modes = |modes: &std::collections::BTreeSet<OperatorWriteMode>| {
+        modes
+            .iter()
+            .map(|mode| match mode {
+                OperatorWriteMode::Create => WriteMode::Create,
+                OperatorWriteMode::Edit => WriteMode::Edit,
+                OperatorWriteMode::Delete => WriteMode::Delete,
+            })
+            .collect()
+    };
+    let mut policy = WritePolicy {
+        roots: Vec::new(),
+        protected: vec![cas_root.join("operator")],
+        configured: crate::config::operator_policy::operator_policy_path(cas_root).exists(),
+    };
+    let mut task_ids = std::collections::HashSet::new();
+    let operator = match load_operator_policy(cas_root) {
+        Ok(operator) => operator,
+        Err(error) => {
+            tracing::warn!(%error, "operator write policy unreadable; no write roots apply");
+            return (policy, task_ids);
+        }
+    };
+    policy.roots.extend(operator.roots.iter().map(|root| WriteRoot {
+        path: root.path.clone(),
+        modes: modes(&root.modes),
+        task_id: None,
+    }));
+    if operator.grants.is_empty() {
+        return (policy, task_ids);
+    }
+    let leased: std::collections::HashSet<String> = stores
+        .agents()
+        .and_then(|store| store.list_agent_leases(&current_agent_id(input)).ok())
+        .map(|leases| leases.into_iter().map(|lease| lease.task_id).collect())
+        .unwrap_or_default();
+    for grant in &operator.grants {
+        let open = stores
+            .tasks()
+            .and_then(|store| store.get(&grant.task).ok())
+            .is_some_and(|task| task.status != cas_types::TaskStatus::Closed);
+        if !open {
+            continue;
+        }
+        if is_supervisor || leased.contains(&grant.task) {
+            task_ids.insert(grant.task.clone());
+        }
+        policy.roots.push(WriteRoot {
+            path: grant.path.clone(),
+            modes: modes(&grant.modes),
+            task_id: Some(grant.task.clone()),
+        });
+    }
+    (policy, task_ids)
+}
+
+/// cas-3147 (GH #1169 item 3): audit every out-of-tree change a write root or
+/// grant admitted.
+fn log_write_root_uses(cas_root: &Path, input: &HookInput, uses: &[WriteRootUse]) {
+    let tool = input.tool_name.as_deref().unwrap_or("unknown");
+    let agent = current_agent_id(input);
+    for used in uses {
+        let path = used.path.display().to_string();
+        let root = used.root.display().to_string();
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            cas_root,
+            "workspace_write_root_used",
+            &[
+                ("tool", tool),
+                ("path", path.as_str()),
+                ("mode", used.mode.as_str()),
+                ("root", root.as_str()),
+                ("task", used.task_id.as_deref().unwrap_or("")),
+                ("agent", agent.as_str()),
+            ],
+        );
+    }
+}
+
+/// cas-3147: the denial message, naming the operator's write roots in effect.
+fn factory_workspace_contract_denial_with_roots(
+    input: &HookInput,
+    violation: &FactoryWriteViolation,
+    configured_artifacts_root: Option<&str>,
+    configured_scratch_root: Option<&str>,
+    worktree_root: Option<&std::path::Path>,
+    policy: &super::write_roots::WritePolicy,
+    task_ids: &std::collections::HashSet<String>,
+) -> String {
+    let denial = factory_workspace_contract_denial(
+        input,
+        violation,
+        configured_artifacts_root,
+        configured_scratch_root,
+        worktree_root,
+    );
+    let roots = policy.describe(task_ids);
+    if roots.is_empty() {
+        return denial;
+    }
+    format!(
+        "{denial} Operator write roots in effect: {}. Only the operator can add roots or grants.",
+        roots.join("; ")
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FactoryWriteViolation {
     evaluated_path: String,
@@ -3666,71 +4235,18 @@ fn factory_write_violation(
     is_supervisor: bool,
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<FactoryWriteViolation> {
-    let tool = input.tool_name.as_deref()?;
-    let tool_input = input.tool_input.as_ref()?;
-    // cas-cf4f: Bash deletions are judged as deletions, before creation.
-    if tool == "Bash"
-        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
-        && let Some(violation) = bash_delete_targets(command).into_iter().find_map(|(raw_path, _recursive)| {
-            factory_delete_violation(
-                input,
-                configured_artifacts_root,
-                configured_scratch_root,
-                is_supervisor,
-                registered_worktree_root,
-                &raw_path,
-            )
-        })
-    {
-        return Some(violation);
+    match factory_write_decision(
+        input,
+        configured_artifacts_root,
+        configured_scratch_root,
+        is_supervisor,
+        registered_worktree_root,
+        &super::write_roots::WritePolicy::default(),
+        &std::collections::HashSet::new(),
+    ) {
+        FactoryWriteDecision::Denied(violation) => Some(violation),
+        FactoryWriteDecision::Allowed | FactoryWriteDecision::AllowedByRoot(_) => None,
     }
-    let raw_paths = match tool {
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
-            .get("file_path")
-            .or_else(|| tool_input.get("path"))
-            .and_then(|value| value.as_str())
-            .map(|path| vec![path.to_string()])
-            .unwrap_or_default(),
-        "Bash" => {
-            let command = tool_input.get("command").and_then(|value| value.as_str())?;
-            bash_write_targets(command)
-        }
-        // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
-        // text in `tool_input.command`.
-        "apply_patch" => {
-            let patch = tool_input.get("command").and_then(|value| value.as_str())?;
-            apply_patch_write_targets(patch)
-        }
-        _ => return None,
-    };
-
-    raw_paths.into_iter().find_map(|raw_path| {
-        // A variable that survived the finite expansion above may resolve to
-        // an absolute path only when Bash runs it. Treating the literal
-        // `$NAME` as relative to the worktree would create an escape hatch.
-        // Known `$HOME` and command-local assignment/loop variables have
-        // already been expanded; the remainder is deliberately fail-closed.
-        if raw_path.contains('$') {
-            return Some(FactoryWriteViolation {
-                evaluated_path: raw_path.clone(),
-                resolved_path: std::path::PathBuf::from(&raw_path),
-                matched_rule: "unresolved shell variable",
-            });
-        }
-        unsanctioned_factory_path_with_worktree(
-            input,
-            configured_artifacts_root,
-            configured_scratch_root,
-            is_supervisor,
-            &raw_path,
-            registered_worktree_root,
-        )
-        .map(|resolved_path| FactoryWriteViolation {
-            evaluated_path: raw_path,
-            resolved_path,
-            matched_rule: "none",
-        })
-    })
 }
 
 /// cas-49c0: every file a Codex `apply_patch` call adds, updates, deletes or
@@ -4225,6 +4741,346 @@ mod workspace_contract_tests {
                     "{case}: the refusal names the path and the worker's own worktree: {denial}"
                 );
             }
+        }
+    }
+
+    /// cas-3147 (GH #1169): fixture with a managed directory outside the
+    /// worktree. Returns (root, home, worktree, managed, outside).
+    fn write_roots_fixture(
+        root: &Path,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let root = root.canonicalize().expect("canonical fixture root");
+        let home = root.join("home");
+        let worktree = root.join("main/.cas/worktrees/brisk-otter-7");
+        let managed = home.join("soundwave-config/docs/requests");
+        let outside = home.join("elsewhere");
+        for dir in [&worktree, &managed, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(managed.join("existing.md"), "x").unwrap();
+        std::fs::write(outside.join("dotfile"), "x").unwrap();
+        (root, home, worktree, managed, outside)
+    }
+
+    fn root_policy(path: &Path, modes: &[super::super::write_roots::WriteMode], task: Option<&str>)
+        -> super::super::write_roots::WritePolicy {
+        super::super::write_roots::WritePolicy {
+            roots: vec![super::super::write_roots::WriteRoot {
+                path: path.to_path_buf(),
+                modes: modes.iter().copied().collect(),
+                task_id: task.map(str::to_string),
+            }],
+            protected: Vec::new(),
+            configured: true,
+        }
+    }
+
+    /// cas-3147 (GH #1169): a write root admits its modes for create, edit,
+    /// rename and in-place shell edits under it, audits each admitted path,
+    /// refuses unpermitted modes and paths outside it (including `..` and
+    /// symlink escapes), and names the roots in the refusal. An empty policy
+    /// keeps the default contract.
+    #[cfg(unix)]
+    #[test]
+    fn cas_3147_write_roots_admit_their_modes_and_deny_everything_else() {
+        use super::super::write_roots::{WriteMode, WritePolicy};
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, managed, outside) = write_roots_fixture(fixture.path());
+        std::os::unix::fs::symlink(&outside, managed.join("escape")).unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let no_tasks = std::collections::HashSet::new();
+        let policy = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit], None);
+        let decide = |input: HookInput, policy: &WritePolicy| {
+            factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), policy, &no_tasks)
+        };
+        let m = |name: &str| managed.join(name).display().to_string();
+
+        let admitted: Vec<(&str, HookInput, WriteMode)> = vec![
+            ("Write a new file", tool_input("Write", serde_json::json!({"file_path": m("new.md"), "content": "x"}), &worktree), WriteMode::Create),
+            ("Edit an existing file", tool_input("Edit", serde_json::json!({"file_path": m("existing.md"), "old_string": "x", "new_string": "y"}), &worktree), WriteMode::Edit),
+            ("tee a new file", bash_input(&format!("printf x | tee {}", m("tee.md")), &worktree), WriteMode::Create),
+            ("apply_patch Add File", tool_input("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Add File: {}\n+x\n*** End Patch", m("patch.md"))}), &worktree), WriteMode::Create),
+            ("sed -i in place", bash_input(&format!("sed -i s/x/y/ {}", m("existing.md")), &worktree), WriteMode::Edit),
+            ("rename inside the root", bash_input(&format!("mv {} {}", m("existing.md"), m("renamed.md")), &worktree), WriteMode::Edit),
+        ];
+        for (case, input, mode) in admitted {
+            match decide(input, &policy) {
+                FactoryWriteDecision::AllowedByRoot(uses) => {
+                    assert!(uses.iter().any(|used| used.mode == mode && used.root == managed), "{case}: {uses:?}");
+                    assert!(uses.iter().all(|used| used.path.starts_with(&managed)), "{case}: {uses:?}");
+                }
+                other => panic!("{case} must be admitted by the write root: {other:?}"),
+            }
+            assert!(
+                matches!(decide(tool_input("Write", serde_json::json!({"file_path": m("new.md"), "content": "x"}), &worktree), &WritePolicy::default()), FactoryWriteDecision::Denied(_)),
+                "{case}: with no roots configured the default contract still refuses"
+            );
+        }
+
+        let refused: Vec<(&str, HookInput)> = vec![
+            ("outside the root", tool_input("Write", serde_json::json!({"file_path": outside.join("x.md").display().to_string(), "content": "x"}), &worktree)),
+            ("delete is not granted", bash_input(&format!("rm {}", m("existing.md")), &worktree)),
+            ("lexical .. escape", tool_input("Write", serde_json::json!({"file_path": format!("{}/../../../elsewhere/y.md", managed.display()), "content": "x"}), &worktree)),
+            ("symlink escape", tool_input("Write", serde_json::json!({"file_path": m("escape/z.md"), "content": "x"}), &worktree)),
+            ("in-place edit outside", bash_input(&format!("sed -i s/x/y/ {}", outside.join("dotfile").display()), &worktree)),
+            ("rename away from outside", bash_input(&format!("mv {} {}", outside.join("dotfile").display(), m("stolen")), &worktree)),
+        ];
+        for (case, input) in refused {
+            let FactoryWriteDecision::Denied(violation) = decide(input.clone(), &policy) else {
+                panic!("{case} must be refused");
+            };
+            let denial = factory_workspace_contract_denial_with_roots(
+                &input, &violation, None, None, Some(worktree.as_path()), &policy, &no_tasks,
+            );
+            assert!(denial.contains(&managed.display().to_string()), "{case}: the refusal names the roots: {denial}");
+        }
+
+        let with_delete = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit, WriteMode::Delete], None);
+        assert!(
+            matches!(decide(bash_input(&format!("rm {}", m("existing.md")), &worktree), &with_delete), FactoryWriteDecision::AllowedByRoot(_)),
+            "a root with delete admits rm under it"
+        );
+    }
+
+    /// cas-3147 (GH #1169): a one-off operator grant applies only while the
+    /// agent works on the granted task.
+    #[test]
+    fn cas_3147_task_grant_admits_only_its_own_task() {
+        use super::super::write_roots::WriteMode;
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, managed, _outside) = write_roots_fixture(fixture.path());
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let grant = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit], Some("cas-1169"));
+        let write = tool_input(
+            "Write",
+            serde_json::json!({"file_path": managed.join("INGEST-1.md").display().to_string(), "content": "x"}),
+            &worktree,
+        );
+        let tasks = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<std::collections::HashSet<_>>();
+        match factory_write_decision(&write, &None, None, false, Some(worktree.as_path()), &grant, &tasks(&["cas-1169"])) {
+            FactoryWriteDecision::AllowedByRoot(uses) => {
+                assert_eq!(uses[0].task_id.as_deref(), Some("cas-1169"), "{uses:?}");
+            }
+            other => panic!("the granted task is admitted: {other:?}"),
+        }
+        assert!(matches!(
+            factory_write_decision(&write, &None, None, false, Some(worktree.as_path()), &grant, &tasks(&["cas-other"])),
+            FactoryWriteDecision::Denied(_)
+        ));
+        assert!(matches!(
+            factory_write_decision(&write, &None, None, true, Some(worktree.as_path()), &grant, &tasks(&[])),
+            FactoryWriteDecision::Denied(_)
+        ), "a supervisor with no granted task is refused too");
+    }
+
+    /// cas-3147: no agent (worker or supervisor) may write the operator
+    /// policy through any tool, even when a write root or its own sanctioned
+    /// checkout contains it.
+    #[cfg(unix)]
+    #[test]
+    fn cas_3147_agents_cannot_write_the_operator_policy() {
+        use super::super::write_roots::{WriteMode, WritePolicy, WriteRoot};
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let main = root.join("main");
+        let operator_dir = main.join(".cas/operator");
+        std::fs::create_dir_all(&operator_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let policy_file = operator_dir.join("write-policy.toml");
+        std::fs::write(&policy_file, "").unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        // The widest case: a root over the whole project, and a supervisor
+        // whose sanctioned checkout is the main repository itself.
+        let policy = WritePolicy {
+            roots: vec![WriteRoot {
+                path: main.clone(),
+                modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
+                task_id: None,
+            }],
+            protected: vec![operator_dir.clone()],
+            configured: true,
+        };
+        let no_tasks = std::collections::HashSet::new();
+        let file = policy_file.display().to_string();
+        for (case, input) in [
+            ("Write", tool_input("Write", serde_json::json!({"file_path": file, "content": "[[roots]]"}), &main)),
+            ("Edit", tool_input("Edit", serde_json::json!({"file_path": file, "old_string": "", "new_string": "x"}), &main)),
+            ("apply_patch", tool_input("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Update File: {file}\n@@\n+x\n*** End Patch")}), &main)),
+            ("tee", bash_input(&format!("echo x | tee {file}"), &main)),
+            ("sed -i", bash_input(&format!("sed -i s/a/b/ {file}"), &main)),
+            ("rm", bash_input(&format!("rm -f {file}"), &main)),
+            ("mv in", bash_input(&format!("mv /tmp/forged.toml {file}"), &main)),
+            ("relative", bash_input("cp forged.toml .cas/operator/write-policy.toml", &main)),
+        ] {
+            for supervisor in [false, true] {
+                let decision = factory_write_decision(&input, &None, None, supervisor, Some(main.as_path()), &policy, &no_tasks);
+                let FactoryWriteDecision::Denied(violation) = decision else {
+                    panic!("{case} (supervisor={supervisor}) must be refused: {decision:?}");
+                };
+                assert!(violation.matched_rule.contains("operator"), "{case}: {violation:?}");
+            }
+        }
+    }
+
+    /// cas-3147: the hook takes roots and grants only from the operator
+    /// policy file (a `[factory.write_roots]` table in config.toml is
+    /// ignored), applies a grant to the supervisor and to the worker holding
+    /// the task, drops it once the task closes, and always protects the
+    /// policy directory.
+    #[test]
+    fn cas_3147_hook_policy_comes_from_the_operator_file_and_ends_at_task_close() {
+        use crate::config::operator_policy::{
+            OperatorWriteGrant, OperatorWriteMode, OperatorWritePolicy, OperatorWriteRoot,
+            save_operator_policy,
+        };
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let managed = project.path().canonicalize().unwrap().join("managed");
+        let granted = project.path().canonicalize().unwrap().join("granted");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::create_dir_all(&granted).unwrap();
+        std::fs::write(
+            cas_root.join("config.toml"),
+            format!("[factory.write_roots]\npaths = [\"{}\"]\n", granted.display()),
+        )
+        .unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
+        let mut task = cas_types::Task::new("cas-1169a".into(), "INGEST request files".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        save_operator_policy(
+            &cas_root,
+            &OperatorWritePolicy {
+                roots: vec![OperatorWriteRoot {
+                    path: managed.clone(),
+                    modes: [OperatorWriteMode::Create, OperatorWriteMode::Edit].into_iter().collect(),
+                }],
+                grants: vec![OperatorWriteGrant {
+                    task: task.id.clone(),
+                    path: granted.clone(),
+                    modes: [OperatorWriteMode::Create].into_iter().collect(),
+                    reason: "INGEST request files".into(),
+                    granted_at: "2026-10-10T18:00:00Z".into(),
+                }],
+            },
+        )
+        .unwrap();
+        let input = tool_input("Write", serde_json::json!({"file_path": "x"}), project.path());
+
+        let mut stores = ToolHookStores::new(&cas_root);
+        let (policy, supervisor_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, true);
+        assert_eq!(policy.protected, vec![cas_root.join("operator")]);
+        assert_eq!(policy.roots.len(), 2, "the file's root and grant, not config.toml: {policy:?}");
+        assert!(policy.roots.iter().any(|root| root.path == managed && root.task_id.is_none()));
+        assert!(policy.roots.iter().any(|root| root.path == granted && root.task_id.as_deref() == Some("cas-1169a")));
+        assert!(supervisor_tasks.contains("cas-1169a"), "the supervisor uses an open task's grant");
+        let (_, unleased_worker_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, false);
+        assert!(unleased_worker_tasks.is_empty(), "a worker without the task's lease gets no grant");
+
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let mut stores = ToolHookStores::new(&cas_root);
+        let (closed, closed_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, true);
+        assert!(closed_tasks.is_empty(), "a grant ends when its task closes");
+        assert!(closed.roots.iter().all(|root| root.task_id.is_none()), "{closed:?}");
+        assert_eq!(closed.protected, vec![cas_root.join("operator")]);
+    }
+
+    /// cas-3147 review: with no operator policy file, in-place edits and
+    /// renames keep today's behaviour (not judged), so the default contract
+    /// is unchanged; the consistent classification starts only once the
+    /// operator configures a policy.
+    #[cfg(unix)]
+    #[test]
+    fn cas_3147_unconfigured_contract_keeps_in_place_edits_and_renames_as_today() {
+        use super::super::write_roots::WritePolicy;
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, _managed, outside) = write_roots_fixture(fixture.path());
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let dotfile = outside.join("dotfile").display().to_string();
+        let no_tasks = std::collections::HashSet::new();
+        for command in [
+            format!("sed -i s/x/y/ {dotfile}"),
+            format!("perl -pi -e 's/x/y/' {dotfile}"),
+            format!("mv {dotfile} src/dotfile"),
+        ] {
+            let input = bash_input(&command, &worktree);
+            assert_eq!(
+                factory_write_violation(&input, &None, None, false, Some(worktree.as_path())),
+                None,
+                "default contract: {command}"
+            );
+            let unconfigured = WritePolicy {
+                protected: vec![fixture.path().join("main/.cas/operator")],
+                ..WritePolicy::default()
+            };
+            assert_eq!(
+                factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), &unconfigured, &no_tasks),
+                FactoryWriteDecision::Allowed,
+                "no policy file: {command}"
+            );
+            let configured = WritePolicy { configured: true, ..unconfigured };
+            assert!(
+                matches!(
+                    factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), &configured, &no_tasks),
+                    FactoryWriteDecision::Denied(_)
+                ),
+                "with a policy file the edit is judged: {command}"
+            );
+        }
+    }
+
+    /// cas-3147: an agent shell cannot run the operator-only commands,
+    /// however the command is wrapped.
+    #[test]
+    fn cas_3147_agent_shell_cannot_run_operator_policy_commands() {
+        for command in [
+            "cas config set factory.write_roots ~/soundwave-config",
+            "/home/u/.local/bin/cas config set factory.write_roots ''",
+            "env -u CLAUDECODE -u CAS_AGENT_ROLE cas config set factory.write_roots /x",
+            "cas config grant-write --task cas-1 --path /x --reason r",
+            "bash -c 'cas config grant-write --task cas-1 --path /x --reason r'",
+            "script -qc 'cas config set factory.write_roots /x' /dev/null",
+            "setsid cas config set factory.write_roots /x",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("operator"), "{denial}");
+        }
+        for allowed in [
+            "cas config get factory.write_roots",
+            "cas config set factory.prompt_retention_days 7",
+            "git commit -m 'document cas config set factory.write_roots'",
+            "rg 'grant-write' cas-cli/src",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
         }
     }
 

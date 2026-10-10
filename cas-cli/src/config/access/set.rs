@@ -1249,6 +1249,14 @@ impl Config {
                     Some(value.to_string())
                 };
             }
+            // cas-3147: operator-only, kept outside config.toml entirely.
+            "factory.write_roots" => {
+                return Err(MemError::Other(
+                    "factory.write_roots is operator-only and is not stored in config.toml. \
+                     Run `cas config set factory.write_roots <paths>` yourself from your own terminal."
+                        .to_string(),
+                ));
+            }
             _ => {
                 return Err(MemError::Other(format!("Unknown config key: {key}")));
             }

@@ -466,118 +466,17 @@ impl SqliteCodeVectorStore {
     ///    (`embed_pending_code` refuses to complete a hash the symbol no
     ///    longer has), so it is pending work that can never finish.
     ///
-    /// The whole pass runs in one `BEGIN IMMEDIATE` transaction with bounded
-    /// retry, so a concurrent reader-writer (`cas doctor`, a second
-    /// `cas serve`) delays it instead of failing it.
+    /// Runs as [`Self::reconcile_scoped`] over every repository: bounded
+    /// `BEGIN IMMEDIATE` transactions with bounded retry, so a concurrent
+    /// reader-writer (`cas doctor`, a second `cas serve`) delays it instead of
+    /// failing it, and no single transaction spans the whole store (cas-8256).
     pub fn reconcile(&self, force: bool) -> Result<CodeVectorReconcile> {
-        let conn = self.lock()?;
-        let kinds = cas_code::SymbolKind::embeddable_kind_names();
-        let placeholders = vec!["?"; kinds.len()].join(", ");
-
-        // No `code_symbols` table means structural indexing has never run in
-        // this store. Every queue row would then read as orphaned; emptying
-        // the queue on the strength of a table that merely has not been
-        // created yet would delete real work.
-        let symbols_table = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'code_symbols'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0);
-        if symbols_table == 0 {
-            return Ok(CodeVectorReconcile::default());
-        }
-
-        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
-            let now = Utc::now().to_rfc3339();
-            let mut outcome = CodeVectorReconcile::default();
-
-            let dropped: Vec<String> = {
-                let mut stmt = tx.prepare(&format!(
-                    "SELECT symbol_id FROM code_vector_queue q
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM code_symbols s
-                         WHERE s.id = q.symbol_id AND s.kind IN ({placeholders})
-                     )"
-                ))?;
-                let rows = stmt.query_map(rusqlite::params_from_iter(kinds.iter()), |row| {
-                    row.get::<_, String>(0)
-                })?;
-                rows.collect::<std::result::Result<Vec<_>, _>>()?
-            };
-            for id in &dropped {
-                tx.execute(
-                    "DELETE FROM code_vector_queue WHERE symbol_id = ?1",
-                    params![id],
-                )?;
-            }
-            outcome.orphaned_dropped = dropped.len();
-            outcome.dropped_symbol_ids = dropped;
-
-            let failed: Vec<(String, Option<String>)> = {
-                let mut stmt = tx.prepare(
-                    "SELECT symbol_id, last_error FROM code_vector_queue WHERE status = 'failed'",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?;
-                rows.collect::<std::result::Result<Vec<_>, _>>()?
-            };
-            for (symbol_id, last_error) in &failed {
-                if !force && !is_retryable_vector_failure(last_error.as_deref()) {
-                    outcome.failed_retained += 1;
-                    continue;
-                }
-                tx.execute(
-                    "UPDATE code_vector_queue
-                     SET status = 'pending', last_error = NULL, updated_at = ?2
-                     WHERE symbol_id = ?1",
-                    params![symbol_id, now],
-                )?;
-                outcome.failed_rearmed += 1;
-            }
-
-            outcome.stale_rearmed = tx.execute(
-                &format!(
-                    "UPDATE code_vector_queue
-                     SET content_hash = (
-                             SELECT s.content_hash FROM code_symbols s
-                             WHERE s.id = code_vector_queue.symbol_id
-                         ),
-                         status = 'pending',
-                         last_error = NULL,
-                         updated_at = ?1
-                     WHERE EXISTS (
-                         SELECT 1 FROM code_symbols s
-                         WHERE s.id = code_vector_queue.symbol_id
-                           AND s.kind IN ({placeholders})
-                           AND s.content_hash <> code_vector_queue.content_hash
-                     )"
-                ),
-                rusqlite::params_from_iter(
-                    std::iter::once(now.clone()).chain(kinds.iter().map(|kind| kind.to_string())),
-                ),
-            )?;
-
-            outcome.requeued = tx.execute(
-                &format!(
-                    "INSERT OR IGNORE INTO code_vector_queue
-                         (symbol_id, content_hash, status, last_error, updated_at)
-                     SELECT s.id, s.content_hash, 'pending', NULL, ?1
-                     FROM code_symbols s
-                     WHERE s.kind IN ({placeholders})
-                       AND NOT EXISTS (
-                           SELECT 1 FROM code_vector_queue q WHERE q.symbol_id = s.id
-                       )"
-                ),
-                rusqlite::params_from_iter(
-                    std::iter::once(now.clone()).chain(kinds.iter().map(|kind| kind.to_string())),
-                ),
-            )?;
-
-            Ok(outcome)
-        })
+        self.reconcile_scoped(
+            force,
+            None,
+            WriteBatching::default(),
+            &mut BatchedWrites::default(),
+        )
     }
 
     /// [`Self::reconcile`] in bounded transactions, optionally scoped to the

@@ -1374,8 +1374,13 @@ fn root_projection_autofix(root: &Path) -> Option<Check> {
 }
 
 fn code_index_autofix(root: &Path) -> Option<Check> {
-    // cas-8256: only the canonical checkout's process writes the code index.
-    if !crate::daemon::canonical_code_index::code_index_role(root).is_writer() { return None; }
+    code_index_autofix_as(root, &crate::daemon::canonical_code_index::code_index_role(root))
+}
+
+/// cas-8256: only the canonical checkout's process writes the code index, so
+/// `cas doctor --fix` run by a worker or in a linked worktree never reindexes.
+fn code_index_autofix_as(root: &Path, role: &crate::daemon::canonical_code_index::CodeIndexRole) -> Option<Check> {
+    if !role.is_writer() { return None; }
     let state = gather_symbol_index_state(root);
     if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
     let project = crate::daemon::indexing::code_project_root(root);
@@ -10010,7 +10015,11 @@ mod tests {
         scans.record_scan(&key, 2, 2, 0, 0, None, None, Some("previous scan needs retry")).unwrap();
         let holder = cas_search::Bm25Index::open(&crate::daemon::indexing::code_index_dir(&fixture.cas_root)).unwrap();
         holder.delete_batch(["lock-probe"]).unwrap();
-        let warning = code_index_autofix(&fixture.cas_root).expect("doctor offered the retry");
+        // cas-8256: a worker's or linked worktree's doctor never reindexes.
+        let reader = crate::daemon::canonical_code_index::CodeIndexRole::Reader("factory worker".into());
+        assert!(code_index_autofix_as(&fixture.cas_root, &reader).is_none());
+        let writer = crate::daemon::canonical_code_index::CodeIndexRole::Writer;
+        let warning = code_index_autofix_as(&fixture.cas_root, &writer).expect("doctor offered the retry");
         assert!(matches!(warning.status, CheckStatus::Warning), "{}", warning.message);
         assert!(warning.message.contains("2 file retirement(s) deferred"), "{}", warning.message);
         assert!(warning.message.contains("cas index code"), "{}", warning.message);
@@ -10024,7 +10033,7 @@ mod tests {
         drop(holder);
         // The persisted warning makes a subsequent real doctor retry possible
         // even though both files disappeared and no new event will arrive.
-        let success = code_index_autofix(&fixture.cas_root).expect("deferred receipt offered retry");
+        let success = code_index_autofix_as(&fixture.cas_root, &writer).expect("deferred receipt offered retry");
         assert!(matches!(success.status, CheckStatus::Ok), "{}", success.message);
         assert!(success.message.contains("fixed: symbol index"));
         assert!(store.list_files("repo", None).unwrap().is_empty());

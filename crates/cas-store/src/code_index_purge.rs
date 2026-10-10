@@ -368,8 +368,10 @@ impl SqliteCodeIndexPurge {
                 if !table_exists(&conn, table) {
                     return Ok(total);
                 }
-                crate::shared_db::with_immediate_write_txn(&conn, |tx| {
-                    Ok(tx.execute(&sql, rusqlite::params_from_iter(bound.iter()))?)
+                without_foreign_keys(&conn, |conn| {
+                    crate::shared_db::with_immediate_write_txn(conn, |tx| {
+                        Ok(tx.execute(&sql, rusqlite::params_from_iter(bound.iter()))?)
+                    })
                 })?
             };
             if deleted == 0 {
@@ -383,6 +385,35 @@ impl SqliteCodeIndexPurge {
             batching.yield_between();
         }
     }
+}
+
+/// Run `body` with foreign-key enforcement suspended on this connection,
+/// restoring the previous setting afterwards (also on error).
+///
+/// The migration-built `code_symbols` declares `parent_id REFERENCES
+/// code_symbols(id) ON DELETE SET NULL` with no index on `parent_id`, so with
+/// enforcement on every deleted symbol scans the whole table. Measured on a
+/// copy of the cassy store: about 1,500 of 356k foreign symbols removed in six
+/// minutes, each transaction holding the write lock for tens of seconds. The
+/// purge deletes every dependent row (queue, relationships, memory links)
+/// explicitly and removes a repository's symbols together, so the referential
+/// actions have nothing left to do. `PRAGMA foreign_keys` is a no-op inside a
+/// transaction, hence it is set before `BEGIN`; the caller holds the
+/// connection mutex, so no other in-process user sees the suspended setting.
+fn without_foreign_keys<T>(
+    conn: &Connection,
+    body: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let enforced = conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))? != 0;
+    if !enforced {
+        return body(conn);
+    }
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let result = body(conn);
+    let restored = conn.execute_batch("PRAGMA foreign_keys = ON");
+    let value = result?;
+    restored?;
+    Ok(value)
 }
 
 pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {

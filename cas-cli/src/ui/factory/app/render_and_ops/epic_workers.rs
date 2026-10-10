@@ -3095,7 +3095,7 @@ mod spawn_base_tests {
         .await
         .expect("create long-title epic");
 
-        let store = core.open_task_store_cached().unwrap();
+        let store = core.open_task_store().unwrap();
         let epic = store
             .list(None)
             .unwrap()

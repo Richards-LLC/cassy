@@ -134,6 +134,30 @@ pub fn forbid_store_access() -> ForbidStoreGuard {
     }
 }
 
+/// Restores the forbid depth that [`permit_store_access`] cleared.
+#[must_use = "the permitted region lasts only while the guard is alive"]
+pub struct PermitStoreGuard {
+    previous_depth: u32,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for PermitStoreGuard {
+    fn drop(&mut self) {
+        FORBID_DEPTH.with(|depth| depth.set(self.previous_depth));
+    }
+}
+
+/// Lift [`forbid_store_access`] for a named exception inside a store-free
+/// region, such as an operator command that arrives on the input path but is
+/// not keystroke forwarding. The wait budget still applies.
+pub fn permit_store_access() -> PermitStoreGuard {
+    let previous_depth = FORBID_DEPTH.with(|depth| depth.replace(0));
+    PermitStoreGuard {
+        previous_depth,
+        _not_send: std::marker::PhantomData,
+    }
+}
+
 /// True inside a [`forbid_store_access`] region on this thread.
 pub fn store_access_forbidden() -> bool {
     FORBID_DEPTH.with(Cell::get) > 0
@@ -264,6 +288,18 @@ mod tests {
         }
         assert_eq!(store_access_violations(), before + 1);
         assert_eq!(last_store_access_violation(), Some("inside"));
+    }
+
+    #[test]
+    fn permitted_exception_is_not_a_violation() {
+        let before = store_access_violations();
+        let _forbid = forbid_store_access();
+        {
+            let _permit = permit_store_access();
+            note_store_access("operator command");
+        }
+        assert_eq!(store_access_violations(), before);
+        assert!(store_access_forbidden(), "the forbid scope resumes");
     }
 
     #[test]

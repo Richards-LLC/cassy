@@ -92,14 +92,32 @@ fn seed(cas_dir: &Path) -> cas_types::Task {
 /// reminders and a draw with the task dialog open. Loop-thread task
 /// mutations still take the intents flock until cas-78ac4 bounds it by the
 /// thread's wait budget; the control test below pins that behaviour.
-async fn store_phases(daemon: &mut FactoryDaemon, terminal: &mut Terminal<BufferBackend>) {
+async fn store_phases(
+    daemon: &mut FactoryDaemon,
+    terminal: &mut Terminal<BufferBackend>,
+) -> Vec<(&'static str, Duration)> {
+    let mut phases = Vec::new();
+    let mut mark = Instant::now();
+    let mut lap = |name: &'static str, phases: &mut Vec<(&'static str, Duration)>| {
+        phases.push((name, mark.elapsed()));
+        mark = Instant::now();
+    };
     let _ = daemon.process_prompt_queue().await;
+    lap("prompt queue", &mut phases);
     let _ = daemon.enqueue_spawn_requests();
+    lap("spawn queue", &mut phases);
     daemon.reconcile_spawn_verifications().await;
+    lap("spawn verification", &mut phases);
     let _ = daemon.app.refresh_data();
+    lap("refresh", &mut phases);
     daemon.process_reminders(&[]);
-    let _forbid = wait_budget::forbid_store_access();
-    terminal.draw(|frame| daemon.app.render(frame)).unwrap();
+    lap("reminders", &mut phases);
+    {
+        let _forbid = wait_budget::forbid_store_access();
+        terminal.draw(|frame| daemon.app.render(frame)).unwrap();
+    }
+    lap("draw", &mut phases);
+    phases
 }
 
 #[tokio::test]
@@ -119,24 +137,35 @@ async fn loop_pass_stays_fast_while_the_intents_flock_and_sqlite_write_lock_are_
 
     // Uncontended warm-up: the daemon has opened its stores before any pass.
     store_phases(&mut daemon, &mut terminal).await;
+    let mut uncontended = Duration::ZERO;
+    for _ in 0..3 {
+        let started = Instant::now();
+        store_phases(&mut daemon, &mut terminal).await;
+        uncontended = uncontended.max(started.elapsed());
+    }
 
     let flock = hold_intents_flock(&cas_dir);
     let write_lock = hold_sqlite_write_lock(&cas_dir);
     let mut slowest = Duration::ZERO;
+    let mut slowest_phases = Vec::new();
     for _ in 0..5 {
         let started = Instant::now();
-        {
+        let phases = {
             let _budget = wait_budget::bound_waits_for(super::store_worker::PASS_STORE_WAIT_BUDGET);
-            store_phases(&mut daemon, &mut terminal).await;
+            store_phases(&mut daemon, &mut terminal).await
+        };
+        if started.elapsed() > slowest {
+            slowest = started.elapsed();
+            slowest_phases = phases;
         }
-        slowest = slowest.max(started.elapsed());
     }
     write_lock.release();
     flock.release();
 
     assert!(
         slowest < PASS_LATENCY_LIMIT,
-        "slowest pass took {slowest:?} with the intents flock and SQLite write lock held"
+        "slowest pass took {slowest:?} with the intents flock and SQLite write lock held \
+         (uncontended {uncontended:?}); phases {slowest_phases:?}"
     );
 }
 

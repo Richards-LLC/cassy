@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.50.0] - 2026-10-10
+
 ### Changed — many agents on one machine (#1165)
 
 - The factory daemon's main loop no longer waits on database or file locks.
@@ -27,7 +29,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   indexes, reconciles and purges it; factory workers and linked worktrees read
   it. Copies left by removed worktrees are purged in bounded batches at
   start-up and after worktree removal. `cas doctor` lists file counts per
-  repository and `--fix` purges stray copies.
+  repository under Indexes and `--fix` purges stray copies. Deleting a file's
+  symbols and finding callers use indexes instead of scanning the whole
+  table, and only the main checkout's process computes code embeddings.
 - A Codex worker starts one `cas serve`, not two. Cassy disables any other
   Cassy server entry in the Codex configuration it launches with, and
   `cas init`/`cas update` keep a single entry.
@@ -37,9 +41,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   with many agents. Both reads now run on a background reader with its own
   database connection, and the loop applies the finished snapshot on a later
   pass: panels lag by at most one refresh, and prompts are still checked
-  against a read taken after the change was detected. Agent and event store
-  reads respect the 50 ms pass budget instead of waiting on another thread's
-  connection. `loop.json` adds `phase_latency`: for each loop phase, how often
+  against a read taken after the change was detected. Every store respects
+  the 50 ms pass budget when it takes its shared database connection, instead
+  of waiting on another thread's. `loop.json` adds `phase_latency`: for each loop phase, how often
   it ran, its slowest run and how many runs took 100 ms or more, with the
   refresh split into its steps.
 - `scripts/many-agent-load.py` reproduces the many-agent stall on a scratch
@@ -62,6 +66,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   removed after their retention windows
   (`factory.supervisor_queue_retention_days`, default 14) in the same batched
   cleanup.
+- The message-queue cleanup also works on a store created by `cas init`. The
+  column it reads to tell whether a supervisor notification was delivered is
+  now added by a migration; before, only the supervisor queue's first use
+  added it, and until then every cleanup failed and removed nothing.
 
 ### Added — Violet push-wake follow-ups
 

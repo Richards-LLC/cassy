@@ -198,7 +198,14 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").args(args).current_dir(repo).output()?;
+    // cas-39f3: the runner only reads git state. `git status` otherwise
+    // rewrites a stat-dirty index under the worker's `index.lock`, and a git
+    // killed during that write strands a zero-byte lock that blocks commits.
+    let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(repo)
+        .output()?;
     if !output.status.success() {
         bail!("git {} failed", args.join(" "));
     }

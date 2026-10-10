@@ -3592,6 +3592,7 @@ fn factory_delete_violation(
         .map(std::path::Path::to_path_buf)
         .or_else(|| std::env::var_os("CAS_CLONE_PATH").filter(|v| !v.is_empty()).map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    let own_worktree_root = worktree_root.clone();
     let is_root_or_ancestor_of = |protected: Option<std::path::PathBuf>| {
         protected
             .and_then(|protected| canonical(&protected))
@@ -3618,6 +3619,13 @@ fn factory_delete_violation(
     {
         return None;
     }
+    // cas-39f3: a worker's own gitdir index.lock, when a killed git left it
+    // empty and nothing holds it open.
+    match own_gitdir_index_lock(&resolved, &own_worktree_root) {
+        OwnGitdirLock::Stale => return None,
+        OwnGitdirLock::Live(rule) => return Some(violation(resolved, rule)),
+        OwnGitdirLock::NotOwnLock => {}
+    }
     // cas-aa4e: a ~/.cas runtime file is deletable only when it is stale.
     match cas_runtime_leftover(&resolved, home.as_deref()) {
         RuntimeLeftover::Stale => return None,
@@ -3634,6 +3642,97 @@ fn factory_delete_violation(
         return None;
     }
     Some(violation(resolved, "deletion outside sanctioned roots"))
+}
+
+/// cas-39f3: classification of a deletion target against the caller's own
+/// linked-worktree gitdir (`<repo>/.git/worktrees/<name>/`).
+enum OwnGitdirLock {
+    /// Not `index.lock` in the caller's own gitdir: other rules decide.
+    NotOwnLock,
+    /// Zero bytes and not open in any process: a killed git's leftover.
+    Stale,
+    /// The caller's own lock, but possibly in use; the refusal rule.
+    Live(&'static str),
+}
+
+fn own_gitdir_index_lock(resolved: &Path, worktree_root: &Path) -> OwnGitdirLock {
+    if resolved.file_name().is_none_or(|name| name != "index.lock") {
+        return OwnGitdirLock::NotOwnLock;
+    }
+    // A linked worktree's `.git` is a file naming its private gitdir.
+    let Ok(dot_git) = std::fs::read_to_string(worktree_root.join(".git")) else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    let Some(gitdir) = dot_git
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+        .map(|gitdir| std::path::PathBuf::from(gitdir.trim()))
+    else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        worktree_root.join(gitdir)
+    };
+    let Ok(gitdir) = gitdir.canonicalize() else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    if gitdir
+        .parent()
+        .and_then(Path::file_name)
+        .is_none_or(|name| name != "worktrees")
+        || resolved != gitdir.join("index.lock")
+    {
+        return OwnGitdirLock::NotOwnLock;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(resolved) else {
+        return OwnGitdirLock::NotOwnLock;
+    };
+    if !metadata.file_type().is_file() {
+        return OwnGitdirLock::Live("deletion of a git index.lock: not a regular file");
+    }
+    if metadata.len() != 0 {
+        return OwnGitdirLock::Live("deletion of a git index.lock: the lock has content");
+    }
+    if git_lock_open_by_a_process(resolved, &metadata) {
+        return OwnGitdirLock::Live("deletion of a git index.lock: the lock is held open by a process");
+    }
+    OwnGitdirLock::Stale
+}
+
+/// Whether any process holds `lock` open. git keeps its lockfile open from
+/// creation until commit or rollback, so an open descriptor means a live
+/// writer. Linux scans `/proc/*/fd`; elsewhere a lock modified in the last
+/// minute is treated as held.
+fn git_lock_open_by_a_process(lock: &Path, metadata: &std::fs::Metadata) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = metadata;
+        let Ok(processes) = std::fs::read_dir("/proc") else {
+            return true;
+        };
+        for process in processes.flatten() {
+            let Ok(fds) = std::fs::read_dir(process.path().join("fd")) else {
+                continue;
+            };
+            for fd in fds.flatten() {
+                if std::fs::read_link(fd.path()).is_ok_and(|target| target == lock) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = lock;
+        metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_none_or(|age| age < std::time::Duration::from_secs(60))
+    }
 }
 
 /// cas-aa4e: the static refusal rule for a live runtime file's reason.

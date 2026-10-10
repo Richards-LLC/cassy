@@ -6340,15 +6340,32 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 [],
                 |row| row.get(0),
             )?;
+            // cas-194c: m153 creates the table without `prompt_delivered_at`;
+            // m267 or `SupervisorQueueStore::init` adds it. Never reference
+            // the column on a store that lacks it.
+            let has_delivery_marker: bool = has_supervisor_queue
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('supervisor_queue')
+                                   WHERE name = 'prompt_delivered_at')",
+                    [],
+                    |row| row.get(0),
+                )?;
             // A supervisor-queue outbox key ("<kind>-outbox:<notification id>")
             // is released once its notification is delivered or gone; the
             // outbox re-relays only undelivered notifications (cas-f207).
-            let outbox_released = if has_supervisor_queue {
-                "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+            // Without the delivery marker, delivery cannot be proven: release
+            // only keys whose notification is gone.
+            let outbox_released = match (has_supervisor_queue, has_delivery_marker) {
+                (true, true) => {
+                    "NOT EXISTS (SELECT 1 FROM supervisor_queue s
                      WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER)
                        AND s.prompt_delivered_at IS NULL)"
-            } else {
-                "1"
+                }
+                (true, false) => {
+                    "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+                     WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER))"
+                }
+                (false, _) => "1",
             };
             let ids: Vec<i64> = {
                 let mut stmt = tx.prepare(&format!(

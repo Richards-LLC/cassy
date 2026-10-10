@@ -1413,6 +1413,14 @@ fn worker_command_rust_build_at_depth(command: &str, cwd: &Path, depth: usize) -
             return Some(found);
         }
         if depth < 2 {
+            // `env -S 'cargo …'` runs its split string as the command (cas-cfd6).
+            if let Some(payload) = env_split_string_payload(&words) {
+                if let Some(found) = worker_command_rust_build_at_depth(&payload, cwd, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        if depth < 2 {
             // `sh -c '<script>'`, `bash -lc "<script>"`
             for (index, word) in words.iter().enumerate() {
                 let shell = matches!(shell_word_basename(word), "sh" | "bash" | "zsh" | "dash");
@@ -2497,6 +2505,42 @@ fn shell_word_basename(word: &str) -> &str {
 
 /// Find the executable word after the small set of shell wrappers commonly
 /// used by worker commands. This is deliberately not a shell evaluator.
+/// `env` options whose value is the following word (cas-cfd6).
+const ENV_VALUE_OPTIONS: &[&str] = &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"];
+
+/// `sudo` options whose value is the following word (cas-cfd6).
+const SUDO_VALUE_OPTIONS: &[&str] = &[
+    "-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host",
+    "-p", "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U",
+    "--other-user", "-R", "--chroot",
+];
+
+/// The command string an `env -S STRING` / `--split-string[=]STRING` runs,
+/// for statements whose executable position is `env` (cas-cfd6).
+fn env_split_string_payload(words: &[String]) -> Option<String> {
+    let start = words
+        .iter()
+        .position(|word| shell_word_basename(word) == "env")?;
+    let mut index = start + 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if let Some(value) = word.strip_prefix("--split-string=") {
+            return Some(value.to_string());
+        }
+        if word == "-S" || word == "--split-string" {
+            return words.get(index + 1).cloned();
+        }
+        if let Some(value) = word.strip_prefix("-S").filter(|value| !value.is_empty()) {
+            return Some(value.to_string());
+        }
+        if word == "--" || !(word.starts_with('-') || word.contains('=')) {
+            return None;
+        }
+        index += if ENV_VALUE_OPTIONS.contains(&word) { 2 } else { 1 };
+    }
+    None
+}
+
 pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
     let mut index = 0;
     while index < words.len() {
@@ -2504,20 +2548,41 @@ pub(super) fn executable_word_index(words: &[String]) -> Option<usize> {
         match shell_word_basename(word) {
             "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
             "env" => {
+                // cas-cfd6: `-u NAME`, `-C DIR` and `-S STRING` take a separate
+                // value; skipping only the flag made `env -u X cargo …` name
+                // `X` as the executable and miss the worker Rust build guard.
+                // An `-S` payload is itself inspected by the build guard.
                 index += 1;
-                while index < words.len()
-                    && (words[index].starts_with('-')
-                        || words[index]
+                while index < words.len() {
+                    let word = words[index].as_str();
+                    if word == "--" {
+                        index += 1;
+                        break;
+                    } else if ENV_VALUE_OPTIONS.contains(&word) {
+                        index += 2;
+                    } else if word.starts_with('-')
+                        || word
                             .split_once('=')
-                            .is_some_and(|(name, _)| is_shell_variable_name(name)))
-                {
-                    index += 1;
+                            .is_some_and(|(name, _)| is_shell_variable_name(name))
+                    {
+                        index += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
             "sudo" => {
                 index += 1;
                 while index < words.len() && words[index].starts_with('-') {
-                    index += 1;
+                    if words[index] == "--" {
+                        index += 1;
+                        break;
+                    }
+                    index += if SUDO_VALUE_OPTIONS.contains(&words[index].as_str()) {
+                        2
+                    } else {
+                        1
+                    };
                 }
             }
             "command" => index += 1,

@@ -39,7 +39,7 @@ not this command's call; `cas doctor` names that file and the exact routes to ad
 
 Every Claude Code profile on the machine that already registers `violet` is
 reconciled, not only the one `CLAUDE_CONFIG_DIR` selects: a literal bearer or
-`MECHA_*` references are rewritten as env references, and profiles without a
+legacy credential references are rewritten as env references, and profiles without a
 `violet` entry are untouched. Each claude-code line in the receipt carries the
 authenticated `tools/list` verdict, so "already current" never hides a rejected
 bearer. Signing in again does not replace a hub client token the hub rejects:

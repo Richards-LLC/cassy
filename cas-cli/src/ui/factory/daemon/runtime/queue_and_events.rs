@@ -1452,6 +1452,28 @@ pub(super) fn lifecycle_redelivery_decision(
     }
 }
 
+/// cas-366b: the `supervisor_injected` status for a pass whose transport
+/// reported `Delivered`.
+///
+/// A pending teams-inbox row is re-offered on its cadence while the recipient
+/// is busy. If our copy was still unread (`prior_copy_unread`, so the write was
+/// a content-dedup no-op), or the pass only nudged (`nudge_only`), and no PTY
+/// wake fired, then nothing reached the recipient on this pass. Recording `ok`
+/// there made one message look delivered ~20 times on 2026-10-05. Such a pass
+/// is `reoffered`. `ok` still marks the pass that wrote the copy or typed into
+/// the pane, which is the row ack waiters look for.
+pub(super) fn injection_event_status(
+    prior_copy_unread: bool,
+    nudge_only: bool,
+    wake: cas_store::WakeAttempt,
+) -> &'static str {
+    if (prior_copy_unread || nudge_only) && wake != cas_store::WakeAttempt::Fired {
+        "reoffered"
+    } else {
+        "ok"
+    }
+}
+
 /// GH #751: Claude's Agent-Teams inbox path must not redeliver a pending row
 /// on the daemon poll cadence. The budget is deliberately small because the
 /// fallback after three unsuccessful wake attempts is supervisor escalation,
@@ -5905,6 +5927,9 @@ impl FactoryDaemon {
             // is neither re-written nor consumed: it stays pending and retries a
             // PTY-nudge-only wake on the cadence below.
             let mut nudge_only = false;
+            // cas-366b: our earlier copy is still unread, so this pass's
+            // inbox write is a content-dedup no-op.
+            let mut prior_copy_unread = false;
             // cas-5c50 (GH #166): set when this pass observed the row as
             // drained-but-unsurfaced; the log line is emitted only if the
             // re-nudge cadence gate then actually grants a re-offer, so the
@@ -5978,6 +6003,7 @@ impl FactoryDaemon {
                     continue;
                 }
                 DeferredInboxOutcome::StillPending => {
+                    prior_copy_unread = true;
                     // Our copy is unread in the inbox: the repeat write below
                     // is a content-dedup no-op, so this pass costs nothing and
                     // still lets the pane wake fire if the recipient has since
@@ -6937,6 +6963,10 @@ impl FactoryDaemon {
                         );
                     }
                 }
+                let pass_wake = inject_result
+                    .as_ref()
+                    .map(|report| report.wake)
+                    .unwrap_or_default();
                 let inject_result = inject_result.map(|report| report.outcome);
                 if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
                     queue.release_recipient_transport(queued.id, &queued.target)?;
@@ -6992,7 +7022,7 @@ impl FactoryDaemon {
                                 &queued.source,
                                 &queued.target,
                                 &pane_target,
-                                "ok",
+                                injection_event_status(prior_copy_unread, nudge_only, pass_wake),
                                 None,
                             );
                         }
@@ -15949,9 +15979,7 @@ mod gh_1153_idle_pty_delivery_tests {
 /// it was still recorded as `ok`.
 #[cfg(test)]
 mod injection_storm_regressions_cas_366b {
-    use super::{
-        ClaudeRedelivery, claude_redelivery_decision_after_turn, injection_event_status,
-    };
+    use super::{ClaudeRedelivery, claude_redelivery_decision_after_turn, injection_event_status};
     use cas_store::WakeAttempt;
 
     #[derive(Debug, Default)]
@@ -16039,26 +16067,55 @@ mod injection_storm_regressions_cas_366b {
         let replay = replay_busy_claude_recipient(100, 12 * 60, 11 * 60 + 13);
         assert_eq!(replay.statuses.first(), Some(&"ok"));
         assert_eq!(
-            replay.statuses.iter().filter(|status| **status == "ok").count(),
+            replay
+                .statuses
+                .iter()
+                .filter(|status| **status == "ok")
+                .count(),
             1,
             "{:?}",
             replay.statuses
         );
-        assert!(replay.statuses[1..].iter().all(|status| *status == "reoffered"));
+        assert!(
+            replay.statuses[1..]
+                .iter()
+                .all(|status| *status == "reoffered")
+        );
     }
 
     #[test]
     fn injection_event_status_names_what_the_pass_did_cas_366b() {
         // A first write, or a re-append after the harness took the copy.
-        assert_eq!(injection_event_status(false, false, WakeAttempt::NotAttempted), "ok");
+        assert_eq!(
+            injection_event_status(false, false, WakeAttempt::NotAttempted),
+            "ok"
+        );
         // A PTY nudge fired: bytes reached the pane.
-        assert_eq!(injection_event_status(true, false, WakeAttempt::Fired), "ok");
-        assert_eq!(injection_event_status(false, true, WakeAttempt::Fired), "ok");
+        assert_eq!(
+            injection_event_status(true, false, WakeAttempt::Fired),
+            "ok"
+        );
+        assert_eq!(
+            injection_event_status(false, true, WakeAttempt::Fired),
+            "ok"
+        );
         // Dedup no-op write and no wake; or a nudge-only pass whose nudge
         // was vetoed or failed.
-        assert_eq!(injection_event_status(true, false, WakeAttempt::NotAttempted), "reoffered");
-        assert_eq!(injection_event_status(true, false, WakeAttempt::Failed), "reoffered");
-        assert_eq!(injection_event_status(false, true, WakeAttempt::NotAttempted), "reoffered");
-        assert_eq!(injection_event_status(false, true, WakeAttempt::Failed), "reoffered");
+        assert_eq!(
+            injection_event_status(true, false, WakeAttempt::NotAttempted),
+            "reoffered"
+        );
+        assert_eq!(
+            injection_event_status(true, false, WakeAttempt::Failed),
+            "reoffered"
+        );
+        assert_eq!(
+            injection_event_status(false, true, WakeAttempt::NotAttempted),
+            "reoffered"
+        );
+        assert_eq!(
+            injection_event_status(false, true, WakeAttempt::Failed),
+            "reoffered"
+        );
     }
 }

@@ -480,11 +480,13 @@ class Agent(threading.Thread):
             match = re.search(r"\b(cas-[0-9a-f]{4,6})\b", text)
             if ok and match:
                 self.own_task = match.group(1)
-            weights = [w for w, _, _ in WORKLOAD]
+            workload = [entry for entry in WORKLOAD
+                        if f"{entry[1]}.{entry[2]}" not in self.args.exclude]
+            weights = [w for w, _, _ in workload]
             counter = 0
             while now() < self.stop_at:
                 counter += 1
-                _, tool, action = self.rng.choices(WORKLOAD, weights=weights)[0]
+                _, tool, action = self.rng.choices(workload, weights=weights)[0]
                 arguments = self.arguments_for(tool, action, counter)
                 if arguments is not None:
                     self.timed_call(tool, action, arguments)
@@ -1012,6 +1014,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "duration_secs": args.duration,
         "think_mean_secs": args.think_mean,
         "seed": args.seed,
+        "excluded_workload": sorted(args.exclude),
         "background_writers": {
             "writers": args.bg_writers,
             "hold_ms": args.bg_hold_ms,
@@ -1104,6 +1107,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=float, default=300.0, help="seconds of agent load")
     parser.add_argument("--think-mean", type=float, default=3.0,
                         help="mean seconds between one agent's calls (exponential)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="TOOL.ACTION",
+                        help="drop one workload entry, e.g. coordination.message (repeatable)")
     parser.add_argument("--stagger", type=float, default=0.25, help="seconds between agent starts")
     parser.add_argument("--seed", type=int, default=1165)
     parser.add_argument("--source-db", help="database to snapshot (opened read-only)")

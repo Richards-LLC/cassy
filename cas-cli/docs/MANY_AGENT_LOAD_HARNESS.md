@@ -47,11 +47,12 @@ The daemon writes `loop.json` every 5 s. Builds with cas-04db add per-window pas
 
 ## SLOs
 
-The run passes only when all three hold:
+The run passes only when all four hold:
 
 - MCP `task` and `coordination` p99 is under 2 s.
+- No wait of 0.4 s or more on the shared `task-sync-intents.lock` lease. Waits on the per-task stripes (`task-sync-intents.d/NN.lock`) are same-task serialization and are reported, not judged.
 - No call reaches the 55 s MCP deadline.
-- The daemon loop pass p99 is under 100 ms.
+- The daemon loop pass p99 is under 100 ms: under 1% of daemon-timed passes take 100 ms or more. When the daemon reports `phase_latency` (cas-ee9ab), the receipt totals it per loop phase, so slow passes are attributed to a phase.
 
 The verdict comes from the run as configured, which by default is the standard pressure profile. After a run with pressure, the harness runs a second phase on a fresh copy with the background writers off and records it in the same receipt under `no_pressure`. Turn that off with `--no-control`.
 

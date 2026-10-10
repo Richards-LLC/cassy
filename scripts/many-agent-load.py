@@ -739,10 +739,21 @@ def summarize_daemon(sampler: DaemonSampler | None, alive: bool) -> dict:
         summary["windows"] = [
             {"written_at": s.get("written_at"), "phase": s.get("phase"),
              "passes": s.get("window_passes", 0), "over_100ms": s.get("passes_over_100ms", 0),
-             "p99_ms": s.get("p99_pass_ms"), "max_ms": s.get("max_pass_ms")}
+             "p99_ms": s.get("p99_pass_ms"), "max_ms": s.get("max_pass_ms"),
+             "phase_latency": s.get("phase_latency")}
             for s in windows
             if s.get("passes_over_100ms", 0) > 0 or (s.get("max_pass_ms") or 0) >= 100
         ]
+        # cas-ee9ab: per-phase totals across every window, so slow passes
+        # are attributed to the loop phase that took the time.
+        phases: dict = {}
+        for snapshot in windows:
+            for name, lat in (snapshot.get("phase_latency") or {}).items():
+                agg = phases.setdefault(name, {"entries": 0, "max_ms": 0, "over_100ms": 0})
+                agg["entries"] += int(lat.get("entries", 0))
+                agg["max_ms"] = max(agg["max_ms"], int(lat.get("max_ms", 0)))
+                agg["over_100ms"] += int(lat.get("over_100ms", 0))
+        summary["phase_latency"] = phases
         summary["pass_p99_ms"] = max(p99s, default=None)
         summary["verdict_basis"] = ("daemon-reported per-pass timings: p99 < 100 ms iff under 1% "
                                     "of timed passes took 100 ms or more (pass_p99_ms is the "
@@ -920,7 +931,10 @@ def summarize_calls(results: list[dict]) -> dict:
     return out
 
 
-def evaluate_slos(calls: list[dict], daemon: dict) -> list[dict]:
+def evaluate_slos(calls: list[dict], daemon: dict, lock_episodes: list[dict]) -> list[dict]:
+    # Per-task stripe waits (task-sync-intents.d/NN.lock) are same-task
+    # serialization and are reported, not judged; the shared lease is judged.
+    global_waits = sum(1 for e in lock_episodes if e["lock"] == "task-sync-intents.lock")
     task_coord = [r["latency"] for r in calls if r["tool"] in ("task", "coordination")]
     p99 = percentile(task_coord, 99)
     deadline_hits = sum(1 for r in calls if r["latency"] >= MCP_DEADLINE_SECS
@@ -928,6 +942,8 @@ def evaluate_slos(calls: list[dict], daemon: dict) -> list[dict]:
     slos = [
         {"slo": "MCP task/coordination p99 < 2 s", "observed": p99,
          "met": p99 is not None and p99 < SLO_P99_SECS},
+        {"slo": f"no wait >= {LOCK_WAIT_REPORT_SECS} s on the task-sync-intents.lock lease",
+         "observed": global_waits, "met": global_waits == 0},
         {"slo": "no call reaches the 55 s deadline", "observed": deadline_hits,
          "met": deadline_hits == 0},
     ]
@@ -991,6 +1007,12 @@ def write_markdown(receipt: dict, path: Path) -> None:
                   f"- Oldest pass age seen {fmt(daemon.get('pass_age_max_secs'), ' s')}; "
                   f"pass p99 {fmt(daemon.get('pass_p99_ms'), ' ms')} ({daemon.get('verdict_basis')})",
                   f"- Loop thread wait channels: {daemon.get('wchan')}"]
+        if daemon.get("phase_latency"):
+            lines += ["", "| Loop phase | entries | >= 100 ms | max ms |", "|---|---|---|---|"]
+            for name, agg in sorted(daemon["phase_latency"].items(),
+                                    key=lambda kv: (-kv[1]["over_100ms"], -kv[1]["max_ms"])):
+                lines.append(f"| {name} | {agg['entries']} | {agg['over_100ms']} | {agg['max_ms']} |")
+            lines.append("")
         if daemon.get("reported"):
             rep = daemon["reported"]
             lines.append(f"- Daemon-timed passes: {rep['timed_passes']}; >= 100 ms: "
@@ -1146,7 +1168,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "sqlite_busy": count_busy_warnings(env["cas_dir"], t0_wall),
         "daemon": daemon,
     }
-    receipt["slos"] = evaluate_slos(results, daemon)
+    receipt["slos"] = evaluate_slos(results, daemon, lock_sampler.episodes)
     receipt["slos_met"] = all(s["met"] for s in receipt["slos"])
     if not args.keep_scratch:
         for suffix in ("cas.db", "cas.db-wal", "cas.db-shm"):

@@ -255,3 +255,69 @@ fn removal_of_a_worktree_never_purges_the_canonical_repository_cas_8256() {
     assert!(purge_removed_worktree_code_index(&project.main, &impostor).is_none());
     assert_eq!(project.repositories(), vec![("proj".to_string(), 1)]);
 }
+
+/// Acceptance measurement (cas-8256): before/after row counts on a COPY of a
+/// real store. Runs only when `target/cas-8256-measure-root` names that copy's
+/// cas root; otherwise it returns at once. It refuses a store that has a
+/// `worktrees` directory, which every live factory store has.
+#[test]
+fn measure_purge_on_a_store_copy_cas_8256() {
+    let pointer = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/cas-8256-measure-root");
+    let Ok(raw) = std::fs::read_to_string(&pointer) else {
+        return;
+    };
+    let cas_root = PathBuf::from(raw.trim());
+    assert!(
+        !cas_root.join("worktrees").exists(),
+        "refusing to measure on a live store: {}",
+        cas_root.display()
+    );
+    let counts = || {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        let one = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+        format!(
+            "repositories={} files={} symbols={} queue={} receipts={} pages={}",
+            one("SELECT COUNT(DISTINCT repository) FROM code_files"),
+            one("SELECT COUNT(*) FROM code_files"),
+            one("SELECT COUNT(*) FROM code_symbols"),
+            one("SELECT COUNT(*) FROM code_vector_queue"),
+            one("SELECT COUNT(*) FROM code_index_state"),
+            one("PRAGMA page_count"),
+        )
+    };
+    let before = counts();
+    let started = std::time::Instant::now();
+    let outcome = purge_non_canonical_code_index(&cas_root, WriteBatching::background()).unwrap();
+    let purge_secs = started.elapsed().as_secs_f64();
+    let started = std::time::Instant::now();
+    let mut reconcile = crate::daemon::CodeIndexResult::default();
+    crate::daemon::indexing::reconcile_code_vector_queue(&cas_root, false, &mut reconcile);
+    let reconcile_secs = started.elapsed().as_secs_f64();
+    let after = counts();
+    let report = format!(
+        "before: {before}\nafter:  {after}\npurge: {} ({purge_secs:.1}s)\n\
+         reconcile: {:?} errors={:?} ({reconcile_secs:.1}s)\n",
+        outcome.summary(),
+        reconcile.vector_reconcile,
+        reconcile.errors,
+    );
+    eprintln!("{report}");
+    std::fs::write(cas_root.join("cas-8256-measure.txt"), &report).unwrap();
+    assert!(outcome.errors.is_empty() && !outcome.deferred, "{report}");
+    assert!(
+        outcome.stats.writes.largest_transaction_rows <= cas_store::CODE_WRITE_DEFAULT_BATCH,
+        "{report}"
+    );
+    let remaining = cas_store::SqliteCodeIndexPurge::open_existing(&cas_root)
+        .unwrap()
+        .unwrap()
+        .repository_file_counts()
+        .unwrap();
+    let keep = canonical_code_repositories(&cas_root).unwrap();
+    assert!(
+        remaining
+            .iter()
+            .all(|(repository, _)| keep.contains(repository)),
+        "{remaining:?}"
+    );
+}

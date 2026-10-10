@@ -31,6 +31,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A Codex worker starts one `cas serve`, not two. Cassy disables any other
   Cassy server entry in the Codex configuration it launches with, and
   `cas init`/`cas update` keep a single entry.
+- The factory loop's two-second refresh no longer reads the store on the
+  loop. It used to read every task, agent and recent event there, then read
+  them again before delivering prompts, which cost 100–400 ms every few passes
+  with many agents. Both reads now run on a background reader with its own
+  database connection, and the loop applies the finished snapshot on a later
+  pass: panels lag by at most one refresh, and prompts are still checked
+  against a read taken after the change was detected. Agent and event store
+  reads respect the 50 ms pass budget instead of waiting on another thread's
+  connection. `loop.json` adds `phase_latency`: for each loop phase, how often
+  it ran, its slowest run and how many runs took 100 ms or more, with the
+  refresh split into its steps.
 
 ### Changed — bounded storage
 

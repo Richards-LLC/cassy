@@ -127,12 +127,18 @@ fn counts_for(root: &Path, repository: &str) -> (usize, usize, usize, usize, usi
     (
         q("SELECT COUNT(*) FROM code_files WHERE repository = ?1"),
         q("SELECT COUNT(*) FROM code_symbols WHERE repository = ?1"),
-        q("SELECT COUNT(*) FROM code_vector_queue q JOIN code_symbols s ON s.id = q.symbol_id \
-           WHERE s.repository = ?1"),
-        q("SELECT COUNT(*) FROM code_relationships r JOIN code_symbols s ON s.id = r.source_id \
-           WHERE s.repository = ?1"),
-        q("SELECT COUNT(*) FROM code_memory_links l JOIN code_symbols s ON s.id = l.code_id \
-           WHERE s.repository = ?1"),
+        q(
+            "SELECT COUNT(*) FROM code_vector_queue q JOIN code_symbols s ON s.id = q.symbol_id \
+           WHERE s.repository = ?1",
+        ),
+        q(
+            "SELECT COUNT(*) FROM code_relationships r JOIN code_symbols s ON s.id = r.source_id \
+           WHERE s.repository = ?1",
+        ),
+        q(
+            "SELECT COUNT(*) FROM code_memory_links l JOIN code_symbols s ON s.id = l.code_id \
+           WHERE s.repository = ?1",
+        ),
     )
 }
 
@@ -193,7 +199,10 @@ fn purge_removes_every_foreign_row_and_keeps_the_canonical_index_cas_8256() {
     retired.sort();
     assert_eq!(retired, expected, "the caller saw every purged id once");
     // Nothing left that a queue row or a link could still point at.
-    assert_eq!(count(root.path(), "SELECT COUNT(*) FROM code_vector_queue"), canonical_ids.len());
+    assert_eq!(
+        count(root.path(), "SELECT COUNT(*) FROM code_vector_queue"),
+        canonical_ids.len()
+    );
     assert_eq!(
         count(
             root.path(),
@@ -243,7 +252,10 @@ fn no_purge_transaction_changes_more_rows_than_the_batch_size_cas_8256() {
         + stats.memory_links_deleted
         + stats.files_deleted;
     assert_eq!(removed, 2_500 + 2_500 + 2_450 + 2_500 + 50);
-    assert_eq!(reported, removed, "every deleted row was counted in some transaction");
+    assert_eq!(
+        reported, removed,
+        "every deleted row was counted in some transaction"
+    );
     assert!(
         stats.writes.largest_transaction_rows <= 100,
         "a purge transaction changed {} rows",

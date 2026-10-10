@@ -1374,6 +1374,8 @@ fn root_projection_autofix(root: &Path) -> Option<Check> {
 }
 
 fn code_index_autofix(root: &Path) -> Option<Check> {
+    // cas-8256: only the canonical checkout's process writes the code index.
+    if !crate::daemon::canonical_code_index::code_index_role(root).is_writer() { return None; }
     let state = gather_symbol_index_state(root);
     if !matches!(symbol_index_check(state, chrono::Utc::now()).status, CheckStatus::Warning) { return None; }
     let project = crate::daemon::indexing::code_project_root(root);
@@ -1387,8 +1389,99 @@ fn code_index_autofix(root: &Path) -> Option<Check> {
 /// cas-8256: one code index per project. Flags rows indexed under any
 /// repository other than the canonical checkout's (factory worktree copies).
 fn code_index_copies_check(counts: &[(String, usize)], canonical: &[String]) -> Check {
-    let _ = (counts, canonical);
-    Check::new("code index copies", CheckStatus::Ok, "")
+    let name = "code index copies";
+    if canonical.is_empty() {
+        return Check::new(
+            name,
+            CheckStatus::Ok,
+            "skipped: the canonical checkout is not a git checkout",
+        );
+    }
+    if counts.is_empty() {
+        return Check::new(name, CheckStatus::Ok, "no source files indexed yet");
+    }
+    let describe = |rows: &[&(String, usize)]| {
+        rows.iter()
+            .map(|(repository, files)| format!("{repository} ({files} files)"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (kept, copies): (Vec<&(String, usize)>, Vec<&(String, usize)>) = counts
+        .iter()
+        .partition(|(repository, _)| canonical.contains(repository));
+    let kept = if kept.is_empty() {
+        "not indexed yet".to_string()
+    } else {
+        describe(&kept)
+    };
+    if copies.is_empty() {
+        return Check::new(name, CheckStatus::Ok, format!("one code index per project: {kept}"));
+    }
+    Check::new(
+        name,
+        CheckStatus::Warning,
+        format!(
+            "{} non-canonical code index {} in the shared store: {}; canonical: {kept}. \
+             Run `cas doctor --fix` (or restart the canonical `cas serve`) to purge them \
+             in bounded batches",
+            copies.len(),
+            if copies.len() == 1 { "copy" } else { "copies" },
+            describe(&copies),
+        ),
+    )
+}
+
+fn gather_code_index_copies_check(cas_root: &Path) -> Check {
+    let canonical =
+        crate::daemon::canonical_code_index::canonical_code_repositories(cas_root).unwrap_or_default();
+    let counts = match cas_store::SqliteCodeIndexPurge::open_existing(cas_root) {
+        Ok(Some(store)) => match store.repository_file_counts() {
+            Ok(counts) => counts,
+            Err(error) => {
+                return Check::new(
+                    "code index copies",
+                    CheckStatus::Warning,
+                    format!("cannot count indexed repositories: {error}"),
+                );
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            return Check::new(
+                "code index copies",
+                CheckStatus::Warning,
+                format!("cannot open the code index: {error}"),
+            );
+        }
+    };
+    code_index_copies_check(&counts, &canonical)
+}
+
+fn code_index_copies_autofix(root: &Path) -> Option<Check> {
+    if !matches!(gather_code_index_copies_check(root).status, CheckStatus::Warning) {
+        return None;
+    }
+    let outcome = crate::daemon::canonical_code_index::purge_non_canonical_code_index(
+        root,
+        cas_store::WriteBatching::background(),
+    );
+    Some(match outcome {
+        Ok(outcome) if outcome.errors.is_empty() && !outcome.deferred => Check::new(
+            "auto-fix",
+            CheckStatus::Ok,
+            format!("fixed: code index copies — {}", outcome.summary()),
+        ),
+        Ok(outcome) => Check::new(
+            "auto-fix",
+            CheckStatus::Warning,
+            format!("code index copies: {}", outcome.summary()),
+        ),
+        Err(error) => Check::new(
+            "auto-fix",
+            CheckStatus::Warning,
+            format!("code index copy purge failed: {error}"),
+        ),
+    })
 }
 
 fn code_index_autofix_outcome(outcome: Result<crate::daemon::CodeIndexResult, crate::error::CasError>) -> Check {
@@ -1418,7 +1511,7 @@ fn search_index_autofix(root: &Path) -> Option<Check> {
     }
 }
 
-fn extended_autofixes(root: &Path) -> Vec<Check> { [host_autofix(), code_index_autofix(root), search_index_autofix(root), root_projection_autofix(root.parent().unwrap_or(root))].into_iter().flatten().collect() }
+fn extended_autofixes(root: &Path) -> Vec<Check> { [host_autofix(), code_index_autofix(root), code_index_copies_autofix(root), search_index_autofix(root), root_projection_autofix(root.parent().unwrap_or(root))].into_iter().flatten().collect() }
 
 fn offer_tty_autofix(root: &Path) -> bool {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() { return false; }
@@ -2380,6 +2473,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     ));
 
     recorder.mark("symbol index", &checks);
+    // Check 4b': one code index per project (cas-8256). Factory worktrees used
+    // to index full copies into the shared store and never removed them.
+    checks.push(gather_code_index_copies_check(&cas_root));
+    recorder.mark("code index copies", &checks);
     // Check 4c: the embedding drain (EPIC cas-6212 / cas-db6e, M7).
     //
     // The drain runs on a daemon tick, so its failures have no command output to

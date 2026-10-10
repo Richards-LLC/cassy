@@ -582,6 +582,19 @@ impl SqliteCodeVectorStore {
 
     /// [`Self::reconcile`] in bounded transactions, optionally scoped to the
     /// canonical repositories (cas-8256).
+    ///
+    /// The single-transaction pass held `BEGIN IMMEDIATE` (and the process's
+    /// shared connection) across an orphan scan of every queue row and an
+    /// `INSERT … SELECT` over every symbol. On a store carrying 58 worktree
+    /// copies that was 364k symbols and 335k queue rows per worker boot, with
+    /// every other writer waiting. This walks the queue and then the symbol
+    /// table by key, one page per transaction; no transaction changes more
+    /// than `batching.batch_size` rows, and the connection is released and the
+    /// pause taken between pages.
+    ///
+    /// `repositories` limits which symbols are queued or re-armed. Queue rows
+    /// whose symbol no longer exists carry no repository and are dropped
+    /// regardless, exactly as before.
     pub fn reconcile_scoped(
         &self,
         force: bool,
@@ -589,14 +602,184 @@ impl SqliteCodeVectorStore {
         batching: WriteBatching,
         writes: &mut BatchedWrites,
     ) -> Result<CodeVectorReconcile> {
-        let _ = (repositories, batching);
-        let outcome = self.reconcile(force)?;
-        writes.record(
-            outcome.orphaned_dropped
-                + outcome.failed_rearmed
-                + outcome.stale_rearmed
-                + outcome.requeued,
-        );
+        let kinds = cas_code::SymbolKind::embeddable_kind_names();
+        let kind_list = vec!["?"; kinds.len()].join(", ");
+        let in_scope = |repository: Option<&str>| match (repositories, repository) {
+            (None, _) => true,
+            (Some(keep), Some(repository)) => keep.iter().any(|name| name == repository),
+            (Some(_), None) => false,
+        };
+        let page = batching.batch_size;
+        let mut outcome = CodeVectorReconcile::default();
+
+        {
+            // No `code_symbols` table means structural indexing has never run
+            // in this store. Every queue row would then read as orphaned;
+            // emptying the queue on the strength of a table that merely has
+            // not been created yet would delete real work.
+            let conn = self.lock()?;
+            if !crate::code_index_purge::table_exists(&conn, "code_symbols") {
+                return Ok(outcome);
+            }
+        }
+
+        // Pass 1: the queue, by symbol id. Drop orphans, re-arm failures,
+        // rewrite stale hashes.
+        let mut after = String::new();
+        loop {
+            let (rows_seen, last_id, changed) = {
+                let conn = self.lock()?;
+                crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+                    let now = Utc::now().to_rfc3339();
+                    let rows: Vec<(
+                        String,
+                        String,
+                        String,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                    )> = {
+                        let mut stmt = tx.prepare_cached(
+                            "SELECT q.symbol_id, q.content_hash, q.status, q.last_error,
+                                    s.content_hash, s.kind, s.repository
+                             FROM code_vector_queue q
+                             LEFT JOIN code_symbols s ON s.id = q.symbol_id
+                             WHERE q.symbol_id > ?1
+                             ORDER BY q.symbol_id LIMIT ?2",
+                        )?;
+                        let mapped = stmt.query_map(params![after, page as i64], |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                            ))
+                        })?;
+                        mapped.collect::<std::result::Result<Vec<_>, _>>()?
+                    };
+                    let mut changed = 0usize;
+                    for (
+                        symbol_id,
+                        queued_hash,
+                        status,
+                        last_error,
+                        symbol_hash,
+                        kind,
+                        repository,
+                    ) in &rows
+                    {
+                        let eligible = symbol_hash.is_some()
+                            && kind.as_ref().is_some_and(|kind| kinds.contains(kind));
+                        if !eligible {
+                            tx.execute(
+                                "DELETE FROM code_vector_queue WHERE symbol_id = ?1",
+                                params![symbol_id],
+                            )?;
+                            outcome.orphaned_dropped += 1;
+                            outcome.dropped_symbol_ids.push(symbol_id.clone());
+                            changed += 1;
+                            continue;
+                        }
+                        if !in_scope(repository.as_deref()) {
+                            continue;
+                        }
+                        let mut row_changed = false;
+                        if status == "failed" {
+                            if force || is_retryable_vector_failure(last_error.as_deref()) {
+                                tx.execute(
+                                    "UPDATE code_vector_queue
+                                     SET status = 'pending', last_error = NULL, updated_at = ?2
+                                     WHERE symbol_id = ?1",
+                                    params![symbol_id, now],
+                                )?;
+                                outcome.failed_rearmed += 1;
+                                row_changed = true;
+                            } else {
+                                outcome.failed_retained += 1;
+                            }
+                        }
+                        if symbol_hash.as_deref() != Some(queued_hash.as_str()) {
+                            tx.execute(
+                                "UPDATE code_vector_queue
+                                 SET content_hash = ?2, status = 'pending',
+                                     last_error = NULL, updated_at = ?3
+                                 WHERE symbol_id = ?1",
+                                params![symbol_id, symbol_hash, now],
+                            )?;
+                            outcome.stale_rearmed += 1;
+                            row_changed = true;
+                        }
+                        changed += usize::from(row_changed);
+                    }
+                    Ok((rows.len(), rows.last().map(|row| row.0.clone()), changed))
+                })?
+            };
+            if changed > 0 {
+                writes.record(changed);
+            }
+            match last_id {
+                Some(last) if rows_seen == page => after = last,
+                _ => break,
+            }
+            batching.yield_between();
+        }
+
+        // Pass 2: the symbol table, by id. Queue every eligible, in-scope
+        // symbol that has no row.
+        let mut after = String::new();
+        loop {
+            let (rows_seen, last_id, changed) = {
+                let conn = self.lock()?;
+                crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+                    let now = Utc::now().to_rfc3339();
+                    let rows: Vec<(String, String, String, bool)> = {
+                        let mut stmt = tx.prepare_cached(&format!(
+                            "SELECT s.id, s.content_hash, s.repository, q.symbol_id IS NULL
+                             FROM code_symbols s
+                             LEFT JOIN code_vector_queue q ON q.symbol_id = s.id
+                             WHERE s.id > ? AND s.kind IN ({kind_list})
+                             ORDER BY s.id LIMIT ?"
+                        ))?;
+                        let values = std::iter::once(rusqlite::types::Value::Text(after.clone()))
+                            .chain(kinds.iter().cloned().map(rusqlite::types::Value::Text))
+                            .chain(std::iter::once(rusqlite::types::Value::Integer(
+                                page as i64,
+                            )));
+                        let mapped = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })?;
+                        mapped.collect::<std::result::Result<Vec<_>, _>>()?
+                    };
+                    let mut changed = 0usize;
+                    for (symbol_id, content_hash, repository, unqueued) in &rows {
+                        if !*unqueued || !in_scope(Some(repository)) {
+                            continue;
+                        }
+                        changed += tx.execute(
+                            "INSERT OR IGNORE INTO code_vector_queue
+                                 (symbol_id, content_hash, status, last_error, updated_at)
+                             VALUES (?1, ?2, 'pending', NULL, ?3)",
+                            params![symbol_id, content_hash, now],
+                        )?;
+                    }
+                    outcome.requeued += changed;
+                    Ok((rows.len(), rows.last().map(|row| row.0.clone()), changed))
+                })?
+            };
+            if changed > 0 {
+                writes.record(changed);
+            }
+            match last_id {
+                Some(last) if rows_seen == page => after = last,
+                _ => break,
+            }
+            batching.yield_between();
+        }
+
         Ok(outcome)
     }
 
@@ -742,7 +925,10 @@ mod tests {
         let done = symbol("sym-1", "a", SymbolKind::Function);
         let waiting = symbol("sym-2", "b", SymbolKind::Struct);
         let broken = symbol("sym-3", "c", SymbolKind::Trait);
-        seed_symbols(root.path(), &[done.clone(), waiting.clone(), broken.clone()]);
+        seed_symbols(
+            root.path(),
+            &[done.clone(), waiting.clone(), broken.clone()],
+        );
         store
             .sync_file_symbols(&[done, waiting, broken], &[])
             .unwrap();
@@ -949,7 +1135,10 @@ mod tests {
             .sync_file_symbols(&[symbol("sym-1", "a", SymbolKind::Function)], &[])
             .unwrap();
 
-        assert_eq!(store.reconcile(false).unwrap(), CodeVectorReconcile::default());
+        assert_eq!(
+            store.reconcile(false).unwrap(),
+            CodeVectorReconcile::default()
+        );
         assert_eq!(store.stats().unwrap().pending, 1);
     }
 
@@ -1172,8 +1361,11 @@ mod tests {
             .into_iter()
             .map(|work| work.symbol_id)
             .collect();
-        assert!(pending.iter().all(|id| id.starts_with("sym-c-") || id == "sym-w-stale"));
+        assert!(
+            pending
+                .iter()
+                .all(|id| id.starts_with("sym-c-") || id == "sym-w-stale")
+        );
         assert_eq!(pending.len(), 4);
     }
-
 }

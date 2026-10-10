@@ -54,7 +54,7 @@ impl WriteBatching {
         Self::new(CODE_WRITE_DEFAULT_BATCH, Duration::from_millis(10))
     }
 
-    pub(crate) fn yield_between(&self) {
+    pub fn yield_between(&self) {
         if !self.pause.is_zero() {
             std::thread::sleep(self.pause);
         }
@@ -165,34 +165,123 @@ impl SqliteCodeIndexPurge {
     /// Open the store only if `cas.db` already exists. A purge never creates
     /// a database or a table.
     pub fn open_existing(cas_dir: &Path) -> Result<Option<Self>> {
-        let _ = cas_dir;
-        Ok(None)
+        let db_path = cas_dir.join("cas.db");
+        if !db_path.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            conn: crate::shared_db::shared_connection(&db_path)?,
+        }))
     }
 
     /// Indexed files per repository, largest first.
+    ///
+    /// Counted from `code_files`, whose `UNIQUE(repository, path)` index
+    /// answers the grouping. `code_symbols` has no repository index and
+    /// carries full source, so grouping it would read the whole table.
     pub fn repository_file_counts(&self) -> Result<Vec<(String, usize)>> {
-        Ok(Vec::new())
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        if !table_exists(&conn, "code_files") {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare(
+            "SELECT repository, COUNT(*) FROM code_files
+             GROUP BY repository ORDER BY COUNT(*) DESC, repository",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as usize,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
-    /// Up to `limit` symbols in `scope` with `rowid > after_rowid`, in rowid order.
+    /// Up to `limit` symbols in `scope` with `rowid > after_rowid`, in rowid
+    /// order. Read-only; the rowid keyset makes a whole purge one table pass.
     pub fn next_symbol_batch(
         &self,
         scope: RepositoryScope<'_>,
         after_rowid: i64,
         limit: usize,
     ) -> Result<Vec<PurgeSymbol>> {
-        let _ = (scope, after_rowid, limit);
-        Ok(Vec::new())
+        let (predicate, mut values) = scope.predicate("repository")?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        if !table_exists(&conn, "code_symbols") {
+            return Ok(Vec::new());
+        }
+        values.insert(0, Value::Integer(after_rowid));
+        values.push(Value::Integer(limit.clamp(1, CODE_WRITE_MAX_BATCH) as i64));
+        let mut stmt = conn.prepare(&format!(
+            "SELECT rowid, id FROM code_symbols
+             WHERE rowid > ? AND {predicate}
+             ORDER BY rowid LIMIT ?"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok(PurgeSymbol {
+                rowid: row.get(0)?,
+                id: row.get(1)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
-    /// Delete these symbols and every SQLite row derived from them.
+    /// Delete these symbols and every SQLite row derived from them: queue
+    /// rows, relationships and memory links first, the symbol rows last.
+    ///
+    /// Each table is cleared in its own transactions of at most
+    /// `batching.batch_size` rows, so a failure part-way leaves the symbol
+    /// rows behind as the manifest for the next run.
     pub fn delete_symbols(
         &self,
         symbols: &[PurgeSymbol],
         batching: WriteBatching,
         stats: &mut CodeIndexPurgeStats,
     ) -> Result<()> {
-        let _ = (symbols, batching, stats);
+        for chunk in symbols.chunks(batching.batch_size) {
+            let ids: Vec<Value> = chunk
+                .iter()
+                .map(|symbol| Value::Text(symbol.id.clone()))
+                .collect();
+            let id_list = vec!["?"; ids.len()].join(", ");
+
+            stats.queue_rows_deleted += self.delete_bounded(
+                "code_vector_queue",
+                &format!("symbol_id IN ({id_list})"),
+                &ids,
+                batching,
+                &mut stats.writes,
+            )?;
+            let both: Vec<Value> = ids.iter().chain(ids.iter()).cloned().collect();
+            stats.relationships_deleted += self.delete_bounded(
+                "code_relationships",
+                &format!("source_id IN ({id_list}) OR target_id IN ({id_list})"),
+                &both,
+                batching,
+                &mut stats.writes,
+            )?;
+            stats.memory_links_deleted += self.delete_bounded(
+                "code_memory_links",
+                &format!("code_id IN ({id_list})"),
+                &ids,
+                batching,
+                &mut stats.writes,
+            )?;
+            let rowids: Vec<Value> = chunk
+                .iter()
+                .map(|symbol| Value::Integer(symbol.rowid))
+                .collect();
+            let rowid_list = vec!["?"; rowids.len()].join(", ");
+            stats.symbols_deleted += self.delete_bounded(
+                "code_symbols",
+                &format!("rowid IN ({rowid_list})"),
+                &rowids,
+                batching,
+                &mut stats.writes,
+            )?;
+        }
         Ok(())
     }
 
@@ -203,20 +292,107 @@ impl SqliteCodeIndexPurge {
         batching: WriteBatching,
         stats: &mut CodeIndexPurgeStats,
     ) -> Result<usize> {
-        let _ = (scope, batching, stats);
-        Ok(0)
+        let (predicate, values) = scope.predicate("repository")?;
+        let deleted = self.delete_bounded(
+            "code_files",
+            &predicate,
+            &values,
+            batching,
+            &mut stats.writes,
+        )?;
+        stats.files_deleted += deleted;
+        Ok(deleted)
     }
 
-    /// Delete `code_index_state` scan receipts in `scope`.
+    /// Delete `code_index_state` scan receipts in `scope`. Legacy receipts
+    /// keyed by a bare repository name are never touched by
+    /// [`ScanReceiptScope::WorktreeKeysExcept`].
     pub fn delete_scan_receipts(
         &self,
         scope: ScanReceiptScope<'_>,
         batching: WriteBatching,
         stats: &mut CodeIndexPurgeStats,
     ) -> Result<usize> {
-        let _ = (scope, batching, stats);
-        Ok(0)
+        let (predicate, values) = match scope {
+            ScanReceiptScope::WorktreeKeysExcept(keep) => {
+                let mut predicate = "substr(repository, 1, 9) = 'worktree:'".to_string();
+                if !keep.is_empty() {
+                    predicate.push_str(&format!(
+                        " AND repository NOT IN ({})",
+                        vec!["?"; keep.len()].join(", ")
+                    ));
+                }
+                (
+                    predicate,
+                    keep.iter().map(|key| Value::Text(key.clone())).collect(),
+                )
+            }
+            ScanReceiptScope::Exact(key) => (
+                "repository = ?".to_string(),
+                vec![Value::Text(key.to_string())],
+            ),
+        };
+        let deleted = self.delete_bounded(
+            "code_index_state",
+            &predicate,
+            &values,
+            batching,
+            &mut stats.writes,
+        )?;
+        stats.scan_receipts_deleted += deleted;
+        Ok(deleted)
     }
+
+    /// Delete rows of `table` matching `predicate`, at most one batch per
+    /// `BEGIN IMMEDIATE` transaction, releasing the in-process connection and
+    /// pausing between transactions. Returns the rows deleted.
+    fn delete_bounded(
+        &self,
+        table: &str,
+        predicate: &str,
+        values: &[Value],
+        batching: WriteBatching,
+        writes: &mut BatchedWrites,
+    ) -> Result<usize> {
+        let sql = format!(
+            "DELETE FROM {table} WHERE rowid IN (
+                 SELECT rowid FROM {table} WHERE {predicate} LIMIT ?
+             )"
+        );
+        let mut bound: Vec<Value> = values.to_vec();
+        bound.push(Value::Integer(batching.batch_size as i64));
+        let mut total = 0;
+        loop {
+            let deleted = {
+                let conn = crate::shared_db::lock_connection(&self.conn)?;
+                if !table_exists(&conn, table) {
+                    return Ok(total);
+                }
+                crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+                    Ok(tx.execute(&sql, rusqlite::params_from_iter(bound.iter()))?)
+                })?
+            };
+            if deleted == 0 {
+                return Ok(total);
+            }
+            writes.record(deleted);
+            total += deleted;
+            if deleted < batching.batch_size {
+                return Ok(total);
+            }
+            batching.yield_between();
+        }
+    }
+}
+
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .unwrap_or(false)
 }
 
 #[cfg(test)]

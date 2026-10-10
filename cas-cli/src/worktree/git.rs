@@ -366,7 +366,10 @@ fn dirty_summary(dir: &Path) -> Option<(usize, String)> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines().filter(|line| !line.trim().is_empty()).peekable();
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
     let first = (*lines.peek()?).trim().to_string();
     Some((text.lines().filter(|l| !l.trim().is_empty()).count(), first))
 }
@@ -1036,6 +1039,11 @@ impl GitOperations {
             return Err(GitError::CommandFailed(stderr.to_string()));
         }
 
+        // cas-8256: a removed worktree's code-index copy goes with it.
+        crate::daemon::canonical_code_index::purge_removed_worktree_code_index(
+            &self.repo_root,
+            path,
+        );
         Ok(())
     }
 

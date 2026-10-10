@@ -140,7 +140,7 @@ fn only_the_canonical_checkout_process_writes_the_code_index_cas_8256() {
 
     assert_eq!(
         canonical_code_repositories(&project.cas_root),
-        vec!["proj".to_string()]
+        Some(vec!["proj".to_string()])
     );
 }
 
@@ -154,7 +154,11 @@ fn purge_removes_worktree_copies_and_workers_still_find_canonical_symbols_cas_82
         project.repositories(),
         vec![("crisp-jay-9".to_string(), 2), ("proj".to_string(), 1)]
     );
-    assert!(!project.search(&project.cas_root, "worker_only_crisp_jay_9").is_empty());
+    assert!(
+        !project
+            .search(&project.cas_root, "worker_only_crisp_jay_9")
+            .is_empty()
+    );
 
     let outcome =
         purge_non_canonical_code_index(&project.cas_root, WriteBatching::new(1, Duration::ZERO))
@@ -168,7 +172,12 @@ fn purge_removes_worktree_copies_and_workers_still_find_canonical_symbols_cas_82
     assert_eq!(project.repositories(), vec![("proj".to_string(), 1)]);
 
     let scans = SqliteCodeVectorStore::open(&project.cas_root).unwrap();
-    assert!(scans.index_state(&code_scan_key(&worktree)).unwrap().is_none());
+    assert!(
+        scans
+            .index_state(&code_scan_key(&worktree))
+            .unwrap()
+            .is_none()
+    );
     assert!(
         scans
             .index_state(&code_scan_key(&project.main))
@@ -190,10 +199,15 @@ fn purge_removes_worktree_copies_and_workers_still_find_canonical_symbols_cas_82
         "canonical symbol missing after purge: {hits:?}"
     );
     assert!(
-        hits.iter().all(|hit| !hit.file_path.contains("crisp-jay-9")),
+        hits.iter()
+            .all(|hit| !hit.file_path.contains("crisp-jay-9")),
         "worktree copy still answers: {hits:?}"
     );
-    assert!(project.search(&worker_root, "worker_only_crisp_jay_9").is_empty());
+    assert!(
+        project
+            .search(&worker_root, "worker_only_crisp_jay_9")
+            .is_empty()
+    );
 
     let again =
         purge_non_canonical_code_index(&project.cas_root, WriteBatching::default()).unwrap();
@@ -220,8 +234,16 @@ fn removing_a_worktree_purges_only_its_copy_cas_8256() {
     );
     let store = crate::store::open_code_store(&project.cas_root).unwrap();
     assert!(store.list_files("crisp-jay-9", None).unwrap().is_empty());
-    assert!(project.search(&project.cas_root, "worker_only_crisp_jay_9").is_empty());
-    assert!(!project.search(&project.cas_root, "worker_only_brave_hound_32").is_empty());
+    assert!(
+        project
+            .search(&project.cas_root, "worker_only_crisp_jay_9")
+            .is_empty()
+    );
+    assert!(
+        !project
+            .search(&project.cas_root, "worker_only_brave_hound_32")
+            .is_empty()
+    );
 }
 
 #[test]

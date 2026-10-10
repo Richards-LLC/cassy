@@ -141,6 +141,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   never the answers. Answers to earlier terminal questions are filled in from
   the recent transcript, once each, and relayed machine prompts are never
   treated as questions.
+- Tapping a conversation in Cassy Cloud opens it every time. Before, a live
+  update between press and release could lose the tap or open another
+  conversation: grouped rows re-sorted under the finger, and a session
+  starting or ending rebuilt the list. The list now holds the pressed row for
+  the whole gesture, and an older load never replaces a newer selection.
+
+### Added — Cassy Cloud app icon and install
+
+- A new app icon, a violet-gradient tile with the Cassy ribbons, replaces
+  the pale flat mark. Cassy Cloud now ships favicons (16, 32 and SVG), a
+  180 px Apple touch icon and a web app manifest with 192 and 512 px regular
+  and maskable icons, so it installs as an app on a phone or computer.
+- In the installed app, headers and sheets clear the iPhone status bar and
+  notch.
 
 ### Fixed — visual QA
 

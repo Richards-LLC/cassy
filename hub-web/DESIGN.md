@@ -150,8 +150,15 @@ Installed app: the manifest names the app **Cassy** (`name` and `short_name`),
 icon) and `theme_color` #5B3FE0 (Glass light `--color-action`); `scheme.ts`
 still sets the live `theme-color` meta per scheme. iOS reads
 `apple-touch-icon.png` and the `apple-mobile-web-app-*` meta (title Cassy,
-capable, `black-translucent` status bar; the shell already pads for
-`safe-area-inset-top`).
+capable, `black-translucent` status bar). Installed that way the page draws
+under the status bar (`env(safe-area-inset-top)` about 47px) and, in
+landscape, beside the notch. Every top-anchored surface adds the insets to its
+own padding, so its background fills the bar and its controls start below it:
+the list heading, the conversation heading (whose phone height grows by the
+inset; `#toast` already offsets by it), the full-screen Attention and launch
+sheets, and the desktop Raw output drawer. In a browser tab the insets are 0
+and nothing moves. `e2e/installed-safe-area.spec.ts` emulates a 47px status
+bar and a 44px landscape notch and fails if any control sits under either.
 
 Rules:
 

@@ -3,7 +3,7 @@ use super::super::imports::*;
 use crate::ui::factory::app::provisioning::{ProvisioningCancellation, launch_stalled_for_test};
 use std::path::Path;
 
-fn daemon(cas_dir: &Path) -> FactoryDaemon {
+pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
     let app = FactoryApp::for_test_at(cas_dir.to_path_buf());
     let listener = UnixListener::bind(cas_dir.join("test.sock")).unwrap();
     let gui_listener = UnixListener::bind(cas_dir.join("gui.sock")).unwrap();

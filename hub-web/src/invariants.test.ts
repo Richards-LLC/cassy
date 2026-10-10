@@ -100,7 +100,11 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("never leaves the command palette flagged open after it closes (cas-dfc8)", async () => {
     const source = await readSource("main.ts");
     // Any close of the palette settles the flag render() reopens it from.
-    expect(source).toContain("palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };");
+    expect(source).toMatch(/palette\.onclose = \(\) => \{\s*if \(!palette\.isConnected \|\| palette\.open\) return;\s*commandPaletteOpen = false;/);
+    // cas-3c25: closing in place adopts the closed-palette signature, so the
+    // next unrelated render does not rebuild the shell under the operator's focus.
+    expect(source).toContain("if (lastShellSignatureWithPaletteClosed !== undefined) lastShellSignature = lastShellSignatureWithPaletteClosed;");
+    expect(source).toContain("lastShellSignatureWithPaletteClosed = shellSignature({ ...signatureParts, commandPaletteOpen: false }) + signatureTail;");
     // Paired machines replaces the palette and clears the flag itself too.
     // cas-460a: it also remembers its opener so its close can hand focus back.
     expect(source).toContain("const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
@@ -206,6 +210,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("touchWindow: (run) => window.setTimeout(run, 600),");
     expect(main).toContain('app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);');
     expect(main).toContain("afterGesture: (run) => window.setTimeout(run, 0),");
+    // cas-3c25 (HUB-J18): a keyboard Tab is mid-transit during focusout, so
+    // the owed rebuild waits a task for focus to settle, then restores the
+    // rebuilt control with its ring.
+    expect(main).toMatch(/app\.addEventListener\("focusout", \(\) => \{[\s\S]{0,600}?window\.setTimeout\(\(\) => \{/);
+    expect(main).not.toMatch(/app\.addEventListener\("focusout", \(\) => \{\s*queueMicrotask/);
+    expect(main).toContain("focus({ preventScroll: true, focusVisible: focusedControlVisible } as FocusOptions)");
   });
 
   // Contract: keeps pairing failures inside the open dialog and cancellation cleanup visible (cas-7d55 F1/F2/F3/F6).

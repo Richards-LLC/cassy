@@ -606,4 +606,78 @@ mod cases {
         }
         assert!(!plain.has_hyperlinks());
     }
+
+    /// cas-ac97 (GH #1153): pane output growth after a normal inject is NOT
+    /// evidence that the recipient took a turn.
+    ///
+    /// The child never reads its input: `sleep` stands in for a harness whose
+    /// composer swallowed the payload (lost submit CR, modal screen, wedged
+    /// TUI). The kernel tty line discipline still echoes every injected byte
+    /// back through the PTY master, so `bytes_received` climbs by at least the
+    /// payload length while no turn ever starts. The delivered-unsurfaced
+    /// watchdog (cas-6e76, GH #224) used exactly that growth as its "observed"
+    /// verdict, so it retired on the echo and never nudged or flagged the
+    /// stuck worker.
+    #[test]
+    fn injected_echo_grows_pane_output_without_any_turn() {
+        let config = crate::pty::PtyConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'casac97-ready\\n'; exec sleep 30".to_string(),
+            ],
+            cwd: Some(std::env::temp_dir()),
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        };
+        let pty = crate::pty::Pty::spawn("cas-ac97-echo", config).expect("spawn real pty");
+        let mut pane = Pane::with_pty(
+            "cas-ac97-echo",
+            PaneKind::Worker,
+            pty,
+            24,
+            80,
+            SupervisorCli::Codex,
+        )
+        .expect("wrap pty in pane");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        let banner_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pane.bytes_received() == 0 && std::time::Instant::now() < banner_deadline {
+            let _ = pane.drain_output();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let before = pane.bytes_received();
+        assert!(before > 0, "the stand-in must print its ready banner");
+
+        let payload = "Message from supervisor: cas-ac97 assignment that never becomes a turn";
+        rt.block_on(pane.inject_prompt(payload))
+            .expect("inject into an idle pane");
+
+        // Past the Codex 500ms submit settle, draining like the daemon poll.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let mut echoed = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let (bytes, _) = pane.drain_output();
+            echoed.extend_from_slice(&bytes);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let after = pane.bytes_received();
+        eprintln!(
+            "[cas-ac97] bytes_received before={before} after={after} delta={} echoed={:?}",
+            after - before,
+            String::from_utf8_lossy(&echoed)
+        );
+        assert!(
+            !pane.has_exited(),
+            "the recipient is alive and idle; it never started a turn"
+        );
+        assert!(
+            after - before >= payload.len() as u64,
+            "the line-discipline echo alone grows pane output by the payload size, \
+             which is why byte growth cannot prove that a turn started"
+        );
+    }
 }

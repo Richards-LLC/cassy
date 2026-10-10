@@ -29,6 +29,22 @@ use cas_types::{
 /// `IF NOT EXISTS` no-op silently dropped the NOT-NULL + FK on
 /// fresh-bootstrap DBs where `Subsystem::Tasks` ran before
 /// `Subsystem::Agents`.
+/// The revision backfill inside [`TASK_SCHEMA`]. Bootstrap callers run it
+/// with the schema; [`SqliteTaskStore::init`] runs it only when needed.
+const TASK_REVISION_BACKFILL: &str = "INSERT OR IGNORE INTO task_mutation_revisions (entity_id, revision, present)
+    SELECT id, 1, 1 FROM tasks;
+";
+
+/// [`TASK_SCHEMA`] without its revision backfill: read-only on a store whose
+/// objects already exist.
+static TASK_SCHEMA_DDL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    assert!(
+        TASK_SCHEMA.contains(TASK_REVISION_BACKFILL),
+        "TASK_SCHEMA must carry the revision backfill verbatim"
+    );
+    TASK_SCHEMA.replacen(TASK_REVISION_BACKFILL, "", 1)
+});
+
 pub const TASK_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -956,18 +972,32 @@ pub fn clear_pending_verification_with_conn(conn: &Connection, task_id: &str) ->
 
 impl TaskStore for SqliteTaskStore {
     fn init(&self) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        conn.execute_batch(TASK_SCHEMA)?;
-        // `task_leases` is owned by the agent lifecycle (`AGENT_SCHEMA`), but
-        // `SqliteTaskStore::delete` issues `DELETE FROM task_leases WHERE
-        // task_id = ?` for cleanup. To keep the task store usable without
-        // requiring callers to also have constructed `SqliteAgentStore`,
-        // we run the agent schema here too. The full AGENT_SCHEMA is the
-        // single source of truth — running it from both store inits is
-        // idempotent (`CREATE TABLE IF NOT EXISTS`). See cas-bdb9
-        // fix-round-1 P1 for why a duplicated slim definition is dangerous.
-        conn.execute_batch(crate::AGENT_SCHEMA)?;
-        Ok(())
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            // cas-0e57: the DDL is read-only once every object exists; the
+            // revision backfill is a write and takes the write lock even
+            // when it inserts nothing. Run it only when a task lacks its row.
+            conn.execute_batch(&TASK_SCHEMA_DDL)?;
+            // `task_leases` is owned by the agent lifecycle (`AGENT_SCHEMA`), but
+            // `SqliteTaskStore::delete` issues `DELETE FROM task_leases WHERE
+            // task_id = ?` for cleanup. To keep the task store usable without
+            // requiring callers to also have constructed `SqliteAgentStore`,
+            // we run the agent schema here too. The full AGENT_SCHEMA is the
+            // single source of truth — running it from both store inits is
+            // idempotent (`CREATE TABLE IF NOT EXISTS`). See cas-bdb9
+            // fix-round-1 P1 for why a duplicated slim definition is dangerous.
+            conn.execute_batch(crate::AGENT_SCHEMA)?;
+            let missing_revision: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks t WHERE NOT EXISTS (
+                     SELECT 1 FROM task_mutation_revisions r WHERE r.entity_id = t.id))",
+                [],
+                |row| row.get(0),
+            )?;
+            if missing_revision {
+                conn.execute_batch(TASK_REVISION_BACKFILL)?;
+            }
+            Ok(())
+        })
     }
 
     fn project_id(&self) -> Option<&str> {

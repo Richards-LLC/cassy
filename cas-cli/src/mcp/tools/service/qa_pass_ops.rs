@@ -64,7 +64,7 @@ impl CasService {
         })?;
         // The verdict must be backed by the round's evidence bundle, built
         // against exactly the tip under review (cas-c3b8 contract v1).
-        let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed)
+        let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed, verdict)
             .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
         if verdict == QaVerdict::Approved {
             let store = self.inner.open_task_store()?;

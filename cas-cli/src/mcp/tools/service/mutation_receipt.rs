@@ -42,6 +42,50 @@ pub(crate) async fn scope<F: Future>(receipt: Arc<Receipt>, future: F) -> F::Out
     CURRENT.scope(receipt, future).await
 }
 
+/// cas-3b81 (GH #1142): run a handler whose body is synchronous Git and
+/// SQLite work on the blocking pool, keeping this request's receipt in scope.
+///
+/// `task close` never yields on its ordinary path: run inline, it pinned a
+/// runtime worker for its whole run (hundreds of Git spawns). Parallel closes
+/// then queued behind each other and behind every other tool call while the
+/// 55s budget ran, and the deadline could not cancel them anyway. On the
+/// blocking pool, closes run side by side and the runtime stays free to answer
+/// other calls and fire deadlines on time.
+///
+/// Task-locals do not follow `spawn_blocking`, so every request-scoped one
+/// is carried over explicitly: the mutation receipt, and the caller's
+/// recovery-guidance context, without which a close's guidance named the
+/// process's own harness instead of the caller's (cas-0081d).
+pub(crate) async fn run_on_blocking_pool<F, T>(future: F) -> Result<T, tokio::task::JoinError>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let receipt = current();
+    let caller = crate::mcp::tools::core::guidance::current_caller_context();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            let future = async move {
+                match caller {
+                    Some((prefix, supervisor)) => {
+                        crate::mcp::tools::core::guidance::with_caller_prefix(
+                            prefix, supervisor, future,
+                        )
+                        .await
+                    }
+                    None => future.await,
+                }
+            };
+            match receipt {
+                Some(receipt) => CURRENT.scope(receipt, future).await,
+                None => future.await,
+            }
+        })
+    })
+    .await
+}
+
 pub(crate) fn message_committed(id: i64) {
     if let Some(receipt) = current() {
         let _ = receipt.commit.set(Commit {
@@ -90,5 +134,91 @@ impl Receipt {
 
     pub(crate) fn task_id(&self) -> Option<&str> {
         self.task_id.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// cas-3b81 (GH #1142): with one runtime worker, two synchronous
+    /// close-shaped handlers ran one after the other and a timer queued behind
+    /// both. On the blocking pool they overlap, the runtime stays free, and
+    /// the request's receipt still observes the handler's commit.
+    /// cas-0081d: the caller's recovery-guidance context is request-scoped
+    /// like the receipt, so the blocking pool must carry it too; otherwise a
+    /// close renders guidance for the process's own harness.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_pool_keeps_caller_guidance_context_cas_0081d() {
+        use crate::mcp::tools::core::guidance;
+        let seen = guidance::with_caller_prefix("mcp__cs__", Some("mcp__cas__"), async {
+            run_on_blocking_pool(async {
+                (
+                    guidance::current_caller_context(),
+                    guidance::caller_prefix(),
+                    guidance::supervisor_prefix(),
+                )
+            })
+            .await
+            .unwrap()
+        })
+        .await;
+        assert_eq!(
+            seen,
+            (
+                Some(("mcp__cs__", Some("mcp__cas__"))),
+                "mcp__cs__",
+                "mcp__cas__"
+            )
+        );
+        let outside = run_on_blocking_pool(async { guidance::current_caller_context() })
+            .await
+            .unwrap();
+        assert_eq!(outside, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_pool_handlers_overlap_and_keep_their_receipt_cas_3b81() {
+        let started = Instant::now();
+        let slow = |id: &'static str| {
+            let receipt = Receipt::new("task", "close", Some(id));
+            let observed = receipt.clone();
+            let handle = tokio::spawn(scope(receipt, async move {
+                run_on_blocking_pool(async move {
+                    std::thread::sleep(Duration::from_millis(400));
+                    task_terminal_committed(id);
+                })
+                .await
+                .unwrap();
+            }));
+            (handle, observed)
+        };
+        let (first, first_receipt) = slow("cas-a");
+        let (second, second_receipt) = slow("cas-b");
+        let tick = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            started.elapsed()
+        });
+        let tick = tick.await.unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        let total = started.elapsed();
+        assert!(
+            tick < Duration::from_millis(300),
+            "runtime pinned: timer fired after {tick:?}"
+        );
+        assert!(
+            total < Duration::from_millis(750),
+            "handlers serialized: {total:?}"
+        );
+        assert!(first_receipt.terminal.get().is_some());
+        assert!(second_receipt.terminal.get().is_some());
+        assert!(
+            first_receipt
+                .commit
+                .get()
+                .is_some_and(|commit| commit.description.contains("cas-a"))
+        );
     }
 }

@@ -17,10 +17,12 @@
 //! operator with something to cite.
 //!
 //! Once an artifact is committed, [`signed_view`] trades its record id for a
-//! short-lived signed view URL, which is how Commander opens a report card.
+//! short-lived signed view URL, which is how Commander opens a report card,
+//! and [`slack`] posts it to Slack through Violet by that same id.
 
 pub mod cloud;
 pub mod paths;
+pub mod slack;
 
 use cas_store::{NewArtifact, PublishedArtifact, SqliteArtifactStore};
 use cas_types::{ARTIFACT_MAX_BYTES, ArtifactRef};

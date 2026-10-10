@@ -7595,23 +7595,45 @@ impl CasCore {
             // measured against the live (origin) target. A reused factory
             // branch otherwise charged an earlier, already-merged task's UI
             // commits to a backend-only task.
+            // GH #1144: a batch-squash receipt carries sibling tasks' files;
+            // judge this task's recorded delivery anchor instead.
+            let squash_anchor = commit_receipt_window.as_ref().and_then(|window| {
+                task_attribution::squash_receipt_qa_anchor(
+                    &evidence_repo,
+                    &resolved_parent_branch,
+                    window,
+                    &task,
+                    req.commit_receipt.as_deref(),
+                )
+            });
+            if let Some(anchor) = squash_anchor.as_deref() {
+                append_close_decision_note(
+                    task_store.as_ref(),
+                    &mut task,
+                    &format!(
+                        "QA evidence scoped to delivery anchor {anchor}: commit_receipt {} is a batch squash carrying that delivery's paths.",
+                        req.commit_receipt.as_deref().unwrap_or("").trim()
+                    ),
+                );
+            }
+            let qa_receipt = squash_anchor.as_deref().or(delivery_receipt);
             let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
                 task_attribution::qa_paths(
                     &evidence_repo,
                     &resolved_parent_branch,
                     window,
-                    delivery_receipt,
+                    qa_receipt,
                 )
             });
             let journey_base = commit_receipt_window.as_ref().and_then(|window| {
-                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, delivery_receipt)
+                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, qa_receipt)
             });
             match super::qa_evidence_gate::qa_evidence_close_gate_for_delivery(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
-                delivery_receipt,
+                qa_receipt,
                 attributed_paths.as_deref(),
                 journey_base.as_deref(),
             ) {
@@ -9180,9 +9202,20 @@ impl CasCore {
         });
         // cas-ba4a: a parked delivery is judged on its anchor alone; the
         // branch-wide probes below would count the worker's next task.
+        // GH #1133, #1147, #1151: a no-code task with no commit of its own
+        // has no branch history to judge. The worker lane's unclaimed
+        // commits belong to other tasks, not to this no-code declaration.
+        let no_code_without_own_commits = no_code_task_without_own_commits(
+            worker_worktree_path
+                .as_deref()
+                .unwrap_or(close_project_root.as_path()),
+            &task,
+            &resolved_parent_branch,
+            delivery_receipt,
+        );
         let effective_has_reviewable = receipt_has_reviewable
             || task.execution_note.as_deref() == Some("value-only")
-            || if parked_head.is_some() {
+            || if parked_head.is_some() || no_code_without_own_commits {
                 false
             } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
@@ -9645,6 +9678,36 @@ impl CasCore {
         task.closed_at = Some(now);
         task.updated_at = now;
         task.deliverables.pre_close_hook = declared_hook_evidence;
+        // GH #1151: an earlier park could anchor a no-code task to the
+        // worker lane's other-task delivery. Every recorded anchor was shown
+        // to be another task's, so none survives as this task's delivery
+        // receipt for the epic close guard.
+        if no_code_without_own_commits
+            && close_disposition != TaskCloseDisposition::NegativeResult
+        {
+            let retired: Vec<String> = task
+                .deliverables
+                .factory_branch_anchor
+                .take()
+                .into_iter()
+                .chain(std::mem::take(
+                    &mut task.deliverables.historical_factory_branch_anchors,
+                ))
+                .chain(task.deliverables.parked_branch.take())
+                .collect();
+            if !retired.is_empty() {
+                let note = format!(
+                    "[{}] DECISION: no-code close retired lane records that are not this task's delivery: {}.",
+                    now.format("%Y-%m-%d %H:%M"),
+                    retired.join(", ")
+                );
+                task.notes = if task.notes.is_empty() {
+                    note
+                } else {
+                    format!("{}\n\n{note}", task.notes)
+                };
+            }
+        }
         task.deliverables.negative_result =
             negative_result_receipt
                 .as_ref()
@@ -13432,6 +13495,74 @@ pub(crate) fn resolve_close_delivery_branch(
     ))
 }
 
+/// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.
+/// Such a task delivers through its portable proof, so close resolves no
+/// delivery branch for it. The worker's lane may end in another task's
+/// delivery, and an anchor recorded for that delivery by an earlier park is
+/// not this task's either. Own commits are explicit: a commit receipt, a
+/// per-task branch, a recorded code delivery, an anchor not claimed by another
+/// task, a commit on the lane naming this task, or an unmerged lane commit
+/// that does not claim another task (unnamed work may be this task's, see
+/// cas-2387). Any of those keeps every ordinary delivery gate.
+pub(crate) fn no_code_task_without_own_commits(
+    repo_path: &std::path::Path,
+    task: &Task,
+    target: &str,
+    receipt: Option<&str>,
+) -> bool {
+    let delivery = &task.deliverables;
+    if task.execution_note.as_deref() != Some("no-code")
+        || task.task_type == TaskType::Epic
+        || receipt.is_some()
+        || delivery.integration_batch.is_some()
+        || !delivery.files_changed.is_empty()
+        || delivery.commit_hash.is_some()
+        || delivery.merge_commit.is_some()
+        || delivery.delivery_pr_merge_commit.is_some()
+    {
+        return false;
+    }
+    let identity = TaskCommitIdentity {
+        task_id: Some(task.id.clone()),
+        known_commits: Vec::new(),
+    };
+    if delivery
+        .factory_branch_anchor
+        .iter()
+        .chain(&delivery.historical_factory_branch_anchors)
+        .any(|anchor| !task_attribution::commit_claims_another_task(repo_path, anchor, &identity))
+    {
+        return false;
+    }
+    let Some(assignee) = task.assignee.as_deref() else {
+        return true;
+    };
+    if worker_task_branch_ref(repo_path, assignee, &task.id).is_some() {
+        return false;
+    }
+    let lanes = std::iter::once(format!("factory/{assignee}"))
+        .chain(delivery.parked_branch.clone())
+        .chain(delivery.handoff_branches.iter().cloned());
+    for lane in lanes {
+        let lane = lane.strip_prefix("origin/").unwrap_or(&lane).to_string();
+        for reference in [lane.clone(), format!("origin/{lane}")] {
+            if !is_safe_git_refname(&reference) || !git_ref_exists(repo_path, &reference) {
+                continue;
+            }
+            if !matches!(
+                task_attribution::branch_task_claims(repo_path, &reference, &identity),
+                Some((None, _))
+            ) || task_attribution::lane_commits_all_claim_other_tasks(
+                repo_path, &reference, target, &identity,
+            ) != Some(true)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// MERGE REQUIRED text for a close whose receipt is newer than a parked
 /// delivery anchor that already landed (GH #1022). Commits after a landed
 /// anchor are a new delivery; the supervisor reopens the cycle with
@@ -13517,6 +13648,28 @@ fn run_factory_branch_merge_gate_for_delivery(
                 batch.branch, batch.tip, parent_branch
             ));
         }
+    }
+    // GH #1133, #1147, #1151: a no-code task with no commit of its own is
+    // delivered by its portable proof. Resolve no branch for it, so the
+    // worker lane's other-task commits are neither counted nor parked here.
+    if validated_recovery_branch.is_none()
+        && no_code_task_without_own_commits(repo_path, task, parent_branch, attribution.receipt)
+    {
+        let lane = format!("factory/{assignee}");
+        let lane_state = if git_ref_exists(repo_path, &lane)
+            || git_ref_exists(repo_path, &format!("origin/{lane}"))
+        {
+            "holds no commit of this task's and was not measured as its work"
+        } else {
+            "is missing locally and on origin"
+        };
+        return match no_code_close_proof(&task.id, Some("no-code"), task.external_ref.as_deref(), false) {
+            Ok(Some(proof)) => MergeStateGateOutcome::ProceedWithNote(format!(
+                "decision: no-code delivery proven by external_ref `{proof}`. No delivery branch was resolved: the `{lane}` lane {lane_state}. No branch commit count was measured."
+            )),
+            Err(message) => MergeStateGateOutcome::Unresolved(message),
+            Ok(None) => unreachable!("explicit no-code intent requires a proof"),
+        };
     }
     // cas-e33f (GH #1004): after a handoff the assignee (often the
     // supervisor) has no factory branch; measure the branch that actually
@@ -38318,3 +38471,7 @@ mod identical_delivery_tests;
 #[cfg(test)]
 #[path = "close_ops/recovery_delivery_tests.rs"]
 mod recovery_delivery_tests;
+
+#[cfg(test)]
+#[path = "close_ops/no_code_close_tests.rs"]
+mod no_code_close_tests;

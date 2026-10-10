@@ -1,10 +1,13 @@
-//! Remove only registrations for the retired production hub. Custom upstreams,
-//! credentials, restrictive policy, comments and unrelated settings survive.
+//! Remove only registrations for the retired production hub and move the
+//! production registration to the canonical hostname. Custom upstreams,
+//! restrictive policy, comments and unrelated settings survive.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cas_types::violet_compatibility::{violet_compatibility, violet_hub_url};
+use cas_types::violet_compatibility::{
+    canonical_violet_credential_name, is_violet_hub_url, violet_compatibility, violet_hub_url,
+};
 use cmcp_core::config::{ExternalToolConfig, Scope, VIOLET_SERVER, VIOLET_TOOLS};
 
 use super::fs as ifs;
@@ -20,7 +23,11 @@ fn retire_toml_entry(document: &mut toml_edit::DocumentMut, key: &str) -> bool {
     let Some(legacy) = servers.get(&contract.retired_server) else {
         return false;
     };
-    if legacy.get("url").and_then(|item| item.as_str()) != Some(violet_hub_url()) {
+    if !legacy
+        .get("url")
+        .and_then(|item| item.as_str())
+        .is_some_and(is_violet_hub_url)
+    {
         return false;
     }
     let legacy = legacy.clone();
@@ -29,6 +36,71 @@ fn retire_toml_entry(document: &mut toml_edit::DocumentMut, key: &str) -> bool {
     }
     servers.remove(&contract.retired_server);
     true
+}
+
+/// Replace a string value in place, keeping its surrounding formatting.
+fn set_string(item: &mut toml_edit::Item, text: &str) {
+    if let Some(value) = item.as_value_mut() {
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(text);
+        *value.decor_mut() = decor;
+    }
+}
+
+/// Point the production `violet` entry under `key` at the canonical URL. With
+/// `rename_env`, `env:` credential references are renamed to their `VIOLET_*`
+/// names too: only the proxy resolves references through the legacy fallback,
+/// so harness entries keep their names until `cas integrate violet` renames
+/// the credentials file and rewrites them together.
+fn modernize_toml_entry(
+    document: &mut toml_edit::DocumentMut,
+    key: &str,
+    rename_env: bool,
+) -> bool {
+    let Some(entry) = document
+        .get_mut(key)
+        .and_then(|servers| servers.as_table_like_mut())
+        .and_then(|servers| servers.get_mut(VIOLET_SERVER))
+        .and_then(|entry| entry.as_table_like_mut())
+    else {
+        return false;
+    };
+    let Some(url) = entry.get_mut("url") else {
+        return false;
+    };
+    if !url.as_str().is_some_and(is_violet_hub_url) {
+        return false;
+    }
+    let mut changed = false;
+    if url.as_str() != Some(violet_hub_url()) {
+        set_string(url, violet_hub_url());
+        changed = true;
+    }
+    if !rename_env {
+        return changed;
+    }
+    let mut rename = |item: &mut toml_edit::Item| {
+        let Some(name) = item.as_str().and_then(|text| text.strip_prefix("env:")) else {
+            return;
+        };
+        let canonical = canonical_violet_credential_name(name);
+        if canonical != name {
+            set_string(item, &format!("env:{canonical}"));
+            changed = true;
+        }
+    };
+    if let Some(auth) = entry.get_mut("auth") {
+        rename(auth);
+    }
+    if let Some(headers) = entry
+        .get_mut("headers")
+        .and_then(|headers| headers.as_table_like_mut())
+    {
+        for (_, value) in headers.iter_mut() {
+            rename(value);
+        }
+    }
+    changed
 }
 
 fn route(value: &toml_edit::Value) -> Option<ExternalToolConfig> {
@@ -47,6 +119,11 @@ fn route(value: &toml_edit::Value) -> Option<ExternalToolConfig> {
 /// Called by both the integration planner and update/sync. An unrelated file
 /// or explicit project opt-out never gains routes.
 pub(super) fn retire_proxy_document(document: &mut toml_edit::DocumentMut) -> bool {
+    let retired = retire_proxy_server(document);
+    modernize_toml_entry(document, "servers", true) | retired
+}
+
+fn retire_proxy_server(document: &mut toml_edit::DocumentMut) -> bool {
     let contract = violet_compatibility();
     let server_access = document
         .get("servers")
@@ -100,26 +177,39 @@ fn retire_claude_document(document: &mut serde_json::Value) -> bool {
     else {
         return false;
     };
+    let mut changed = false;
     if servers
         .get(&contract.retired_server)
         .and_then(|server| server.get("url"))
         .and_then(|url| url.as_str())
-        != Some(violet_hub_url())
+        .is_some_and(is_violet_hub_url)
     {
-        return false;
+        let legacy = servers
+            .remove(&contract.retired_server)
+            .expect("checked above");
+        servers.entry(VIOLET_SERVER.to_owned()).or_insert(legacy);
+        changed = true;
     }
-    let legacy = servers
-        .remove(&contract.retired_server)
-        .expect("checked above");
-    servers.entry(VIOLET_SERVER.to_owned()).or_insert(legacy);
-    true
+    // URL only: see `modernize_toml_entry` for why harness credential
+    // references are renamed by `cas integrate violet` alone.
+    if let Some(url) = servers
+        .get_mut(VIOLET_SERVER)
+        .and_then(|server| server.get_mut("url"))
+        && url.as_str().is_some_and(is_violet_hub_url)
+        && url.as_str() != Some(violet_hub_url())
+    {
+        *url = serde_json::Value::from(violet_hub_url());
+        changed = true;
+    }
+    changed
 }
 
 pub(super) fn retire_claude_entry(document: &mut serde_json::Value) -> bool {
     retire_claude_document(document)
 }
 pub(super) fn retire_codex_entry(document: &mut toml_edit::DocumentMut) -> bool {
-    retire_toml_entry(document, "mcp_servers")
+    let retired = retire_toml_entry(document, "mcp_servers");
+    modernize_toml_entry(document, "mcp_servers", false) | retired
 }
 
 fn retire_file(path: &Path, format: &str) -> Result<bool> {
@@ -570,7 +660,7 @@ mod tests {
         for profile in ["", ".claude", ".claude-alt", ".claude-work"] {
             let dir = temp.path().join(profile);
             std::fs::create_dir_all(&dir).unwrap();
-            let entry = serde_json::json!({"type":"http", "url":violet_hub_url(), "headers":{"Authorization":format!("Bearer ${{{}_LAPTOP}}", contract.legacy_token_prefix)}});
+            let entry = serde_json::json!({"type":"http", "url":contract.legacy_hub_url, "headers":{"Authorization":format!("Bearer ${{{}_LAPTOP}}", contract.legacy_token_prefix)}});
             let path = dir.join(".claude.json");
             std::fs::write(&path, serde_json::json!({"unrelated":true,"mcpServers":{(contract.retired_server.as_str()):entry,"custom":{"url":"https://custom.example/mcp"}}}).to_string()).unwrap();
         }
@@ -582,7 +672,7 @@ mod tests {
                 format!(
                     "# keep comment\n[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = {:?}\n",
                     contract.retired_server,
-                    violet_hub_url(),
+                    contract.legacy_hub_url,
                     format!("{}_LAPTOP", contract.legacy_token_prefix)
                 ),
             )
@@ -617,6 +707,9 @@ mod tests {
             let doc: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert!(doc["mcpServers"].get(&contract.retired_server).is_none());
+            assert_eq!(doc["mcpServers"]["violet"]["url"], violet_hub_url());
+            // Harness references keep their names until `cas integrate violet`
+            // renames the credentials file they expand from.
             assert_eq!(
                 doc["mcpServers"]["violet"]["headers"]["Authorization"],
                 format!("Bearer ${{{}_LAPTOP}}", contract.legacy_token_prefix)
@@ -630,6 +723,10 @@ mod tests {
             let doc: toml::Value = toml::from_str(&raw).unwrap();
             assert!(raw.contains("# keep comment"));
             assert!(doc["mcp_servers"].get(&contract.retired_server).is_none());
+            assert_eq!(
+                doc["mcp_servers"]["violet"]["url"].as_str(),
+                Some(violet_hub_url())
+            );
             assert_eq!(
                 doc["mcp_servers"]["violet"]["bearer_token_env_var"].as_str(),
                 Some(format!("{}_LAPTOP", contract.legacy_token_prefix).as_str())
@@ -660,7 +757,7 @@ mod tests {
             c.retired_tools[0],
             c.retired_server,
             c.retired_server,
-            violet_hub_url(),
+            c.legacy_hub_url,
             format!("env:{}_LAPTOP", c.legacy_token_prefix)
         );
         std::fs::write(&path, &original).unwrap();
@@ -669,10 +766,20 @@ mod tests {
         let config = cmcp_core::config::Config::load_from(&path).unwrap();
         assert!(raw.contains("# keep comment"));
         assert!(!config.servers.contains_key(&c.retired_server));
+        // The proxy resolves the legacy variable as a fallback, so the file
+        // moves to the canonical endpoint and names in one step.
         assert_eq!(
-            config.violet_env_names().unwrap().0,
-            Some(format!("{}_LAPTOP", c.legacy_token_prefix))
+            config.violet_env_names().unwrap().0.as_deref(),
+            Some("VIOLET_SLACK_TOKEN_LAPTOP")
         );
+        assert!(raw.contains(violet_hub_url()), "{raw}");
+        for legacy in [
+            c.legacy_hub_url.as_str(),
+            c.legacy_token_prefix.as_str(),
+            c.retired_server.as_str(),
+        ] {
+            assert!(!raw.contains(legacy), "{legacy} survived:\n{raw}");
+        }
         assert!(config.allowlist.iter().any(|route| route.server == "violet"
             && route.tool == "violet_read"
             && route.supervisor_only));
@@ -687,7 +794,7 @@ mod tests {
             Some(&cmcp_core::config::WorkerAccess::ReadOnly)
         );
         assert!(!retire_project_proxy(&path).unwrap());
-        let custom = original.replace(violet_hub_url(), "https://custom.example/mcp");
+        let custom = original.replace(&c.legacy_hub_url, "https://custom.example/mcp");
         std::fs::write(&path, &custom).unwrap();
         assert!(!retire_project_proxy(&path).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
@@ -706,5 +813,64 @@ mod tests {
                 .allowlist
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn installed_violet_entries_move_to_violet_hub_on_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let c = violet_compatibility();
+        let proxy = temp.path().join("proxy.toml");
+        let original = format!(
+            "# managed\nallowlist = [\"violet.violet_read\", \"violet.violet_post\"]\n\n[servers.violet]\ntransport = \"http\"\nurl = \"{}\"\nauth = \"env:{}_CASSY_PROXY\"\n\n[servers.violet.headers]\nx-vercel-protection-bypass = \"env:{}\"\n",
+            c.legacy_hub_url, c.legacy_token_prefix, c.legacy_bypass_env
+        );
+        std::fs::write(&proxy, &original).unwrap();
+        assert!(retire_project_proxy(&proxy).unwrap());
+        let raw = std::fs::read_to_string(&proxy).unwrap();
+        assert_eq!(
+            raw,
+            format!(
+                "# managed\nallowlist = [\"violet.violet_read\", \"violet.violet_post\"]\n\n[servers.violet]\ntransport = \"http\"\nurl = \"{}\"\nauth = \"env:VIOLET_SLACK_TOKEN_CASSY_PROXY\"\n\n[servers.violet.headers]\nx-vercel-protection-bypass = \"env:VIOLET_VERCEL_BYPASS\"\n",
+                violet_hub_url()
+            ),
+            "only the URL and credential names change"
+        );
+        assert!(!retire_project_proxy(&proxy).unwrap(), "idempotent");
+
+        let codex = temp.path().join("config.toml");
+        std::fs::write(
+            &codex,
+            format!(
+                "[mcp_servers.violet]\nurl = \"{}\"\nbearer_token_env_var = \"VIOLET_SLACK_TOKEN_LAPTOP\"\n",
+                c.legacy_hub_url
+            ),
+        )
+        .unwrap();
+        assert!(retire_file(&codex, "codex").unwrap());
+        assert!(!retire_file(&codex, "codex").unwrap());
+        assert!(
+            std::fs::read_to_string(&codex)
+                .unwrap()
+                .contains(violet_hub_url())
+        );
+
+        let claude = temp.path().join(".claude.json");
+        std::fs::write(
+            &claude,
+            serde_json::json!({"mcpServers":{"violet":{"type":"http","url":c.legacy_hub_url}}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(retire_file(&claude, "claude").unwrap());
+        assert!(!retire_file(&claude, "claude").unwrap());
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&claude).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["violet"]["url"], violet_hub_url());
+
+        // A staging hub is operator-owned under any credential names.
+        let staging = original.replace(&c.legacy_hub_url, "https://staging.example/mcp/slack");
+        std::fs::write(&proxy, &staging).unwrap();
+        assert!(!retire_project_proxy(&proxy).unwrap());
+        assert_eq!(std::fs::read_to_string(&proxy).unwrap(), staging);
     }
 }

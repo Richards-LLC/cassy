@@ -16,6 +16,10 @@ fn req(action: &str) -> ArtifactRequest {
         task_id: None,
         path: None,
         id: None,
+        channel: None,
+        reply_to: None,
+        title: None,
+        initial_comment: None,
     }
 }
 
@@ -232,5 +236,33 @@ async fn the_credential_cache_is_not_publishable_through_the_tool_either() {
         !error.message.contains("real-secret"),
         "a refusal must not echo the file's contents: {}",
         error.message
+    );
+}
+
+/// cassy#1148: `post` is dispatched, names a missing channel, and names an
+/// unreachable Violet rather than failing silently.
+#[tokio::test]
+async fn post_is_dispatched_and_its_failures_are_named() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
+    let mut post = req("post");
+    post.id = Some("art-nope".to_string());
+    let no_channel = service.artifact(Parameters(post.clone())).await.unwrap_err();
+    assert!(
+        no_channel.message.starts_with("artifact_channel_missing:"),
+        "{}",
+        no_channel.message
+    );
+
+    post.channel = Some("cas-internal".to_string());
+    let no_proxy = service.artifact(Parameters(post)).await.unwrap_err();
+    assert!(
+        no_proxy.message.starts_with("violet_unavailable:"),
+        "{}",
+        no_proxy.message
+    );
+    assert_eq!(
+        no_proxy.data.as_ref().and_then(|data| data.get("error_code")),
+        Some(&serde_json::json!("violet_unavailable"))
     );
 }

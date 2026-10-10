@@ -222,8 +222,29 @@ pub(crate) fn observe(
     stall_secs: i64,
 ) -> Observation {
     let mut last: Option<TurnEvent> = None;
+    // cas-5e3c (GH #1130): the latest fatal provider refusal not yet followed
+    // by a healthy turn or model output. A worker whose turns keep dying on a
+    // 400 still burns CPU between retries, so this overrides process evidence.
+    let mut fatal: Option<String> = None;
     if let Some(path) = path {
         tail_records(path, |value| {
+            if cli == SupervisorCli::Codex {
+                use crate::factory_auth_health::{CodexRecordVerdict, codex_record_verdict};
+                match codex_record_verdict(value) {
+                    CodexRecordVerdict::Fatal(message) => fatal = Some(message),
+                    CodexRecordVerdict::Healthy => fatal = None,
+                    CodexRecordVerdict::Neutral => {
+                        // Tool activity or assistant output proves the model
+                        // answered; a bare turn start proves nothing.
+                        if event(value, cli).is_some_and(|event| {
+                            event.state == Liveness::Executing
+                                && !matches!(event.kind.as_str(), "turn_started" | "task_started")
+                        }) {
+                            fatal = None;
+                        }
+                    }
+                }
+            }
             if let Some(event) = event(value, cli) {
                 // Late tool/assistant flushes after a terminal event do not
                 // start another turn. Only an actual start can reopen it.
@@ -262,6 +283,8 @@ pub(crate) fn observe(
         cli == SupervisorCli::Claude && path.is_none_or(|path| !path.exists());
     let state = if process.alive == Some(false) {
         Liveness::Dead
+    } else if fatal.is_some() {
+        Liveness::Stalled
     } else if last.is_none() && claude_without_transcript {
         Liveness::AwaitingFirstPrompt
     } else if let Some(event) = &last {
@@ -278,9 +301,12 @@ pub(crate) fn observe(
     } else {
         Liveness::Stalled
     };
-    let event_detail = last
+    let mut event_detail = last
         .map(|e| format!("{} {}s ago", e.kind, (now - e.at).num_seconds().max(0)))
         .unwrap_or_else(|| "turn evidence unavailable in bounded tail".into());
+    if let Some(message) = fatal {
+        event_detail = format!("fatal provider error: {message}; {event_detail}");
+    }
     Observation {
         state,
         evidence: format!(

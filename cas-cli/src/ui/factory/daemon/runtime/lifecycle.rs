@@ -159,14 +159,14 @@ fn merged_close_blocked_status_key(
 /// Persist one confirmed worker stoppage through the same durable supervisor
 /// relay used by director-detected idle and stall events.  This is deliberately
 /// narrower than a normal-message delivery failure: callers invoke it only
-/// after a bounded wake retry has also produced no pane output.
+/// after a bounded wake retry has also started no harness turn (cas-ac97).
 pub(super) fn enqueue_worker_delivery_stalled_relay(
     cas_dir: &std::path::Path,
     worker: &str,
     message_id: i64,
 ) -> WorkerAttentionRelayOutcome {
     let detail = format!(
-        "Worker {worker} produced no pane output after normal message {message_id} and its bounded retry."
+        "Worker {worker} started no harness turn after normal message {message_id} and its bounded retry."
     );
     enqueue_worker_attention_relay_detail(
         cas_dir,
@@ -1842,6 +1842,27 @@ impl FactoryDaemon {
         // lose both its auto-merge arm and queue entry without a merge-group
         // run, which still needs one supervisor wake.
         let mut last_auto_merge_membership = std::collections::BTreeSet::new();
+        // cas-e753 (GH #1145): Violet push-wake. Claims run on the blocking
+        // pool every 15 s; channel sweeps run as their own task so a slow
+        // Violet read never holds up the next claim.
+        let violet_wake = super::violet_activity::VioletWakeRuntime::start(
+            self.app.cas_dir(),
+            &self.session_name,
+            self.app.supervisor_name(),
+        )
+        .map(std::sync::Arc::new);
+        let mut last_violet_poll = std::time::Instant::now()
+            .checked_sub(super::violet_activity::POLL_INTERVAL)
+            .unwrap_or_else(std::time::Instant::now);
+        let mut violet_task: Option<
+            JoinHandle<(
+                super::violet_activity::PollReport,
+                Vec<super::violet_activity::SweepRequest>,
+                Option<super::violet_activity::SupervisorPresence>,
+            )>,
+        > = None;
+        let mut violet_sweep_task: Option<JoinHandle<()>> = None;
+        let mut violet_error_reported = false;
         let refresh_interval = Duration::from_secs(2);
         let poll_interval = Duration::from_millis(100);
 
@@ -2185,6 +2206,57 @@ impl FactoryDaemon {
                         }
                         Err(error) => {
                             tracing::warn!(%error, "GitHub CI watcher background task failed")
+                        }
+                    }
+                }
+
+                if let Some(violet) = violet_wake.as_ref() {
+                    if violet_task.is_none()
+                        && last_violet_poll.elapsed() >= super::violet_activity::POLL_INTERVAL
+                    {
+                        let violet = std::sync::Arc::clone(violet);
+                        violet_task =
+                            Some(tokio::task::spawn_blocking(move || violet.tick_blocking()));
+                        last_violet_poll = std::time::Instant::now();
+                    }
+                    if violet_task.as_ref().is_some_and(JoinHandle::is_finished) {
+                        match violet_task.take().expect("checked above").await {
+                            Ok((report, sweeps, presence)) => {
+                                if report.wakes > 0 {
+                                    super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                                    tracing::info!(
+                                        wakes = report.wakes,
+                                        admitted = report.admitted,
+                                        "queued Violet Slack-activity wake for supervisor"
+                                    );
+                                }
+                                if !report.denied.is_empty() {
+                                    tracing::debug!(denied = ?report.denied, "Cloud denied Violet activity claim for project");
+                                }
+                                if report.errors.is_empty() {
+                                    violet_error_reported = false;
+                                } else if !violet_error_reported {
+                                    tracing::warn!(errors = ?report.errors, "Violet activity relay unavailable; retrying silently on its next cadence");
+                                    violet_error_reported = true;
+                                }
+                                if let Some(presence) = presence
+                                    && !sweeps.is_empty()
+                                    && violet_sweep_task
+                                        .as_ref()
+                                        .is_none_or(JoinHandle::is_finished)
+                                {
+                                    let violet = std::sync::Arc::clone(violet);
+                                    let cas_dir = self.app.cas_dir().to_path_buf();
+                                    violet_sweep_task = Some(tokio::spawn(async move {
+                                        if violet.sweep(sweeps, presence).await > 0 {
+                                            super::delivery::wake_daemon_after_enqueue(&cas_dir);
+                                        }
+                                    }));
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "Violet activity poll task failed")
+                            }
                         }
                     }
                 }

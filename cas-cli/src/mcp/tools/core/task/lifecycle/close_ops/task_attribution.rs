@@ -39,6 +39,64 @@ fn subject_claims_another_task(message: &str, identity: &TaskCommitIdentity) -> 
         && references_foreign_task(subject, identity)
 }
 
+/// GH #1151: whether `commit` is another task's work under the subject rule
+/// above. An unreadable commit is not shown to be foreign.
+pub(super) fn commit_claims_another_task(
+    repo: &Path,
+    commit: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    is_safe_git_refname(commit)
+        && git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
+            .is_some_and(|message| subject_claims_another_task(&message, identity))
+}
+
+/// GH #1133, #1151: whether every commit `lane` holds beyond `target` (and
+/// beyond `origin/<target>` when that exists) claims another task. An unnamed
+/// commit may be this task's own work (cas-2387), so it answers `false`.
+/// `None` when Git cannot read the range or it is too large to judge.
+pub(super) fn lane_commits_all_claim_other_tasks(
+    repo: &Path,
+    lane: &str,
+    target: &str,
+    identity: &TaskCommitIdentity,
+) -> Option<bool> {
+    const LIMIT: usize = 200;
+    if !is_safe_git_refname(lane) || !is_safe_git_refname(target) {
+        return None;
+    }
+    let limit = (LIMIT + 1).to_string();
+    let mut args = vec![
+        "log".to_string(),
+        "--no-merges".to_string(),
+        "-n".to_string(),
+        limit,
+        "--format=%H%x1f%B%x1e".to_string(),
+        lane.to_string(),
+        format!("^{target}"),
+    ];
+    let origin_target = format!("origin/{target}");
+    if git_ref_exists(repo, &origin_target) {
+        args.push(format!("^{origin_target}"));
+    }
+    args.push("--".to_string());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let history = git_text(repo, &args)?;
+    let records: Vec<&str> = history
+        .split('\u{1e}')
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+        .collect();
+    if records.len() > LIMIT {
+        return None;
+    }
+    Some(records.iter().all(|record| {
+        record
+            .split_once('\u{1f}')
+            .is_some_and(|(_, message)| subject_claims_another_task(message, identity))
+    }))
+}
+
 /// cas-93db: what `branch`'s recent first-parent work claims, under the
 /// subject rule above. Returns the first commit claiming this task, if any,
 /// and the newest commit claiming only another task (its subject line), if
@@ -536,6 +594,51 @@ pub(super) fn delivery_base(
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
     let base = ranges.first()?.base.clone();
     (!base.is_empty()).then_some(base)
+}
+
+/// GH #1144: the delivery the QA gate judges when `receipt` is a batch squash.
+///
+/// Several tasks shipped as one squash give that commit every sibling's
+/// files; its message also names this task, so attribution selected the whole
+/// squash and charged a docs-only task for a sibling's UI. When the task has a
+/// recorded delivery anchor that the receipt does not descend from, and the
+/// receipt is a target-reachable single-parent commit whose own delta carries
+/// every path of the anchor's attributed delivery, return the anchor. QA then
+/// judges the task's own delivery, as the recorded integration-batch receipt
+/// path already does. Anything else returns `None` and keeps the receipt.
+pub(super) fn squash_receipt_qa_anchor(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    task: &Task,
+    receipt: Option<&str>,
+) -> Option<String> {
+    let receipt = resolve_task_commit_receipt_sha(repo, receipt?).ok()?;
+    let anchor = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .map(str::trim)
+        .filter(|anchor| !anchor.is_empty())?;
+    let anchor = resolve_task_commit_receipt_sha(repo, anchor).ok()?;
+    if anchor == receipt
+        || git_commit_is_ancestor(repo, &anchor, &receipt)
+        || crate::git_evidence::git_commit_parent_count(repo, &receipt) != 1
+        || !commit_is_merged_into_parent(repo, &receipt, target)
+    {
+        return None;
+    }
+    let own = paths(repo, target, window, Some(&anchor))?;
+    let carried: HashSet<String> = git_text(
+        repo,
+        &["diff", "--name-only", &format!("{receipt}^1"), &receipt, "--"],
+    )?
+    .lines()
+    .map(str::trim)
+    .filter(|path| !path.is_empty())
+    .map(ToOwned::to_owned)
+    .collect();
+    (!own.is_empty() && own.iter().all(|path| carried.contains(path))).then_some(anchor)
 }
 
 /// Shared candidate selection for whole-delivery and final-snapshot proof.

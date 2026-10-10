@@ -238,7 +238,71 @@ fn preflight_account_auth_with(
             crate::factory_auth_health::auth_failure_remedy(spec.cli, account_dir.as_deref()),
         ));
     }
+    preflight_codex_model_support(specs, chrono::Utc::now())
+}
+
+/// Refuse a Codex spawn whose target account cannot run its model, before any
+/// worktree is cut (cas-5e3c, GH #1130).
+///
+/// A ChatGPT-account Codex rejects models outside its catalogue with a 400 on
+/// every turn, while the worker keeps heartbeating. The lane registry cannot
+/// know which account a spawn targets, so the check reads that account's own
+/// `models_cache.json`. Only an affirmative absence from a fresh catalogue
+/// refuses; a missing or stale catalogue is not evidence.
+fn preflight_codex_model_support(
+    specs: &[cas_mux::WorkerSpec],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
+    let mut seen = std::collections::BTreeSet::new();
+    for spec in specs {
+        if spec.cli != cas_mux::SupervisorCli::Codex {
+            continue;
+        }
+        let Some(model) = spec.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) else {
+            continue;
+        };
+        let account_dir = spec
+            .config_dir
+            .clone()
+            .or_else(|| spec.requester_config_dir.clone())
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
+        if !seen.insert((account_dir.clone(), model.to_string())) {
+            continue;
+        }
+        let Some(home) = codex_home_path(account_dir.as_deref()) else {
+            continue;
+        };
+        if let CodexModelSupport::Unsupported { catalog, listed } =
+            codex_account_model_support(&home, model, now)
+        {
+            let account = account_dir
+                .as_deref()
+                .map_or_else(|| default_account_label(spec.cli), str::to_string);
+            return Err(format!(
+                "spawn refused: the codex account at {account} is a ChatGPT account whose model catalogue ({}) \
+                 does not list '{model}', so every turn would fail with \"model is not supported when using Codex \
+                 with a ChatGPT account\". Listed: {}. {} No worktree was created and no task was assigned.",
+                catalog.display(),
+                listed.join(", "),
+                crate::factory_auth_health::model_refusal_remedy(account_dir.as_deref()),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// The `CODEX_HOME` a Codex worker runs against: its account directory with
+/// `~` expanded, or the default `~/.codex` (spawns clear `CODEX_HOME`).
+fn codex_home_path(account_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    match account_dir {
+        Some(dir) => match dir.strip_prefix('~') {
+            Some(suffix) => dirs::home_dir().map(|home| home.join(suffix.trim_start_matches('/'))),
+            None => Some(std::path::PathBuf::from(dir)),
+        },
+        None => dirs::home_dir().map(|home| home.join(".codex")),
+    }
 }
 
 /// What to call the account when the caller named no directory.
@@ -609,7 +673,27 @@ struct ShutdownWorkerSnapshot {
     unsafe_worktree: bool,
 }
 
+/// The task rows the shutdown safety check judges, or why they are unreadable.
+fn shutdown_safety_tasks(cas_root: &std::path::Path) -> Result<Vec<cas_types::Task>, String> {
+    crate::store::open_task_store(cas_root)
+        .map_err(|error| format!("cannot open the task store: {error}"))?
+        .list(None)
+        .map_err(|error| format!("cannot list tasks: {error}"))
+}
+
 impl ShutdownWorkerSnapshot {
+    /// cas-0e57: the worker's tasks could not be read. Unknown task state is
+    /// treated like an in-progress task: shutdown requires force=true, and the
+    /// rendered state says why.
+    fn mark_task_state_unknown(&mut self, error: &str) {
+        self.task_states = vec![format!("unknown ({error})")];
+        self.has_in_progress_task = true;
+        self.worktree_cleanup_verdict = format!(
+            "{} (task state unknown; cleanup is re-checked at shutdown)",
+            self.worktree_cleanup_verdict
+        );
+    }
+
     fn requires_force(&self) -> bool {
         self.has_in_progress_task || self.unsafe_worktree
     }
@@ -3084,31 +3168,31 @@ impl CasService {
             ));
         }
 
-        let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open task store for shutdown safety check: {e}"),
-            )
-        })?;
-        let tasks = task_store.list(None).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to list tasks for shutdown safety check: {e}"),
-            )
-        })?;
+        // cas-0e57: the safety check reads task state; it must not be the
+        // reason a shutdown cannot happen. When the store cannot be read,
+        // every selected worker reports its task state as unknown, which
+        // requires force=true like an in-progress task, and force proceeds.
+        let (tasks, task_state_error) = match shutdown_safety_tasks(&self.inner.cas_root) {
+            Ok(tasks) => (tasks, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         let local_merge_delivery = factory_session_uses_local_merge(factory_session.as_deref());
         let pinned_epic_branch =
             factory_session_pinned_epic_branch(factory_session.as_deref(), &tasks);
         let snapshots: Vec<ShutdownWorkerSnapshot> = selected
             .iter()
             .map(|worker| {
-                shutdown_worker_snapshot(
+                let mut snapshot = shutdown_worker_snapshot(
                     &self.inner.cas_root,
                     worker,
                     &tasks,
                     local_merge_delivery,
                     pinned_epic_branch.as_deref(),
-                )
+                );
+                if let Some(error) = task_state_error.as_deref() {
+                    snapshot.mark_task_state_unknown(error);
+                }
+                snapshot
             })
             .collect();
         let force = req.force.unwrap_or(false);
@@ -10894,6 +10978,26 @@ mod spawn_lifecycle_tests {
     }
 
     #[test]
+    fn chatgpt_standard_lane_refuses_a_model_absent_from_target_account_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "models": [{"slug": "gpt-6-sol"}]
+        }).to_string()).unwrap();
+        let (specs, recipe, _) = build_lane_spawn_specs(
+            1, "standard", Some(home.path().to_str().unwrap()), None,
+            &cas_factory::CapabilitySnapshot::default(),
+        ).unwrap();
+        let error = preflight_account_auth_with(&specs, |_, _| {
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        }).expect_err("the target ChatGPT account cannot run this lane recipe");
+        assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
+        assert!(error.contains(home.path().to_str().unwrap()), "{error}");
+        assert!(error.contains("No worktree was created"), "{error}");
+    }
+
+    #[test]
     fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];
         let error = preflight_account_auth_with(&specs, |_, _| {
@@ -11815,6 +11919,83 @@ mod tests {
             agents.get(&supervisor.id).unwrap().status,
             AgentStatus::Idle
         );
+    }
+
+    /// cas-0e57: the incident shape. A logged-in store (the task-store open
+    /// also opens the cloud sync queue) is briefly write-locked by another
+    /// connection while the supervisor force-stops a worker holding work. The
+    /// safety check must read through the lock, and the shutdown must queue
+    /// once the lock clears within the busy budget.
+    #[tokio::test]
+    async fn shutdown_force_waits_out_a_brief_foreign_write_lock_cas_0e57() {
+        use cas_types::{AgentStatus, Task, TaskStatus};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "shutdown-locked");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_WORKER_NAMES", "unrelated-pane");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        crate::cloud::CloudConfig {
+            token: Some("cas-0e57-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut worker = worker_named("locked-worker", "locked-worker-id");
+        worker.factory_session = Some("shutdown-locked".into());
+        worker.status = AgentStatus::Stale;
+        worker.pid = Some(i32::MAX as u32);
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-0e57-held".into(), "Held by the worker".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let locker = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            locker.execute_batch("COMMIT").unwrap();
+        });
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": "locked-worker", "force": true
+        }))
+        .unwrap();
+        let result = service.factory_shutdown_workers(request).await;
+        release.join().unwrap();
+        let text = response_text(result.expect("force shutdown waits out a brief write lock"));
+        assert!(text.contains("Queued shutdown request"), "{text}");
+        assert!(text.contains("cas-0e57-held"), "{text}");
+    }
+
+    /// cas-0e57: a safety check that cannot read task state says so, demands
+    /// force like an in-progress task, and does not promise worktree removal.
+    #[test]
+    fn unreadable_task_state_requires_force_and_is_reported_cas_0e57() {
+        let missing = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(missing.path().join("cas.db")).unwrap();
+        let error = shutdown_safety_tasks(missing.path()).expect_err("a directory is not a store");
+        let mut snapshot = ShutdownWorkerSnapshot {
+            worker_name: "w".into(),
+            worker_id: "w-id".into(),
+            task_states: Vec::new(),
+            has_in_progress_task: false,
+            worktree_state: "worktree=/tmp/w".into(),
+            worktree_cleanup_verdict: "worktree /tmp/w will be removed at shutdown".into(),
+            unsafe_worktree: false,
+        };
+        assert!(!snapshot.requires_force());
+        snapshot.mark_task_state_unknown(&error);
+        assert!(snapshot.requires_force());
+        let rendered = snapshot.render();
+        assert!(rendered.contains("unknown (") && rendered.contains(&error), "{rendered}");
+        assert!(rendered.contains("task state unknown"), "{rendered}");
     }
 
     #[tokio::test]

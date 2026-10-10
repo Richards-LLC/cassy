@@ -2,8 +2,9 @@
 //! verification passes. A supervisor posted a client-bound PDF through Violet
 //! while the epic's verification task was still open, with a "final check
 //! still running" caveat; verification then found 18 wrong statements and the
-//! post had to be retracted. This pre-tool check refuses a `violet_post` of
-//! `kind: "file"`, or a message marked `deliverable: true`, while the epic has
+//! post had to be retracted. This pre-tool check refuses a `violet_post` that
+//! shares a file (`kind: "file"`, `"file_external"`, or a `"thread"` reply with
+//! `files`), or any post marked `deliverable: true`, while the epic has
 //! open verification-type tasks. An operator's `PUBLICATION OVERRIDE:` note on
 //! the epic, recorded within the last few hours, lets one through, and each use
 //! is logged back onto the epic.
@@ -17,7 +18,7 @@ const OVERRIDE_WINDOW_HOURS: i64 = 6;
 /// The note marker an operator's override carries on the epic.
 pub(super) const OVERRIDE_MARKER: &str = "PUBLICATION OVERRIDE:";
 
-pub(super) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
+pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
     let gated: Vec<Value> = violet_posts(tool, input)
         .into_iter()
         .filter(is_deliverable_post)
@@ -26,6 +27,7 @@ pub(super) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
         return None;
     }
     let cas_root = cas_root?;
+    let gated = with_artifact_tasks(gated, cas_root);
     let store = crate::store::open_task_store(cas_root).ok()?;
     // The post may name its epic (or a task under it); otherwise the
     // session's own focused epic is the one whose verification it waits on.
@@ -59,7 +61,7 @@ pub(super) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
     }
     Some(format!(
         "PUBLICATION BLOCKED (verification_pending): this Violet post shares a deliverable \
-         (kind=file, or deliverable=true) while epic {epic} still has open verification:\n  - {list}\n\n\
+         (kind=file or file_external, a thread reply with files, or deliverable=true) while epic {epic} still has open verification:\n  - {list}\n\n\
          Do not share a deliverable before its verification passes; a \"final check still running\" \
          caveat is not enough. Wait for those tasks to close, then post. Only the operator can \
          authorize an earlier share: record their words on the epic with \
@@ -82,6 +84,25 @@ fn violet_posts(tool: &str, input: Option<&Value>) -> Vec<Value> {
             .is_some_and(|(server, method)| server == "violet" && method == "violet_post");
     if direct {
         return input.cloned().into_iter().collect();
+    }
+    // cassy#1148: `artifact action=post` uploads a file through Violet from
+    // inside the runtime, so it shares a deliverable exactly like kind=file.
+    let artifact_tool = lower == "artifact"
+        || lower.ends_with("__artifact")
+        || lower.ends_with("cas_artifact")
+        || lower.ends_with("cs_artifact");
+    if artifact_tool {
+        return input
+            .filter(|input| input.get("action").and_then(Value::as_str) == Some("post"))
+            .map(|input| {
+                let mut post = serde_json::json!({ "kind": "file" });
+                if let Some(id) = input.get("id").and_then(Value::as_str) {
+                    post["artifact_id"] = Value::from(id);
+                }
+                post
+            })
+            .into_iter()
+            .collect();
     }
     if lower.ends_with("mcp_execute") {
         let mut posts = Vec::new();
@@ -125,14 +146,53 @@ fn collect_dispatch(code: &Value, posts: &mut Vec<Value>) {
     }
 }
 
-/// `kind: "file"` always shares an artifact; a message shares one when it is
-/// marked `deliverable: true`. An unparseable dispatch fails toward the gate.
+/// `kind: "file"` and `kind: "file_external"` always share an artifact, as
+/// does a `kind: "thread"` whose `replies[]` carry `files` (cas-1206, GH
+/// #1154: the 2026-10-09 contract added both routes); any other post shares
+/// one when it is marked `deliverable: true`. An unparseable dispatch fails
+/// toward the gate.
 fn is_deliverable_post(post: &Value) -> bool {
     if post.is_null() {
         return true;
     }
-    post.get("kind").and_then(Value::as_str) == Some("file")
-        || post.get("deliverable").and_then(Value::as_bool) == Some(true)
+    let shares_file = match post.get("kind").and_then(Value::as_str) {
+        Some("file" | "file_external") => true,
+        Some("thread") => post
+            .get("replies")
+            .and_then(Value::as_array)
+            .is_some_and(|replies| replies.iter().any(|reply| reply.get("files").is_some())),
+        _ => false,
+    };
+    shares_file || post.get("deliverable").and_then(Value::as_bool) == Some(true)
+}
+
+/// An artifact post names its record, not a task: the record's own task says
+/// which epic's verification it waits on.
+fn with_artifact_tasks(posts: Vec<Value>, cas_root: &Path) -> Vec<Value> {
+    if posts
+        .iter()
+        .all(|post| post.get("artifact_id").is_none() || post.get("task_id").is_some())
+    {
+        return posts;
+    }
+    let Ok(artifacts) = cas_store::SqliteArtifactStore::open(cas_root) else {
+        return posts;
+    };
+    posts
+        .into_iter()
+        .map(|mut post| {
+            let task = post
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .filter(|_| post.get("task_id").is_none())
+                .and_then(|id| artifacts.get(id).ok().flatten())
+                .map(|artifact| artifact.task_id);
+            if let Some(task) = task {
+                post["task_id"] = Value::from(task);
+            }
+            post
+        })
+        .collect()
 }
 
 fn explicit_epic(post: &Value, store: &dyn cas_store::TaskStore) -> Option<String> {

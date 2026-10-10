@@ -299,6 +299,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
             "max_messages": 500,
             "include_threads": True,
             "include_files": False,
+            "include_channels": False,
             "max_files": 50,
             "max_file_bytes": 4 * 1024 * 1024,
             "max_bytes": 8 * 1024 * 1024,

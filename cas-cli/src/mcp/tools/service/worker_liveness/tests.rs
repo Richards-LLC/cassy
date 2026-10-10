@@ -485,3 +485,22 @@ fn live_codex_mcp_child_prevents_false_dead_after_parent_changes_gh_1033() {
         ProcessSelection::Exited("worker harness parent exited"),
     );
 }
+
+#[test]
+fn repeated_fatal_codex_model_errors_override_busy_cpu_and_retries() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("rollout.jsonl");
+    let error = serde_json::json!({"type": "error", "status": 400, "error": {
+        "type": "invalid_request_error",
+        "message": "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+    }});
+    let start = "{\"timestamp\":\"2026-09-10T19:00:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+    let text = format!("{start}{error}\n{start}{error}\n{start}");
+    std::fs::write(&path, &text).unwrap();
+    let busy = ProcessEvidence { alive: Some(true), cpu_busy: Some(true), detail: "busy harness with live MCP child".into() };
+    let got = observe(SupervisorCli::Codex, Some(&path), busy.clone(), now(), 300);
+    assert_eq!(got.state, Liveness::Stalled);
+    assert!(got.evidence.contains("not supported"), "{}", got.evidence);
+    std::fs::write(&path, format!("{text}{{\"timestamp\":\"2026-09-10T19:01:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\",\"last_agent_message\":\"working\"}}}}\n")).unwrap();
+    assert_eq!(observe(SupervisorCli::Codex, Some(&path), busy, now(), 300).state, Liveness::WaitingForInput);
+}

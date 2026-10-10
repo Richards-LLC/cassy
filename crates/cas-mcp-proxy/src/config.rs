@@ -25,9 +25,11 @@ pub const VIKTOR_CONVERSATION_TOOLS: [&str; 9] = [
 /// Canonical Violet hub upstream. Credentials are referenced by environment
 /// variable name, never stored in proxy configuration.
 pub const VIOLET_SERVER: &str = "violet";
-/// The deployed endpoint keeps its original hostname.
+/// The manifest names the canonical endpoint and the former hostname that
+/// installed registrations migrate from.
 pub use cas_types::violet_compatibility::{
-    violet_compatibility, violet_credential_names, violet_hub_url,
+    canonical_violet_credential_name, is_violet_hub_url, violet_compatibility,
+    violet_credential_names, violet_hub_url,
 };
 pub const VIOLET_DEFAULT_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_CASSY_PROXY";
 pub const VIOLET_DEFAULT_BYPASS_ENV: &str = "VIOLET_VERCEL_BYPASS";
@@ -601,13 +603,19 @@ impl Config {
         changed
     }
 
-    /// Move only the retired production hub to Violet. Custom upstreams are
-    /// operator-owned. Credential references and restrictive policy survive.
+    /// Move only the retired production hub to Violet, then bring the
+    /// production registration onto the canonical endpoint and credential
+    /// names. Custom upstreams are operator-owned. Restrictive policy survives.
     pub fn retire_legacy_hub_registration(&mut self) -> bool {
+        let retired = self.retire_legacy_hub_server();
+        self.modernize_violet_registration() | retired
+    }
+
+    fn retire_legacy_hub_server(&mut self) -> bool {
         let contract = violet_compatibility();
         let retired = &contract.retired_server;
         let is_production = self.servers.get(retired).is_some_and(|server| {
-            matches!(server, ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } if url == violet_hub_url())
+            matches!(server, ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } if is_violet_hub_url(url))
         });
         if !is_production {
             return false;
@@ -645,6 +653,44 @@ impl Config {
             });
         }
         true
+    }
+
+    /// Point a production-hub `violet` registration at the canonical URL and
+    /// rename installed-machine credential references (`auth` and header
+    /// `env:` values) to their `VIOLET_*` names. Credential resolution falls
+    /// back to the legacy variables, so a machine whose credentials file still
+    /// holds them keeps working. Custom endpoints and custom names are left
+    /// alone. Returns `true` when anything changed.
+    pub fn modernize_violet_registration(&mut self) -> bool {
+        let Some(
+            ServerConfig::Http {
+                url, auth, headers, ..
+            }
+            | ServerConfig::Sse {
+                url, auth, headers, ..
+            },
+        ) = self.servers.get_mut(VIOLET_SERVER)
+        else {
+            return false;
+        };
+        if !is_violet_hub_url(url) {
+            return false;
+        }
+        let mut changed = false;
+        if url.as_str() != violet_hub_url() {
+            *url = violet_hub_url().to_string();
+            changed = true;
+        }
+        for value in auth.iter_mut().chain(headers.values_mut()) {
+            if let Some(name) = value.strip_prefix("env:") {
+                let canonical = canonical_violet_credential_name(name);
+                if canonical != name {
+                    *value = format!("env:{canonical}");
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// Migrate an existing file without adding routes to a project's policy.
@@ -1136,8 +1182,128 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
             ))
         );
         let raw = std::fs::read_to_string(path).unwrap();
-        assert!(raw.contains("env:VIOLET_SLACK_TOKEN_CASSY_PROXY"));
+        assert!(
+            raw.contains("url = \"https://violet-hub.vercel.app/mcp/slack\""),
+            "{raw}"
+        );
+        assert!(
+            raw.contains("auth = \"env:VIOLET_SLACK_TOKEN_CASSY_PROXY\""),
+            "{raw}"
+        );
         assert!(raw.contains("env:VIOLET_VERCEL_BYPASS"));
+        assert_no_legacy_hub_vocabulary(&raw);
+    }
+
+    fn assert_no_legacy_hub_vocabulary(text: &str) {
+        let contract = violet_compatibility();
+        for legacy in [
+            contract.legacy_hub_url.as_str(),
+            contract.legacy_token_prefix.as_str(),
+            contract.legacy_bypass_env.as_str(),
+            contract.retired_server.as_str(),
+        ] {
+            assert!(!text.contains(legacy), "{legacy} survived in:\n{text}");
+        }
+    }
+
+    fn legacy_violet_registration(server: &str, url: &str) -> String {
+        let contract = violet_compatibility();
+        format!(
+            r#"allowlist = ["violet.violet_read", "violet.violet_post"]
+
+[servers.{server}]
+transport = "http"
+url = "{url}"
+auth = "env:{token}_CASSY_PROXY"
+
+[servers.{server}.headers]
+x-vercel-protection-bypass = "env:{bypass}"
+"#,
+            token = contract.legacy_token_prefix,
+            bypass = contract.legacy_bypass_env,
+        )
+    }
+
+    #[test]
+    fn installed_violet_registration_moves_to_violet_hub_and_violet_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let legacy_url = &violet_compatibility().legacy_hub_url;
+        std::fs::write(&path, legacy_violet_registration(VIOLET_SERVER, legacy_url)).unwrap();
+
+        assert!(Config::refresh_violet_managed_default(&path).unwrap());
+        assert!(
+            !Config::refresh_violet_managed_default(&path).unwrap(),
+            "the migration is idempotent"
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_no_legacy_hub_vocabulary(&raw);
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.servers.get(VIOLET_SERVER),
+            Some(&ServerConfig::Http {
+                url: violet_hub_url().to_string(),
+                auth: Some(format!("env:{VIOLET_DEFAULT_TOKEN_ENV}")),
+                headers: HashMap::from([(
+                    VIOLET_BYPASS_HEADER.to_string(),
+                    format!("env:{VIOLET_DEFAULT_BYPASS_ENV}"),
+                )]),
+                oauth: false,
+            })
+        );
+        assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
+    }
+
+    #[test]
+    fn retired_server_on_either_hostname_becomes_canonical_violet() {
+        let contract = violet_compatibility();
+        for url in [contract.legacy_hub_url.as_str(), violet_hub_url()] {
+            let mut config: Config =
+                toml::from_str(&legacy_violet_registration(&contract.retired_server, url)).unwrap();
+            assert!(config.retire_legacy_hub_registration());
+            assert!(!config.retire_legacy_hub_registration());
+            assert_no_legacy_hub_vocabulary(&toml::to_string(&config).unwrap());
+            assert_eq!(
+                config.violet_env_names(),
+                Some((
+                    Some(VIOLET_DEFAULT_TOKEN_ENV.to_string()),
+                    Some(VIOLET_DEFAULT_BYPASS_ENV.to_string())
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn custom_violet_endpoint_keeps_its_url_and_credential_names() {
+        let source = legacy_violet_registration(VIOLET_SERVER, "https://staging.example/mcp/slack");
+        let mut config: Config = toml::from_str(&source).unwrap();
+        let before = config.clone();
+        assert!(!config.retire_legacy_hub_registration());
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn merged_load_resolves_an_unmigrated_project_file_to_violet_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proxy.toml");
+        let legacy_url = &violet_compatibility().legacy_hub_url;
+        std::fs::write(
+            &project,
+            legacy_violet_registration(VIOLET_SERVER, legacy_url),
+        )
+        .unwrap();
+        let (merged, _) = Config::load_merged_with_sources_from(None, Some(&project)).unwrap();
+        assert_eq!(
+            merged.violet_env_names(),
+            Some((
+                Some(VIOLET_DEFAULT_TOKEN_ENV.to_string()),
+                Some(VIOLET_DEFAULT_BYPASS_ENV.to_string())
+            ))
+        );
+        assert!(matches!(
+            merged.servers.get(VIOLET_SERVER),
+            Some(ServerConfig::Http { url, .. }) if url == violet_hub_url()
+        ));
     }
 
     #[test]

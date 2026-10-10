@@ -76,6 +76,17 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
             "mcp__violet__violet_post",
             json!({"channel":"client-internal","kind":"message","text":"Report attached","deliverable":true,"task_id":"cas-pub-work"}),
         ),
+        // cas-1206 (GH #1154): the 2026-10-09 contract's other file routes.
+        (
+            "mcp__violet__violet_post",
+            json!({"channel":"client-internal","kind":"file_external","step":"complete","epic_id":"cas-pub-epic",
+                "file_id":"F1","filename":"report.pdf","size_bytes":2_000_000,"sha256":"a".repeat(64)}),
+        ),
+        (
+            "mcp__violet__violet_post",
+            json!({"channel":"client-internal","kind":"thread","epic_id":"cas-pub-epic","text":"Report","idempotency_key":"k",
+                "replies":[{"text":"Summary"},{"text":"PDF","files":[{"filename":"report.pdf","content":"JVBERi0=","content_encoding":"base64"}]}]}),
+        ),
     ] {
         let reason = denied(handle_pre_tool_use(&input(tool, args.clone(), dir.path()), Some(&cas)).unwrap())
             .unwrap_or_else(|| panic!("{tool} {args} must be denied"));
@@ -96,6 +107,10 @@ fn ordinary_messages_and_verified_epics_are_allowed_cas_f6ad() {
     // A status message that shares no deliverable is not gated.
     let message = json!({"channel":"client-internal","kind":"message","text":"Working on it","epic_id":"cas-pub-epic"});
     assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", message, dir.path()), Some(&cas)).unwrap()).is_none());
+    // A text-only ordered thread (cas-1206) shares no file either.
+    let thread = json!({"channel":"client-internal","kind":"thread","text":"Status","idempotency_key":"k",
+        "epic_id":"cas-pub-epic","replies":[{"text":"Was → Now"}]});
+    assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", thread, dir.path()), Some(&cas)).unwrap()).is_none());
     // A file post with no epic context has nothing to wait on.
     let unbound = json!({"channel":"client-internal","kind":"file","file":{"filename":"x.txt","content":"x"}});
     assert!(denied(handle_pre_tool_use(&input("mcp__violet__violet_post", unbound, dir.path()), Some(&cas)).unwrap()).is_none());
@@ -131,4 +146,39 @@ fn recorded_operator_override_allows_and_is_logged_cas_f6ad() {
         notes.contains("publication gate overridden") && notes.contains("the client is waiting") && notes.contains("cas-pub-verify"),
         "each overridden post is logged on the epic: {notes}"
     );
+}
+
+#[test]
+fn artifact_post_is_a_gated_deliverable_share_cassy_1148() {
+    let _env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let store = epic_store(dir.path());
+    let cas = dir.path().join(".cas");
+    // The record belongs to a task under the epic; its id is all the call names.
+    let artifacts = cas_store::SqliteArtifactStore::open(&cas).unwrap();
+    artifacts
+        .record_local(&cas_store::NewArtifact {
+            id: "art-gate1148".into(),
+            task_id: "cas-pub-work".into(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size_bytes: 11,
+            sha256: "b".repeat(64),
+        })
+        .unwrap();
+    let post = json!({"action":"post","id":"art-gate1148","channel":"client-internal"});
+    for tool in ["mcp__cas__artifact", "mcp__cs__artifact", "cas_artifact"] {
+        let reason = denied(handle_pre_tool_use(&input(tool, post.clone(), dir.path()), Some(&cas)).unwrap())
+            .unwrap_or_else(|| panic!("{tool} post must be denied while verification is open"));
+        assert!(reason.contains("cas-pub-verify"), "{reason}");
+    }
+    // Publishing or reading an artifact shares nothing.
+    for action in ["publish", "show", "list"] {
+        let args = json!({"action":action,"id":"art-gate1148","task_id":"cas-pub-work"});
+        assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", args, dir.path()), Some(&cas)).unwrap()).is_none());
+    }
+    let mut verify = store.get("cas-pub-verify").unwrap();
+    verify.status = TaskStatus::Closed;
+    store.update(&verify).unwrap();
+    assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", post, dir.path()), Some(&cas)).unwrap()).is_none());
 }

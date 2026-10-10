@@ -223,6 +223,42 @@ const POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15
 
 type ToolResult = Result<rmcp::model::CallToolResult, rmcp::ErrorData>;
 
+/// cas-3b81: the note label carrying a late close's final outcome.
+const LATE_CLOSE_NOTE_MARKER: &str = "CLOSE_OUTCOME";
+
+/// First line of a late close's answer, bounded for a task note.
+fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
+    let text = match joined {
+        Ok(Ok(result)) => {
+            let text = result
+                .content
+                .iter()
+                .find_map(|content| match &content.raw {
+                    rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if result.is_error == Some(true) {
+                format!("refused: {text}")
+            } else {
+                text
+            }
+        }
+        Ok(Err(error)) => format!("error: {}", error.message),
+        Err(error) => format!("handler ended abnormally: {error}"),
+    };
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(no output)");
+    let mut summary: String = line.chars().take(300).collect();
+    if line.chars().count() > 300 {
+        summary.push('…');
+    }
+    summary
+}
+
 /// Post-commit duration of a request, logged when it is long enough to matter
 /// (cas-b1dd): the stage the 55s deadline used to hide.
 fn log_post_commit(tool: &str, receipt: &super::mutation_receipt::Receipt, how: &str) {
@@ -354,22 +390,36 @@ impl CasService {
             Won::Deadline => {
                 let elapsed = start.elapsed();
                 let commit = receipt.commit.get();
-                if commit.is_none() {
-                    // Nothing committed: cancel as before, so an UNKNOWN answer
-                    // is not followed by a late write the caller never sees.
-                    handle.abort();
-                }
                 // cas-24d8: a close commits intermediate writes (a gate note,
                 // a parked anchor) long before its Closed write. Reporting
                 // those as COMMITTED told the supervisor a close was done
                 // while the task was still awaiting_merge. Only the terminal
                 // write makes a close committed; until then it is running.
+                //
+                // cas-3b81 (GH #1142): the same holds when nothing has
+                // committed yet. The close runs on the blocking pool and
+                // cannot be cancelled, so "UNKNOWN" was followed by a late
+                // Closed write or refusal nobody saw. It keeps running, and
+                // its final outcome is recorded on the task as a note.
                 let close_unfinished = tool_name == "task"
                     && receipt.action() == "close"
-                    && commit.is_some()
-                    && receipt.terminal.get().is_none();
-                let outcome = if close_unfinished {
-                    "IN_PROGRESS (the close has not committed: only intermediate writes have, so the task's status is unchanged so far; the close keeps running in the background — re-query with task action=show before retrying)".to_string()
+                    && receipt.terminal.get().is_none()
+                    && receipt.task_id().is_some();
+                if close_unfinished {
+                    self.record_late_close_outcome(handle, receipt.clone(), start, budget);
+                } else if commit.is_none() {
+                    // Nothing committed: cancel as before, so an UNKNOWN answer
+                    // is not followed by a late write the caller never sees.
+                    handle.abort();
+                }
+                let outcome = if close_unfinished && commit.is_some() {
+                    format!(
+                        "IN_PROGRESS (the close has not committed: only intermediate writes have, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
+                    )
+                } else if close_unfinished {
+                    format!(
+                        "IN_PROGRESS (nothing has committed yet, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
+                    )
                 } else {
                     self.mutation_timeout_outcome(tool_name, arguments, commit)
                 };
@@ -462,6 +512,57 @@ impl CasService {
     /// A response-layer timeout cancels the handler, but a synchronous store
     /// write may have committed just before that cancellation. Never leave a
     /// caller guessing whether retrying a mutating request would duplicate it.
+    /// cas-3b81 (GH #1142): a close answered IN_PROGRESS at the response
+    /// deadline keeps running; when it finishes, append its outcome and the
+    /// task's resulting status to the task, so the caller can determine what
+    /// happened with `task action=show` instead of guessing from "UNKNOWN".
+    /// Appending is an atomic SQL append, so it cannot clobber the close's
+    /// own row write.
+    fn record_late_close_outcome(
+        &self,
+        handle: tokio::task::JoinHandle<ToolResult>,
+        receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+        start: std::time::Instant,
+        budget: std::time::Duration,
+    ) {
+        let Some(task_id) = receipt.task_id().map(str::to_string) else {
+            return;
+        };
+        let service = self.clone();
+        tokio::spawn(async move {
+            let joined = handle.await;
+            let elapsed = start.elapsed();
+            let summary = late_close_summary(&joined);
+            let recorded = tokio::task::spawn_blocking(move || {
+                let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
+                let status = store
+                    .get(&task_id)
+                    .map(|task| task.status.to_string())
+                    .unwrap_or_else(|error| format!("unreadable ({error})"));
+                let note = format!(
+                    "[{}] 📝 PROGRESS {LATE_CLOSE_NOTE_MARKER}: a close answered IN_PROGRESS at the {:.0}s response budget finished after {:.1}s; task status now `{status}`. Result: {summary}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    budget.as_secs_f64(),
+                    elapsed.as_secs_f64(),
+                );
+                store
+                    .append_note(&task_id, &note)
+                    .map(|_| task_id.clone())
+                    .map_err(|error| format!("{task_id}: {error}"))
+            })
+            .await;
+            match recorded {
+                Ok(Ok(task_id)) => {
+                    info!(task_id = %task_id, elapsed_ms = elapsed.as_millis() as u64, "MCP late close outcome recorded")
+                }
+                Ok(Err(error)) => warn!(error = %error, "MCP late close outcome not recorded"),
+                Err(error) => {
+                    warn!(error = %error, "MCP late close outcome recorder ended abnormally")
+                }
+            }
+        });
+    }
+
     fn mutation_timeout_outcome(
         &self,
         tool_name: &str,
@@ -799,6 +900,82 @@ mod tests {
         assert!(error.message.contains("IN_PROGRESS"), "{error:?}");
         assert!(!error.message.contains("COMMITTED ("), "{error:?}");
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+    }
+
+    /// cas-3b81 (GH #1142): a close still running at the deadline with
+    /// nothing committed is not "UNKNOWN". It keeps running, the caller is
+    /// told so, and its final outcome lands on the task as a note.
+    #[tokio::test]
+    async fn close_deadline_before_any_write_records_the_late_outcome_cas_3b81() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        tasks
+            .add(&crate::types::Task::new(
+                "cas-late".into(),
+                "slow close".into(),
+            ))
+            .unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({"action":"close", "id":"cas-late"});
+        let close = async {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(rmcp::model::CallToolResult::error(vec![
+                rmcp::model::Content::text(
+                    "⚠️ MERGE REQUIRED\n\ntask close rejected: factory/x has 1 commit(s) from this task not on staging.",
+                ),
+            ]))
+        };
+        let error = service
+            .call_with_deadline(
+                "task",
+                arguments.as_object(),
+                std::time::Duration::from_millis(20),
+                close,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("IN_PROGRESS"), "{error:?}");
+        assert!(error.message.contains("CLOSE_OUTCOME"), "{error:?}");
+        assert!(!error.message.contains("UNKNOWN"), "{error:?}");
+        assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let notes = loop {
+            let notes = tasks.get("cas-late").unwrap().notes;
+            if notes.contains("CLOSE_OUTCOME") {
+                break notes;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "late close outcome never recorded: {notes}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert!(notes.contains("task status now `open`"), "{notes}");
+        assert!(notes.contains("refused: ⚠️ MERGE REQUIRED"), "{notes}");
+        assert_eq!(notes.matches("CLOSE_OUTCOME").count(), 1, "{notes}");
+    }
+
+    #[test]
+    fn late_close_summary_keeps_one_bounded_line_cas_3b81() {
+        let long = format!("Closed task: cas-x - {}\nsecond line", "y".repeat(400));
+        let joined = Ok(Ok(rmcp::model::CallToolResult::success(vec![
+            rmcp::model::Content::text(long),
+        ])));
+        let summary = super::late_close_summary(&joined);
+        assert!(summary.starts_with("Closed task: cas-x"), "{summary}");
+        assert!(!summary.contains("second line"), "{summary}");
+        assert_eq!(summary.chars().count(), 301, "{summary}");
     }
 
     #[tokio::test]

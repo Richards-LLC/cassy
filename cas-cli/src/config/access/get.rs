@@ -43,6 +43,18 @@ impl Config {
                 }
                 .to_string(),
             ),
+            "slack.wake_enabled" => Some(
+                self.slack
+                    .as_ref()
+                    .is_none_or(|slack| slack.wake_enabled())
+                    .to_string(),
+            ),
+            "slack.violet_bot_user_ids" => Some(
+                self.slack
+                    .as_ref()
+                    .map(|slack| slack.violet_bot_user_ids().join(","))
+                    .unwrap_or_default(),
+            ),
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
             "sync.target" => Some(self.sync.target.clone()),

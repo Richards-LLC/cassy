@@ -984,14 +984,47 @@ fn visual_qa_same_bounds(left: [f64; 4], right: [f64; 4]) -> bool {
 /// Compare the same kind of rectangle across report versions. A new textBounds
 /// field must not be compared to an old clipping ancestor's different box.
 fn visual_qa_common_bounds(left: &serde_json::Value, right: &serde_json::Value) -> Option<bool> {
+    visual_qa_bounds_pair(left, right).map(|(left, right)| visual_qa_same_bounds(left, right))
+}
+
+fn visual_qa_bounds_pair(
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+) -> Option<([f64; 4], [f64; 4])> {
     ["textBounds", "box", "ancestorBox"]
         .into_iter()
         .find_map(|field| {
-            Some(visual_qa_same_bounds(
+            Some((
                 visual_qa_finding_bounds(left, field)?,
                 visual_qa_finding_bounds(right, field)?,
             ))
         })
+}
+
+/// Measured defect details the producer records. A translated finding must
+/// carry identical values, so a moved element whose defect changed is new.
+const VISUAL_QA_TRANSLATION_METRICS: [&str; 5] =
+    ["ratio", "threshold", "foreground", "background", "largeText"];
+
+/// cas-5488 (GH #1152): content inserted above an element moves it without
+/// changing it. Pair a pure translation only when the exact DOM path, box
+/// size and measured defect all agree; a renamed or resized element still
+/// needs the strict position match above.
+fn visual_qa_translated_element(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    let selector = visual_qa_selector(left);
+    if selector.is_empty() || selector != visual_qa_selector(right) {
+        return false;
+    }
+    let Some((left_bounds, right_bounds)) = visual_qa_bounds_pair(left, right) else {
+        return false;
+    };
+    let same_size = [2, 3].into_iter().all(|index| {
+        (left_bounds[index] - right_bounds[index]).abs() <= VISUAL_QA_IDENTITY_BOUNDS_TOLERANCE
+    });
+    same_size
+        && VISUAL_QA_TRANSLATION_METRICS
+            .iter()
+            .all(|field| left.get(field) == right.get(field))
 }
 
 fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -> bool {
@@ -1004,7 +1037,8 @@ fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -
         if left_id != right_id {
             return false;
         }
-        return visual_qa_common_bounds(left, right).unwrap_or(true);
+        return visual_qa_common_bounds(left, right).unwrap_or(true)
+            || visual_qa_translated_element(left, right);
     }
     let left_text = visual_qa_finding_text(left, "textSample");
     let right_text = visual_qa_finding_text(right, "textSample");
@@ -1013,7 +1047,7 @@ fn visual_qa_same_element(left: &serde_json::Value, right: &serde_json::Value) -
             return false;
         }
         if let Some(same_bounds) = visual_qa_common_bounds(left, right) {
-            return same_bounds;
+            return same_bounds || visual_qa_translated_element(left, right);
         }
     }
     // Older minimal reports do not identify text or accessible elements. Retain

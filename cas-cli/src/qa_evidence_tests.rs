@@ -2107,6 +2107,48 @@ fn scoped_visual_qa_uses_each_base_finding_once_without_order_bias_cas_f290() {
     );
 }
 
+fn cas_5488_badge(origin: &str, index: usize, y: f64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "contrast", "selector": format!(".error-feed > .badge:nth-of-type({index})"),
+        "textSample": "Error", "textBounds": {"x":24,"y":y,"width":48,"height":16},
+        "ratio": 3.1, "threshold": 4.5, "foreground": [128,128,128], "background": [255,255,255],
+        "url": format!("{origin}/commander/?conversation=1"), "scheme": "light",
+        "viewport": {"name":"phone","width":390,"height":844}
+    })
+}
+
+#[test]
+fn scoped_visual_qa_pairs_translated_badges_cas_5488() {
+    let fx = scoped_fixture();
+    let base: Vec<_> = (1..=20).map(|i| cas_5488_badge(BASE, i, 100.0 + i as f64 * 20.0)).collect();
+    let tip: Vec<_> = (1..=20).map(|i| cas_5488_badge(TIP, i, 639.0 + i as f64 * 20.0)).collect();
+    cas_f290_reports(&fx, serde_json::json!(tip), serde_json::json!(base));
+    fx.validate(&fx.notes()).expect("twenty identical badges translated by 539px are existing findings");
+}
+
+#[test]
+fn scoped_visual_qa_translation_preserves_new_findings_cas_5488() {
+    let fx = scoped_fixture();
+    let base = cas_5488_badge(BASE, 1, 100.0);
+    let tip = cas_5488_badge(TIP, 1, 639.0);
+    for (pointer, value) in [
+        ("/selector", serde_json::json!(".new-badge")),
+        ("/textSample", serde_json::json!("Warning")),
+        ("/type", serde_json::json!("clipped-content")),
+        ("/textBounds/width", serde_json::json!(32)),
+        ("/ratio", serde_json::json!(1.5)),
+        ("/foreground", serde_json::json!([200,200,200])),
+    ] {
+        let mut changed = tip.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        cas_f290_reports(&fx, serde_json::json!([changed]), serde_json::json!([base.clone()]));
+        let refusal = fx.validate(&fx.notes()).unwrap_err();
+        assert!(refusal.problem.contains("introduced 1"), "{pointer}: {refusal:?}");
+    }
+    cas_f290_reports(&fx, serde_json::json!([tip.clone(), tip]), serde_json::json!([base]));
+    assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
+}
+
 /// cas-1ca0: a valid pixel/trace bundle cannot cover a journey it never ran.
 #[test]
 fn cas_1ca0_close_refuses_a_hand_picked_journey_subset() {

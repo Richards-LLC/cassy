@@ -710,6 +710,77 @@ fn merge_into_main(fx: &Fx, commit: &str) {
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
 }
 
+/// GH #1144: park `delivered` at an anchor, ship it in one squash with a
+/// sibling task's `.vue` file, then re-close with the squash as receipt.
+/// Returns the close text and the parked anchor.
+async fn close_against_batch_squash(
+    env: &mut TestEnvGuard,
+    delivered: &[(&str, &str)],
+    status: TaskStatus,
+) -> (Fx, String, String) {
+    let fx = fixture(env, delivered, "");
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = status;
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    tasks.update(&task).unwrap();
+
+    git(&fx.repo, &["checkout", "-q", "-b", "batch/qa"]);
+    commit_file(&fx.repo, "web/SiblingDrawer.vue", "<template>Sibling</template>\n");
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", "batch/qa"]);
+    git(&fx.repo, &["commit", "-q", "-m", &format!("{TASK}: squash integration batch")]);
+    let squash = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+
+    let mut request = close_req(TASK);
+    request.commit_receipt = Some(squash);
+    let text = match fx.core.cas_task_close(Parameters(request)).await {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    };
+    (fx, text, head)
+}
+
+/// GH #1144: the receipt is the batch's squash; the parked anchor still
+/// identifies this task's delivery, including when a failed re-close blocked it.
+#[tokio::test]
+async fn batch_squash_receipt_keeps_docs_only_qa_scope_cas_e5b1() {
+    for status in [TaskStatus::AwaitingMerge, TaskStatus::Blocked] {
+        let mut env = TestEnvGuard::temp_home();
+        let (fx, text, head) =
+            close_against_batch_squash(&mut env, &[("DESIGN.md", "Document the layout\n")], status).await;
+        assert_eq!(fx.status(), TaskStatus::Closed, "{status:?}: {text}");
+        assert_eq!(anchor(&fx).as_deref(), Some(head.as_str()));
+        assert!(!text.contains("SiblingDrawer.vue"), "{status:?}: {text}");
+        assert!(!fx.notes().contains("QA evidence bundle accepted"), "{}", fx.notes());
+        assert!(
+            fx.notes().contains(&format!("QA evidence scoped to delivery anchor {head}")),
+            "{}",
+            fx.notes()
+        );
+    }
+}
+
+/// GH #1144: scoping to the anchor never drops the task's own surface. A
+/// delivery that touches a `.vue` file still needs its bundle, and the refusal
+/// names only that file, not the sibling's.
+#[tokio::test]
+async fn batch_squash_receipt_still_requires_own_ui_bundle_cas_e5b1() {
+    let mut env = TestEnvGuard::temp_home();
+    let (fx, text, _) = close_against_batch_squash(
+        &mut env,
+        &[("web/OwnPanel.vue", "<template>Own</template>\n")],
+        TaskStatus::AwaitingMerge,
+    )
+    .await;
+    assert_ne!(fx.status(), TaskStatus::Closed, "{text}");
+    assert!(text.contains("path:web/OwnPanel.vue"), "{text}");
+    assert!(!text.contains("SiblingDrawer.vue"), "{text}");
+}
+
 /// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the
 /// same lane and commits B's work. A pre-merge retry must not move A's anchor
 /// onto B's commit, and once X merges A's plain re-close judges X — not the

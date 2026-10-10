@@ -221,17 +221,38 @@ impl SyncQueue {
             )?;
         }
 
+        // cas-0e57: this runs on every logged-in task-store open. The repairs
+        // below are write statements, and SQLite takes the write lock for a
+        // write statement even when it changes no row, so an unconditional
+        // repair made every open queue behind (or fail against) whichever
+        // connection held the lock. Check first; repair only what is there.
+        let has_null_team: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE team_id IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        let has_identity_index: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_sync_queue_entity_team_project')",
+            [],
+            |row| row.get(0),
+        )?;
+
         // Normalize any pre-migration NULL team_ids to '' before creating the
         // unique index. In SQLite, NULL != '' under UNIQUE, so a row with
         // team_id=NULL and a subsequent enqueue with team_id='' would create
         // duplicates (defect C / cas-8dd8).
-        conn.execute_batch("UPDATE sync_queue SET team_id = '' WHERE team_id IS NULL;")?;
+        if has_null_team {
+            conn.execute_batch("UPDATE sync_queue SET team_id = '' WHERE team_id IS NULL;")?;
+        }
 
         // Databases created before the identity index could contain several
         // copies of one queue key. Retain the newest row (highest AUTOINCREMENT
         // id, which is the latest enqueue) so its operation and payload are the
         // values that the next push observes. This also makes index creation
-        // safe for a partially migrated database.
+        // safe for a partially migrated database. Once the unique index exists
+        // and no NULL team_id remains, no duplicate key can exist.
+        if has_null_team || !has_identity_index {
         conn.execute_batch(
             r#"
             DELETE FROM sync_queue
@@ -242,6 +263,7 @@ impl SyncQueue {
             );
             "#,
         )?;
+        }
 
         conn.execute_batch(
             r#"

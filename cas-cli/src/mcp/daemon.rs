@@ -266,6 +266,7 @@ pub(crate) fn register_session_start_agent(
     agent.status = AgentStatus::Active;
     agent.pid = Some(cc_pid);
     agent.ppid = None;
+    agent.metadata.remove(PPID_STARTTIME_KEY);
     agent.cc_session_id = Some(session_id.to_string());
     stamp_pid_fingerprint(&mut agent, cc_pid);
     agent.machine_id = Some(Agent::get_or_generate_machine_id());
@@ -1982,6 +1983,33 @@ pub(crate) fn pid_alive(_pid: u32) -> bool {
 /// (EPIC cas-9508 / cas-ea46). All writers and readers must use this constant
 /// so a typo on one side cannot silently disable the liveness gate.
 pub(crate) const PID_STARTTIME_KEY: &str = "pid_starttime";
+
+/// Metadata key holding the start-time fingerprint of the harness that
+/// spawned an eagerly registering `cas serve` (the row's `ppid`).
+///
+/// cas-2a49 (GH #1143): such a row records the MCP child as `pid`. The child
+/// can exit and be restarted while the harness keeps running; Claude Code
+/// restarts a server that rejected its pre-initialize probe. A fingerprinted
+/// live parent is the harness itself, so liveness checks consult it before
+/// they declare the worker dead.
+pub(crate) const PPID_STARTTIME_KEY: &str = "ppid_starttime";
+
+/// Record [`PPID_STARTTIME_KEY`] for `ppid`, but only when that parent is
+/// recognisably a harness process. A reparenting target (init, launchd, a
+/// subreaper) must never vouch for a worker. An existing fingerprint is
+/// cleared first, so a rebound row cannot keep a previous parent's
+/// fingerprint.
+pub(crate) fn stamp_harness_parent_fingerprint(agent: &mut crate::types::Agent, ppid: u32) {
+    agent.metadata.remove(PPID_STARTTIME_KEY);
+    if ppid <= 1 || !crate::agent_id::is_harness_process(ppid) {
+        return;
+    }
+    if let Some(starttime) = read_pid_starttime(ppid) {
+        agent
+            .metadata
+            .insert(PPID_STARTTIME_KEY.to_string(), starttime.to_string());
+    }
+}
 
 /// Outcome of the daemon's agent-liveness evaluation (EPIC cas-9508 / cas-5b1c).
 ///

@@ -39,8 +39,8 @@ use url::Url;
 
 use cmcp_core::config::{
     Config as ProxyConfig, ExternalToolConfig, ServerConfig, VIOLET_BYPASS_HEADER,
-    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_SERVER, VIOLET_TOOLS, violet_compatibility,
-    violet_credential_value, violet_hub_url,
+    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_SERVER, VIOLET_TOOLS, canonical_violet_credential_name,
+    violet_compatibility, violet_credential_value, violet_hub_url,
 };
 
 use crate::cloud::{CloudConfig, DeviceConfig};
@@ -191,8 +191,15 @@ impl EnvState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "result", rename_all = "kebab-case")]
 pub enum ProbeOutcome {
-    /// The hub answered with this exact tool list.
-    Tools { tools: Vec<String> },
+    /// The hub answered with this exact tool list. `schema_problems` names
+    /// every way the served `violet_post` input schema would be dropped or
+    /// misread by a harness (see [`violet_post_schema_problems`]); empty when
+    /// the schema is usable or the hub did not offer `violet_post`.
+    Tools {
+        tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        schema_problems: Vec<String>,
+    },
     /// HTTP 401. Reported with header state only, never a value.
     Unauthorized,
     /// Any other transport failure, carrying the proxy's error code.
@@ -204,6 +211,65 @@ pub enum ProbeOutcome {
 /// An authenticated `tools/list` against the hub.
 pub trait HubProbe {
     fn list_tools(&self, server: &ServerConfig) -> ProbeOutcome;
+}
+
+/// The hub tool whose input schema is checked by [`violet_post_schema_problems`].
+pub const VIOLET_POST_TOOL: &str = "violet_post";
+
+/// `kind` values every `violet_post` schema must offer. Without `edit` and
+/// `delete`, agents send `kind=message` with a `message_id`, the hub rejects
+/// it, and they conclude a post cannot be changed (GH #1051).
+pub const VIOLET_POST_REQUIRED_KINDS: [&str; 5] = ["message", "file", "reaction", "edit", "delete"];
+
+/// Name every way a served `violet_post` input schema would be dropped or
+/// misread by a harness; empty means usable.
+///
+/// Claude Code and Codex register the hub as a direct HTTP MCP server, so
+/// this schema reaches agents with no Cassy layer in between (cas-96c0).
+/// Claude Code drops a tool whose schema has a top-level `anyOf`, `oneOf` or
+/// `allOf`, which is how `violet_post` vanished from Claude sessions until
+/// violet_ps#26. A missing `kind` enum, or one without `edit`/`delete`, is
+/// how agents came to believe edits were impossible.
+pub fn violet_post_schema_problems(schema: &serde_json::Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let Some(root) = schema.as_object() else {
+        return vec!["input schema is not a JSON object".to_string()];
+    };
+    if root.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        problems.push("input schema root is not type=object".to_string());
+    }
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        if root.contains_key(combinator) {
+            problems.push(format!(
+                "input schema has a top-level {combinator}, so Claude Code drops the tool"
+            ));
+        }
+    }
+    let kinds: Option<Vec<&str>> = root
+        .get("properties")
+        .and_then(|properties| properties.get("kind"))
+        .and_then(|kind| kind.get("enum"))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        });
+    match kinds {
+        None => problems.push("properties.kind is not an enum".to_string()),
+        Some(kinds) => {
+            let missing: Vec<&str> = VIOLET_POST_REQUIRED_KINDS
+                .iter()
+                .copied()
+                .filter(|required| !kinds.contains(required))
+                .collect();
+            if !missing.is_empty() {
+                problems.push(format!("kind enum lacks {}", missing.join(", ")));
+            }
+        }
+    }
+    problems
 }
 
 /// Live probe: passes the effective server unchanged to the proxy, which
@@ -247,11 +313,17 @@ impl HubProbe for ProxyHubProbe {
             let outcome = match record {
                 Some(server) if server.state == cmcp_core::UpstreamState::Healthy => {
                     let catalog = engine.catalog_entries_by_server().await;
-                    let tools = catalog
-                        .get(VIOLET_SERVER)
-                        .map(|entries| entries.iter().map(|e| e.name.clone()).collect())
+                    let entries = catalog.get(VIOLET_SERVER).map(Vec::as_slice).unwrap_or(&[]);
+                    let tools = entries.iter().map(|e| e.name.clone()).collect();
+                    let schema_problems = entries
+                        .iter()
+                        .find(|e| e.name == VIOLET_POST_TOOL)
+                        .map(|e| violet_post_schema_problems(&e.input_schema))
                         .unwrap_or_default();
-                    ProbeOutcome::Tools { tools }
+                    ProbeOutcome::Tools {
+                        tools,
+                        schema_problems,
+                    }
                 }
                 Some(server) => match server.last_error_code.as_deref() {
                     Some("authentication_required") => ProbeOutcome::Unauthorized,
@@ -908,6 +980,70 @@ fn write_credentials(
     Ok(changed)
 }
 
+/// Rename installed-machine keys in the credentials file to their canonical
+/// `VIOLET_*` names, keeping each line's value text and position. A legacy
+/// line whose canonical name already holds a value is dropped; an empty
+/// canonical line yields to the legacy value it would otherwise have fallen
+/// back to. Returns the canonical names that changed. Idempotent; values never
+/// leave this function.
+fn rename_legacy_credentials(path: &Path, dry_run: bool) -> Result<Vec<String>> {
+    if !ifs::is_regular_file(path) {
+        return Ok(Vec::new());
+    }
+    let existing = ifs::read_capped(path)?;
+    let renames: std::collections::BTreeMap<&str, String> = existing
+        .lines()
+        .filter_map(assignment_name)
+        .filter_map(|name| {
+            let canonical = canonical_violet_credential_name(name);
+            (canonical != name).then_some((name, canonical))
+        })
+        .collect();
+    if renames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let canonical_with_value: std::collections::BTreeSet<String> = existing
+        .lines()
+        .filter_map(assignment_value)
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(name, _)| name)
+        .collect();
+    let mut renamed = std::collections::BTreeSet::new();
+    let mut lines = Vec::new();
+    for line in existing.lines() {
+        match assignment_name(line) {
+            Some(name) if renames.contains_key(name) => {
+                let canonical = &renames[name];
+                renamed.insert(canonical.clone());
+                if canonical_with_value.contains(canonical) {
+                    continue;
+                }
+                let at = line.find(name).expect("assignment name occurs in its line");
+                lines.push(format!(
+                    "{}{canonical}{}",
+                    &line[..at],
+                    &line[at + name.len()..]
+                ));
+            }
+            Some(name)
+                if renames.values().any(|canonical| canonical == name)
+                    && !canonical_with_value.contains(name) =>
+            {
+                // An empty canonical assignment would shadow the renamed value.
+            }
+            _ => lines.push(line.to_string()),
+        }
+    }
+    let mut rendered = lines.join("\n");
+    if existing.ends_with('\n') {
+        rendered.push('\n');
+    }
+    if !dry_run && rendered != existing {
+        write_private_file(path, &rendered)?;
+    }
+    Ok(renamed.into_iter().collect())
+}
+
 fn profile_source_line(credentials: &Path) -> String {
     let path = shell_quote(&credentials.to_string_lossy());
     format!("[ -f '{path}' ] && . '{path}'")
@@ -1053,6 +1189,18 @@ fn load_machine_credentials_with_installer(
     Ok(loaded)
 }
 
+/// cas-e753: the machine credentials a long-running process may need after
+/// startup, returned as values rather than installed into its environment.
+/// Names already set in the environment are omitted, as for startup loading.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn machine_credential_values() -> Result<std::collections::BTreeMap<String, String>> {
+    let mut values = std::collections::BTreeMap::new();
+    load_machine_credentials_with_installer(&[], |name, value| {
+        values.insert(name.to_string(), value.to_string());
+    })?;
+    Ok(values)
+}
+
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
@@ -1112,6 +1260,10 @@ pub struct VioletReport {
     pub registration: WriteState,
     pub credentials_path: PathBuf,
     pub credentials: WriteState,
+    /// Canonical names whose installed-machine keys this run renamed in the
+    /// credentials file. Names only; values are never reported.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renamed_credentials: Vec<String>,
     pub login_profile_path: Option<PathBuf>,
     pub login_profile: WriteState,
     /// Routes that will actually be admitted from here. A project
@@ -1138,8 +1290,9 @@ impl VioletReport {
     }
 
     /// Green means: effective credential references usable, registration on disk, and
-    /// the hub answered with exactly the allowlisted tools. A skipped probe is
-    /// deliberately *not* green — an unverified setup has never been proven.
+    /// the hub answered with exactly the allowlisted tools and a usable
+    /// `violet_post` schema. A skipped probe is deliberately *not* green — an
+    /// unverified setup has never been proven.
     pub fn is_green(&self) -> bool {
         self.credentials_ready()
             && matches!(
@@ -1147,7 +1300,7 @@ impl VioletReport {
                 WriteState::Written | WriteState::AlreadyCurrent
             )
             && self.drift.is_empty()
-            && matches!(&self.probe, ProbeOutcome::Tools { .. })
+            && matches!(&self.probe, ProbeOutcome::Tools { schema_problems, .. } if schema_problems.is_empty())
     }
 }
 
@@ -1586,6 +1739,10 @@ fn run_with_credentials(
         .map(profile_write_path)
         .transpose()?;
 
+    // Rename before writing so a provisioned value replaces the renamed line
+    // instead of leaving a legacy duplicate behind.
+    let renamed_credentials = rename_legacy_credentials(&paths.credentials_file, args.dry_run)
+        .with_context(|| format!("renaming keys in {}", paths.credentials_file.display()))?;
     let (credentials_state, profile_state) = match credentials {
         Some(_values) if args.dry_run => (WriteState::Planned, WriteState::Planned),
         Some(values) => {
@@ -1617,6 +1774,16 @@ fn run_with_credentials(
             (credentials_state, profile_state)
         }
         None => (WriteState::Skipped, WriteState::Skipped),
+    };
+    let credentials_state = match credentials_state {
+        WriteState::Skipped | WriteState::AlreadyCurrent if !renamed_credentials.is_empty() => {
+            if args.dry_run {
+                WriteState::Planned
+            } else {
+                WriteState::Written
+            }
+        }
+        state => state,
     };
 
     // The registration is written even when a variable is missing: it names
@@ -1738,7 +1905,7 @@ fn run_with_credentials(
         &paths.user_proxy,
     );
     let (drift, drift_message) = match &probe_outcome {
-        ProbeOutcome::Tools { tools } => {
+        ProbeOutcome::Tools { tools, .. } => {
             let drift = tool_drift(&allowlist, tools);
             let message =
                 (!drift.is_empty()).then(|| drift.describe(tools, &allowlist, Some(source)));
@@ -1785,6 +1952,7 @@ fn run_with_credentials(
         registration,
         credentials_path: paths.credentials_file.clone(),
         credentials: credentials_state,
+        renamed_credentials,
         login_profile_path,
         login_profile: profile_state,
         allowlist,
@@ -1810,6 +1978,9 @@ fn build_remedy(
         return Some(drift);
     }
     match probe {
+        ProbeOutcome::Tools {
+            schema_problems, ..
+        } if !schema_problems.is_empty() => Some(schema_problem_remedy(schema_problems)),
         ProbeOutcome::Unauthorized => Some(format!(
             "The hub rejected this machine's bearer (HTTP 401; Authorization: Bearer <set>). \
              Confirm `cas login`, then run `cas integrate violet` again."
@@ -1820,6 +1991,16 @@ fn build_remedy(
         )),
         _ => None,
     }
+}
+
+/// The hub, not Cassy, owns the `violet_post` schema: harnesses receive it
+/// directly, so the only remedy is a hub fix.
+fn schema_problem_remedy(problems: &[String]) -> String {
+    format!(
+        "The hub serves an unusable {VIOLET_POST_TOOL} schema: {}. Harnesses receive it \
+         directly from the hub, so report it in Richards-LLC/violet_ps (see violet_ps#26).",
+        problems.join("; ")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2117,13 +2298,28 @@ pub fn doctor_row(
         .join(", ");
 
     match probe.list_tools(server) {
-        ProbeOutcome::Tools { tools } => {
+        ProbeOutcome::Tools {
+            tools,
+            schema_problems,
+        } => {
             let drift = tool_drift(&allowlist, &tools);
-            if drift.is_empty() {
+            if !schema_problems.is_empty() {
+                // Claude Code drops a tool it cannot read, so a broken schema
+                // is an outage for every Claude session even though the
+                // tool list itself looks right.
+                DoctorRow {
+                    severity: DoctorSeverity::Error,
+                    message: format!(
+                        "hub {endpoint}: {}",
+                        schema_problem_remedy(&schema_problems)
+                    ),
+                }
+            } else if drift.is_empty() {
                 DoctorRow {
                     severity: DoctorSeverity::Ok,
                     message: format!(
-                        "registered ({credentials}); hub {endpoint} answered with {} tool(s): {}",
+                        "registered ({credentials}); hub {endpoint} reachable and bearer accepted, \
+                         answered with {} tool(s): {}; `cas violet post|thread|read` ready",
                         tools.len(),
                         tools.join(", ")
                     ),
@@ -2155,14 +2351,15 @@ pub fn doctor_row(
         ProbeOutcome::Unauthorized => DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "hub {endpoint} rejected this machine (HTTP 401; Authorization: Bearer <set>). Confirm \
-                 `cas login`, then run `cas integrate violet`"
+                "hub {endpoint} rejected this machine (HTTP 401 invalid_token; Authorization: Bearer \
+                 <set>): the bearer is bad, so `cas violet` cannot post. Confirm `cas login`, then run \
+                 `cas integrate violet`"
             ),
         },
         ProbeOutcome::Unreachable { code } => DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
-                "registered, but {} (hub: {endpoint}); run `cas integrate violet` once connectivity is back",
+                "registered, but {} (hub: {endpoint}), so `cas violet` cannot reach it; run `cas integrate violet` once connectivity is back",
                 probe_failure_detail(&code)
             ),
         },
@@ -2202,9 +2399,25 @@ fn project_proxy_path() -> Option<PathBuf> {
     ifs::is_regular_file(&path).then_some(path)
 }
 
-/// A default integration refresh keeps this machine's credential references.
-/// Explicit --label/--token-env select a new registration intentionally.
+/// A default integration refresh keeps this machine's credential references,
+/// spelled with their canonical `VIOLET_*` names: the same run renames the
+/// credentials-file keys they expand from. Explicit --label/--token-env select
+/// a new registration intentionally.
 fn existing_machine_env_names(paths: &MachinePaths, url: &str) -> Result<Option<(String, String)>> {
+    Ok(
+        registered_machine_env_names(paths, url)?.map(|(token, bypass)| {
+            (
+                canonical_violet_credential_name(&token),
+                canonical_violet_credential_name(&bypass),
+            )
+        }),
+    )
+}
+
+fn registered_machine_env_names(
+    paths: &MachinePaths,
+    url: &str,
+) -> Result<Option<(String, String)>> {
     let mut config = ProxyConfig::load_from(&paths.user_proxy)?;
     config.retire_legacy_hub_registration();
     if config
@@ -2368,9 +2581,17 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
             .join(", ")
     ));
     outcome.summary.push(format!(
-        "credentials file: {} ({})",
+        "credentials file: {} ({}){}",
         report.credentials.as_str(),
-        report.credentials_path.display()
+        report.credentials_path.display(),
+        if report.renamed_credentials.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; keys renamed to {}",
+                report.renamed_credentials.join(", ")
+            )
+        }
     ));
     if let Some(profile) = &report.login_profile_path {
         outcome.summary.push(format!(
@@ -2408,11 +2629,22 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
         ));
     }
     match &report.probe {
-        ProbeOutcome::Tools { tools } => outcome.summary.push(format!(
-            "authenticated tools/list: {} tool(s): {}",
-            tools.len(),
-            tools.join(", ")
-        )),
+        ProbeOutcome::Tools {
+            tools,
+            schema_problems,
+        } => {
+            outcome.summary.push(format!(
+                "authenticated tools/list: {} tool(s): {}",
+                tools.len(),
+                tools.join(", ")
+            ));
+            if !schema_problems.is_empty() {
+                outcome.summary.push(format!(
+                    "{VIOLET_POST_TOOL} schema: {}",
+                    schema_problems.join("; ")
+                ));
+            }
+        }
         ProbeOutcome::Unauthorized => outcome.summary.push(
             "authenticated tools/list: refused (HTTP 401; Authorization: Bearer <set>)".to_string(),
         ),
@@ -2793,6 +3025,7 @@ mod tests {
     fn live_tools() -> ProbeOutcome {
         ProbeOutcome::Tools {
             tools: VIOLET_TOOLS.iter().map(|t| t.to_string()).collect(),
+            schema_problems: Vec::new(),
         }
     }
 
@@ -2971,17 +3204,20 @@ auth = "env:{token}"
     }
 
     #[test]
-    fn default_refresh_keeps_installed_machine_credential_references() {
+    fn default_refresh_keeps_installed_machine_credentials_under_violet_names() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let c = violet_compatibility();
         let token = format!("{}_LAPTOP", c.legacy_token_prefix);
-        let expected = Some((token.clone(), c.legacy_bypass_env.clone()));
+        let expected = Some((
+            "VIOLET_SLACK_TOKEN_LAPTOP".to_string(),
+            VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+        ));
         let mut config = ProxyConfig::default();
         config.add_server(
             c.retired_server.clone(),
             ServerConfig::Http {
-                url: violet_hub_url().to_owned(),
+                url: c.legacy_hub_url.clone(),
                 auth: Some(format!("env:{token}")),
                 headers: HashMap::from([(
                     VIOLET_BYPASS_HEADER.into(),
@@ -2998,7 +3234,7 @@ auth = "env:{token}"
         std::fs::remove_file(&paths.user_proxy).unwrap();
         let path = paths.claude_json.as_deref().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_json::json!({"mcpServers":{(c.retired_server.as_str()):{"url":violet_hub_url(),"headers":{"Authorization":format!("Bearer ${{{token}}}"), VIOLET_BYPASS_HEADER:format!("${{{}}}",c.legacy_bypass_env)}}}}).to_string()).unwrap();
+        std::fs::write(path, serde_json::json!({"mcpServers":{(c.retired_server.as_str()):{"url":c.legacy_hub_url,"headers":{"Authorization":format!("Bearer ${{{token}}}"), VIOLET_BYPASS_HEADER:format!("${{{}}}",c.legacy_bypass_env)}}}}).to_string()).unwrap();
         assert_eq!(
             existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
             expected
@@ -3006,7 +3242,7 @@ auth = "env:{token}"
         std::fs::remove_file(path).unwrap();
         let path = paths.codex_config.as_deref().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = {:?}\nenv_http_headers = {{ {} = {:?} }}\n", c.retired_server, violet_hub_url(), token, VIOLET_BYPASS_HEADER, c.legacy_bypass_env)).unwrap();
+        std::fs::write(path, format!("[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = {:?}\nenv_http_headers = {{ {} = {:?} }}\n", c.retired_server, c.legacy_hub_url, token, VIOLET_BYPASS_HEADER, c.legacy_bypass_env)).unwrap();
         assert_eq!(
             existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
             expected
@@ -3016,6 +3252,264 @@ auth = "env:{token}"
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn legacy_credentials_file(paths: &MachinePaths, keep: &str) -> String {
+        let c = violet_compatibility();
+        let text = format!(
+            "# machine secrets\nexport KEEP='unrelated'\n{keep}export {}_LAPTOP='{FAKE_TOKEN}'\nexport {}='{FAKE_BYPASS}'\n",
+            c.legacy_token_prefix, c.legacy_bypass_env
+        );
+        std::fs::create_dir_all(paths.credentials_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.credentials_file, &text).unwrap();
+        text
+    }
+
+    #[test]
+    fn integrate_renames_legacy_credential_keys_idempotently_without_reporting_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        legacy_credentials_file(&paths, "");
+        let args = VioletArgs {
+            no_harness: true,
+            ..test_args()
+        };
+        let report = run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        assert_eq!(
+            report.renamed_credentials,
+            ["VIOLET_SLACK_TOKEN_LAPTOP", VIOLET_DEFAULT_BYPASS_ENV]
+        );
+        assert_eq!(report.credentials, WriteState::Written);
+        let renamed = std::fs::read_to_string(&paths.credentials_file).unwrap();
+        assert_eq!(
+            renamed,
+            format!(
+                "# machine secrets\nexport KEEP='unrelated'\nexport VIOLET_SLACK_TOKEN_LAPTOP='{FAKE_TOKEN}'\nexport VIOLET_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            )
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&paths.credentials_file)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        for rendered in [
+            serde_json::to_string(&report).unwrap(),
+            format!("{report:?}"),
+        ] {
+            assert!(
+                !contains_any(&rendered, &[FAKE_TOKEN, FAKE_BYPASS]),
+                "{rendered}"
+            );
+        }
+
+        let again = run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
+        assert!(again.renamed_credentials.is_empty());
+        assert_eq!(again.credentials, WriteState::Skipped);
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            renamed
+        );
+        assert!(
+            !serde_json::to_string(&again)
+                .unwrap()
+                .contains("renamed_credentials")
+        );
+    }
+
+    #[test]
+    fn credential_rename_resolves_both_generations_and_dry_run_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        // A populated canonical key wins; the legacy duplicate is dropped.
+        legacy_credentials_file(&paths, "export VIOLET_SLACK_TOKEN_LAPTOP='newer'\n");
+        assert_eq!(
+            rename_legacy_credentials(&paths.credentials_file, false).unwrap(),
+            ["VIOLET_SLACK_TOKEN_LAPTOP", VIOLET_DEFAULT_BYPASS_ENV]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            format!(
+                "# machine secrets\nexport KEEP='unrelated'\nexport VIOLET_SLACK_TOKEN_LAPTOP='newer'\nexport VIOLET_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            )
+        );
+        assert!(
+            rename_legacy_credentials(&paths.credentials_file, false)
+                .unwrap()
+                .is_empty()
+        );
+
+        // An empty canonical key would shadow the value it falls back to.
+        legacy_credentials_file(&paths, "export VIOLET_SLACK_TOKEN_LAPTOP=''\n");
+        rename_legacy_credentials(&paths.credentials_file, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            format!(
+                "# machine secrets\nexport KEEP='unrelated'\nexport VIOLET_SLACK_TOKEN_LAPTOP='{FAKE_TOKEN}'\nexport VIOLET_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            )
+        );
+
+        let original = legacy_credentials_file(&paths, "");
+        assert_eq!(
+            rename_legacy_credentials(&paths.credentials_file, true)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.credentials_file).unwrap(),
+            original
+        );
+        std::fs::remove_file(&paths.credentials_file).unwrap();
+        assert!(
+            rename_legacy_credentials(&paths.credentials_file, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn integrate_moves_an_installed_project_registration_to_violet_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let c = violet_compatibility();
+        let legacy = duplicate_server_block()
+            .replace(violet_hub_url(), &c.legacy_hub_url)
+            .replace(
+                TEST_TOKEN_ENV,
+                &cmcp_core::config::violet_credential_names(TEST_TOKEN_ENV)[1],
+            )
+            .replace(
+                &format!("env:{VIOLET_DEFAULT_BYPASS_ENV}"),
+                &format!("env:{}", c.legacy_bypass_env),
+            );
+        let project = write_project_proxy(
+            dir.path(),
+            &format!("allowlist = [\"violet.violet_read\", \"violet.violet_post\"]\n\n{legacy}"),
+        );
+        let args = VioletArgs {
+            no_harness: true,
+            ..test_args()
+        };
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
+        assert!(report.is_green(), "{report:?}");
+        assert_eq!(report.url, "https://violet-hub.vercel.app/mcp/slack");
+        let project_raw = std::fs::read_to_string(&project).unwrap();
+        assert!(
+            !project_raw.contains("[servers.violet]"),
+            "identical to the machine registration once migrated: {project_raw}"
+        );
+        let machine = std::fs::read_to_string(&paths.user_proxy).unwrap();
+        assert!(
+            machine.contains("url = \"https://violet-hub.vercel.app/mcp/slack\""),
+            "{machine}"
+        );
+        assert!(machine.contains(&format!("auth = \"env:{TEST_TOKEN_ENV}\"")));
+        assert!(machine.contains(&format!("\"env:{VIOLET_DEFAULT_BYPASS_ENV}\"")));
+        for text in [&project_raw, &machine] {
+            for legacy in [
+                c.legacy_hub_url.as_str(),
+                c.legacy_token_prefix.as_str(),
+                c.legacy_bypass_env.as_str(),
+            ] {
+                assert!(!text.contains(legacy), "{legacy} survived:\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_and_violet_skill_carry_no_retired_hub_vocabulary() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let c = violet_compatibility();
+        let legacy_token = cmcp_core::config::violet_credential_names(TEST_TOKEN_ENV)[1].clone();
+        // An installed machine: former hostname, legacy names in the file and
+        // in the environment.
+        let mut config = ProxyConfig::default();
+        config.ensure_violet_registration(
+            violet_hub_url(),
+            TEST_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
+        );
+        config.add_server(
+            VIOLET_SERVER.to_string(),
+            ServerConfig::Http {
+                url: c.legacy_hub_url.clone(),
+                auth: Some(format!("env:{legacy_token}")),
+                headers: HashMap::from([(
+                    VIOLET_BYPASS_HEADER.into(),
+                    format!("env:{}", c.legacy_bypass_env),
+                )]),
+                oauth: false,
+            },
+        );
+        config.save_to(&paths.user_proxy).unwrap();
+        let env = FakeEnv::with(&[
+            (legacy_token.as_str(), FAKE_TOKEN),
+            (c.legacy_bypass_env.as_str(), FAKE_BYPASS),
+        ]);
+        let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
+        assert!(row.message.contains(violet_hub_url()), "{row:?}");
+        assert!(
+            row.message.contains(&format!("{TEST_TOKEN_ENV} set")),
+            "{row:?}"
+        );
+
+        let mut texts = vec![("doctor row", row.message)];
+        for (path, text) in [
+            (
+                "SKILL.md",
+                include_str!("../../builtins/skills/violet/SKILL.md"),
+            ),
+            (
+                "references/attachments.md",
+                include_str!("../../builtins/skills/violet/references/attachments.md"),
+            ),
+            (
+                "references/contract.md",
+                include_str!("../../builtins/skills/violet/references/contract.md"),
+            ),
+            (
+                "references/publication.md",
+                include_str!("../../builtins/skills/violet/references/publication.md"),
+            ),
+            (
+                "references/registration.md",
+                include_str!("../../builtins/skills/violet/references/registration.md"),
+            ),
+        ] {
+            texts.push((path, text.to_string()));
+        }
+        for (source, text) in texts {
+            let lower = text.to_ascii_lowercase();
+            for legacy in [
+                c.legacy_hub_url.as_str(),
+                c.retired_server.as_str(),
+                c.legacy_token_prefix.as_str(),
+                c.legacy_bypass_env.as_str(),
+                c.retired_tools[0].as_str(),
+                c.retired_tools[1].as_str(),
+            ] {
+                assert!(
+                    !lower.contains(&legacy.to_ascii_lowercase()),
+                    "{source} names {legacy}"
+                );
+            }
+        }
     }
 
     fn test_args() -> VioletArgs {
@@ -3303,7 +3797,8 @@ auth = "env:{token}"
         assert_eq!(
             report.probe,
             ProbeOutcome::Tools {
-                tools: vec!["violet_read".to_string(), "violet_post".to_string()]
+                tools: vec!["violet_read".to_string(), "violet_post".to_string()],
+                schema_problems: Vec::new(),
             }
         );
         assert!(
@@ -3638,6 +4133,9 @@ auth = "env:{token}"
         let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
         assert!(row.message.contains("violet_read"), "{row:?}");
+        // GH #1157: the row states `cas violet` readiness, not just registration.
+        assert!(row.message.contains("reachable and bearer accepted"), "{row:?}");
+        assert!(row.message.contains("`cas violet post|thread|read` ready"), "{row:?}");
         assert!(!row.message.contains(FAKE_TOKEN));
     }
 
@@ -3711,11 +4209,118 @@ auth = "env:{token}"
             &env,
             &FakeProbe(ProbeOutcome::Tools {
                 tools: vec!["violet_read".to_string(), "violet_broadcast".to_string()],
+                schema_problems: Vec::new(),
             }),
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("violet_broadcast"), "{row:?}");
         assert!(row.message.contains("cas integrate violet"), "{row:?}");
+    }
+
+    /// The `violet_post` input schema both Claude Code and Codex received from
+    /// the hub on 2026-10-09, after violet_ps#26 (cas-96c0).
+    fn served_violet_post_schema() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/violet/violet_post_input_schema_20261009.json"
+        ))
+        .unwrap()
+    }
+
+    /// The shape the hub served before violet_ps#26: one top-level `anyOf`
+    /// branch per kind and no root `properties`. Claude Code dropped the
+    /// tool, and Codex agents read it as "kind is always message" (GH #1051).
+    fn pre_fix_any_of_violet_post_schema() -> serde_json::Value {
+        let branch = |kind: &str, required: &[&str]| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "kind": {"const": kind},
+                    "message_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": required,
+            })
+        };
+        serde_json::json!({
+            "type": "object",
+            "anyOf": [
+                branch("message", &["channel", "kind", "text"]),
+                branch("file", &["channel", "kind"]),
+                branch("reaction", &["channel", "kind", "message_id"]),
+                branch("edit", &["channel", "kind", "message_id", "text"]),
+                branch("delete", &["channel", "kind", "message_id"]),
+            ],
+        })
+    }
+
+    #[test]
+    fn served_violet_post_schema_is_object_root_with_edit_and_delete_kinds() {
+        let schema = served_violet_post_schema();
+        assert_eq!(violet_post_schema_problems(&schema), Vec::<String>::new());
+        // Pin the corrective guidance agents read when they try to edit with
+        // kind=message (GH #1051).
+        let message_id = schema["properties"]["message_id"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(message_id.contains("kind=edit"), "{message_id}");
+        let kind = schema["properties"]["kind"]["description"]
+            .as_str()
+            .unwrap();
+        for shape in ["edit: message_id, text", "delete: message_id"] {
+            assert!(kind.contains(shape), "{kind}");
+        }
+    }
+
+    #[test]
+    fn pre_fix_any_of_violet_post_schema_is_reported() {
+        let problems = violet_post_schema_problems(&pre_fix_any_of_violet_post_schema());
+        assert!(
+            problems.iter().any(|p| p.contains("top-level anyOf")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("kind is not an enum")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn violet_post_schema_without_edit_and_delete_kinds_is_reported() {
+        let mut schema = served_violet_post_schema();
+        schema["properties"]["kind"]["enum"] = serde_json::json!(["message", "file", "reaction"]);
+        assert_eq!(
+            violet_post_schema_problems(&schema),
+            vec!["kind enum lacks edit, delete".to_string()]
+        );
+    }
+
+    #[test]
+    fn doctor_and_receipt_are_red_when_the_hub_serves_an_unusable_violet_post_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let env = ready_env();
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: violet_hub_url().to_string(),
+            no_harness: true,
+            ..test_args()
+        };
+        let broken = ProbeOutcome::Tools {
+            tools: VIOLET_TOOLS.iter().map(|t| t.to_string()).collect(),
+            schema_problems: violet_post_schema_problems(&pre_fix_any_of_violet_post_schema()),
+        };
+
+        let report = run(&args, None, &paths, &env, &FakeProbe(broken.clone())).unwrap();
+        assert!(!report.is_green(), "{report:?}");
+        let remedy = report.remedy.as_deref().unwrap();
+        assert!(remedy.contains("violet_ps"), "{remedy}");
+        assert!(remedy.contains("top-level anyOf"), "{remedy}");
+
+        let row = doctor_row(None, &paths, &env, &FakeProbe(broken));
+        assert_eq!(row.severity, DoctorSeverity::Error, "{row:?}");
+        assert!(row.message.contains("violet_post"), "{row:?}");
+        assert!(row.message.contains("top-level anyOf"), "{row:?}");
     }
 
     /// A machine whose project file still lists the retired `slack_*` names
@@ -4212,6 +4817,9 @@ auth = "env:{token}"
         let row = doctor_row(None, &paths, &env, &FakeProbe(ProbeOutcome::Unauthorized));
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("401"), "{row:?}");
+        assert!(row.message.contains("invalid_token"), "{row:?}");
+        assert!(row.message.contains("the bearer is bad"), "{row:?}");
+        assert!(row.message.contains("`cas violet` cannot post"), "{row:?}");
         assert!(!row.message.contains(FAKE_TOKEN));
     }
 }

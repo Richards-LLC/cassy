@@ -7,10 +7,10 @@ the edge.
 Both values live in the machine's credentials file as
 `VIOLET_SLACK_TOKEN_<LABEL>` and `VIOLET_VERCEL_BYPASS` and are exported into the
 environment by the login shell. Configurations below name those variables and
-never hold their values. `cas integrate violet` prefers `VIOLET_*` names and
-falls back to the corresponding legacy variables on existing machines;
-retain whichever env names
-the integration receipt selects.
+never hold their values. `cas integrate violet` renames an existing machine's
+legacy credential keys to these names and rewrites its registrations to match;
+until it runs, credential lookup falls back to the legacy variables for one
+release. Use the env names the integration receipt prints.
 
 ## One command, once per machine
 
@@ -75,7 +75,7 @@ Dispatch through the proxy. `mcp_execute` takes a single `code` string holding
 the JSON dispatch; it has no `server`, `tool` or `args` parameters:
 
 ```text
-mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
+mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50,"include_channels":false}}'
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every
@@ -147,13 +147,16 @@ another.
 
 ## Proxy-less one-shot
 
-A bounded `codex exec` or `claude -p` process with no live proxy uses the hub
-project's `scripts/slack-post.sh` with `post`, `upload`, or `read`.
-It applies the same channel rule and exits 0 with a JSON receipt on stdout, 1
-on a Slack or API error, 2 on missing credentials or bad arguments, and 3 on an
-unallowlisted or non-member channel. Capture that JSON without shell tracing or
-verbose HTTP output. This is for proxy-less execution, not a way around the hub
-from a connected worker.
+A bounded `codex exec` or `claude -p` process with no live proxy runs
+`cas violet post|thread|read`. The command connects with this machine's
+`[servers.violet]` registration and credentials (the project's
+`.cas/proxy.toml` and worker policy apply inside a Cassy project), prints the
+hub's receipt, and exits non-zero on `ok: false`. Add `--json` to capture the
+receipt as one JSON document; never add shell tracing or verbose HTTP output.
+It is also the route for a local file from any session:
+`cas violet post --channel <name> --file <path>` reads the bytes from disk, so
+no base64 passes through the model. Codes are in
+[contract.md](contract.md#posting-local-files-with-cas-violet).
 
 ## Verify without leaking
 

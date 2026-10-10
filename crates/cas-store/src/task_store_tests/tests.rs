@@ -1130,3 +1130,42 @@ fn parent_epic_orders_nonterminal_parents_and_retains_terminal_only_cas_1980() {
         assert!(store.get_parent_epic(&child.id).unwrap().is_none());
     }
 }
+
+/// cas-0e57: opening an initialized task store must not need the write lock.
+/// The revision backfill ran on every open and queued behind (or failed
+/// against) any connection holding the lock during a fleet boot.
+#[test]
+fn init_of_an_initialized_store_reads_only_cas_0e57() {
+    let (temp, store) = create_test_store();
+    let task = Task::new("cas-0e57-a".to_string(), "existing".to_string());
+    store.add(&task).unwrap();
+
+    let locker = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    SqliteTaskStore::open(temp.path()).unwrap().init().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "init waited {:?} on a foreign write lock",
+        started.elapsed()
+    );
+    locker.execute_batch("ROLLBACK").unwrap();
+
+    // A row written without its revision (as before the revision table
+    // existed) is still backfilled once the lock is free.
+    locker
+        .execute(
+            "DELETE FROM task_mutation_revisions WHERE entity_id = ?1",
+            ["cas-0e57-a"],
+        )
+        .unwrap();
+    store.init().unwrap();
+    let revisions: i64 = locker
+        .query_row(
+            "SELECT COUNT(*) FROM task_mutation_revisions WHERE entity_id = ?1",
+            ["cas-0e57-a"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revisions, 1);
+}

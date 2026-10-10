@@ -1298,6 +1298,12 @@ pub enum SupervisorWakeClass {
     /// delivery parked for merge and needs an independent reviewer spawned
     /// before it may merge.
     QaDispatch,
+    /// cas-e753 (GH #1145): Slack activity for this project, claimed from the
+    /// Violet relay by the daemon and framed as `<cas-violet-activity>`. Its
+    /// own class so wake policy can treat it apart from lifecycle wakes; the
+    /// daemon already coalesces it per channel. Daemon-stamped only: no
+    /// registered sender can raise it.
+    SlackActivity,
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -1739,6 +1745,13 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 /// urgent interrupt path: ordinary traffic must never escalate itself.
 const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// cas-ac97 (GH #1153): how often a due probe re-reads the recipient's
+/// transcript while that recipient is still inside a turn that began before
+/// the delivery. The message is queued behind that turn, so the watchdog waits
+/// for the boundary instead of typing a nudge into a working pane, but it must
+/// not rescan a large rollout on every ~100ms poll.
+const NORMAL_DELIVERY_BUSY_RECHECK: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A normal write that has not yet produced evidence of a harness turn.
 #[derive(Debug, Clone)]
 pub(crate) struct NormalDeliveryProbe {
@@ -1746,39 +1759,162 @@ pub(crate) struct NormalDeliveryProbe {
     pub(crate) target: String,
     pub(crate) bytes_at_delivery: u64,
     pub(crate) delivered_at: std::time::Instant,
+    /// cas-ac97: wall-clock floor for transcript turn evidence. Harness
+    /// records are timestamped, so the delivery instant above cannot order
+    /// them.
+    pub(crate) delivered_at_utc: chrono::DateTime<chrono::Utc>,
+    /// cas-ac97: the queued body, for the per-message transcript match.
+    pub(crate) prompt: String,
     pub(crate) nudge_sent_at: Option<std::time::Instant>,
+    /// cas-ac97: when the probe is next due for an evidence read. `None`
+    /// means one observe window after delivery.
+    pub(crate) next_check_at: Option<std::time::Instant>,
+}
+
+/// cas-ac97 (GH #1153): what the recipient's harness says happened after a
+/// normal delivery, read only when the probe is due.
+///
+/// Pane output growth used to be the whole verdict, and it is satisfied by the
+/// PTY echo of the injected payload itself: a worker whose composer swallowed
+/// the message (lost submit CR, modal screen, wedged TUI) re-renders the typed
+/// text and so "reacted" without ever starting a turn. The watchdog then
+/// retired itself and the supervisor read `stage=delivered` while the worker
+/// sat idle. A transcript turn record is the evidence that a turn started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NormalDeliveryTurnEvidence {
+    /// The transcript records this message, or any turn start, at or after
+    /// delivery.
+    TurnStarted,
+    /// The latest turn began before delivery and has not ended: the message
+    /// is queued behind work in flight.
+    RecipientBusy,
+    /// The transcript is readable and records no turn since delivery.
+    NoTurn,
+    /// No authoritative transcript (unregistered recipient, OpenCode, missing
+    /// or unreadable artifact). Pane output growth is the only fallback, with
+    /// the echo weakness stated above.
+    Unavailable { pane_output_grew: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NormalDeliveryProbeAction {
     Observed,
-    Wait,
+    /// The recipient is mid-turn; re-read its evidence after
+    /// [`NORMAL_DELIVERY_BUSY_RECHECK`].
+    WaitForTurnBoundary,
     RetryNormalNudge,
     FlagSupervisor,
 }
 
-/// Decision seam for the delivered-unsurfaced watchdog (GH #224).
-pub(super) fn normal_delivery_probe_action(
-    bytes_at_delivery: u64,
-    bytes_now: Option<u64>,
-    elapsed_since_delivery: std::time::Duration,
-    nudge_sent_at: Option<std::time::Instant>,
+/// Whether a probe is due for an evidence read. Cheap and pure, so the
+/// transcript is read once per window rather than on every poll.
+pub(super) fn normal_delivery_probe_due(
+    delivered_at: std::time::Instant,
+    next_check_at: Option<std::time::Instant>,
     now: std::time::Instant,
+) -> bool {
+    now >= next_check_at.unwrap_or(delivered_at + NORMAL_DELIVERY_OBSERVE_WINDOW)
+}
+
+/// Decision seam for the delivered-unsurfaced watchdog (GH #224, GH #1153).
+/// Called only for a due probe.
+pub(super) fn normal_delivery_probe_action(
+    evidence: NormalDeliveryTurnEvidence,
+    nudge_sent_at: Option<std::time::Instant>,
 ) -> NormalDeliveryProbeAction {
-    if bytes_now.is_some_and(|bytes| bytes > bytes_at_delivery) {
-        return NormalDeliveryProbeAction::Observed;
+    match evidence {
+        NormalDeliveryTurnEvidence::TurnStarted
+        | NormalDeliveryTurnEvidence::Unavailable {
+            pane_output_grew: true,
+        } => NormalDeliveryProbeAction::Observed,
+        NormalDeliveryTurnEvidence::RecipientBusy => NormalDeliveryProbeAction::WaitForTurnBoundary,
+        NormalDeliveryTurnEvidence::NoTurn
+        | NormalDeliveryTurnEvidence::Unavailable {
+            pane_output_grew: false,
+        } => match nudge_sent_at {
+            None => NormalDeliveryProbeAction::RetryNormalNudge,
+            Some(_) => NormalDeliveryProbeAction::FlagSupervisor,
+        },
     }
-    match nudge_sent_at {
-        None if elapsed_since_delivery >= NORMAL_DELIVERY_OBSERVE_WINDOW => {
-            NormalDeliveryProbeAction::RetryNormalNudge
-        }
-        Some(nudged_at)
-            if now.saturating_duration_since(nudged_at) >= NORMAL_DELIVERY_OBSERVE_WINDOW =>
-        {
-            NormalDeliveryProbeAction::FlagSupervisor
-        }
-        _ => NormalDeliveryProbeAction::Wait,
+}
+
+/// Classify transcript observations for a normal delivery (cas-ac97).
+///
+/// `message_wake` is the per-message match; `latest_start`/`latest_end` are
+/// the recipient's newest turn boundaries. Any turn start at or after delivery
+/// counts: the incident is a worker that never takes a turn, and a strict
+/// per-message match alone would flag workers whose harness reframed the body.
+pub(super) fn classify_normal_delivery_turn(
+    delivered_at: chrono::DateTime<chrono::Utc>,
+    message_wake: Option<chrono::DateTime<chrono::Utc>>,
+    latest_start: Option<chrono::DateTime<chrono::Utc>>,
+    latest_end: Option<chrono::DateTime<chrono::Utc>>,
+) -> NormalDeliveryTurnEvidence {
+    if message_wake.is_some() || latest_start.is_some_and(|start| start >= delivered_at) {
+        return NormalDeliveryTurnEvidence::TurnStarted;
     }
+    match (latest_start, latest_end) {
+        (Some(start), Some(end)) if start > end => NormalDeliveryTurnEvidence::RecipientBusy,
+        (Some(_), None) => NormalDeliveryTurnEvidence::RecipientBusy,
+        _ => NormalDeliveryTurnEvidence::NoTurn,
+    }
+}
+
+/// cas-ac97: plain-language evidence for logs, row details and the flag.
+pub(super) fn normal_delivery_evidence_phrase(evidence: NormalDeliveryTurnEvidence) -> &'static str {
+    match evidence {
+        NormalDeliveryTurnEvidence::TurnStarted => "the transcript records a turn since delivery",
+        NormalDeliveryTurnEvidence::RecipientBusy => {
+            "the recipient is still inside a turn that began before delivery"
+        }
+        NormalDeliveryTurnEvidence::NoTurn => {
+            "the recipient's transcript records no turn since delivery"
+        }
+        NormalDeliveryTurnEvidence::Unavailable {
+            pane_output_grew: true,
+        } => "no readable transcript; the pane printed output after delivery",
+        NormalDeliveryTurnEvidence::Unavailable {
+            pane_output_grew: false,
+        } => "no readable transcript and no pane output after delivery",
+    }
+}
+
+/// cas-ac97: the wake record for the watchdog's single normal nudge.
+pub(super) fn normal_delivery_watchdog_nudge_record(
+    nudge: &cas_mux::Result<cas_mux::InjectOutcome>,
+    evidence: NormalDeliveryTurnEvidence,
+) -> (cas_store::WakeAttempt, String) {
+    let why = normal_delivery_evidence_phrase(evidence);
+    let window = NORMAL_DELIVERY_OBSERVE_WINDOW.as_secs();
+    match nudge {
+        Ok(cas_mux::InjectOutcome::Delivered) => (
+            cas_store::WakeAttempt::Fired,
+            format!(
+                "delivery watchdog: no turn started {window}s after delivery ({why}); typed one normal nudge"
+            ),
+        ),
+        Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => (
+            cas_store::WakeAttempt::Failed,
+            format!(
+                "delivery watchdog: no turn started {window}s after delivery ({why}); nudge not typed because the composer holds a draft or an earlier payload is still awaiting its submit"
+            ),
+        ),
+        Err(error) => (
+            cas_store::WakeAttempt::Failed,
+            format!(
+                "delivery watchdog: no turn started {window}s after delivery ({why}); nudge failed: {error}"
+            ),
+        ),
+    }
+}
+
+/// cas-ac97: the wake record written when the watchdog gives up and flags
+/// the supervisor.
+pub(super) fn normal_delivery_watchdog_flag_detail(evidence: NormalDeliveryTurnEvidence) -> String {
+    format!(
+        "delivery watchdog: no turn started after delivery or after the watchdog nudge ({}); supervisor flagged. The PTY write landed, but the recipient never took the turn",
+        normal_delivery_evidence_phrase(evidence)
+    )
 }
 
 fn normal_delivery_probe_targets_worker(pane: &str, target: &str, supervisor_pane: &str) -> bool {
@@ -2807,31 +2943,53 @@ impl FactoryDaemon {
     /// and visibility, not permission to auto-escalate a normal message.
     async fn resolve_normal_delivery_probes(&mut self, queue: &dyn cas_store::PromptQueueStore) {
         let now = std::time::Instant::now();
-        let actions: Vec<_> = self
+        // cas-ac97 (GH #1153): only a due probe reads harness evidence, so a
+        // transcript is scanned about once per observe window per message
+        // rather than on every poll.
+        let due: Vec<_> = self
             .normal_delivery_probes
             .iter()
-            .map(|(id, probe)| {
-                (
-                    *id,
-                    probe.pane.clone(),
-                    probe.target.clone(),
-                    normal_delivery_probe_action(
-                        probe.bytes_at_delivery,
-                        self.app.mux.pane_bytes_received(&probe.pane),
-                        now.saturating_duration_since(probe.delivered_at),
-                        probe.nudge_sent_at,
-                        now,
-                    ),
-                )
+            .filter(|(_, probe)| {
+                normal_delivery_probe_due(probe.delivered_at, probe.next_check_at, now)
             })
+            .map(|(id, probe)| (*id, probe.clone()))
             .collect();
+        let mut actions = Vec::with_capacity(due.len());
+        for (row_id, probe) in due {
+            let pane_output_grew = self
+                .app
+                .mux
+                .pane_bytes_received(&probe.pane)
+                .is_some_and(|bytes| bytes > probe.bytes_at_delivery);
+            let evidence = self.normal_delivery_turn_evidence(
+                &probe.pane,
+                probe.delivered_at_utc,
+                &probe.prompt,
+                pane_output_grew,
+            );
+            let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
+            tracing::debug!(
+                target: "cas::coordination",
+                stage = "normal_delivery_watchdog_evidence",
+                message_id = row_id,
+                target_agent = %probe.pane,
+                ?evidence,
+                ?action,
+                "cas-ac97: normal delivery watchdog read harness turn evidence"
+            );
+            actions.push((row_id, probe.pane, probe.target, evidence, action));
+        }
 
-        for (row_id, pane, target, action) in actions {
+        for (row_id, pane, target, evidence, action) in actions {
             match action {
                 NormalDeliveryProbeAction::Observed => {
                     self.normal_delivery_probes.remove(&row_id);
                 }
-                NormalDeliveryProbeAction::Wait => {}
+                NormalDeliveryProbeAction::WaitForTurnBoundary => {
+                    if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
+                        probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
+                    }
+                }
                 NormalDeliveryProbeAction::RetryNormalNudge => {
                     let source = "lifecycle-wake:delivery-watchdog";
                     let payload = super::delivery::prepare_pty_machine_delivery(
@@ -2842,16 +3000,28 @@ impl FactoryDaemon {
                         "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.",
                         Some(row_id),
                     );
-                    let _ = self.app.mux.inject(&pane, &payload).await;
+                    let nudge = self.app.mux.inject(&pane, &payload).await;
+                    let (attempt, detail) = normal_delivery_watchdog_nudge_record(&nudge, evidence);
+                    if let Err(error) = queue.record_wake_attempt(row_id, attempt, Some(&detail)) {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            message_id = row_id,
+                            %error,
+                            "failed to record the delivery watchdog nudge on the row"
+                        );
+                    }
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
                         probe.nudge_sent_at = Some(now);
+                        probe.next_check_at = Some(now + NORMAL_DELIVERY_OBSERVE_WINDOW);
                     }
                     tracing::warn!(
                         target: "cas::coordination",
                         stage = "normal_delivery_watchdog_nudge",
                         message_id = row_id,
                         target_agent = %pane,
-                        "normal transport delivery remained unsurfaced; sent one non-urgent nudge"
+                        ?evidence,
+                        wake_attempt = attempt.as_str(),
+                        "normal transport delivery started no harness turn; sent one non-urgent nudge"
                     );
                 }
                 NormalDeliveryProbeAction::FlagSupervisor => {
@@ -2865,6 +3035,22 @@ impl FactoryDaemon {
                     ) {
                         self.normal_delivery_probes.remove(&row_id);
                         continue;
+                    }
+                    // cas-ac97 (GH #1153): `message_status` must not keep
+                    // reading as a successful delivery for a turn that never
+                    // started. `Failed` overwrites the earlier `Fired`, so the
+                    // narrative names the failed wake. Recorded before the
+                    // relay so the row is truthful even while the relay retries.
+                    let detail = normal_delivery_watchdog_flag_detail(evidence);
+                    if let Err(error) =
+                        queue.record_wake_attempt(row_id, cas_store::WakeAttempt::Failed, Some(&detail))
+                    {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            message_id = row_id,
+                            %error,
+                            "failed to record the delivery watchdog flag on the row"
+                        );
                     }
                     // A normal message that was transport-delivered, then
                     // ignored across the bounded retry window is worker-health
@@ -2882,13 +3068,18 @@ impl FactoryDaemon {
                         super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
                     ) {
                         // The durable/prompt outbox has not confirmed this
-                        // incident. Keep the probe so the next sweep retries
-                        // with its stable message-id occurrence key.
+                        // incident. Keep the probe so a later sweep retries
+                        // with its stable message-id occurrence key, without
+                        // rereading the transcript on every poll.
+                        if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
+                            probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
+                        }
                         continue;
                     }
                     self.normal_delivery_probes.remove(&row_id);
                     let notice = format!(
-                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then produced no pane output for two watchdog windows. A single normal nudge was attempted; a durable worker-attention relay was sent to the supervisor; no urgent escalation was sent.</system-notice>"
+                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then started no harness turn across two watchdog windows ({}). A single normal nudge was attempted; a durable worker-attention relay was sent to the supervisor; no urgent escalation was sent. Use `coordination action=interrupt` or recycle the worker if it stays idle.</system-notice>",
+                        normal_delivery_evidence_phrase(evidence)
                     );
                     if let Err(error) = queue.enqueue_with_session(
                         "delivery-watchdog",
@@ -2905,7 +3096,8 @@ impl FactoryDaemon {
                         stage = "normal_delivery_watchdog_flagged",
                         message_id = row_id,
                         target_agent = %pane,
-                        "normal delivery stayed unsurfaced after retry; supervisor notified without urgent escalation"
+                        ?evidence,
+                        "normal delivery started no harness turn after retry; supervisor notified without urgent escalation"
                     );
                 }
             }
@@ -3191,6 +3383,52 @@ impl FactoryDaemon {
                         .is_ok_and(|age| age <= CLAUDE_FIRST_PROMPT_GRACE),
             },
         }
+    }
+
+    /// cas-ac97 (GH #1153): classify what the recipient's harness transcript
+    /// says happened after a normal delivery. Pane output growth is only the
+    /// fallback when no authoritative transcript exists, because the PTY echo
+    /// of the injected text grows it with no turn at all.
+    fn normal_delivery_turn_evidence(
+        &self,
+        pane_target: &str,
+        delivered_at: chrono::DateTime<chrono::Utc>,
+        prompt: &str,
+        pane_output_grew: bool,
+    ) -> NormalDeliveryTurnEvidence {
+        let unavailable = NormalDeliveryTurnEvidence::Unavailable { pane_output_grew };
+        let Some(agent) = open_agent_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .and_then(|agents| agents.into_iter().find(|agent| agent.name == pane_target))
+        else {
+            return unavailable;
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        if cli == cas_mux::SupervisorCli::OpenCode {
+            return unavailable;
+        }
+        let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        )
+        .filter(|path| path.is_file()) else {
+            return unavailable;
+        };
+        let message = crate::mcp::tools::service::harness_observation::observations_after_delivery(
+            &path,
+            cli,
+            delivered_at,
+            prompt,
+        );
+        let latest =
+            crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
+        classify_normal_delivery_turn(
+            delivered_at,
+            message.wake.map(|observation| observation.at),
+            latest.wake.map(|observation| observation.at),
+            latest.completion.map(|observation| observation.at),
+        )
     }
 
     fn recipient_mid_turn(&self, pane_target: &str) -> Option<bool> {
@@ -3666,7 +3904,15 @@ impl FactoryDaemon {
 
     /// cas-0f5b: hold a respawned or recycled worker to the same boot
     /// verification as a fresh spawn, so its hook canary is checked.
-    fn verify_respawned_worker(&mut self, name: &str, request_id: Option<i64>) {
+    ///
+    /// `launch_floor` must be captured before the PTY was started; see
+    /// [`crate::factory_hook_canary::launch_floor`] (cas-2a49).
+    fn verify_respawned_worker(
+        &mut self,
+        name: &str,
+        request_id: Option<i64>,
+        launch_floor: std::time::SystemTime,
+    ) {
         self.spawn_verifications.insert(
             name.to_string(),
             SpawnVerification {
@@ -3674,7 +3920,7 @@ impl FactoryDaemon {
                 launched_at: Instant::now(),
                 registered_at: None,
                 task_id: None,
-                launched_wall: std::time::SystemTime::now(),
+                launched_wall: launch_floor,
             },
         );
     }
@@ -3732,10 +3978,11 @@ impl FactoryDaemon {
                 if canary == crate::factory_hook_canary::CanaryVerdict::Failed {
                     return Some((
                         worker.clone(),
-                        VerificationAction::Failed(crate::factory_hook_canary::failure_detail(
+                        VerificationAction::Failed(crate::factory_hook_canary::failure_detail_since(
+                            self.app.cas_dir(),
                             worker,
                             crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
-                            &crate::factory_hook_canary::marker_path(self.app.cas_dir(), worker),
+                            verification.launched_wall,
                         )),
                     ));
                 }
@@ -4247,6 +4494,9 @@ impl FactoryDaemon {
                 if crate::prompt_revalidation::parse_qa_dispatch_envelope(prompt).is_some() {
                     return Some(SupervisorWakeClass::QaDispatch);
                 }
+                if super::violet_activity::parse_violet_activity_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::SlackActivity);
+                }
                 // cas-619f: CAS itself escalates a delivery whose independent
                 // QA was rejected `qa.max_rounds` times with a blocker
                 // envelope. Daemon-stamped, so the envelope is CAS's own.
@@ -4443,7 +4693,7 @@ impl FactoryDaemon {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
                 WakeSender::Daemon | WakeSender::Registered { .. } => {
-                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker or verification-dispatch envelopes (cas-dab2, cas-d9a8, cas-8725)"
+                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-8725, cas-e753)"
                 }
             });
         };
@@ -4474,6 +4724,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::QaDispatch => {
                 "supervisor pane is quiet and the row is a CAS independent-QA dispatch"
+            }
+            SupervisorWakeClass::SlackActivity => {
+                "supervisor pane is quiet and the row is CAS-relayed Slack activity for this project"
             }
         })
     }
@@ -6207,6 +6460,10 @@ impl FactoryDaemon {
             };
 
             let mut success = false;
+            // cas-ac97 (GH #1153): wall-clock floor for the normal delivery
+            // watchdog's transcript evidence, taken before any byte is typed so
+            // the turn the delivery starts can never predate it.
+            let delivery_started_at_utc = chrono::Utc::now();
             // cas-f02b: set when this row is a supervisor wake that did not
             // actually wake the pane this pass — see the stamp guard below.
             let mut wake_deferred = false;
@@ -7023,7 +7280,10 @@ impl FactoryDaemon {
                             target: queued.target.clone(),
                             bytes_at_delivery,
                             delivered_at: std::time::Instant::now(),
+                            delivered_at_utc: delivery_started_at_utc,
+                            prompt: queued.prompt.clone(),
                             nudge_sent_at: None,
+                            next_check_at: None,
                         },
                     );
                 }
@@ -7689,6 +7949,10 @@ impl FactoryDaemon {
                         );
                     }
                     let task_id_for_finish = pending_task_id.clone();
+                    // cas-2a49: `finish_worker_spawn` starts the PTY and then
+                    // does store and git bookkeeping, so the canary floor is
+                    // taken before the call, not after it returns.
+                    let launch_floor = crate::factory_hook_canary::launch_floor();
                     match self.app.finish_worker_spawn(
                         result,
                         teams_config,
@@ -7727,7 +7991,7 @@ impl FactoryDaemon {
                                     launched_at: Instant::now(),
                                     registered_at: None,
                                     task_id: pending_task_id.clone(),
-                                    launched_wall: std::time::SystemTime::now(),
+                                    launched_wall: launch_floor,
                                 },
                             );
                             // A worker may reuse a retired name (e.g. a Codex worker
@@ -8258,6 +8522,7 @@ impl FactoryDaemon {
                     crate::ui::theme::register_agent_color(&tc.agent_name, &tc.agent_color);
                 }
                 // Respawn reuses existing worktree - fast enough to run synchronously
+                let launch_floor = crate::factory_hook_canary::launch_floor();
                 match self.app.respawn_worker(&name, teams_config) {
                     Ok(()) => {
                         // The respawned worker is live again under the same name;
@@ -8265,7 +8530,7 @@ impl FactoryDaemon {
                         // are no longer dropped as "from a dead worker" (cas-5a5c).
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a respawn must prove its hooks run too.
-                        self.verify_respawned_worker(&name, None);
+                        self.verify_respawned_worker(&name, None, launch_floor);
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -8306,15 +8571,17 @@ impl FactoryDaemon {
                         )
                     })?;
                     self.app.shutdown_worker_for_recycle(&name).await?;
+                    let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
                         .respawn_worker_with_spec(&name, teams_config, Some(spec))
+                        .map(|()| launch_floor)
                 }
                 .await;
                 match result {
-                    Ok(()) => {
+                    Ok(launch_floor) => {
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a recycled worker must prove its hooks run too.
-                        self.verify_respawned_worker(&name, Some(request_id));
+                        self.verify_respawned_worker(&name, Some(request_id), launch_floor);
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,
@@ -14316,59 +14583,153 @@ mod urgent_wake_probe_tests {
     #[test]
     fn normal_watchdog_retries_idle_codex_then_flags_cas_6e76() {
         use super::{
-            NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction, normal_delivery_probe_action,
+            NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction, NormalDeliveryTurnEvidence,
+            normal_delivery_probe_action, normal_delivery_probe_due,
         };
 
         let start = Instant::now();
-        assert_eq!(
-            normal_delivery_probe_action(10, Some(10), Duration::from_secs(30), None, start),
-            NormalDeliveryProbeAction::Wait
+        assert!(
+            !normal_delivery_probe_due(start, None, start + Duration::from_secs(30)),
+            "inside the first window the probe reads no evidence at all"
         );
+        assert!(normal_delivery_probe_due(
+            start,
+            None,
+            start + NORMAL_DELIVERY_OBSERVE_WINDOW
+        ));
         assert_eq!(
-            normal_delivery_probe_action(
-                10,
-                Some(10),
-                NORMAL_DELIVERY_OBSERVE_WINDOW,
-                None,
-                start + NORMAL_DELIVERY_OBSERVE_WINDOW,
-            ),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, None),
             NormalDeliveryProbeAction::RetryNormalNudge,
             "an idle normal recipient gets exactly one normal retry at the cadence"
         );
         let nudged_at = start + NORMAL_DELIVERY_OBSERVE_WINDOW;
         assert_eq!(
-            normal_delivery_probe_action(
-                10,
-                Some(11),
-                NORMAL_DELIVERY_OBSERVE_WINDOW + Duration::from_secs(1),
-                Some(nudged_at),
-                nudged_at + Duration::from_secs(1),
-            ),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::TurnStarted, Some(nudged_at)),
             NormalDeliveryProbeAction::Observed,
-            "a seeded idle recipient that reacts to the normal nudge is surfaced and retires the probe"
+            "a recipient that takes a turn after the normal nudge retires the probe"
         );
         assert_eq!(
-            normal_delivery_probe_action(
-                10,
-                Some(10),
-                NORMAL_DELIVERY_OBSERVE_WINDOW * 2,
-                Some(nudged_at),
-                nudged_at + NORMAL_DELIVERY_OBSERVE_WINDOW,
-            ),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, Some(nudged_at)),
             NormalDeliveryProbeAction::FlagSupervisor,
-            "the second silent window is a supervisor-visible flag, never an auto-urgent"
+            "the second turnless window is a supervisor-visible flag, never an auto-urgent"
         );
         assert_eq!(
             normal_delivery_probe_action(
-                10,
-                Some(11),
-                NORMAL_DELIVERY_OBSERVE_WINDOW,
+                NormalDeliveryTurnEvidence::Unavailable {
+                    pane_output_grew: true
+                },
                 None,
-                start + NORMAL_DELIVERY_OBSERVE_WINDOW,
             ),
             NormalDeliveryProbeAction::Observed,
-            "any post-delivery pane output closes the watchdog"
+            "without a readable transcript, post-delivery pane output stays the fallback"
         );
+        assert_eq!(
+            normal_delivery_probe_action(
+                NormalDeliveryTurnEvidence::Unavailable {
+                    pane_output_grew: false
+                },
+                None,
+            ),
+            NormalDeliveryProbeAction::RetryNormalNudge
+        );
+    }
+
+    /// cas-ac97 (GH #1153): the PTY echo of the injected text grows pane
+    /// output (measured in `cas-mux` pane test
+    /// `injected_echo_grows_pane_output_without_any_turn`). The old verdict
+    /// treated that growth as a surfaced message and retired the watchdog, so
+    /// an idle worker that never started a turn was neither nudged nor
+    /// flagged. With a transcript that records no turn, growth is ignored.
+    #[test]
+    fn echo_growth_without_a_transcript_turn_still_nudges_then_flags_gh_1153() {
+        use super::{
+            NormalDeliveryProbeAction, NormalDeliveryTurnEvidence, normal_delivery_probe_action,
+        };
+
+        let echo_only = NormalDeliveryTurnEvidence::NoTurn;
+        assert_eq!(
+            normal_delivery_probe_action(echo_only, None),
+            NormalDeliveryProbeAction::RetryNormalNudge
+        );
+        assert_eq!(
+            normal_delivery_probe_action(echo_only, Some(Instant::now())),
+            NormalDeliveryProbeAction::FlagSupervisor
+        );
+        assert_eq!(
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::RecipientBusy, None),
+            NormalDeliveryProbeAction::WaitForTurnBoundary,
+            "a recipient still inside an earlier turn has the message queued; typing a \
+             nudge into a working pane is not the fix"
+        );
+    }
+
+    #[test]
+    fn transcript_turn_classification_gh_1153() {
+        use super::{NormalDeliveryTurnEvidence, classify_normal_delivery_turn};
+        use chrono::{Duration as Chrono, TimeZone, Utc};
+
+        let delivered = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
+        let before = delivered - Chrono::seconds(30);
+        let after = delivered + Chrono::seconds(1);
+        assert_eq!(
+            classify_normal_delivery_turn(delivered, None, Some(before), Some(before)),
+            NormalDeliveryTurnEvidence::NoTurn,
+            "idle since before delivery, nothing after: the GH #1153 shape"
+        );
+        assert_eq!(
+            classify_normal_delivery_turn(delivered, None, None, None),
+            NormalDeliveryTurnEvidence::NoTurn
+        );
+        assert_eq!(
+            classify_normal_delivery_turn(delivered, None, Some(after), None),
+            NormalDeliveryTurnEvidence::TurnStarted
+        );
+        assert_eq!(
+            classify_normal_delivery_turn(delivered, Some(after), Some(before), Some(before)),
+            NormalDeliveryTurnEvidence::TurnStarted,
+            "a per-message match is a started turn even if the turn index lags"
+        );
+        assert_eq!(
+            classify_normal_delivery_turn(delivered, None, Some(before), None),
+            NormalDeliveryTurnEvidence::RecipientBusy
+        );
+        assert_eq!(
+            classify_normal_delivery_turn(
+                delivered,
+                None,
+                Some(before),
+                Some(before - Chrono::seconds(5))
+            ),
+            NormalDeliveryTurnEvidence::RecipientBusy
+        );
+        assert_eq!(
+            classify_normal_delivery_turn(delivered, None, Some(before), Some(after)),
+            NormalDeliveryTurnEvidence::NoTurn,
+            "the in-flight turn ended after delivery and no new turn carried the message"
+        );
+    }
+
+    #[test]
+    fn watchdog_row_records_are_truthful_gh_1153() {
+        use super::{
+            NormalDeliveryTurnEvidence, normal_delivery_watchdog_flag_detail,
+            normal_delivery_watchdog_nudge_record,
+        };
+
+        let (attempt, detail) = normal_delivery_watchdog_nudge_record(
+            &Ok(cas_mux::InjectOutcome::Delivered),
+            NormalDeliveryTurnEvidence::NoTurn,
+        );
+        assert_eq!(attempt, cas_store::WakeAttempt::Fired);
+        assert!(detail.contains("no turn started"), "{detail}");
+        let (attempt, detail) = normal_delivery_watchdog_nudge_record(
+            &Ok(cas_mux::InjectOutcome::DeferredComposerDirty),
+            NormalDeliveryTurnEvidence::NoTurn,
+        );
+        assert_eq!(attempt, cas_store::WakeAttempt::Failed);
+        assert!(detail.contains("awaiting its submit"), "{detail}");
+        let flag = normal_delivery_watchdog_flag_detail(NormalDeliveryTurnEvidence::NoTurn);
+        assert!(flag.contains("never took the turn"), "{flag}");
     }
 
     #[test]
@@ -15304,6 +15665,272 @@ mod stalled_recipient_episode_tests_gh1119 {
                 .unwrap()
                 .is_some(),
             "recipient name reuse cannot coalesce across sessions"
+        );
+    }
+}
+
+/// cas-ac97 (GH #1153): the delivered-unsurfaced watchdog end to end, over a
+/// real PTY recipient that never takes a turn and a real Codex rollout.
+#[cfg(test)]
+mod gh_1153_idle_pty_delivery_tests {
+    use super::{NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbe};
+    use crate::mcp::tools::service::agent_search_system::message::wake_attempt_narrative;
+    use cas_mux::{InjectOutcome, Pane, PaneKind, Pty, PtyConfig, SupervisorCli};
+    use cas_types::{Agent, AgentRole};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    const WORKER: &str = "idle-codex-1153";
+
+    fn rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
+        at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn turn_event(kind: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": rfc3339(at),
+                "type": "event_msg",
+                "payload": {"type": kind, "turn_id": format!("turn-{kind}-{}", at.timestamp_millis())},
+            })
+        )
+    }
+
+    /// An idle Codex worker: its last turn completed before the delivery.
+    fn write_idle_rollout(account: &Path, clone: &Path) -> PathBuf {
+        let rollout = account
+            .join("sessions/2026/10/09")
+            .join("rollout-2026-10-09T12-00-00-gh1153.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let now = chrono::Utc::now();
+        let meta = serde_json::json!({
+            "timestamp": rfc3339(now - chrono::Duration::seconds(90)),
+            "type": "session_meta",
+            "payload": {
+                "session_id": "019f84af-3121-7950-ba14-b01db2da1153",
+                "cwd": clone.to_str().unwrap(),
+                "originator": "codex-tui",
+                "source": "cli",
+                "thread_source": "user",
+            },
+        });
+        let mut body = format!("{meta}\n");
+        body.push_str(&turn_event("task_started", now - chrono::Duration::seconds(60)));
+        body.push_str(&turn_event("task_complete", now - chrono::Duration::seconds(50)));
+        std::fs::write(&rollout, body).unwrap();
+        rollout
+    }
+
+    fn register_agents(cas_dir: &Path, account: &Path, clone: &Path) {
+        let store = crate::store::open_agent_store(cas_dir).unwrap();
+        let mut worker = Agent::new_with_role(
+            "gh1153-worker-id".to_string(),
+            WORKER.to_string(),
+            AgentRole::Worker,
+        );
+        worker
+            .metadata
+            .insert("worker_cli".to_string(), "codex".to_string());
+        worker
+            .metadata
+            .insert("clone_path".to_string(), clone.to_str().unwrap().to_string());
+        worker.metadata.insert(
+            "worker_account_dir".to_string(),
+            account.to_str().unwrap().to_string(),
+        );
+        store.register(&worker).unwrap();
+        let supervisor = Agent::new_with_role(
+            "gh1153-supervisor-id".to_string(),
+            "test-supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        store.register(&supervisor).unwrap();
+    }
+
+    /// A pane whose child never reads input: the kernel still echoes what
+    /// Cassy types, so pane output grows while no turn ever starts.
+    fn idle_echo_pane() -> Pane {
+        let config = PtyConfig {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'gh1153-ready\\n'; exec sleep 60".to_string(),
+            ],
+            cwd: Some(std::env::temp_dir()),
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        };
+        let pty = Pty::spawn(WORKER, config).expect("spawn real pty");
+        Pane::with_pty(WORKER, PaneKind::Worker, pty, 24, 80, SupervisorCli::Codex)
+            .expect("wrap pty in pane")
+    }
+
+    async fn drain_for(daemon: &mut crate::ui::factory::daemon::FactoryDaemon, span: Duration) {
+        let deadline = Instant::now() + span;
+        while Instant::now() < deadline {
+            let _ = daemon.app.mux.poll_batch();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        daemon: crate::ui::factory::daemon::FactoryDaemon,
+        queue: std::sync::Arc<dyn cas_store::PromptQueueStore>,
+        rollout: PathBuf,
+        row: i64,
+    }
+
+    /// Deliver one normal message over the real PTY to an idle worker and
+    /// open the watchdog probe exactly as the delivery arm does, aged so its
+    /// first observe window has elapsed.
+    async fn deliver_to_idle_worker() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_dir = tmp.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let account = tmp.path().join("codex-account");
+        let clone = tmp.path().join("worktrees").join(WORKER);
+        std::fs::create_dir_all(&clone).unwrap();
+        let rollout = write_idle_rollout(&account, &clone);
+        register_agents(&cas_dir, &account, &clone);
+
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        daemon.app.mux.add_pane(idle_echo_pane());
+        let banner = Instant::now() + Duration::from_secs(5);
+        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0 && Instant::now() < banner
+        {
+            drain_for(&mut daemon, Duration::from_millis(50)).await;
+        }
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let prompt = "You have been assigned a new task: cas-1153. Start it now.";
+        let row = queue
+            .enqueue_with_session("supervisor", WORKER, prompt, "provision-test")
+            .unwrap();
+        let delivered_at_utc = chrono::Utc::now();
+        let bytes_at_delivery = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
+        let outcome = daemon.app.mux.inject(WORKER, prompt).await.unwrap();
+        assert_eq!(outcome, InjectOutcome::Delivered);
+        queue.mark_transport_delivered(row).unwrap();
+        // Past the Codex 500ms submit CR, draining like the daemon loop.
+        drain_for(&mut daemon, Duration::from_millis(800)).await;
+        let bytes_now = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
+        assert!(
+            bytes_now >= bytes_at_delivery + prompt.len() as u64,
+            "precondition: the PTY echo alone grew pane output ({bytes_at_delivery} -> {bytes_now}), \
+             the signal the old watchdog mistook for a surfaced message"
+        );
+
+        daemon.normal_delivery_probes.insert(
+            row,
+            NormalDeliveryProbe {
+                pane: WORKER.to_string(),
+                target: WORKER.to_string(),
+                bytes_at_delivery,
+                delivered_at: Instant::now()
+                    .checked_sub(NORMAL_DELIVERY_OBSERVE_WINDOW)
+                    .unwrap(),
+                delivered_at_utc,
+                prompt: prompt.to_string(),
+                nudge_sent_at: None,
+                next_check_at: None,
+            },
+        );
+        Fixture {
+            _tmp: tmp,
+            daemon,
+            queue,
+            rollout,
+            row,
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_pty_recipient_without_a_turn_is_nudged_then_reported_not_delivered() {
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
+
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        let report = queue.message_delivery_report(row).unwrap().unwrap();
+        assert_eq!(
+            report.wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "echo growth must not retire the watchdog: no turn started, so one normal \
+             nudge is owed (detail: {:?})",
+            report.wake_attempt_detail
+        );
+        assert!(
+            report
+                .wake_attempt_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("no turn started")),
+            "{:?}",
+            report.wake_attempt_detail
+        );
+        let probe = daemon
+            .normal_delivery_probes
+            .get(&row)
+            .expect("the probe stays open after the nudge");
+        assert!(probe.nudge_sent_at.is_some());
+
+        // The nudge also lands only as echo; the second window elapses.
+        drain_for(&mut daemon, Duration::from_millis(800)).await;
+        daemon.normal_delivery_probes.get_mut(&row).unwrap().next_check_at =
+            Instant::now().checked_sub(Duration::from_secs(1));
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+
+        let report = queue.message_delivery_report(row).unwrap().unwrap();
+        assert_eq!(report.wake_attempt, cas_store::WakeAttempt::Failed);
+        assert_eq!(report.wake, cas_store::ObservationStatus::Unobserved);
+        assert!(
+            report
+                .wake_attempt_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("never took the turn")),
+            "{:?}",
+            report.wake_attempt_detail
+        );
+        let narrative = wake_attempt_narrative(report.wake_attempt, report.wake);
+        assert!(
+            narrative.contains("NOT delivered to a turn"),
+            "message_status must not report success for a turn that never started: {narrative}"
+        );
+        // Whether the supervisor relay persisted depends on the ambient
+        // factory session; the row's own record above is the contract.
+    }
+
+    #[tokio::test]
+    async fn idle_pty_recipient_that_takes_the_turn_retires_the_watchdog_silently() {
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            rollout,
+            row,
+        } = deliver_to_idle_worker().await;
+
+        let mut body = std::fs::read_to_string(&rollout).unwrap();
+        body.push_str(&turn_event("task_started", chrono::Utc::now()));
+        std::fs::write(&rollout, body).unwrap();
+
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(
+            !daemon.normal_delivery_probes.contains_key(&row),
+            "a transcript turn start after delivery is the started turn"
+        );
+        let report = queue.message_delivery_report(row).unwrap().unwrap();
+        assert_ne!(
+            report.wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "a worker that took the turn must not be nudged"
         );
     }
 }

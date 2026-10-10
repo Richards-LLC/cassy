@@ -14,6 +14,26 @@ pub enum SlackTransport {
 pub struct SlackConfig {
     #[serde(default)]
     pub transport: SlackTransport,
+    /// cas-e753: whether the factory daemon claims this project's Violet
+    /// Slack activity from Cloud and wakes the supervisor. Unset means on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_enabled: Option<bool>,
+    /// Slack user ids of the Violet bot, which channel sweeps never count as
+    /// human activity. The daemon also learns the id from threads Violet
+    /// started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violet_bot_user_ids: Option<Vec<String>>,
+}
+
+impl SlackConfig {
+    /// cas-e753: Violet push-wake is on unless explicitly disabled.
+    pub fn wake_enabled(&self) -> bool {
+        self.wake_enabled.unwrap_or(true)
+    }
+
+    pub fn violet_bot_user_ids(&self) -> Vec<String> {
+        self.violet_bot_user_ids.clone().unwrap_or_default()
+    }
 }
 
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.

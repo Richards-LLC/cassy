@@ -71,7 +71,7 @@ import { TranscriptView } from "./transcript-view";
 import { applyLiveRegions, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
 import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
-import { isEditableElement, renderDecision, shellSignature } from "./render-model";
+import { isEditableElement, renderDecision, shellSignature, type ShellSignatureParts } from "./render-model";
 import { applyDraftNote, applyMicState, composerMarkup } from "./composer-markup";
 import { countdownLabel, nextCountdown, pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
 import { OperatorInboxController, startInboxLoop } from "./inbox/controller";
@@ -241,6 +241,11 @@ function refreshWorkingLines(): void {
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
+// cas-3c25: the built shell's signature as it reads once the palette is
+// closed. Closing the palette closes its dialog in place; adopting this on
+// close keeps the stale "palette open" part from rebuilding the whole shell,
+// under the operator's focus, on whatever renders next.
+let lastShellSignatureWithPaletteClosed: string | undefined;
 let lastPairingView: string | undefined;
 // setTimeout, not queueMicrotask: the click event a pointerup is about to
 // produce is dispatched in the same task, so only a macrotask lands after it.
@@ -3601,6 +3606,9 @@ function render(captureDraft = true): void {
   const focusedControl = document.activeElement instanceof HTMLElement && document.activeElement.id
     && document.activeElement.id !== "message-text" && app.contains(document.activeElement)
     && !document.activeElement.closest("dialog") ? document.activeElement.id : undefined;
+  // cas-3c25: a keyboard user's ring comes back with their focus. A scripted
+  // focus() after the old node left the page would otherwise drop it.
+  const focusedControlVisible = focusedControl !== undefined && document.activeElement?.matches(":focus-visible") === true;
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
   const compatibility = selected ? compatibilityWarning(selected.id) : undefined;
@@ -3685,7 +3693,7 @@ function render(captureDraft = true): void {
     pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}:${pairingCleanupContext.storeOpen ? "store" : ""}:${pairingCleanupContext.rollbackPending ? "rollback" : ""}` : "",
     shownRepairCommand() ?? "",
   ].join("|");
-  const signature = shellSignature({
+  const signatureParts: ShellSignatureParts = {
     machineId: selectedMachineId,
     session: selectedSession,
     // Label as well as id: a credential refresh can rename a machine, and the
@@ -3697,7 +3705,9 @@ function render(captureDraft = true): void {
     compatibility,
     commandPaletteOpen,
     pairingView,
-  }) + JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
+  };
+  const signatureTail = JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
+  const signature = shellSignature(signatureParts) + signatureTail;
   const active = document.activeElement;
   // Focus anywhere inside the open palette counts as composing too: a rebuild
   // would replace the dialog under a focused row, wipe its filter and leave
@@ -3794,6 +3804,7 @@ function render(captureDraft = true): void {
   if (threadWasFocused && !composerWasFocused) landFocus([focusTargets.thread], { keep: true, waitMs: 500 });
   if (threadControl && !composerWasFocused) landFocus([() => threadControl], { keep: true, waitMs: 500 });
   lastShellSignature = signature;
+  lastShellSignatureWithPaletteClosed = shellSignature({ ...signatureParts, commandPaletteOpen: false }) + signatureTail;
   lastPairingView = pairingView;
   bindEvents();
   if (commandPaletteOpen) {
@@ -3813,7 +3824,7 @@ function render(captureDraft = true): void {
   // and focus() on a hidden control does nothing, so a rebuild left focus on
   // the page.
   if (!composerWasFocused && focusedControl && (document.activeElement === document.body || document.activeElement === null)) {
-    document.getElementById(focusedControl)?.focus({ preventScroll: true });
+    document.getElementById(focusedControl)?.focus({ preventScroll: true, focusVisible: focusedControlVisible } as FocusOptions);
   }
 }
 
@@ -4836,7 +4847,11 @@ function bindEvents(): void {
   // Any other close settles the same flag, so a command that closes the
   // palette can never leave render() to reopen it (cas-dfc8). A dialog a
   // shell rebuild replaced is detached and must not reset it.
-  palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };
+  palette.onclose = () => {
+    if (!palette.isConnected || palette.open) return;
+    commandPaletteOpen = false;
+    if (lastShellSignatureWithPaletteClosed !== undefined) lastShellSignature = lastShellSignatureWithPaletteClosed;
+  };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
   const paletteAdvanced = palette.querySelector<HTMLDetailsElement>(".palette-advanced");
   // Commands in order, grouped Conversations / This conversation / Machines /
@@ -5092,7 +5107,12 @@ app.addEventListener("pointerup", (event) => { if (event.pointerType === "touch"
 app.addEventListener("click", () => deferredRender.clicked(), true);
 app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);
 app.addEventListener("focusout", () => {
-  queueMicrotask(() => {
+  // cas-3c25: wait a task, not a microtask. A keyboard Tab dispatches
+  // focusout before the next control has focus, so a microtask saw <body>,
+  // rebuilt the shell with nothing to restore, and replaced the control Tab
+  // was moving to: focus fell to <body> and the next Tab started from the
+  // top of the page. Once focus has settled, the rebuild restores it.
+  window.setTimeout(() => {
     // Moving between two fields is still composing; only a focus that has left
     // every editable control releases the rebuild.
     const active = document.activeElement;

@@ -157,6 +157,54 @@ fn qa_task_id(cas_dir: &Path, delivery: &str) -> String {
 }
 
 #[tokio::test]
+async fn qa_record_rejection_survives_visual_bounds_refusal_cas_5488() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    let service = CasService::new(reviewer, None);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let dir = repo.join("round-bounds");
+    let ledger = round_evidence(&dir, &task_id, &head);
+    let bundle_path = dir.join("bundle.json");
+    let mut bundle: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    bundle["visual_qa_status"] = serde_json::json!("scoped");
+    bundle["files"] = serde_json::json!({"visual_qa_json":"tip.json", "visual_qa_baseline_json":"base.json"});
+    std::fs::write(&bundle_path, bundle.to_string()).unwrap();
+    for (name, port, findings) in [
+        ("tip.json", 28511, serde_json::json!([{
+            "type":"contrast", "selector":".new-badge", "textSample":"Error",
+            "textBounds":{"x":24,"y":639,"width":48,"height":16},
+            "url":"http://127.0.0.1:28511/", "scheme":"light",
+            "viewport":{"name":"phone","width":390,"height":844}
+        }])),
+        ("base.json", 28512, serde_json::json!([])),
+    ] {
+        std::fs::write(dir.join(name), serde_json::json!({
+            "status":"FAIL", "strict":true,
+            "generatedAt":(chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339(),
+            "urls":[format!("http://127.0.0.1:{port}/")], "findings":findings
+        }).to_string()).unwrap();
+    }
+    let request = |status| verification(serde_json::json!({
+        "action":"qa_record", "task_id":task_id, "status":status,
+        "summary":"new badge fails contrast", "ledger_path":ledger.display().to_string()
+    }));
+    let refused = service.verification(Parameters(request("approved"))).await.unwrap_err();
+    assert!(refused.message.contains("introduced 1 visual-QA finding"), "{}", refused.message);
+    let result = extract_text(service.verification(Parameters(request("rejected"))).await
+        .expect("a visual bounds refusal cannot prevent recording a rejection"));
+    assert!(result.contains("REJECTION"), "{result}");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::Open);
+    assert_eq!(tasks.get(&qa_task).unwrap().status, TaskStatus::Closed);
+    assert_eq!(cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now()).unwrap().unwrap().state,
+        cas::types::QaPassState::Failed);
+}
+
+#[tokio::test]
 async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_review() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);

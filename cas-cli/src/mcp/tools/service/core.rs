@@ -492,17 +492,30 @@ impl CasService {
             search_manifest: req.search_manifest,
             commit_receipt: req.commit_receipt,
         };
-        self.inner
-            .cas_task_close_with_dispositions(
+        // cas-3b81 (GH #1142): the close is synchronous Git/SQLite work; keep
+        // it off the runtime workers so parallel closes cannot starve them.
+        let core = self.inner.clone();
+        let completion_receipt = req.completion_receipt;
+        let external_verification_receipt = req.external_verification_receipt;
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.cas_task_close_with_dispositions(
                 Parameters(inner_req),
-                req.completion_receipt,
-                req.external_verification_receipt,
+                completion_receipt,
+                external_verification_receipt,
                 negative_result,
                 evidence_only,
                 inline_external_ref,
                 inline_execution_note,
             )
             .await
+        })
+        .await
+        .unwrap_or_else(|error| {
+            Err(Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("task close handler ended abnormally: {error}"),
+            ))
+        })
     }
 
     pub(super) async fn task_reopen(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {

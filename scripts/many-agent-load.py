@@ -456,6 +456,9 @@ class Agent(threading.Thread):
         if tool == "coordination":
             if action == "message":
                 target = self.rng.choice([p for p in self.peers if p != self.name_] or [self.name_])
+                if target == agent_name(0) and self.role == "worker":
+                    # Workers address their supervisor by role, not by name.
+                    target = "supervisor"
                 return {"action": "message", "target": target, "summary": f"load ping {counter}",
                         "message": f"load harness message {counter} from {self.name_}"}
             return {"action": action}

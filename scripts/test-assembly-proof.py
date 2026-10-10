@@ -128,6 +128,83 @@ class ReceiptTests(unittest.TestCase):
                                  {key: value for key, value in test_env.items()
                                   if key != "CAS_RELEASE_ENV_FILE"})
 
+    # cas-398c: measured 2026-10-10 on the factory host. The daemon that runs
+    # the background proof had five credentials the supervisor shell lacked;
+    # the shell had Claude Code harness, terminal and worker-spawn variables.
+    DAEMON_ONLY = {"GITHUB_TOKEN": "ghp_fixture", "VERCEL_TOKEN": "vercel-fixture",
+                   "CAS_CLOUD_TOKEN": "cloud-fixture", "NEON_API_KEY": "neon-fixture",
+                   "CONTEXT7_API_KEY": "ctx7-fixture"}
+    SHELL_ONLY = {"CLAUDE_CODE_SESSION_ID": "fixture", "CLAUDE_CONFIG_DIR": "/fixture/claude",
+                  "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_PROJECT_DIR": "/fixture/project",
+                  "CODEX_HOME": "/fixture/codex", "TERM": "xterm-256color",
+                  "COLORTERM": "truecolor", "TMUX": "/tmp/tmux-1000/default,1,0",
+                  "SSH_AUTH_SOCK": "/tmp/ssh-agent", "GIT_EDITOR": "true",
+                  "COREPACK_ENABLE_AUTO_PIN": "0", "DISABLE_AUTOUPDATER": "1",
+                  "DISABLE_COST_WARNINGS": "1", "IS_DEMO": "1",
+                  "CAS_FACTORY_WORKER_MODEL": "fixture-model",
+                  "CAS_FACTORY_WORKER_EFFORT": "high",
+                  "CAS_FACTORY_WORKER_ACCOUNT_DIR": "/fixture/account",
+                  "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE": "fixture",
+                  "CAS_FACTORY_NICE_WORKER": "1"}
+
+    def test_cas_398c_daemon_proof_key_matches_supervisor_shell(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": str(self.root), "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8"}
+        daemon, daemon_env = self.inputs_for_environment(dict(base, **self.DAEMON_ONLY))
+        shell, shell_env = self.inputs_for_environment(
+            self.harness_environment(dict(base, **self.SHELL_ONLY)))
+        self.assertEqual(daemon, shell)
+        self.assertEqual(proof.receipt_path(self.root, daemon), proof.receipt_path(self.root, shell))
+        # Excluded names are scrubbed from the proof's test rows too, so no
+        # test outcome can depend on them.
+        for name in (*self.DAEMON_ONLY, *self.SHELL_ONLY):
+            self.assertNotIn(name, daemon_env)
+            self.assertNotIn(name, shell_env)
+            self.assertIsNotNone(proof.exclusion_reason(name), name)
+
+    def test_cas_398c_test_relevant_variable_refuses_reuse_and_names_it(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        daemon_inputs, daemon_env = self.inputs_for_environment(dict(base, **self.DAEMON_ONLY))
+        self.record["inputs"] = daemon_inputs
+        self.record["environment_keys"] = {
+            key: proof.digest(value.encode())
+            for key, value in proof.environment_material(self.root, daemon_env).items()}
+        self.path = proof.receipt_path(self.root, daemon_inputs)
+        self.save()
+        # Harness noise only: the cut reuses the daemon's proof.
+        shell = self.harness_environment(dict(base, **self.SHELL_ONLY))
+        shell_inputs, _ = self.inputs_for_environment(shell)
+        self.assertIsNotNone(proof.matching(self.root, shell_inputs))
+        for name, value in (("RUSTFLAGS", "-C debuginfo=2"), ("CARGO_INCREMENTAL", "0"),
+                            ("CAS_TEST_PROTECTED_HOME", "/fixture/operator"),
+                            ("RUST_TEST_THREADS", "1")):
+            with self.subTest(variable=name):
+                changed_inputs, changed_env = self.inputs_for_environment(dict(shell, **{name: value}))
+                stream = io.StringIO()
+                with mock.patch.dict(proof.os.environ, dict(shell, **{name: value}), clear=True), \
+                        contextlib.redirect_stderr(stream):
+                    self.assertIsNone(proof.matching(self.root, changed_inputs, diagnostic=True))
+                self.assertIn("key=environment reason=different", stream.getvalue())
+                self.assertIn("environment_key=" + name, stream.getvalue())
+                if len(value) > 3:  # names and hashes only, never values
+                    self.assertNotIn(value, stream.getvalue())
+
+    def test_cas_398c_receipt_records_included_and_excluded_names_with_reasons(self):
+        env = dict(self.harness_environment({"HOME": str(self.root), "PATH": "/bin",
+                                             "RUSTFLAGS": "-C debuginfo=1"}),
+                   **self.DAEMON_ONLY, **self.SHELL_ONLY, CARGO_TARGET_DIR="/fixture/target",
+                   CAS_RELEASE_GATE_LOG_DIR="/fixture/logs")
+        with mock.patch.dict(proof.os.environ, env, clear=True):
+            policy = proof.environment_policy(self.root)
+        self.assertIn("RUSTFLAGS", policy["included"])
+        self.assertIn("PATH", policy["included"])
+        for name in (*self.DAEMON_ONLY, *self.SHELL_ONLY, "CAS_SESSION_ID", "CARGO_TARGET_DIR",
+                     "CAS_RELEASE_GATE_LOG_DIR"):
+            self.assertIn(name, policy["excluded"], name)
+            self.assertTrue(policy["excluded"][name].strip(), name)
+            self.assertNotIn(name, policy["included"])
+        self.assertNotIn("ghp_fixture", json.dumps(policy))
+
     def test_build_test_and_unknown_variables_still_invalidate_fingerprint(self):
         base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
         expected, _ = self.inputs_for_environment(base)

@@ -1420,6 +1420,115 @@ fn scoped_visual_qa_refuses_a_finding_the_delivery_introduced() {
     assert!(refusal.problem.contains("introduced 1"), "{refusal:?}");
 }
 
+/// GH #1166: a project visual-qa.mjs (the gabber-studio shape) writes one
+/// report per source: `input`, `strict`, `totalIssues`, and `renders[]`, each
+/// carrying its unsuppressed `issues[]` already annotated with viewport and
+/// scheme. It writes no top-level `findings[]`.
+fn per_render_report(
+    path: &Path,
+    generated: chrono::DateTime<chrono::Utc>,
+    input: &str,
+    renders: serde_json::Value,
+) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let total: usize = renders
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|render| render["issues"].as_array().map_or(0, Vec::len))
+        .sum();
+    let valid = renders.as_array().unwrap().len();
+    std::fs::write(
+        path,
+        serde_json::json!({
+            "version": 1,
+            "generatedAt": generated.to_rfc3339(),
+            "name": "home",
+            "input": input,
+            "strict": true,
+            "totalIssues": total,
+            "validRenders": valid,
+            "renders": renders
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn render_issue(selector: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "contrast",
+        "selector": selector,
+        "text": "Read more",
+        "box": {"x": 10, "y": 20, "width": 80, "height": 16},
+        "viewport": "390x844",
+        "scheme": "dark"
+    })
+}
+
+fn per_render_fixture(tip_issues: serde_json::Value) -> Fixture {
+    let fx = scoped_fixture();
+    let dir = fx.bundle_dir();
+    let renders = |issues: serde_json::Value| {
+        serde_json::json!([
+            {"viewport": "390x844", "scheme": "dark", "valid": true, "screenshot": "a.png", "issues": issues},
+            {"viewport": "1440x900", "scheme": "light", "valid": true, "screenshot": "b.png", "issues": []}
+        ])
+    };
+    per_render_report(
+        &dir.join("visual-qa/visual-qa.json"),
+        chrono::Utc::now(),
+        &format!("{TIP}/?fixture=home"),
+        renders(tip_issues),
+    );
+    per_render_report(
+        &dir.join("visual-qa-baseline/visual-qa.json"),
+        chrono::Utc::now() - chrono::Duration::days(1),
+        &format!("{BASE}/?fixture=home"),
+        renders(serde_json::json!([render_issue("footer a"), render_issue("header nav a")])),
+    );
+    fx
+}
+
+#[test]
+fn scoped_visual_qa_compares_per_render_issue_reports_gh_1166() {
+    // Both runs carry the same pre-existing finding: the delivery added none.
+    let fx = per_render_fixture(serde_json::json!([render_issue("footer a")]));
+    fx.validate(&fx.notes())
+        .expect("renders[].issues reports are compared like findings[]");
+
+    // A finding only the delivered build has is still refused, by name.
+    let fx = per_render_fixture(serde_json::json!([
+        render_issue("footer a"),
+        render_issue("#send")
+    ]));
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("introduced 1 visual-QA finding") && refusal.problem.contains("#send"),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn scoped_visual_qa_names_both_accepted_shapes_when_neither_is_present_gh_1166() {
+    let fx = scoped_fixture();
+    let dir = fx.bundle_dir();
+    std::fs::write(
+        dir.join("visual-qa/visual-qa.json"),
+        serde_json::json!({
+            "status": "FAIL", "strict": true, "generatedAt": chrono::Utc::now().to_rfc3339(),
+            "urls": [format!("{TIP}/?fixture=home")]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("findings") && refusal.problem.contains("renders[].issues"),
+        "{refusal:?}"
+    );
+}
+
 #[test]
 fn scoped_visual_qa_needs_a_comparable_local_base_run() {
     // No baseline key.

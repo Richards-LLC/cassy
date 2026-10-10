@@ -3,7 +3,7 @@ to: Petra Stella Cloud team
 from: Cassy CLI (cas-c117, EPIC cas-e0d9 — macOS clean-install field report)
 date: 2026-08-18
 priority: P1
-status: client-side fix shipped; one server behaviour needs confirmation
+status: filed as Richards-LLC/petra-stella-cloud#119 (closed 2026-10-09)
 ---
 
 # Project↔team registration only happens as a side effect of a non-empty team push

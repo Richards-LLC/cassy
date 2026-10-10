@@ -22,6 +22,11 @@ use crate::{Result, StoreError};
 /// polled only until the deadline: another thread of this process holding the
 /// connection across its own busy wait must not stall a UI thread (GH #1165).
 pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>> {
+    lock_connection_mutex(conn)
+}
+
+/// [`lock_connection`] for a bare mutex (the pooled write path).
+pub(crate) fn lock_connection_mutex(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
     crate::wait_budget::note_store_access("sqlite connection");
     if crate::wait_budget::wait_deadline().is_none() {
         return conn
@@ -662,9 +667,11 @@ impl std::ops::Deref for PooledImmediateTx<'_> {
 /// Here each attempt takes the mutex, waits at most [`POOLED_ATTEMPT_BUSY`] in
 /// the busy handler, and on SQLITE_BUSY drops the mutex before sleeping, so an
 /// in-process lock holder that needs the connection gets it within one
-/// attempt. The overall wait budget is unchanged. The connection's busy
-/// timeout is restored to [`SQLITE_BUSY_TIMEOUT`] before the mutex is
-/// released, which is the value every pooled connection is opened with.
+/// attempt. The overall wait budget is unchanged. The connection's
+/// budget-aware busy handler ([`install_busy_handler`]) is restored before the
+/// mutex is released, which is what every pooled connection is opened with. A
+/// thread under a store wait budget ([`crate::wait_budget`]) also stops at its
+/// deadline (GH #1165).
 ///
 /// As with the unpooled form, nothing runs inside the transaction until it is
 /// open, so the caller's body executes exactly once.
@@ -684,12 +691,22 @@ pub fn begin_immediate_pooled_bounded(
 
     let last_busy = loop {
         attempts += 1;
-        let conn = shared
-            .lock()
-            .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()))?;
+        let conn = lock_connection_mutex(shared)?;
+        // GH #1165: a thread under a store wait budget never waits past it.
+        let attempt_busy = match crate::wait_budget::remaining_wait() {
+            Some(left) if left.is_zero() => {
+                drop(conn);
+                return Err(crate::wait_budget::budget_exhausted_store_error(
+                    "BEGIN IMMEDIATE",
+                ));
+            }
+            Some(left) => attempt_busy.min(left),
+            None => attempt_busy,
+        };
         conn.busy_timeout(attempt_busy)?;
         let begun = conn.execute_batch("BEGIN IMMEDIATE");
-        let restored = conn.busy_timeout(SQLITE_BUSY_TIMEOUT);
+        // Restore the pool's budget-aware handler, not SQLite's built-in one.
+        let restored = install_busy_handler(&conn);
         match begun {
             Ok(()) => {
                 let tx = PooledImmediateTx {
@@ -704,7 +721,7 @@ pub fn begin_immediate_pooled_bounded(
                 // Release the process mutex before sleeping: this is the point
                 // of the pooled form.
                 drop(conn);
-                if started.elapsed() >= budget {
+                if started.elapsed() >= budget || crate::wait_budget::wait_budget_exhausted() {
                     break error;
                 }
                 let base_ms = POOLED_BACKOFF_MS
@@ -723,7 +740,12 @@ pub fn begin_immediate_pooled_bounded(
                          connection released"
                     );
                 }
-                std::thread::sleep(Duration::from_millis(delay_ms));
+                let Some(sleep) =
+                    crate::wait_budget::clamp_wait(Duration::from_millis(delay_ms))
+                else {
+                    break error;
+                };
+                std::thread::sleep(sleep);
             }
             Err(error) => {
                 restored?;
@@ -731,6 +753,13 @@ pub fn begin_immediate_pooled_bounded(
             }
         }
     };
+
+    if crate::wait_budget::wait_budget_exhausted() {
+        // Keep the busy shape so callers that defer on busy do so here.
+        return Err(crate::wait_budget::budget_exhausted_store_error(
+            "BEGIN IMMEDIATE",
+        ));
+    }
 
     Err(StoreError::Other(format!(
         "database busy for {:.1}s across {attempts} attempt(s); another connection held the \
@@ -2434,7 +2463,10 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 3, "seed + holder + pooled");
-        assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 5_000);
+        // The pool's budget-aware busy handler is back (GH #1165); SQLite
+        // reports a custom handler as busy_timeout 0, never the short
+        // per-attempt timeout.
+        assert_eq!(busy_timeout_ms(&shared.lock().unwrap()), 0);
     }
 
     /// While a pooled writer waits, other callers keep getting the mutex
@@ -2523,6 +2555,34 @@ mod tests {
         assert!(slowest < Duration::from_secs(10), "slowest writer waited {slowest:?}");
     }
 
+    /// GH #1165: a thread with a store wait budget gives up at its deadline
+    /// on the pooled path too, with a busy-shaped error.
+    #[test]
+    fn pooled_writer_honours_the_thread_wait_budget() {
+        let temp = TempDir::new().unwrap();
+        let (db_path, conn) = contended_db(&temp);
+        let shared = Mutex::new(conn);
+        let (ready, holder) = hold_write_lock(db_path, Duration::from_millis(1_000));
+        ready.recv().unwrap();
+
+        let started = Instant::now();
+        let error = {
+            let _budget = crate::wait_budget::bound_waits_for(Duration::from_millis(40));
+            match begin_immediate_pooled(&shared) {
+                Ok(_) => panic!("the foreign lock outlives the budget"),
+                Err(error) => error,
+            }
+        };
+        let waited = started.elapsed();
+        holder.join().unwrap();
+        assert!(waited < Duration::from_millis(500), "waited {waited:?}");
+        assert!(
+            matches!(&error, StoreError::Database(e) if is_busy_error(e)),
+            "{error}"
+        );
+        assert!(shared.try_lock().unwrap().is_autocommit());
+    }
+
     #[test]
     fn cas_3f65e_pooled_budget_exhaustion_fails_with_the_wait_stated() {
         let temp = TempDir::new().unwrap();
@@ -2550,7 +2610,11 @@ mod tests {
         assert!(waited < Duration::from_millis(800), "waited {waited:?}");
         let conn = shared.try_lock().expect("the mutex is released on failure");
         assert!(conn.is_autocommit(), "no transaction is left open");
-        assert_eq!(busy_timeout_ms(&conn), 5_000, "the busy timeout is restored");
+        assert_eq!(
+            busy_timeout_ms(&conn),
+            0,
+            "the budget-aware busy handler is restored (GH #1165)"
+        );
     }
 
     #[test]

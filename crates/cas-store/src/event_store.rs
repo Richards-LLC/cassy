@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::Result;
-use crate::error::StoreError;
 use crate::write_jsonl_archive;
 use cas_types::{Event, EventEntityType, EventType};
 

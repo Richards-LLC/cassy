@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::Result;
-use crate::error::StoreError;
 use cas_types::{
     Agent, AgentRole, AgentStatus, AgentType, ClaimResult, LeaseStatus, TaskLease,
     WorktreeClaimResult, WorktreeLease,

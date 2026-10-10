@@ -280,7 +280,8 @@ impl EventStore for SqliteEventStore {
         let conn = self.conn.lock().map_err(lock_error)?;
         Ok(conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM events
-             WHERE session_id = ?1 AND event_type = ?2 AND created_at > ?3)",
+             WHERE session_id = ?1 AND event_type = ?2
+               AND julianday(created_at) > julianday(?3))",
             params![session_id, event_type.to_string(), since.to_rfc3339()],
             |row| row.get(0),
         )?)

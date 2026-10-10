@@ -694,14 +694,28 @@ def summarize_daemon(sampler: DaemonSampler | None, alive: bool) -> dict:
         "in_pass_samples": len(stalls),
         "longest_in_pass": sorted(stalls, key=lambda s: -s["in_pass_secs_lower_bound"])[:10],
     })
-    # Prefer per-pass latency when the daemon reports it (cas-04db).
-    reported = [s.get("p99_pass_ms") for s in samples if s.get("p99_pass_ms") is not None]
-    reported_max = [s.get("max_pass_ms") for s in samples if s.get("max_pass_ms") is not None]
-    if reported:
-        summary["reported_p99_pass_ms_max"] = max(reported)
-        summary["reported_max_pass_ms"] = max(reported_max) if reported_max else None
-        summary["pass_p99_ms"] = max(reported)
-        summary["verdict_basis"] = "daemon-reported per-pass latency"
+    # Prefer per-pass timings when the daemon reports them (cas-04db). Each
+    # snapshot covers the passes completed since the previous snapshot.
+    windows = [s for s in samples if "window_passes" in s]
+    if windows:
+        timed = sum(int(s.get("window_passes", 0)) for s in windows)
+        over = sum(int(s.get("passes_over_100ms", 0)) for s in windows)
+        p99s = [s["p99_pass_ms"] for s in windows if s.get("p99_pass_ms") is not None]
+        maxes = [s["max_pass_ms"] for s in windows if s.get("max_pass_ms") is not None]
+        summary["reported"] = {
+            "timed_passes": timed,
+            "passes_over_100ms": over,
+            "fraction_over_100ms": round(over / timed, 5) if timed else None,
+            "worst_window_p99_ms": max(p99s, default=None),
+            "max_pass_ms": max(maxes, default=None),
+        }
+        # Over the whole run, p99 < 100 ms exactly when fewer than 1% of the
+        # timed passes took 100 ms or more.
+        summary["pass_p99_under_100ms"] = timed > 0 and over / timed < 0.01
+        summary["pass_p99_ms"] = max(p99s, default=None)
+        summary["verdict_basis"] = ("daemon-reported per-pass timings: p99 < 100 ms iff under 1% "
+                                    "of timed passes took 100 ms or more (pass_p99_ms is the "
+                                    "worst 5 s window's p99)")
     else:
         # Lower bound for the slowest pass from the 5 s watchdog snapshots.
         # Without per-pass timings, bound the slowest pass from below: a pass
@@ -813,8 +827,11 @@ def evaluate_slos(calls: list[dict], daemon: dict) -> list[dict]:
     ]
     if daemon.get("enabled"):
         observed = daemon.get("pass_p99_ms")
-        met = daemon.get("status_samples", 0) > 0 and daemon.get("alive_at_end", False) and (
-            observed is None or observed < SLO_LOOP_PASS_P99_MS)
+        if "pass_p99_under_100ms" in daemon:
+            within = daemon["pass_p99_under_100ms"]
+        else:
+            within = observed is None or observed < SLO_LOOP_PASS_P99_MS
+        met = daemon.get("status_samples", 0) > 0 and daemon.get("alive_at_end", False) and within
         slos.append({"slo": "daemon loop pass p99 < 100 ms", "observed": observed, "met": met,
                      "basis": daemon.get("verdict_basis")})
     return slos
@@ -868,6 +885,12 @@ def write_markdown(receipt: dict, path: Path) -> None:
                   f"- Oldest pass age seen {fmt(daemon.get('pass_age_max_secs'), ' s')}; "
                   f"pass p99 {fmt(daemon.get('pass_p99_ms'), ' ms')} ({daemon.get('verdict_basis')})",
                   f"- Loop thread wait channels: {daemon.get('wchan')}"]
+        if daemon.get("reported"):
+            rep = daemon["reported"]
+            lines.append(f"- Daemon-timed passes: {rep['timed_passes']}; >= 100 ms: "
+                         f"{rep['passes_over_100ms']} ({fmt(rep['fraction_over_100ms'])}); "
+                         f"worst window p99 {fmt(rep['worst_window_p99_ms'], ' ms')}; "
+                         f"max {fmt(rep['max_pass_ms'], ' ms')}")
     agents = receipt["agent_errors"]
     if agents:
         lines += ["", "## Agent failures", ""] + [f"- {name}: {err}" for name, err in agents.items()]

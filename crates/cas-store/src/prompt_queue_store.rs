@@ -12717,6 +12717,67 @@ mod tests {
         assert!(store.prune_terminal_batch(0, 10).is_err(), "a zero window is refused");
     }
 
+    /// cas-194c: `supervisor_queue` as migrations create it (m153) has no
+    /// `prompt_delivered_at` until `SupervisorQueueStore::init` adds it, so a
+    /// store that never opened the supervisor queue made every retention sweep
+    /// fail with "no such column: s.prompt_delivered_at" and prune nothing.
+    /// Without the column the sweep still prunes plain rows and outbox rows
+    /// whose notification is gone, and keeps an outbox row whose notification
+    /// still exists (its delivery cannot be proven).
+    #[test]
+    fn cas_194c_retention_sweep_prunes_when_supervisor_queue_lacks_prompt_delivered_at() {
+        let (_temp, store) = create_test_store();
+        let notification_id: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE supervisor_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    supervisor_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed_at TEXT
+                );
+                INSERT INTO supervisor_queue (supervisor_id, event_type, payload)
+                VALUES ('supervisor', 'task_lifecycle', '{}');",
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let keyed = |key: String| -> i64 {
+            match store
+                .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, &key, None)
+                .unwrap()
+            {
+                EnqueueIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let plain = store.enqueue("supervisor", "worker-a", "old").unwrap();
+        let outbox_gone = keyed("lifecycle-outbox:999999".to_string());
+        let outbox_present = keyed(format!("lifecycle-outbox:{notification_id}"));
+        {
+            let aged = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            for id in [plain, outbox_gone, outbox_present] {
+                conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![aged, id])
+                    .unwrap();
+            }
+        }
+
+        let sweep = store
+            .prune_terminal_older_than(7 * 24 * 60 * 60)
+            .expect("the sweep must not depend on a column only the supervisor store adds");
+        assert_eq!(sweep.pruned, 2);
+        let remaining: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM prompt_queue ORDER BY id").unwrap();
+            stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
+        };
+        assert_eq!(remaining, vec![outbox_present]);
+    }
+
     #[test]
     fn inbox_poll_cleanup_removes_matching_and_preexisting_orphan_seen_rows() {
         let (_temp, store) = create_test_store();

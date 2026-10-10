@@ -245,6 +245,105 @@ else
     bad 'gap 4: preflight did not honor the configured scratch base and mount check'
 fi
 
+# cas-be3a: with no configured scratch base, a release checkout on another
+# filesystem than the platform default gets a base beside it, on its own
+# mount, instead of a filesystem-boundary blocker. A fake stat puts
+# everything under $be3a_mount on device 66307 and the rest on 66310.
+be3a_mount="$tmp/be3a-mnt"
+be3a_checkout="$be3a_mount/scratch/release-9.99.0"
+mkdir -p "$be3a_checkout"
+be3a_stat="$tmp/be3a-stat"
+cat >"$be3a_stat" <<BE3A_STAT
+#!/usr/bin/env bash
+path="\${@: -1}"
+case "\$(cd "\$path" 2>/dev/null && pwd -P || printf '%s' "\$path")" in
+    "$be3a_mount"|"$be3a_mount"/*) printf '66307\n' ;;
+    *) printf '66310\n' ;;
+esac
+BE3A_STAT
+chmod +x "$be3a_stat"
+be3a_env="$tmp/be3a-release.env"
+: >"$be3a_env"
+be3a_output="$( (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_checkout"
+    run_dir="$tmp/be3a-run"
+    artifacts_root="$tmp/artifacts"
+    CAS_RELEASE_ENV_FILE="$be3a_env"
+    CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
+    unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_scratch && printf 'scratch=%s\n' "$(release_portable_checkout_scratch_base "$worktree")"
+) 2>&1 )"
+if [[ "$be3a_output" == *"scratch=$be3a_mount/scratch/cas-release-gate"* ]] \
+    && [[ -d "$be3a_mount/scratch/cas-release-gate" ]]; then
+    ok 'cas-be3a: an unset scratch base defaults to the checkout filesystem'
+else
+    bad "cas-be3a: the default scratch base stayed across a filesystem boundary: $be3a_output"
+fi
+
+# cas-be3a: an explicitly configured base on another filesystem still blocks,
+# and the blocker prints the exact assignment that fixes it.
+printf 'CAS_RELEASE_GATE_HOME_DIR=%s\n' "$tmp/be3a-elsewhere/gate" >"$be3a_env"
+be3a_output="$( (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_checkout"
+    run_dir="$tmp/be3a-run"
+    artifacts_root="$tmp/artifacts"
+    CAS_RELEASE_ENV_FILE="$be3a_env"
+    CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
+    unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_scratch
+) 2>&1 )" && bad 'cas-be3a: a cross-filesystem configured base passed preflight'
+if [[ "$be3a_output" == *"filesystem boundary"* ]] \
+    && [[ "$be3a_output" == *"CAS_RELEASE_GATE_HOME_DIR=$be3a_mount/scratch/cas-release-gate"* ]]; then
+    ok 'cas-be3a: the scratch blocker prints the CAS_RELEASE_GATE_HOME_DIR fix'
+else
+    bad "cas-be3a: the scratch blocker did not print the fix: $be3a_output"
+fi
+
+# cas-be3a: preflight refuses before any publish step when the report
+# renderer's browser is missing, and names the install command. The probe is
+# stubbed: the real one installs Playwright into a disposable workspace.
+be3a_probe="$tmp/be3a-renderer-probe"
+printf '#!/usr/bin/env bash\nprintf "browserType.launch: Executable doesn'"'"'t exist at /x/chromium_headless_shell-1248/chrome-linux/headless_shell\\n" >&2\nexit 1\n' >"$be3a_probe"
+chmod +x "$be3a_probe"
+be3a_output="$( (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_checkout"
+    run_dir="$tmp/be3a-renderer-run"
+    mkdir -p "$run_dir"
+    CAS_RELEASE_REPORT_RENDERER_PROBE="$be3a_probe"
+    unset CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_REPORT_RENDERER
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_report_renderer
+) 2>&1 )" && bad 'cas-be3a: a missing report renderer browser passed preflight'
+if [[ "$be3a_output" == *"BLOCKER report-renderer"* ]] \
+    && [[ "$be3a_output" == *"playwright install chromium-headless-shell"* ]]; then
+    ok 'cas-be3a: preflight blocks a missing report renderer browser with the install command'
+else
+    bad "cas-be3a: missing renderer browser was not an actionable preflight blocker: $be3a_output"
+fi
+printf '#!/usr/bin/env bash\nexit 0\n' >"$be3a_probe"
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_checkout"
+    run_dir="$tmp/be3a-renderer-run"
+    CAS_RELEASE_REPORT_RENDERER_PROBE="$be3a_probe"
+    unset CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_REPORT_RENDERER
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_report_renderer
+) 2>/dev/null; then
+    ok 'cas-be3a: a working report renderer passes preflight'
+else
+    bad 'cas-be3a: a working report renderer was refused'
+fi
+
 # Gap 6: a linked worktree receives the Zig toolchain directory, never a
 # symlink whose target is the compiler binary itself.
 zig_main="$(new_worktree zig-main)"

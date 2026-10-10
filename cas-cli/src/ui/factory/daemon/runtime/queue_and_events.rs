@@ -15904,7 +15904,7 @@ mod gh_1153_idle_pty_delivery_tests {
         assert!(!daemon.normal_delivery_probes.contains_key(&row));
         assert_ne!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
             cas_store::WakeAttempt::Fired, "recipient activity must not trigger a nudge");
-        assert!(queue.message_delivery_report(row).unwrap().unwrap().acked_at.is_none(),
+        assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().confirmation_source, cas_store::ConfirmationSource::Unconfirmed,
             "activity is watchdog evidence, not an explicit message acknowledgement");
     }
 
@@ -15924,7 +15924,7 @@ mod gh_1153_idle_pty_delivery_tests {
         assert!(!daemon.normal_delivery_probes.contains_key(&row));
         assert_ne!(queue.message_delivery_report(row).unwrap().unwrap().wake_attempt,
             cas_store::WakeAttempt::Fired);
-        assert!(queue.message_delivery_report(row).unwrap().unwrap().acked_at.is_none());
+        assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
     }
 
     #[tokio::test]

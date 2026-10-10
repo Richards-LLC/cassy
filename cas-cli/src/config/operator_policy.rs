@@ -90,8 +90,57 @@ pub fn record_operator_grant(
     reason: &str,
     source: &GrantSource,
 ) -> anyhow::Result<OperatorWriteGrant> {
-    let _ = (cas_root, task_store, task_id, raw_path, raw_modes, reason, source);
-    anyhow::bail!("not implemented")
+    let reason = reason.trim();
+    if reason.is_empty() {
+        anyhow::bail!("a reason is required: it is recorded on the task");
+    }
+    let task = task_store
+        .get(task_id)
+        .map_err(|error| anyhow::anyhow!("task {task_id} not found: {error}"))?;
+    if task.status == cas_types::TaskStatus::Closed {
+        anyhow::bail!("task {} is closed; a grant ends when its task closes", task.id);
+    }
+    let path = resolve_operator_path(raw_path, cas_root)?;
+    let modes = parse_modes(raw_modes)?;
+    let mode_text = modes
+        .iter()
+        .map(|mode| format!("{mode:?}").to_lowercase())
+        .collect::<Vec<_>>()
+        .join("+");
+    let grant = OperatorWriteGrant {
+        task: task.id.clone(),
+        path: path.clone(),
+        modes,
+        reason: reason.to_string(),
+        granted_at: chrono::Utc::now().to_rfc3339(),
+        granted_by: Some(source.label()),
+    };
+    let mut policy = load_operator_policy(cas_root)?;
+    policy.grants.retain(|existing| !(existing.task == task.id && existing.path == path));
+    policy.grants.push(grant.clone());
+    save_operator_policy(cas_root, &policy)?;
+    task_store.append_note(
+        &task.id,
+        &format!(
+            "[{}] ✅ DECISION operator write grant (cas-3147): {} ({mode_text}) until this task closes, by {}. Reason: {reason}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            path.display(),
+            source.label()
+        ),
+    )?;
+    let path_text = path.display().to_string();
+    let by = source.label();
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_root,
+        "operator_write_grant",
+        &[
+            ("task", task.id.as_str()),
+            ("path", path_text.as_str()),
+            ("mode", mode_text.as_str()),
+            ("by", by.as_str()),
+        ],
+    );
+    Ok(grant)
 }
 
 /// Remove a task's grants (all, or the one for `raw_path`) and note it.
@@ -102,8 +151,33 @@ pub fn revoke_operator_grants(
     raw_path: Option<&str>,
     source: &GrantSource,
 ) -> anyhow::Result<usize> {
-    let _ = (cas_root, task_store, task_id, raw_path, source);
-    anyhow::bail!("not implemented")
+    let path = raw_path
+        .map(|raw| resolve_operator_path(raw, cas_root))
+        .transpose()?;
+    let mut policy = load_operator_policy(cas_root)?;
+    let before = policy.grants.len();
+    policy.grants.retain(|grant| {
+        !(grant.task == task_id && path.as_ref().is_none_or(|path| &grant.path == path))
+    });
+    let removed = before - policy.grants.len();
+    if removed > 0 {
+        save_operator_policy(cas_root, &policy)?;
+        let _ = task_store.append_note(
+            task_id,
+            &format!(
+                "[{}] ✅ DECISION operator write grant revoked (cas-3147): {removed} grant(s), by {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                source.label()
+            ),
+        );
+        let by = source.label();
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            cas_root,
+            "operator_write_grant_revoked",
+            &[("task", task_id), ("by", by.as_str())],
+        );
+    }
+    Ok(removed)
 }
 
 /// The whole operator policy file.

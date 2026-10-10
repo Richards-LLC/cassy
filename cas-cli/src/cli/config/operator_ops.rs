@@ -10,9 +10,8 @@ use std::path::Path;
 
 use crate::cli::Cli;
 use crate::config::operator_policy::{
-    InvocationContext, OperatorWriteGrant, load_operator_policy, operator_context_refusal,
-    operator_policy_path, parse_modes, parse_write_roots, resolve_operator_path,
-    save_operator_policy,
+    InvocationContext, load_operator_policy, operator_context_refusal, operator_policy_path,
+    parse_modes, parse_write_roots, resolve_operator_path, save_operator_policy,
 };
 
 /// `cas config grant-write`: a one-off write grant bound to one open task.
@@ -135,7 +134,8 @@ pub(crate) fn execute_grant_write(args: &ConfigGrantWriteArgs, cli: &Cli, cas_ro
         anyhow::bail!("task {} is closed; a grant ends when its task closes", task.id);
     }
     let path = resolve_operator_path(&args.path, cas_root)?;
-    let modes = parse_modes(&args.mode)?;
+    // Validate before asking the operator to confirm.
+    parse_modes(&args.mode)?;
     confirm(
         &format!(
             "Grant agents working on {} ({}) write access to {} ({}) until the task closes.\nReason: {}",
@@ -147,32 +147,17 @@ pub(crate) fn execute_grant_write(args: &ConfigGrantWriteArgs, cli: &Cli, cas_ro
         ),
         &path.display().to_string(),
     )?;
-    let granted_at = chrono::Utc::now().to_rfc3339();
-    let mut policy = load_operator_policy(cas_root)?;
-    policy.grants.retain(|grant| !(grant.task == task.id && grant.path == path));
-    policy.grants.push(OperatorWriteGrant {
-        task: task.id.clone(),
-        path: path.clone(),
-        modes,
-        reason: args.reason.trim().to_string(),
-        granted_at: granted_at.clone(),
-        granted_by: Some("operator-cli".to_string()),
-    });
-    save_operator_policy(cas_root, &policy)?;
-    let note = format!(
-        "[{}] ✅ DECISION operator write grant (cas-3147): {} ({}) until this task closes. Reason: {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-        path.display(),
-        args.mode,
-        args.reason.trim()
-    );
-    task_store.append_note(&task.id, &note)?;
-    let path_text = path.display().to_string();
-    record_event(
+    let grant = crate::config::operator_policy::record_operator_grant(
         cas_root,
-        "operator_write_grant",
-        &[("task", task.id.as_str()), ("path", path_text.as_str()), ("mode", args.mode.as_str())],
-    );
+        task_store.as_ref(),
+        &task.id,
+        &path.display().to_string(),
+        &args.mode,
+        &args.reason,
+        &crate::config::operator_policy::GrantSource::OperatorCli,
+    )?;
+    let path = grant.path;
+    let path_text = path.display().to_string();
     if cli.json {
         println!("{}", serde_json::json!({"task": task.id, "path": path_text, "mode": args.mode}));
     } else {
@@ -184,29 +169,14 @@ pub(crate) fn execute_grant_write(args: &ConfigGrantWriteArgs, cli: &Cli, cas_ro
 /// `cas config revoke-write`.
 pub(crate) fn execute_revoke_write(args: &ConfigRevokeWriteArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     require_operator()?;
-    let path = args
-        .path
-        .as_deref()
-        .map(|path| resolve_operator_path(path, cas_root))
-        .transpose()?;
-    let mut policy = load_operator_policy(cas_root)?;
-    let before = policy.grants.len();
-    policy.grants.retain(|grant| {
-        !(grant.task == args.task && path.as_ref().is_none_or(|path| &grant.path == path))
-    });
-    let removed = before - policy.grants.len();
-    save_operator_policy(cas_root, &policy)?;
-    if removed > 0
-        && let Ok(task_store) = crate::store::open_task_store(cas_root)
-    {
-        let _ = task_store.append_note(
-            &args.task,
-            &format!(
-                "[{}] ✅ DECISION operator write grant revoked (cas-3147): {removed} grant(s)",
-                chrono::Utc::now().format("%Y-%m-%d %H:%M")
-            ),
-        );
-    }
+    let task_store = crate::store::open_task_store(cas_root)?;
+    let removed = crate::config::operator_policy::revoke_operator_grants(
+        cas_root,
+        task_store.as_ref(),
+        &args.task,
+        args.path.as_deref(),
+        &crate::config::operator_policy::GrantSource::OperatorCli,
+    )?;
     if cli.json {
         println!("{}", serde_json::json!({"task": args.task, "removed": removed}));
     } else {

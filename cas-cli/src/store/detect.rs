@@ -501,8 +501,11 @@ pub fn open_task_store(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
             // A prior local task write may have committed immediately before
             // its outbox transaction failed or the process exited. A logged-in
             // store never falls back to an unsynced writer when this repair
-            // path itself is unavailable.
-            store.reconcile_pending_task_sync()?;
+            // path itself is unavailable (the queue open/init above). The
+            // repair pass runs once per process and then on a bounded
+            // schedule, never waits on a lock, and bounds its SQLite write
+            // wait: opens are read paths (GH #1165).
+            store.reconcile_if_due();
             return Ok(Arc::new(store));
         }
     }

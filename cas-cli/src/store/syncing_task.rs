@@ -4,11 +4,14 @@
 //! When a team is configured and the task passes the T1 filter policy,
 //! the write is dual-enqueued to both the personal queue and the team queue.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::cloud::{
-    CloudConfig, EntityType, SyncOperation, SyncQueue, TaskSyncFulfillResult, TaskSyncIntent,
-    TaskSyncPayload,
+    CloudConfig, EntityType, SyncOperation, SyncQueue, TaskSyncFulfillMode, TaskSyncFulfillResult,
+    TaskSyncIntent, TaskSyncPayload,
 };
 use crate::error::CasError;
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
@@ -24,6 +27,32 @@ struct TaskDependencyPayload<'a> {
     dep_type: String,
     created_at: DateTime<Utc>,
     origin_project: Option<&'a str>,
+}
+
+/// After a clean scheduled reconcile, the next one waits this long. It is the
+/// safety net for intents a crashed process left behind; a mutator fulfills
+/// its own intent.
+const RECONCILE_PERIOD: Duration = Duration::from_secs(60);
+/// After a deferred or failed scheduled reconcile, the next one waits this long.
+const RECONCILE_RETRY: Duration = Duration::from_secs(5);
+
+/// Next due time of the scheduled reconcile, per process and `.cas` directory.
+fn reconcile_schedule() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Instant>> {
+    static SCHEDULE: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+    SCHEDULE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Outcome of one reconcile pass over the pending task sync intents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskSyncReconcileOutcome {
+    /// No intent was left for a later pass.
+    Clean,
+    /// A live mutation owned an entity, or the database stayed write-busy:
+    /// the remaining intents stay durable for a later pass.
+    Deferred,
 }
 
 /// A task store wrapper that queues changes for cloud sync
@@ -121,19 +150,20 @@ impl SyncingTaskStore {
     }
 
     fn fulfill_upsert(&self, intent: &TaskSyncIntent) -> Result<TaskSyncFulfillResult> {
-        self.fulfill_upsert_after_validation(intent, || {})
+        self.fulfill_upsert_after_validation(intent, TaskSyncFulfillMode::Mutation, || {})
     }
 
     fn fulfill_upsert_after_validation<H>(
         &self,
         intent: &TaskSyncIntent,
+        mode: TaskSyncFulfillMode,
         after_validation: H,
     ) -> Result<TaskSyncFulfillResult>
     where
         H: FnOnce(),
     {
         self.queue
-            .fulfill_task_sync_intent(intent, after_validation, || {
+            .fulfill_task_sync_intent(intent, mode, after_validation, || {
                 self.load_canonical_sync_payload(intent)
                     .map_err(|error| CasError::Other(error.to_string()))
             })
@@ -148,15 +178,19 @@ impl SyncingTaskStore {
         let _ = self.queue.cancel_task_sync_intent(intent.id);
     }
 
-    pub(crate) fn reconcile_pending_task_sync(&self) -> Result<()> {
-        let _sync_guard = self
-            .queue
-            .lock_task_sync_mutations()
-            .map_err(queue_error_before_local_commit)?;
+    /// Fulfill or retire every pending task sync intent that no live mutation
+    /// owns. Never waits on a lock and bounds each SQLite write wait
+    /// (GH #1165): an owned entity or a write-busy database defers the rest of
+    /// the pass, leaving the intents durable.
+    pub(crate) fn reconcile_pending_task_sync(&self) -> Result<TaskSyncReconcileOutcome> {
+        // Lock-free first read: the common case is nothing to reconcile.
         let intents = self
             .queue
             .pending_task_sync_intents()
             .map_err(queue_error_before_local_commit)?;
+        if intents.is_empty() {
+            return Ok(TaskSyncReconcileOutcome::Clean);
+        }
         let mut by_entity = std::collections::BTreeMap::<String, Vec<TaskSyncIntent>>::new();
         for intent in intents {
             by_entity
@@ -174,13 +208,46 @@ impl SyncingTaskStore {
                 Err(error) => return Err(error),
             }
             while let Some(intent) = intents.pop() {
-                match self.fulfill_upsert(&intent)? {
+                match self.fulfill_upsert_after_validation(
+                    &intent,
+                    TaskSyncFulfillMode::Reconcile,
+                    || {},
+                )? {
                     TaskSyncFulfillResult::ProvenPreCommit => continue,
                     TaskSyncFulfillResult::Fulfilled | TaskSyncFulfillResult::Superseded => break,
+                    TaskSyncFulfillResult::Deferred => {
+                        return Ok(TaskSyncReconcileOutcome::Deferred);
+                    }
                 }
             }
         }
-        Ok(())
+        Ok(TaskSyncReconcileOutcome::Clean)
+    }
+
+    /// The task-store open path's reconcile: once per process and `.cas`
+    /// directory, then again only when the schedule is due
+    /// ([`RECONCILE_PERIOD`] after a clean pass, [`RECONCILE_RETRY`] after a
+    /// deferred or failed one). Opens are read paths, so a failure is logged
+    /// and the intents stay durable for the next pass; explicit `init`
+    /// still reports it.
+    pub(crate) fn reconcile_if_due(&self) {
+        let cas_dir = self.queue.cas_dir().to_path_buf();
+        let now = Instant::now();
+        {
+            let mut schedule = reconcile_schedule();
+            if schedule.get(&cas_dir).is_some_and(|due| now < *due) {
+                return;
+            }
+            // Claim this pass so concurrent opens do not repeat it.
+            schedule.insert(cas_dir.clone(), now + RECONCILE_RETRY);
+        }
+        match self.reconcile_pending_task_sync() {
+            Ok(outcome) => record_reconcile(cas_dir, outcome),
+            Err(error) => {
+                record_reconcile(cas_dir, TaskSyncReconcileOutcome::Deferred);
+                tracing::warn!(%error, "task sync reconcile failed; pending intents retained for retry");
+            }
+        }
     }
 
     fn persisted_for_queue(&self, task: &Task) -> Result<Task> {
@@ -318,6 +385,14 @@ impl SyncingTaskStore {
     }
 }
 
+fn record_reconcile(cas_dir: PathBuf, outcome: TaskSyncReconcileOutcome) {
+    let delay = match outcome {
+        TaskSyncReconcileOutcome::Clean => RECONCILE_PERIOD,
+        TaskSyncReconcileOutcome::Deferred => RECONCILE_RETRY,
+    };
+    reconcile_schedule().insert(cas_dir, Instant::now() + delay);
+}
+
 fn dependency_entity_id(dep: &Dependency) -> String {
     format!("{}:{}:{}", dep.from_id, dep.to_id, dep.dep_type)
 }
@@ -344,7 +419,17 @@ impl TaskStore for SyncingTaskStore {
     fn init(&self) -> Result<()> {
         self.inner.init()?;
         self.queue.init().map_err(queue_error_before_local_commit)?;
-        self.reconcile_pending_task_sync()
+        let cas_dir = self.queue.cas_dir().to_path_buf();
+        match self.reconcile_pending_task_sync() {
+            Ok(outcome) => {
+                record_reconcile(cas_dir, outcome);
+                Ok(())
+            }
+            Err(error) => {
+                record_reconcile(cas_dir, TaskSyncReconcileOutcome::Deferred);
+                Err(error)
+            }
+        }
     }
 
     fn generate_id(&self) -> Result<String> {
@@ -358,7 +443,7 @@ impl TaskStore for SyncingTaskStore {
     fn add(&self, task: &Task) -> Result<()> {
         let _sync_guard = self
             .queue
-            .lock_task_sync_mutations()
+            .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
         let intent = self.stage_upsert(task, "add", None, None)?;
         if let Err(error) = self
@@ -382,7 +467,7 @@ impl TaskStore for SyncingTaskStore {
     ) -> Result<()> {
         let _sync_guard = self
             .queue
-            .lock_task_sync_mutations()
+            .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
         let intent = self.stage_upsert(task, "create_atomic", None, None)?;
         if let Err(error) = self.inner.create_atomic_with_mutation_receipt(
@@ -422,7 +507,7 @@ impl TaskStore for SyncingTaskStore {
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         let _sync_guard = self
             .queue
-            .lock_task_sync_mutations()
+            .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
         let previous = self.inner.get(&task.id)?;
         let previous_updated_at = previous.updated_at.to_rfc3339();
@@ -450,7 +535,7 @@ impl TaskStore for SyncingTaskStore {
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         let _sync_guard = self
             .queue
-            .lock_task_sync_mutations()
+            .lock_task_sync_mutations(&[task_id])
             .map_err(queue_error_before_local_commit)?;
         let previous = self.inner.get(task_id)?;
         let previous_updated_at = previous.updated_at.to_rfc3339();
@@ -1093,60 +1178,135 @@ mod tests {
         );
     }
 
+    /// A live mutation's staged-but-uncommitted intent looks exactly like a
+    /// crashed pre-commit one. Reconcile must defer it, without waiting,
+    /// whether the writer is a current mutator (entity stripe) or a pre-GH
+    /// #1165 binary (exclusive process lease), and consume it once the writer
+    /// has committed and released.
     #[test]
-    fn independent_reconciler_cannot_consume_a_live_pre_write_intent() {
-        let (temp, _) = create_test_store();
+    fn independent_reconciler_defers_a_live_pre_write_intent() {
+        for legacy_writer in [false, true] {
+            let (temp, _) = create_test_store();
+            let cas_dir = temp.path().to_path_buf();
+            let writer_queue = SyncQueue::open(&cas_dir).unwrap();
+            writer_queue.init().unwrap();
+            let task = Task::new(
+                format!("task-live-pre-write-intent-{legacy_writer}"),
+                "commit after reconcile".to_string(),
+            );
+            let legacy_lock = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(cas_dir.join("task-sync-intents.lock"))
+                .unwrap();
+            let mutation = if legacy_writer {
+                legacy_lock.lock_exclusive().unwrap();
+                None
+            } else {
+                Some(writer_queue.lock_task_sync_mutations(&[&task.id]).unwrap())
+            };
+            let intent = writer_queue
+                .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
+                .unwrap();
+
+            let reconciler = reopen_test_store(&cas_dir, false);
+            let started = std::time::Instant::now();
+            assert_eq!(
+                reconciler.reconcile_pending_task_sync().unwrap(),
+                TaskSyncReconcileOutcome::Deferred
+            );
+            assert!(started.elapsed() < Duration::from_millis(100));
+            reconciler.init().unwrap();
+            assert_eq!(
+                writer_queue.pending_task_sync_intents().unwrap(),
+                vec![intent.clone()],
+                "a live writer's intent must survive reconciliation"
+            );
+
+            let local = SqliteTaskStore::open(&cas_dir).unwrap();
+            local.init().unwrap();
+            local
+                .add_with_mutation_receipt(&task, &intent.mutation_id)
+                .unwrap();
+            drop(mutation);
+            if legacy_writer {
+                FileExt::unlock(&legacy_lock).unwrap();
+            }
+
+            assert_eq!(
+                reconciler.reconcile_pending_task_sync().unwrap(),
+                TaskSyncReconcileOutcome::Clean
+            );
+            assert!(writer_queue.pending_task_sync_intents().unwrap().is_empty());
+            assert_eq!(writer_queue.pending(10, 5).unwrap().len(), 1);
+        }
+    }
+
+    /// GH #1165 (2): a task-store open reconciles once per process, then only
+    /// on the bounded schedule; a deferred pass is retried and the intent
+    /// still reaches the queue.
+    #[test]
+    fn open_path_reconciles_once_then_on_schedule_and_retries_deferred_work() {
+        let (temp, store) = create_test_store();
+        let task = leave_degraded_update_intent(&temp, &store, "task-scheduled-reconcile");
         let cas_dir = temp.path().to_path_buf();
-        let writer_lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(cas_dir.join("task-sync-intents.lock"))
-            .unwrap();
-        writer_lock.lock_exclusive().unwrap();
 
-        let writer_queue = SyncQueue::open(&cas_dir).unwrap();
-        writer_queue.init().unwrap();
-        let task = Task::new(
-            "task-live-pre-write-intent".to_string(),
-            "commit after barrier".to_string(),
-        );
-        let intent = writer_queue
-            .stage_task_sync_intent(&task.id, "add", None, None, None, None, false)
-            .unwrap();
+        // First pass in this process: a live mutation owns the task, so the
+        // pass defers without waiting and schedules a retry.
+        let held = store.queue.lock_task_sync_mutations(&[&task.id]).unwrap();
+        let started = std::time::Instant::now();
+        reopen_test_store(&cas_dir, false).reconcile_if_due();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(held);
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
 
-        let barrier = Arc::new(Barrier::new(2));
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let reconcile_barrier = Arc::clone(&barrier);
-        let reconcile_dir = cas_dir.clone();
-        let reconciler = std::thread::spawn(move || {
-            let store = reopen_test_store(&reconcile_dir, false);
-            reconcile_barrier.wait();
-            let result = store.init();
-            finished_tx.send(result).unwrap();
-        });
+        // Not yet due: further opens do no reconcile work at all.
+        reopen_test_store(&cas_dir, false).reconcile_if_due();
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
+        let retry_due = *reconcile_schedule().get(&cas_dir).unwrap();
+        assert!(retry_due <= Instant::now() + RECONCILE_RETRY);
 
-        barrier.wait();
+        // Once the retry is due, the deferred intent is fulfilled.
+        reconcile_schedule().insert(cas_dir.clone(), Instant::now());
+        reopen_test_store(&cas_dir, false).reconcile_if_due();
+        assert!(store.queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
         assert!(
-            finished_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err(),
-            "reconciliation must wait while another handle owns the mutation lease"
+            pending[0]
+                .payload
+                .as_deref()
+                .is_some_and(|payload| payload.contains("committed, sync pending"))
         );
-        let local = SqliteTaskStore::open(&cas_dir).unwrap();
-        local.init().unwrap();
-        local
-            .add_with_mutation_receipt(&task, &intent.mutation_id)
-            .unwrap();
-        FileExt::unlock(&writer_lock).unwrap();
+        let clean_due = *reconcile_schedule().get(&cas_dir).unwrap();
+        assert!(clean_due > Instant::now() + RECONCILE_RETRY);
+    }
 
-        finished_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("reconciler should finish after the writer releases its lease")
-            .unwrap();
-        reconciler.join().unwrap();
-        assert!(writer_queue.pending_task_sync_intents().unwrap().is_empty());
-        assert_eq!(writer_queue.pending(10, 5).unwrap().len(), 1);
+    /// GH #1165 (3): reconcile bounds its SQLite write wait and defers rather
+    /// than spending the ~31 s retry budget on an open path.
+    #[test]
+    fn reconcile_defers_when_the_database_stays_write_busy() {
+        let (temp, store) = create_test_store();
+        leave_degraded_update_intent(&temp, &store, "task-busy-reconcile");
+        let blocker = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let outcome = store.reconcile_pending_task_sync().unwrap();
+        let elapsed = started.elapsed();
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(outcome, TaskSyncReconcileOutcome::Deferred);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "reconcile waited {elapsed:?}"
+        );
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap().len(), 1);
+        assert_eq!(
+            store.reconcile_pending_task_sync().unwrap(),
+            TaskSyncReconcileOutcome::Clean
+        );
+        assert!(store.queue.pending_task_sync_intents().unwrap().is_empty());
     }
 
     /// Leave one committed task whose sync intent is still pending, the state
@@ -1289,7 +1449,7 @@ mod tests {
         });
 
         let outcome = store
-            .fulfill_upsert_after_validation(&intent, || {
+            .fulfill_upsert_after_validation(&intent, TaskSyncFulfillMode::Mutation, || {
                 start_tx.send(()).unwrap();
                 assert!(
                     finished_rx

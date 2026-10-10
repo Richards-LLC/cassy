@@ -27,7 +27,9 @@ mod tests;
 mod types;
 mod unauthored;
 
-pub(crate) use task_intents::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
+pub(crate) use task_intents::{
+    TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
+};
 
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,

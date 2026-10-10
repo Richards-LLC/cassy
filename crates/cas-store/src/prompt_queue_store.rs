@@ -6340,15 +6340,32 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 [],
                 |row| row.get(0),
             )?;
+            // cas-194c: m153 creates the table without `prompt_delivered_at`;
+            // m267 or `SupervisorQueueStore::init` adds it. Never reference
+            // the column on a store that lacks it.
+            let has_delivery_marker: bool = has_supervisor_queue
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('supervisor_queue')
+                                   WHERE name = 'prompt_delivered_at')",
+                    [],
+                    |row| row.get(0),
+                )?;
             // A supervisor-queue outbox key ("<kind>-outbox:<notification id>")
             // is released once its notification is delivered or gone; the
             // outbox re-relays only undelivered notifications (cas-f207).
-            let outbox_released = if has_supervisor_queue {
-                "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+            // Without the delivery marker, delivery cannot be proven: release
+            // only keys whose notification is gone.
+            let outbox_released = match (has_supervisor_queue, has_delivery_marker) {
+                (true, true) => {
+                    "NOT EXISTS (SELECT 1 FROM supervisor_queue s
                      WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER)
                        AND s.prompt_delivered_at IS NULL)"
-            } else {
-                "1"
+                }
+                (true, false) => {
+                    "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+                     WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER))"
+                }
+                (false, _) => "1",
             };
             let ids: Vec<i64> = {
                 let mut stmt = tx.prepare(&format!(
@@ -12715,6 +12732,67 @@ mod tests {
         kept_receipts.sort();
         assert_eq!(ids("prompt_queue_recipient_seen", "prompt_id"), kept_receipts);
         assert!(store.prune_terminal_batch(0, 10).is_err(), "a zero window is refused");
+    }
+
+    /// cas-194c: `supervisor_queue` as migrations create it (m153) has no
+    /// `prompt_delivered_at` until `SupervisorQueueStore::init` adds it, so a
+    /// store that never opened the supervisor queue made every retention sweep
+    /// fail with "no such column: s.prompt_delivered_at" and prune nothing.
+    /// Without the column the sweep still prunes plain rows and outbox rows
+    /// whose notification is gone, and keeps an outbox row whose notification
+    /// still exists (its delivery cannot be proven).
+    #[test]
+    fn cas_194c_retention_sweep_prunes_when_supervisor_queue_lacks_prompt_delivered_at() {
+        let (_temp, store) = create_test_store();
+        let notification_id: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE supervisor_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    supervisor_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed_at TEXT
+                );
+                INSERT INTO supervisor_queue (supervisor_id, event_type, payload)
+                VALUES ('supervisor', 'task_lifecycle', '{}');",
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let keyed = |key: String| -> i64 {
+            match store
+                .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, &key, None)
+                .unwrap()
+            {
+                EnqueueIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let plain = store.enqueue("supervisor", "worker-a", "old").unwrap();
+        let outbox_gone = keyed("lifecycle-outbox:999999".to_string());
+        let outbox_present = keyed(format!("lifecycle-outbox:{notification_id}"));
+        {
+            let aged = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            for id in [plain, outbox_gone, outbox_present] {
+                conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![aged, id])
+                    .unwrap();
+            }
+        }
+
+        let sweep = store
+            .prune_terminal_older_than(7 * 24 * 60 * 60)
+            .expect("the sweep must not depend on a column only the supervisor store adds");
+        assert_eq!(sweep.pruned, 2);
+        let remaining: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM prompt_queue ORDER BY id").unwrap();
+            stmt.query_map([], |row| row.get(0)).unwrap().map(|id| id.unwrap()).collect()
+        };
+        assert_eq!(remaining, vec![outbox_present]);
     }
 
     #[test]

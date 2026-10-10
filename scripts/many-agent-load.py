@@ -775,29 +775,52 @@ def task_pool_from(cas_dir: Path, size: int) -> list[str]:
 
 
 def prewarm(args, env, run_dir: Path) -> dict:
-    """Run one `cas serve` alone before the measured load.
+    """Run one canonical `cas serve` alone before the measured load.
 
     A build's first canonical serve may do one-off boot work on the copied
-    database, such as purging duplicate code-index copies. Measured once and
-    kept out of the load window, that work is reported, not mixed into the
-    SLO latencies.
+    database: from cas-8256 on, it purges code-index copies left by factory
+    worktrees. Only a non-worker serve in the store's own checkout does that,
+    so the prewarm serve runs as the supervisor role. It stays up for at
+    least `--prewarm-secs`, then until the code-index footprint has been
+    stable for 10 s (capped at `--prewarm-max-secs`), so that work is
+    reported here and kept out of the SLO latencies.
     """
     if args.prewarm_secs <= 0:
         return {"secs": 0}
     started = now()
+    stderr_path = run_dir / "prewarm.stderr"
     client = McpClient(args.cas_bin, env["project"], child_env(args, env, {
         "CAS_AGENT_NAME": "load-prewarm",
-        "CAS_AGENT_ROLE": "worker",
+        "CAS_AGENT_ROLE": "supervisor",
         "CAS_SESSION_ID": str(uuid.uuid4()),
-    }), run_dir / "prewarm.stderr")
+    }), stderr_path)
+    samples = []
     try:
         client.initialize(CALL_TIMEOUT_SECS)
         boot = now() - started
-        time.sleep(max(0.0, args.prewarm_secs - boot))
+        last = None
+        stable_since = now()
+        while True:
+            rows = code_index_rows(env["cas_dir"])
+            elapsed = now() - started
+            samples.append({"t": round(elapsed, 1), **rows})
+            if rows != last:
+                last, stable_since = rows, now()
+            if elapsed >= args.prewarm_secs and now() - stable_since >= 10:
+                break
+            if elapsed >= args.prewarm_max_secs:
+                break
+            time.sleep(2.0)
     finally:
         client.close()
+    try:
+        lines = [line.strip() for line in stderr_path.read_text(errors="replace").splitlines()
+                 if "Code index" in line]
+    except OSError:
+        lines = []
     return {"secs": args.prewarm_secs, "initialize_secs": round(boot, 2),
-            "elapsed_secs": round(now() - started, 1)}
+            "elapsed_secs": round(now() - started, 1), "code_index_log": lines[-5:],
+            "footprint": samples[:: max(1, len(samples) // 20)]}
 
 
 def code_index_rows(cas_dir: Path) -> dict:
@@ -1167,8 +1190,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="run a headless `cas factory daemon --workers 0`")
     parser.add_argument("--daemon-warmup", type=float, default=10.0)
     parser.add_argument("--prewarm-secs", type=float, default=0.0,
-                        help="run one cas serve alone this long before the load, so one-off "
-                             "boot work on the copied DB stays out of the measured window")
+                        help="run one canonical cas serve alone at least this long before the "
+                             "load, so one-off boot work on the copied DB stays out of the "
+                             "measured window")
+    parser.add_argument("--prewarm-max-secs", type=float, default=600.0)
     parser.add_argument("--cloud-endpoint", default="http://127.0.0.1:9",
                         help="cloud endpoint for children; default is a closed local port")
     parser.add_argument("--lock-interval", type=float, default=0.2)

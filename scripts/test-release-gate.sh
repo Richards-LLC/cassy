@@ -1782,14 +1782,15 @@ if grep -q 'stopped after stage assemble' "$tmp/train-proof.log" \
     && grep -q 'stopped after stage gate' "$tmp/train-proof.log"; then
     train_run="$tmp/train-artifacts/v9.99.8-train-proof"
     if [[ "$(grep -c '^nextest run --workspace.*--no-fail-fast' "$tmp/cargo.log")" == 1 ]] \
-        && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 2 ]] \
+        && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 3 ]] \
+        && [[ "$(awk -F '\t' '$1 == "ci-script-tests" && $7 == "REUSED" {n++} END {print n+0}' "$train_run"/rows/*/timing.tsv)" == 1 ]] \
         && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]] \
         && [[ "$(grep -c '^zigbuild ' "$tmp/cargo.log" || true)" == 0 ]] \
         && grep -q '^Reused PASS ' "$train_run"/rows/*/release-binary-isa.log \
         && [[ "$(awk -F '\t' '$1 == "release-binary-isa" && $4 == 0 && $7 == "REUSED" {n++} END {print n+0}' "$train_run"/rows/*/timing.tsv)" == 1 ]] \
         && grep -q 'stage prep: done' "$tmp/train-proof.log" \
         && grep -q 'stage ledger: done' "$tmp/train-proof.log"; then
-        ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts'
+        ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts and the script tier'
     else
         bad "train sequence missed assembly reuse: $(cat "$tmp/cargo.log"); $(cat "$train_run/gate.log")"
     fi

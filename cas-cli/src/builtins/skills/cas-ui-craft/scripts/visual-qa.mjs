@@ -154,8 +154,11 @@ const PAGE_READINESS = ({ readySelector }) => {
     const box = element.getBoundingClientRect();
     return box.width > 1 && box.height > 1 && element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
   };
-  const indicators = [...document.querySelectorAll('[aria-busy="true"], [role="progressbar"], .spinner, [class*="spinner-" i], [class*="-spinner" i], .animate-spin, [data-loading="true"]')].filter(visible);
-  const inLoader = (element) => indicators.some((indicator) => indicator === element || indicator.contains(element));
+  const loaderSelector = '[role="progressbar"], .spinner, [class*="spinner-" i], [class*="-spinner" i], .animate-spin, [data-loading="true"]';
+  const indicators = [...document.querySelectorAll(`[aria-busy="true"], ${loaderSelector}`)].filter(visible);
+  // aria-busy can mark a partly populated region (for example prices still
+  // loading on rendered plan cards). Its visible content still counts.
+  const inLoader = (element) => indicators.some((indicator) => indicator.matches(loaderSelector) && (indicator === element || indicator.contains(element)));
   const loadingText = (text) => /^(?:loading|please wait|fetching)(?:\b.*)?$/i.test(text);
   const large = (element) => {
     const box = element.getBoundingClientRect();
@@ -164,7 +167,8 @@ const PAGE_READINESS = ({ readySelector }) => {
     return width * height >= innerWidth * innerHeight * 0.5;
   };
   const dominantLoadingSurface = indicators.some((indicator) => {
-    if (large(indicator)) return true;
+    const ownText = indicator.innerText?.trim() ?? '';
+    if (large(indicator) && (indicator.matches(loaderSelector) || !ownText || loadingText(ownText))) return true;
     // A tiny spinner often occupies an otherwise empty full-screen wrapper.
     for (let parent = indicator.parentElement; parent; parent = parent.parentElement) {
       const text = parent.innerText?.trim() ?? '';

@@ -485,11 +485,16 @@ pub(super) fn execute_status(
         })
         .collect();
 
+    let violet_status = crate::ui::factory::daemon::runtime::violet_activity::watch_status(
+        &cas_root,
+        chrono::Utc::now(),
+    );
     if cli.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&StatusJson {
                 schema_version: 1,
+                violet: violet_status.clone(),
                 session: SessionJson::from_session_info(&session, cli.full),
                 prompt_queue_pending: pending,
                 prompt_queue_peek,
@@ -521,6 +526,9 @@ pub(super) fn execute_status(
             idle_minutes,
             agents: &agents,
             full: cli.full,
+            violet: violet_status
+                .as_ref()
+                .map(|status| (status.summary(chrono::Utc::now()), status.watch_rows())),
         },
         chrono::Utc::now(),
     )?;
@@ -541,6 +549,9 @@ struct StatusView<'a> {
     pub agents: &'a [AgentSummaryJson],
     /// `--full`: never truncate a cell.
     pub full: bool,
+    /// cas-a897: Violet push-wake watch summary and one row per active watch,
+    /// when this project has a watch book.
+    pub violet: Option<(String, Vec<String>)>,
 }
 
 /// Verdict → grouped rows → agents ledger. The first line answers "is the
@@ -620,6 +631,13 @@ fn render_status(
             view.idle_minutes
         ),
     )?;
+
+    if let Some((summary, watches)) = &view.violet {
+        row(fmt, "Violet", summary.clone())?;
+        for watch in watches {
+            row(fmt, "", watch.clone())?;
+        }
+    }
 
     if view.agents.is_empty() {
         fmt.newline()?;
@@ -1027,6 +1045,9 @@ struct TargetsJson {
 #[serde(rename_all = "snake_case")]
 struct StatusJson {
     schema_version: u32,
+    /// cas-a897: the Violet push-wake watch book, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    violet: Option<crate::ui::factory::daemon::runtime::violet_activity::VioletWatchStatus>,
     session: SessionJson,
     prompt_queue_pending: usize,
     prompt_queue_peek: Vec<QueuedPromptJson>,
@@ -1193,6 +1214,36 @@ mod status_render_tests {
         String::from_utf8(bytes).expect("utf-8")
     }
 
+    /// cas-a897: the Violet push-wake watch book gets its own labelled row,
+    /// with one indented row per active watch, inside the terminal width.
+    #[test]
+    fn status_screen_shows_violet_watches_and_relay_health_cas_a897() {
+        let agents = vec![agent("lively-panther-31", "active", None, 12)];
+        let view = StatusView {
+            session: "cas-src-lively-panther-31",
+            project: "/srv/work/cas-src",
+            pending: 0,
+            ready: 1,
+            in_progress: 0,
+            epics: 1,
+            idle_minutes: 0,
+            agents: &agents,
+            full: false,
+            violet: Some((
+                "1 watch active · relay ok, last claim 12s ago".to_string(),
+                vec!["#violet-internal (C09F) · watching 4m · last human 4m ago · next sweep in 1m"
+                    .to_string()],
+            )),
+        };
+        let out = render_at(80, &view);
+        assert!(
+            out.contains("Violet    1 watch active · relay ok, last claim 12s ago\n"),
+            "{out}"
+        );
+        assert!(out.contains("\n          #violet-internal (C09F) · watching 4m"), "{out}");
+        assert!(out.lines().all(|line| line.chars().count() <= 80), "{out}");
+    }
+
     /// cas-4df0: verdict first, four labelled rows, an agents ledger with the
     /// age right-aligned, receipt last; nothing wider than the terminal.
     #[test]
@@ -1211,6 +1262,7 @@ mod status_render_tests {
             idle_minutes: 0,
             agents: &agents,
             full: false,
+            violet: None,
         };
         let out = render_at(80, &view);
         assert!(
@@ -1256,6 +1308,7 @@ mod status_render_tests {
             idle_minutes: 14,
             agents: &[agent("a", "active", None, 1)],
             full: false,
+            violet: None,
         };
         let out = render_at(80, &idle);
         assert!(out.starts_with("[WARN] idle 14 min · "), "{out}");
@@ -1284,6 +1337,7 @@ mod status_render_tests {
             idle_minutes: 0,
             agents: &agents,
             full: false,
+            violet: None,
         };
         let out = render_at(80, &view);
         let row = out

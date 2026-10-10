@@ -2559,7 +2559,6 @@ impl SqlitePromptQueueStore {
         let _ = std::fs::write(dir.join(inbox_signal_file_name(recipient)), stamp);
     }
 
-    /// Open or create a SQLite prompt queue store
     /// A store on an existing connection, e.g. a
     /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
     /// schema setup; this never runs DDL.
@@ -2567,6 +2566,7 @@ impl SqlitePromptQueueStore {
         Self { conn }
     }
 
+    /// Open or create a SQLite prompt queue store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;

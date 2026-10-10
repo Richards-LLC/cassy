@@ -101,7 +101,6 @@ pub struct SqliteWorktreeStore {
 }
 
 impl SqliteWorktreeStore {
-
     /// A store on an existing connection, e.g. a
     /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
     /// schema setup; this never runs DDL.

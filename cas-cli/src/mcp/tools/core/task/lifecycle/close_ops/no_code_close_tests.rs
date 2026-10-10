@@ -309,6 +309,8 @@ async fn no_code_chore_on_a_foreign_lane_closes_after_target_clear_and_by_eviden
     )
     .await;
     assert!(f.task(id).deliverables.work_target.is_none(), "{cleared}");
+    // cas-3b42: the clear is recorded, so the target is absent by review.
+    assert!(f.task(id).deliverables.work_target_cleared, "{cleared}");
     let response = call(
         &f.worker,
         serde_json::json!({"action": "close", "id": id, "reason": "Staging cleaned up"}),
@@ -471,6 +473,8 @@ async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167
     )
     .await;
     assert!(f.task(id).deliverables.work_target.is_none(), "{cleared}");
+    // cas-3b42: the clear is recorded, so the target is absent by review.
+    assert!(f.task(id).deliverables.work_target_cleared, "{cleared}");
     let response = call(
         &f.worker,
         serde_json::json!({

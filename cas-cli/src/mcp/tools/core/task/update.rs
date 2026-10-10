@@ -772,6 +772,11 @@ impl CasCore {
             }
 
             task.deliverables.work_target = corrected_target.clone();
+            if !proof_targets_fix && !risk_fix && !methodology_fix {
+                // cas-3b42: only this explicit clear makes a missing target
+                // a reviewed one (GH #1167); a new target ends it.
+                task.deliverables.work_target_cleared = corrected_target.is_none();
+            }
             if proof_targets_fix {
                 task.proof_targets = effective_proof_targets.clone();
             }

@@ -13543,11 +13543,12 @@ pub(crate) fn resolve_close_delivery_branch(
 /// that does not claim another task (unnamed work may be this task's, see
 /// cas-2387). Any of those keeps every ordinary delivery gate.
 ///
-/// GH #1167: once a no-code task has no work target (a supervisor cleared it
-/// with proof_scope_fix target_repo="", or it never had one), nothing can be
-/// merged on its behalf, so only worker-lane commits that name this task
-/// count as its own; an unnamed lane commit does not. A retained delivery
-/// anchor stays binding either way (cas-3067).
+/// GH #1167: once a supervisor has cleared a no-code task's work target
+/// (proof_scope_fix target_repo=""), nothing can be merged on its behalf, so
+/// only worker-lane commits that name this task count as its own; an unnamed
+/// lane commit does not. A retained delivery anchor stays binding either way
+/// (cas-3067). cas-3b42: a task that simply never had a work target (a
+/// trunk-fallback task) is not reviewed; it keeps the cas-2387 rule.
 pub(crate) fn no_code_task_without_own_commits(
     repo_path: &std::path::Path,
     task: &Task,
@@ -13559,7 +13560,7 @@ pub(crate) fn no_code_task_without_own_commits(
         task,
         target,
         receipt,
-        task.deliverables.work_target.is_none(),
+        task.deliverables.work_target.is_none() && task.deliverables.work_target_cleared,
     )
 }
 

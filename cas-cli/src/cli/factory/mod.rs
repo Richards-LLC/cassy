@@ -654,11 +654,7 @@ fn normalize_supervisor_spec(
 /// LLM value from re-entering after normalization.
 fn launch_fields_from_spec(
     spec: &cas_mux::WorkerSpec,
-) -> (
-    cas_mux::SupervisorCli,
-    Option<String>,
-    Option<String>,
-) {
+) -> (cas_mux::SupervisorCli, Option<String>, Option<String>) {
     (
         spec.cli,
         spec.model.clone(),
@@ -735,6 +731,10 @@ pub enum FactoryCommands {
         /// requiring a focused epic merge event.
         #[arg(long)]
         base_only: bool,
+        /// Restrict recovery to these comma-separated release epic IDs. An empty
+        /// value tests only the trunk. Required for release-train self-heal.
+        #[arg(long, requires = "base_only")]
+        release_epics: Option<String>,
     },
 
     /// Run as a factory daemon (internal use)
@@ -1144,9 +1144,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
-            FactoryCommands::IntegrationRecover { base_only } => {
-                execute_integration_recover(cas_root, *base_only)
-            }
+            FactoryCommands::IntegrationRecover {
+                base_only,
+                release_epics,
+            } => execute_integration_recover(cas_root, *base_only, release_epics.as_deref()),
             FactoryCommands::Daemon {
                 session,
                 cwd,
@@ -1795,6 +1796,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 fn execute_integration_recover(
     cas_root: Option<&std::path::Path>,
     base_only: bool,
+    release_epics: Option<&str>,
 ) -> Result<()> {
     let cas_root = cas_root.context("Cassy project root is unavailable")?;
     let session = std::env::var("CAS_FACTORY_SESSION")
@@ -1852,12 +1854,19 @@ fn execute_integration_recover(
     let config = crate::config::Config::load(cas_root)
         .context("could not load factory recovery settings")?
         .factory();
+    let release_epics = release_epics.map(|ids| {
+        ids.split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
     let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
         &project_root,
         cas_root,
         &session,
         focus.as_deref(),
         base_only,
+        release_epics.as_deref(),
         &config,
     )
     .map_err(|error| anyhow::anyhow!("integration recovery failed: {error}"))?;
@@ -2133,9 +2142,9 @@ fn resolve_cli_choice(
              curl -fsSL https://x.ai/cli/install.sh | bash"
         ),
         cas_mux::SupervisorCli::OpenCode if is_opencode_installed() => Ok(parsed),
-        cas_mux::SupervisorCli::OpenCode => bail!(
-            "{role} 'opencode' is not installed. Install the OpenCode CLI before spawning"
-        ),
+        cas_mux::SupervisorCli::OpenCode => {
+            bail!("{role} 'opencode' is not installed. Install the OpenCode CLI before spawning")
+        }
     }
 }
 
@@ -2506,6 +2515,32 @@ mod tests {
     }
 
     #[test]
+    fn integration_recover_accepts_explicit_release_selection() {
+        for selection in ["cas-one,cas-two", ""] {
+            let parsed = crate::cli::try_parse_from_with_wordmark([
+                "cas",
+                "factory",
+                "integration-recover",
+                "--base-only",
+                "--release-epics",
+                selection,
+            ])
+            .unwrap();
+            assert!(parsed.command.is_some());
+        }
+        assert!(
+            crate::cli::try_parse_from_with_wordmark([
+                "cas",
+                "factory",
+                "integration-recover",
+                "--release-epics",
+                "cas-one",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn recovery_cli_rejects_unknown_and_registered_worker_even_with_supervisor_env_hint() {
         let temp = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -2523,7 +2558,7 @@ mod tests {
             ("CAS_AGENT_ROLE", "supervisor"),
             ("CAS_AGENT_NAME", "claimed-supervisor"),
         ]);
-        let error = execute_integration_recover(Some(&cas_root), false).unwrap_err();
+        let error = execute_integration_recover(Some(&cas_root), false, None).unwrap_err();
         assert!(
             error.to_string().contains("recovery authorization refused"),
             "{error:#}"
@@ -2536,7 +2571,7 @@ mod tests {
             ("CAS_AGENT_ROLE", "supervisor"),
             ("CAS_AGENT_NAME", "claimed-supervisor"),
         ]);
-        let error = execute_integration_recover(Some(&cas_root), false).unwrap_err();
+        let error = execute_integration_recover(Some(&cas_root), false, None).unwrap_err();
         assert!(
             error.to_string().contains("recovery authorization refused"),
             "{error:#}"
@@ -2567,10 +2602,7 @@ mod tests {
         let now = cas_factory::CapabilitySnapshot::now_ms();
         let mut snapshot = CapabilitySnapshot::default();
         snapshot.record(
-            cas_factory::recipe_route_identity(
-                &registry.recipes["claude_opus_5_5"],
-                "default",
-            ),
+            cas_factory::recipe_route_identity(&registry.recipes["claude_opus_5_5"], "default"),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Unavailable,
                 now,
@@ -2578,10 +2610,7 @@ mod tests {
             .with_reason("Claude Opus account unavailable"),
         );
         snapshot.record(
-            cas_factory::recipe_route_identity(
-                &registry.recipes["claude_fable_high"],
-                "default",
-            ),
+            cas_factory::recipe_route_identity(&registry.recipes["claude_fable_high"], "default"),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Available,
                 now,

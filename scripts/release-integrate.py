@@ -16,6 +16,43 @@ STALE_BASE_ERROR = "Main changed since integration; rerun the merge sweep"
 DEFAULT_RECOVERY_TIMEOUT_SECS = 4 * 60 * 60
 
 
+def integration_branch(root):
+    # Match worktree/integration_branch.rs. Shared local Git config survives
+    # checkout renames and applies to every linked worktree.
+    configured = subprocess.run(["git", "-C", str(root), "config", "--local", "--get",
+                                 "cas.integrationBranch"], capture_output=True, text=True)
+    if configured.returncode == 0:
+        branch = configured.stdout.strip()
+    else:
+        branches = git(root, "for-each-ref", "--format=%(refname:short)",
+                       "refs/heads/integration/").splitlines()
+        if len(branches) > 1:
+            raise RuntimeError("Multiple legacy integration branches; set git config --local "
+                               "cas.integrationBranch <branch> after reviewing the sweep receipt")
+        branch = branches[0] if branches else "integration/project"
+        git(root, "config", "--local", "cas.integrationBranch", branch)
+    if not branch.startswith("integration/"):
+        raise RuntimeError("cas.integrationBranch must name an integration/ branch")
+    git(root, "check-ref-format", "refs/heads/" + branch)
+    return branch
+
+
+def main_input(root):
+    common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    tip = git(root, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+    return {"repository": str(common), "tip": tip, "base": tip,
+            "mode": "from-main", "reason": "Release epics already merged to origin/main by PR; no sweep ran",
+            "full_gate_required": True}
+
+
+def release_input(root):
+    previous = assembly_input(root)
+    if previous and previous.get("mode") == "from-main":
+        return main_input(root)
+    common, receipt = integration_receipt(root)
+    return {**receipt, "repository": str(common)}
+
+
 def integration_receipt(root):
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     return common, json.loads((common.parent / ".cas/merge-sweeps/integration.json").read_text())
@@ -45,11 +82,14 @@ def record_assembly_input(root):
     path = assembly_input_path()
     if path is None:
         return
-    common, receipt = integration_receipt(root)
+    receipt = release_input(root)
     tip = receipt["tip"]
-    if receipt.get("status") != "PASSED" or not is_ancestor(root, tip, "HEAD"):
+    if (receipt.get("mode") != "from-main" and receipt.get("status") != "PASSED") or not is_ancestor(root, tip, "HEAD"):
         raise RuntimeError("Assembly did not consume the current passing integration tip")
-    write_assembly_input(path, {"repository": str(common), "tip": tip, "base": receipt["base"]})
+    value = {key: receipt[key] for key in ("repository", "tip", "base")}
+    if receipt.get("mode") == "from-main":
+        value.update({key: receipt[key] for key in ("mode", "reason", "full_gate_required")})
+    write_assembly_input(path, value)
 
 
 def write_assembly_input(path, value):
@@ -83,8 +123,8 @@ def refresh_resume(root):
     path = assembly_input_path()
     if path is None or not (path.parent / "stage.assemble.done").exists():
         return
-    _, receipt = integration_receipt(root)
-    if receipt.get("status") != "PASSED":
+    receipt = release_input(root)
+    if receipt.get("mode") != "from-main" and receipt.get("status") != "PASSED":
         raise RuntimeError("Integration has no passing sweep; resolve the epic sweep report")
     old = assembly_input(root)
     if old is None:
@@ -308,7 +348,14 @@ def recorded_identity():
 
 
 def heal_stale_assembly(root):
-    """Re-sweep the current base/open-epic union once before assembly retry."""
+    """Re-sweep only the epic IDs recorded for this release, once."""
+    _, receipt = integration_receipt(root)
+    selected = []
+    for epic in receipt["epics"]:
+        epic_id = epic.get("id")
+        if not isinstance(epic_id, str) or not epic_id or "," in epic_id:
+            raise RuntimeError("Integration receipt lacks release epic IDs; rerun an explicitly selected sweep")
+        selected.append(epic_id)
     command = os.environ.get("CAS_RELEASE_TRAIN_CAS", "cas")
     env = {
         key: os.environ[key]
@@ -322,7 +369,8 @@ def heal_stale_assembly(root):
     env.update(recorded_identity())
     try:
         result = subprocess.run(
-            [command, "factory", "integration-recover", "--base-only"],
+            [command, "factory", "integration-recover", "--base-only",
+             "--release-epics", ",".join(selected)],
             cwd=root,
             env=env,
             capture_output=True,
@@ -353,9 +401,7 @@ class StaleBaseError(RuntimeError):
 def _assemble_locked(root):
     """Validate and consume an integration receipt while holding its lock."""
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
-    project = "".join(c if c.isascii() and (c.isalnum() or c == "-") else "-"
-                      for c in common.parent.name)
-    branch = "integration/" + project
+    branch = integration_branch(root)
     cas = common.parent / ".cas"
     receipt = json.loads((cas / "merge-sweeps" / "integration.json").read_text())
     if receipt.get("status") != "PASSED":
@@ -388,9 +434,7 @@ def _under_delivery_lock(root, action):
     wait on this process.
     """
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
-    project = "".join(c if c.isascii() and (c.isalnum() or c == "-") else "-"
-                      for c in common.parent.name)
-    branch = "integration/" + project
+    branch = integration_branch(root)
     cas = common.parent / ".cas"
     key = hashlib.sha256(b"cas-0a21/delivery-target-lock/v1\0" + os.fsencode(common)
                          + b"\0" + branch.encode()).hexdigest()
@@ -408,7 +452,29 @@ def _under_delivery_lock(root, action):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def assemble(root):
+def _assemble_main_locked(root):
+    value = main_input(root)
+    if git(root, "status", "--porcelain"):
+        raise RuntimeError("Assembly checkout has changes; commit or move them first")
+    current = git(root, "branch", "--show-current")
+    if current and not current.startswith("release/"):
+        raise RuntimeError("Use a detached checkout or a release/ branch for assembly")
+    previous = assembly_input(root)
+    if previous and previous["tip"] != value["tip"]:
+        validate_release_metadata(root, previous["tip"], value["tip"])
+        rebase_release_metadata(root, previous["tip"], value["tip"])
+    git(root, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", value["tip"])
+    path = assembly_input_path()
+    if path is None:
+        raise RuntimeError("--from-main requires CAS_RELEASE_TRAIN_RUN_DIR for its audit receipt")
+    write_assembly_input(path, value)
+    return value["tip"]
+
+
+def assemble(root, from_main=False):
+    previous = assembly_input(root)
+    if from_main or (previous and previous.get("mode") == "from-main"):
+        return _under_delivery_lock(root, _assemble_main_locked)
     try:
         return _under_delivery_lock(root, _assemble_locked)
     except StaleBaseError:
@@ -431,7 +497,9 @@ def main():
         if action == "--resume-check":
             _under_delivery_lock(root, refresh_resume)
             return 0
-        tip = assemble(root)
+        if action not in ("assemble", "--from-main"):
+            raise RuntimeError("Unknown assembly action: " + action)
+        tip = assemble(root, from_main=action == "--from-main")
     except (OSError, ValueError, KeyError, IndexError, RuntimeError) as exc:
         print("FAIL release assembly", file=sys.stderr)
         print(str(exc), file=sys.stderr)

@@ -194,6 +194,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `duplicate_of_other_project`, with the fix: fold the alias and run
   `cas cloud project adopt-aliases`, or retire the local copy.
 
+### Fixed — SQLite
+
+- Two connections to the same database closing at the same moment in one
+  process could hang forever, a deadlock in the bundled SQLite 3.51.1. Cassy
+  now bundles SQLite 3.51.3 (rusqlite 0.39), which fixes it and also carries
+  SQLite's WAL-reset corruption fix.
+
 ### Fixed — release train
 
 - The integration branch is remembered by name, so renaming the checkout no

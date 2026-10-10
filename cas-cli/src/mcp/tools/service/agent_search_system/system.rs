@@ -840,19 +840,6 @@ impl CasService {
         &self,
         _req: SystemRequest,
     ) -> Result<CallToolResult, McpError> {
-        // cas-53ce (GH #1168): this session's own engine is the execute
-        // path. The shared cache may be another process's snapshot, which
-        // reported a dropped upstream healthy from session start.
-        if let Some(proxy) = self.proxy.as_ref() {
-            let snapshot = proxy.health_snapshot().await;
-            let json = serde_json::to_string(&snapshot).unwrap_or_default();
-            let snapshot = parse_proxy_health_cache(&json).map_err(|_| {
-                Self::error(ErrorCode::INTERNAL_ERROR, "MCP proxy health is invalid")
-            })?;
-            return Ok(Self::success(
-                serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
-            ));
-        }
         let json = crate::mcp::read_proxy_health_cache(&self.inner.cas_root).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,

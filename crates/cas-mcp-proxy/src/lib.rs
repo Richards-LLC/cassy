@@ -542,6 +542,9 @@ pub struct ProxyEngine {
     /// Serializes on-demand reconnects so concurrent calls to a dropped
     /// upstream start one connection, not one each (cas-53ce).
     reconnect_gate: tokio::sync::Mutex<()>,
+    /// Bumped on every health transition (connect, failure, drop), so a
+    /// caller can republish the project snapshot only when it changed.
+    health_epoch: AtomicU64,
 }
 
 /// Default client-side bound on one upstream tool call (cas-53ce). Hub
@@ -586,6 +589,7 @@ impl ProxyEngine {
             policy_audit: Mutex::new(VecDeque::new()),
             call_timeout: std::sync::RwLock::new(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
             reconnect_gate: tokio::sync::Mutex::new(()),
+            health_epoch: AtomicU64::new(0),
         };
 
         let mut names: Vec<_> = configs.keys().cloned().collect();
@@ -605,6 +609,13 @@ impl ProxyEngine {
         if let Ok(mut current) = self.call_timeout.write() {
             *current = timeout.max(Duration::from_millis(1));
         }
+    }
+
+    /// Monotonic counter of health transitions in this engine (cas-53ce).
+    /// Compare before and after a call to learn whether the published
+    /// health snapshot is now stale.
+    pub fn health_epoch(&self) -> u64 {
+        self.health_epoch.load(Ordering::Acquire)
     }
 
     fn call_timeout(&self) -> Duration {
@@ -797,6 +808,7 @@ impl ProxyEngine {
                     .entry(name.to_string())
                     .or_insert_with(|| initial_health(name, config));
                 record_success(record, tool_count, now);
+                self.health_epoch.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     upstream = %public_name,
                     tool_count,
@@ -818,6 +830,7 @@ impl ProxyEngine {
                     }
                     record_failure_with_detail(record, &code, Some(&error), now)
                 };
+                self.health_epoch.fetch_add(1, Ordering::AcqRel);
                 match visibility {
                     FailureVisibility::Error if code == "executable_missing" => tracing::error!(
                         upstream = %public_name,
@@ -1507,6 +1520,7 @@ impl ProxyEngine {
             };
             record_failure(record, code, now_ms())
         };
+        self.health_epoch.fetch_add(1, Ordering::AcqRel);
         drop(servers);
         let _ = removed.service.cancel().await;
         match visibility {
@@ -3032,7 +3046,9 @@ for line in sys.stdin:
         assert!(healthy.connected);
         assert!(healthy.last_success_at_ms.is_some());
 
+        let epoch = engine.health_epoch();
         let dropped = call_fake(&engine, "drop").await;
+        assert!(engine.health_epoch() > epoch, "a dropped upstream changes health");
         assert!(dropped.is_err(), "a dropped transport fails the call");
         let down = fake_health(&engine).await;
         assert_eq!(down.state, UpstreamState::Backoff, "{down:?}");
@@ -3048,7 +3064,9 @@ for line in sys.stdin:
         assert!(!absent.contains("credential"), "the credential is fine: {absent}");
 
         engine.health.write().await.get_mut("fake").unwrap().next_retry_at_ms = Some(0);
+        let epoch = engine.health_epoch();
         let recovered = call_fake(&engine, "echo").await;
+        assert!(engine.health_epoch() > epoch, "a reconnect changes health");
         assert!(recovered.is_ok(), "a due backoff reconnects on the next call: {recovered:?}");
         let up = fake_health(&engine).await;
         assert_eq!(up.state, UpstreamState::Healthy, "{up:?}");

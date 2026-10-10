@@ -715,7 +715,9 @@ impl CloudSyncer {
                 }
             }
             let remote_tasks = remote_endpoint_tasks.as_ref().unwrap();
-            let _mutation_guard = self.queue.lock_task_sync_mutations()?;
+            let _mutation_guard = self
+                .queue
+                .lock_task_sync_mutations(&[&dependency.from_id, &dependency.to_id])?;
             let mut endpoints = Vec::new();
             let mut missing = Vec::new();
             let mut refusal = None;

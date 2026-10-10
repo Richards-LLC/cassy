@@ -125,6 +125,8 @@ test('both CLI copies honor readiness options and publish a clear failure reason
     assert.match(child.stdout, /^FAIL page-not-ready[^\n]*\n  ready-selector-not-visible.*100 ms/);
     const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
     assert.equal(report.readiness[0].readySelector, '#missing-shell');
+    assert.ok(report.playwrightSource.length > 0, 'resolved browser provenance remains in the report');
+    assert.ok(child.stdout.includes(`Playwright ${report.playwrightVersion}`));
   }
 });
 

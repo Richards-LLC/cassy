@@ -1169,7 +1169,7 @@ async function inspectVisualQa(options) {
   const readinessOptions = { readySelector: options.readySelector, readyTimeoutMs };
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
-  const { playwright, version: playwrightVersion } = await resolvePlaywright();
+  const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
   const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
   const findings = [];
   const infoFindings = [];
@@ -1369,6 +1369,7 @@ async function inspectVisualQa(options) {
     strict: Boolean(options.strict),
     generatedAt: new Date().toISOString(),
     playwrightVersion,
+    playwrightSource,
     schemes,
     viewports,
     urls: inputUrls,

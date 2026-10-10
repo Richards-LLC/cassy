@@ -609,6 +609,21 @@ pub struct FactoryConfig {
     #[serde(default = "default_event_telemetry_retention_days")]
     pub event_telemetry_retention_days: u32,
 
+    /// Days a captured prompt keeps its session transcript (`messages_json`)
+    /// before the canonical daemon nulls it in bounded batches (cas-f207).
+    /// The prompt row, its text and its provenance keys are kept; no reader
+    /// consumes the transcript. 0 disables the trim.
+    #[serde(default = "default_prompt_transcript_retention_days")]
+    pub prompt_transcript_retention_days: u32,
+
+    /// Days a finished supervisor-queue notification (outbox row delivered,
+    /// or pull row processed) is kept before the canonical daemon deletes it
+    /// in bounded batches (cas-f207). Pending, undelivered and recurring-key
+    /// (`worker-attention:`, `integration:`) rows are never deleted. 0
+    /// disables the sweep.
+    #[serde(default = "default_supervisor_queue_retention_days")]
+    pub supervisor_queue_retention_days: u32,
+
     /// Seconds a worker may hold an in-progress task with a fresh heartbeat
     /// but zero observable activity (no file edits, commits, or subagent
     /// events) before the director flags it `WorkerStalled` and notifies
@@ -856,6 +871,14 @@ pub(crate) fn default_event_telemetry_retention_days() -> u32 {
     14
 }
 
+pub(crate) fn default_prompt_transcript_retention_days() -> u32 {
+    14
+}
+
+pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
+    14
+}
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -925,6 +948,8 @@ impl Default for FactoryConfig {
             spawn_min_free_gib: default_spawn_min_free_gib(),
             prompt_retention_days: default_prompt_retention_days(),
             event_telemetry_retention_days: default_event_telemetry_retention_days(),
+            prompt_transcript_retention_days: default_prompt_transcript_retention_days(),
+            supervisor_queue_retention_days: default_supervisor_queue_retention_days(),
             stall_threshold_secs: default_stall_threshold_secs(),
             context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),

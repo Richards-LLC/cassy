@@ -82,6 +82,13 @@ pub trait PromptStore: Send + Sync {
     /// Delete old prompts (keep last N days)
     fn prune(&self, days: i64) -> Result<usize>;
 
+    /// Null `messages_json` on at most `batch` prompts older than
+    /// `older_than_secs`, in one IMMEDIATE transaction (cas-f207). The row,
+    /// its content and its provenance keys (id, session, agent, task, hash)
+    /// stay; only the session transcript, which no reader consumes, goes.
+    /// Returns the rows trimmed.
+    fn trim_transcripts_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
+
     /// Close the store
     fn close(&self) -> Result<()>;
 }
@@ -328,6 +335,11 @@ impl PromptStore for SqlitePromptStore {
         )?;
 
         Ok(())
+    }
+
+    fn trim_transcripts_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
+        let _ = (older_than_secs, batch);
+        Ok(0)
     }
 
     fn prune(&self, days: i64) -> Result<usize> {
@@ -691,4 +703,55 @@ mod tests {
         assert_eq!(updated.model, Some("claude-opus-4-5".to_string()));
         assert_eq!(updated.tool_version, Some("1.0.0".to_string()));
     }
+
+    /// cas-f207: aged transcripts are nulled in bounded batches; the prompt
+    /// row and its provenance survive, and recent transcripts are untouched.
+    #[test]
+    fn cas_f207_trim_transcripts_is_batched_and_keeps_provenance() {
+        let (store, _dir) = setup_store();
+        let messages = vec![Message::user("transcript body".to_string())];
+        let mut aged_ids = Vec::new();
+        for n in 0..5 {
+            let mut prompt = Prompt::new(
+                format!("aged-{n}"),
+                format!("session-{n}"),
+                "agent-1".to_string(),
+                format!("aged prompt {n}"),
+            );
+            prompt.timestamp = Utc::now() - chrono::Duration::days(30);
+            prompt.task_id = Some("cas-x".to_string());
+            store.add(&prompt).unwrap();
+            store
+                .update_blame_fields(&prompt.id, &messages, Some("model"), Some("v1"))
+                .unwrap();
+            aged_ids.push(prompt.id);
+        }
+        let fresh = Prompt::new(
+            "fresh".to_string(),
+            "session-fresh".to_string(),
+            "agent-1".to_string(),
+            "fresh prompt".to_string(),
+        );
+        store.add(&fresh).unwrap();
+        store
+            .update_blame_fields(&fresh.id, &messages, Some("model"), Some("v1"))
+            .unwrap();
+
+        let window = 14 * 24 * 60 * 60;
+        let batches: Vec<usize> = (0..4)
+            .map(|_| store.trim_transcripts_batch(window, 2).unwrap())
+            .collect();
+        assert_eq!(batches, vec![2, 2, 1, 0], "each transaction is bounded by the batch");
+
+        for id in &aged_ids {
+            let prompt = store.get(id).unwrap().expect("the aged row is kept");
+            assert!(prompt.messages.is_empty(), "{id} transcript was not trimmed");
+            assert!(prompt.content.starts_with("aged prompt"), "content is provenance");
+            assert_eq!(prompt.task_id.as_deref(), Some("cas-x"));
+        }
+        let kept = store.get("fresh").unwrap().unwrap();
+        assert_eq!(kept.messages.len(), 1, "a recent transcript is kept");
+        assert!(store.trim_transcripts_batch(0, 10).is_err(), "a zero window is refused");
+    }
+
 }

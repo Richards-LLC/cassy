@@ -63,6 +63,7 @@ mod qa_pass_store;
 mod recording_store;
 mod recording_text_store;
 mod reminder_store;
+pub mod retention;
 mod retrieval_store;
 mod skill_store;
 mod spawn_queue_store;

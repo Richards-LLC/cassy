@@ -592,6 +592,93 @@ fn maintenance_cycle_prunes_aged_telemetry_events_without_auto_prune_cas_e193() 
     assert_eq!(events.list_recent(10).unwrap().len(), 4);
 }
 
+/// cas-f207: one retention run trims aged prompt transcripts, deletes aged
+/// terminal prompt-queue rows and finished supervisor-queue rows, never in a
+/// transaction above the batch bound, and each window's 0 disables it.
+#[test]
+fn prompt_table_retention_trims_and_prunes_in_bounded_batches_cas_f207() {
+    use cas_store::retention::RETENTION_MAX_BATCH;
+    use cas_store::{NotificationPriority, NotifyIdempotentResult};
+    use cas_types::{Message, Prompt};
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let cas_root = temp.path().to_path_buf();
+    let _store = crate::store::open_store(&cas_root).unwrap();
+    let prompts = crate::store::open_prompt_store(&cas_root).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+    let supervisor = crate::store::open_supervisor_queue_store(&cas_root).unwrap();
+    let db = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    let days_ago = |days: i64| (Utc::now() - Duration::days(days)).to_rfc3339();
+
+    let messages = vec![Message::user("transcript".to_string())];
+    for (id, days) in [("aged", 20), ("fresh", 1)] {
+        let mut prompt = Prompt::new(id.into(), format!("s-{id}"), "agent".into(), id.into());
+        prompt.timestamp = Utc::now() - Duration::days(days);
+        prompts.add(&prompt).unwrap();
+        prompts.update_blame_fields(id, &messages, None, None).unwrap();
+    }
+    let aged_message = queue.enqueue("supervisor", "worker", "old").unwrap();
+    let recent_message = queue.enqueue("supervisor", "worker", "new").unwrap();
+    db.execute(
+        "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+        rusqlite::params![days_ago(10), aged_message],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+        rusqlite::params![days_ago(1), recent_message],
+    )
+    .unwrap();
+    let notify = |key: &str| match supervisor
+        .notify_idempotent("sup", "task_lifecycle", "{}", NotificationPriority::Normal, key)
+        .unwrap()
+    {
+        NotifyIdempotentResult::Created(id) => id,
+        other => panic!("{other:?}"),
+    };
+    let delivered = notify("cas-a:open:closed:s:task_closed:1");
+    let undelivered = notify("cas-b:open:closed:s:task_closed:1");
+    supervisor.mark_prompt_delivered(delivered).unwrap();
+    db.execute(
+        "UPDATE supervisor_queue SET created_at = ?1",
+        rusqlite::params![days_ago(20)],
+    )
+    .unwrap();
+
+    let report = crate::daemon::run_prompt_table_retention(&cas_root).expect("retention run");
+    assert_eq!(report.transcripts.affected, 1, "{report:?}");
+    assert_eq!(report.prompt_queue.affected, 1, "{report:?}");
+    assert_eq!(report.supervisor_queue.affected, 1, "{report:?}");
+    for table in [report.transcripts, report.prompt_queue, report.supervisor_queue] {
+        assert!(table.complete, "{report:?}");
+        assert!(table.largest_batch <= RETENTION_MAX_BATCH, "{report:?}");
+    }
+    assert!(prompts.get("aged").unwrap().unwrap().messages.is_empty());
+    assert_eq!(prompts.get("fresh").unwrap().unwrap().messages.len(), 1);
+    assert!(queue.message_delivery_report(aged_message).unwrap().is_none());
+    assert!(queue.message_delivery_report(recent_message).unwrap().is_some());
+    assert!(supervisor.get(delivered).unwrap().is_none());
+    assert!(supervisor.get(undelivered).unwrap().is_some());
+
+    // Each window's 0 disables its sweep.
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[factory]\nprompt_retention_days = 0\nprompt_transcript_retention_days = 0\nsupervisor_queue_retention_days = 0\n",
+    )
+    .unwrap();
+    prompts.update_blame_fields("aged", &messages, None, None).unwrap();
+    db.execute(
+        "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+        rusqlite::params![days_ago(30), recent_message],
+    )
+    .unwrap();
+    supervisor.mark_prompt_delivered(undelivered).unwrap();
+    let disabled = crate::daemon::run_prompt_table_retention(&cas_root).expect("retention run");
+    assert_eq!(disabled, Default::default());
+    assert_eq!(prompts.get("aged").unwrap().unwrap().messages.len(), 1);
+}
+
 #[test]
 fn daemon_index_cycle_repairs_the_legacy_tantivy_root_before_draining_pending_entries() {
     use crate::daemon::indexing::run_indexing_cycle;

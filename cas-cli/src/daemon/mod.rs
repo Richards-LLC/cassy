@@ -34,7 +34,7 @@ pub use indexing::{
     run_indexing_cycle,
 };
 pub(crate) use maintenance::{
-    heartbeat_stale_agent_should_be_reaped, newest_agent_for_identity, run_event_telemetry_retention,
+    heartbeat_stale_agent_should_be_reaped, newest_agent_for_identity, run_event_telemetry_retention, run_prompt_table_retention,
 };
 pub use maintenance::{run_maintenance, run_once};
 pub use queue::{

@@ -2450,6 +2450,19 @@ pub trait PromptQueueStore: Send + Sync {
     /// built from ids stay valid after a sweep.
     fn prune_terminal_older_than(&self, older_than_secs: i64) -> Result<PromptRetentionSweep>;
 
+    /// One bounded retention step (cas-f207): delete at most `batch` terminal
+    /// rows processed more than `older_than_secs` ago, with their
+    /// per-recipient receipts, in one IMMEDIATE transaction. Returns the rows
+    /// deleted.
+    ///
+    /// Same guards as [`Self::prune_terminal_older_than`], with one widening:
+    /// a supervisor-queue outbox row (`lifecycle-outbox:`, `worker-died-outbox:`,
+    /// `worker-attention-outbox:` + notification id) is deletable once its
+    /// source notification is delivered or gone. The outbox only re-relays a
+    /// notification whose `prompt_delivered_at` is NULL, and notification ids
+    /// are AUTOINCREMENT, so such a key can never be enqueued again.
+    fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
+
     /// Clear all prompts (for cleanup)
     fn clear(&self) -> Result<usize>;
 
@@ -6203,6 +6216,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(rows)
         })
+    }
+
+    fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
+        let _ = (older_than_secs, batch);
+        Ok(0)
     }
 
     fn prune_terminal_older_than(&self, older_than_secs: i64) -> Result<PromptRetentionSweep> {
@@ -12325,6 +12343,100 @@ mod tests {
         assert!(store.enqueue("supervisor", "worker-a", "next").unwrap() > max_before);
         // A second sweep has nothing left to prune.
         assert_eq!(store.prune_terminal_older_than(window).unwrap().pruned, 0);
+    }
+
+    /// cas-f207: the bounded retention step deletes at most `batch` aged
+    /// terminal rows per transaction with their receipts, and releases
+    /// supervisor-queue outbox keys only once the source notification is
+    /// delivered or gone. Other episode keys (e.g. `ci-red-run:`) and pending
+    /// rows stay.
+    #[test]
+    fn cas_f207_prune_terminal_batch_is_bounded_and_releases_delivered_outbox_keys() {
+        let (temp, store) = create_test_store();
+        let sq = crate::SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        crate::SupervisorQueueStore::init(&sq).unwrap();
+        let notify = |key: &str| -> i64 {
+            match crate::SupervisorQueueStore::notify_idempotent(
+                &sq,
+                "supervisor",
+                "task_lifecycle",
+                "{}",
+                crate::NotificationPriority::Normal,
+                key,
+            )
+            .unwrap()
+            {
+                crate::NotifyIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let delivered_sq = notify("cas-a:open:closed:s:task_closed:1");
+        let undelivered_sq = notify("cas-b:open:closed:s:task_closed:1");
+        crate::SupervisorQueueStore::mark_prompt_delivered(&sq, delivered_sq).unwrap();
+
+        let keyed = |key: String| -> i64 {
+            match store
+                .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, &key, None)
+                .unwrap()
+            {
+                EnqueueIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let plain: Vec<i64> = (0..3)
+            .map(|n| store.enqueue("supervisor", "worker-a", &format!("old {n}")).unwrap())
+            .collect();
+        let outbox_delivered = keyed(format!("lifecycle-outbox:{delivered_sq}"));
+        let outbox_gone = keyed("worker-died-outbox:999999".to_string());
+        let outbox_undelivered = keyed(format!("lifecycle-outbox:{undelivered_sq}"));
+        let ci_red = keyed("ci-red-run:branch:sha".to_string());
+        let pending = store.enqueue("supervisor", "worker-b", "pending").unwrap();
+        let recent = store.enqueue("supervisor", "worker-a", "recent").unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            let fresh = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            for id in plain
+                .iter()
+                .chain([&outbox_delivered, &outbox_gone, &outbox_undelivered, &ci_red])
+            {
+                conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![aged, id])
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at) VALUES (?, 'worker-a', ?)",
+                    params![id, aged],
+                )
+                .unwrap();
+            }
+            conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![fresh, recent])
+                .unwrap();
+            conn.execute("UPDATE prompt_queue SET created_at = ? WHERE id = ?", params![aged, pending])
+                .unwrap();
+        }
+
+        let window = 7 * 24 * 60 * 60;
+        let batches: Vec<usize> = (0..4)
+            .map(|_| store.prune_terminal_batch(window, 2).unwrap())
+            .collect();
+        assert_eq!(batches, vec![2, 2, 1, 0], "each transaction is bounded by the batch");
+
+        let ids = |table: &str, column: &str| -> Vec<i64> {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}"))
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .map(|id| id.unwrap())
+                .collect()
+        };
+        let mut kept = vec![outbox_undelivered, ci_red, pending, recent];
+        kept.sort();
+        assert_eq!(ids("prompt_queue", "id"), kept);
+        let mut kept_receipts = vec![outbox_undelivered, ci_red];
+        kept_receipts.sort();
+        assert_eq!(ids("prompt_queue_recipient_seen", "prompt_id"), kept_receipts);
+        assert!(store.prune_terminal_batch(0, 10).is_err(), "a zero window is refused");
     }
 
     #[test]

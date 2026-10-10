@@ -179,6 +179,16 @@ pub trait SupervisorQueueStore: Send + Sync {
     /// Clear old processed notifications (cleanup)
     fn cleanup_old(&self, older_than_secs: i64) -> Result<usize>;
 
+    /// Delete at most `batch` finished notifications created before
+    /// `older_than_secs` ago, in one IMMEDIATE transaction (cas-f207).
+    ///
+    /// Finished means: an outbox row (`transition_key` set) whose prompt was
+    /// delivered, or a pull row (no key) that was processed. Pending and
+    /// undelivered rows stay. Keys that can recur for the same subject
+    /// (`worker-attention:`, `integration:`) stay, because deleting them would
+    /// let [`Self::notify_idempotent`] fire the same event again.
+    fn prune_finished_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
+
     /// Close the store
     fn close(&self) -> Result<()>;
 }
@@ -529,6 +539,11 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
 
             Ok(rows)
         }) // with_write_retry
+    }
+
+    fn prune_finished_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
+        let _ = (older_than_secs, batch);
+        Ok(0)
     }
 
     fn close(&self) -> Result<()> {
@@ -889,4 +904,67 @@ mod tests {
         assert_eq!(outbox.len(), 1);
         assert_eq!(outbox[0].transition_key.as_deref(), Some(key));
     }
+
+    /// cas-f207: finished notifications past the window are deleted in
+    /// bounded batches; pending, undelivered and recurring-key rows stay.
+    #[test]
+    fn cas_f207_prune_finished_batch_keeps_pending_and_recurring_keys() {
+        let (_temp, store) = create_test_store();
+        let created = |key: Option<&str>| -> i64 {
+            match key {
+                None => store
+                    .notify("sup", "worker_died", "{}", NotificationPriority::Normal)
+                    .unwrap(),
+                Some(key) => match store
+                    .notify_idempotent("sup", "task_lifecycle", "{}", NotificationPriority::Normal, key)
+                    .unwrap()
+                {
+                    NotifyIdempotentResult::Created(id) => id,
+                    other => panic!("{other:?}"),
+                },
+            }
+        };
+        let delivered_lifecycle: Vec<i64> = (0..3)
+            .map(|n| created(Some(&format!("cas-x:open:closed:s:task_closed:occ-{n}"))))
+            .collect();
+        let processed_pull = created(None);
+        let pending_pull = created(None);
+        let undelivered_outbox = created(Some("cas-y:open:closed:s:task_closed:occ"));
+        let recurring = created(Some("worker-attention:s:worker_idle:w1::t"));
+        let integration = created(Some("integration:owner:cas-z:sha:Failed"));
+        let fresh = created(Some("cas-f:open:closed:s:task_closed:occ"));
+        for id in delivered_lifecycle.iter().chain([&recurring, &integration, &fresh]) {
+            store.mark_prompt_delivered(*id).unwrap();
+        }
+        store.ack(processed_pull).unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE supervisor_queue SET created_at = ?1 WHERE id <> ?2",
+                params![aged, fresh],
+            )
+            .unwrap();
+        }
+
+        let window = 14 * 24 * 60 * 60;
+        let batches: Vec<usize> = (0..4)
+            .map(|_| store.prune_finished_batch(window, 2).unwrap())
+            .collect();
+        assert_eq!(batches, vec![2, 2, 0, 0], "bounded by the batch, then drained");
+
+        let remaining: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM supervisor_queue ORDER BY id").unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|id| id.unwrap())
+                .collect()
+        };
+        let mut expected = vec![pending_pull, undelivered_outbox, recurring, integration, fresh];
+        expected.sort();
+        assert_eq!(remaining, expected);
+        assert!(store.prune_finished_batch(0, 10).is_err(), "a zero window is refused");
+    }
+
 }

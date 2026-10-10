@@ -408,6 +408,21 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
     Ok(shared)
 }
 
+/// A private connection to `db_path`, configured like the pooled one but
+/// not shared with any other caller in this process (cas-ee9ab).
+///
+/// Every store opened through [`shared_connection`] serialises on one
+/// in-process mutex. A long read on that connection, such as the factory
+/// daemon's full director snapshot, makes every other store call in the
+/// process wait for the mutex. A background reader with its own connection
+/// is an ordinary WAL reader instead: it blocks neither other readers nor the
+/// writer, and holds no mutex anyone else needs.
+pub fn dedicated_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>> {
+    assert_not_protected(db_path);
+    crate::wait_budget::note_store_access("dedicated_connection");
+    Ok(Arc::new(Mutex::new(open_configured(db_path)?)))
+}
+
 /// Open a database and apply the PRAGMAs every shared connection carries.
 fn open_configured(db_path: &Path) -> crate::Result<Connection> {
     let conn = Connection::open(db_path)?;

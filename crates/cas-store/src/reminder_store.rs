@@ -373,6 +373,13 @@ pub struct SqliteReminderStore {
 }
 
 impl SqliteReminderStore {
+
+    /// A store on an existing connection, e.g. a
+    /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
+    /// schema setup; this never runs DDL.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
     /// Open or create a SQLite reminder store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");

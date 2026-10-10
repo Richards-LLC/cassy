@@ -26,6 +26,8 @@ export const FIXTURE_NAMES = [
   "fleet-ops-menu",
   "fleet-ops-confirm",
   "fleet-ops-undo",
+  "fleet-ops-write-access",
+  "fleet-ops-write-access-confirm",
   "connection-failed-retry",
   "connection-fatal-browser",
   "pairing-step-1",

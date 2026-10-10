@@ -1178,8 +1178,12 @@ task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and
 `reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit
-must strictly descend from the delivery anchor, be reachable on the authoritative
-target, and touch a dropped path. Together they must cover every dropped path.
+must differ from the delivery anchor, be reachable on the authoritative target,
+and change a dropped path in its first-parent diff. Together they must cover
+every dropped path's final target state: a path counts only when its state at
+the named commit matches the target, including deletion and file mode. The
+superseding commits may predate the anchor, as when migration renames or a
+deliberate revert landed before the delivery was re-anchored (GH #1160).
 Cassy records the full resolved commit IDs, anchor, measured target, paths and
 review. A narrative without commit receipts cannot waive the content gate.
 

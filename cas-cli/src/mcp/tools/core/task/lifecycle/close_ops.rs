@@ -12599,7 +12599,9 @@ fn reviewed_delivery_drop_reason(reason: Option<&str>) -> Option<&str> {
 }
 
 /// Narrative reviews alone cannot establish supersession. Resolve every named
-/// commit, prove its post-anchor target ancestry, and require path coverage.
+/// commit, prove target reachability, and require first-parent path changes
+/// whose resulting state survives on the target. A re-anchored delivery may
+/// postdate the commits that superseded its earlier content (GH #1160).
 /// The caller supplies a reason only after live supervisor authentication.
 fn validated_delivery_drop_review(
     repo: &std::path::Path,
@@ -12627,7 +12629,8 @@ fn validated_delivery_drop_review(
     };
     let target =
         resolve_branch_sha(repo, &target).ok_or("delivery review target does not resolve")?;
-    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")).ok_or("delivery review anchor does not resolve to a commit")?;
+    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+        .ok_or("delivery review anchor does not resolve to a commit")?;
     if !git_commit_is_ancestor(repo, &anchor, &target) {
         return Err("delivery review anchor is not reachable on the target".into());
     }
@@ -12635,16 +12638,21 @@ fn validated_delivery_drop_review(
     let mut resolved = Vec::new();
     for named in commits.split(',') {
         let sha = resolve_task_commit_receipt_sha(repo, named.trim())?;
-        if sha == anchor
-            || !git_commit_is_ancestor(repo, &anchor, &sha)
-            || !git_commit_is_ancestor(repo, &sha, &target)
-        {
+        if sha == anchor || !git_commit_is_ancestor(repo, &sha, &target) {
             return Err(format!(
-                "superseding commit `{sha}` must strictly descend from anchor `{anchor}` and be reachable on target `{target}`"
+                "superseding commit `{sha}` must differ from anchor `{anchor}` and be reachable on target `{target}`"
             ));
         }
         let output = std::process::Command::new("git")
-            .args(["diff", "--name-only", "--no-renames", "-z", &format!("{sha}^1"), &sha, "--"])
+            .args([
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &format!("{sha}^1"),
+                &sha,
+                "--",
+            ])
             .current_dir(repo)
             .output()
             .map_err(|error| error.to_string())?;
@@ -12662,7 +12670,36 @@ fn validated_delivery_drop_review(
                 "superseding commit `{sha}` does not touch any dropped path"
             ));
         }
-        covered.extend(affected.into_iter().cloned());
+        // Merely touching a path in old history is not supersession: the
+        // named edit must establish its final target state. Comparing trees
+        // also covers deletions/renames, file modes and binary content.
+        let output = std::process::Command::new("git")
+            .args([
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &sha,
+                &target,
+                "--",
+            ])
+            .args(affected.iter().map(|path| path.as_str()))
+            .current_dir(repo)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "cannot compare superseding commit `{sha}` with target `{target}`"
+            ));
+        }
+        let changed = String::from_utf8(output.stdout)
+            .map_err(|_| "superseding comparison paths are not UTF-8")?;
+        covered.extend(
+            affected
+                .into_iter()
+                .filter(|path| !changed.split('\0').any(|changed| changed == path.as_str()))
+                .cloned(),
+        );
         if !resolved.contains(&sha) {
             resolved.push(sha);
         }
@@ -12674,7 +12711,7 @@ fn validated_delivery_drop_review(
         .collect();
     if !uncovered.is_empty() {
         return Err(format!(
-            "superseding commits do not cover dropped path(s): {}",
+            "superseding commits do not cover final target state of dropped path(s): {}",
             uncovered.join(", ")
         ));
     }
@@ -12955,8 +12992,9 @@ fn anchored_delivery_content_gate_unbounded(
                  commit it, and retry close. If the content was intentionally superseded, \
                  a live registered supervisor may close with supervisor_override=true \
                  reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\". \
-                 Each named commit must descend from the anchor, be reachable on the \
-                 target, and touch the dropped paths. The resolved commits, paths, and \
+                 Each named commit must differ from the anchor, be reachable on the \
+                 target, and change dropped paths to their final target state. The \
+                 commit may predate the anchor. The resolved commits, paths, and \
                  review are recorded.",
                 paths.join(", "),
                 dropped_line_samples(repo_path, anchor, parent_branch, &paths),
@@ -29073,24 +29111,57 @@ mod merge_state_gate_tests {
         std::fs::write(p.join(loose), "CREATE TABLE receipt (id INT);\n").unwrap();
         std::fs::write(p.join("analytics.vue"), "delivered();\n").unwrap();
         git(p, &["add", "."]);
-        git(p, &["commit", "-qm", "cas-test1: deliver migration and analytics"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-qm",
+                "cas-test1: deliver migration and analytics",
+            ],
+        );
         let introduction = head_sha(p);
         std::fs::create_dir_all(p.join("migrations/early")).unwrap();
         git(p, &["mv", loose, intermediate]);
-        git(p, &["commit", "-qm", "cas-test1: move migration into Prisma directory"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-qm",
+                "cas-test1: move migration into Prisma directory",
+            ],
+        );
         let moved = head_sha(p);
         git(p, &["mv", "migrations/early", "migrations/final"]);
-        git(p, &["commit", "-qm", "cas-test1: rename migration directory"]);
+        git(
+            p,
+            &["commit", "-qm", "cas-test1: rename migration directory"],
+        );
         let renamed = head_sha(p);
         git(p, &["rm", "analytics.vue"]);
-        git(p, &["commit", "-qm", "revert: deliberately retire cas-test1 analytics"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-qm",
+                "revert: deliberately retire cas-test1 analytics",
+            ],
+        );
         let reverted = head_sha(p);
         git(p, &["checkout", "main"]);
         std::fs::write(p.join("sibling.txt"), "sibling\n").unwrap();
         git(p, &["add", "."]);
         git(p, &["commit", "-qm", "cas-sibling: documentation"]);
         git(p, &["checkout", "factory/worker"]);
-        git(p, &["merge", "--no-ff", "main", "-m", "cas-test1: sync target before parking"]);
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "main",
+                "-m",
+                "cas-test1: sync target before parking",
+            ],
+        );
         let anchor = head_sha(p);
         git(p, &["checkout", "main"]);
         git(p, &["merge", "--ff-only", "factory/worker"]);
@@ -29108,30 +29179,100 @@ mod merge_state_gate_tests {
         window.identity.task_id = Some(task.id.clone());
         let outcome = |window: &TaskCommitReceiptWindow| {
             run_factory_branch_merge_gate_with_attribution(
-                &task, &req, "main", p,
-                TaskCommitAttribution { receipt: None, window: Some(window) },
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(window),
+                },
             )
         };
-        assert!(matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
-            "unreviewed drops must still refuse");
+        assert!(
+            matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "unreviewed drops must still refuse"
+        );
         window.supervisor_override_reason = Some(format!(
             "reviewed-drop: {introduction} -- original delivery is not a replacement"
         ));
-        assert!(matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
-            "an old path touch without final-state coverage must refuse");
+        assert!(
+            matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "an old path touch without final-state coverage must refuse"
+        );
         window.supervisor_override_reason = Some(format!(
             "reviewed-drop: {moved},{renamed} -- analytics is not covered"
         ));
-        assert!(matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
-            "every dropped path needs a covering commit");
+        assert!(
+            matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "every dropped path needs a covering commit"
+        );
         window.supervisor_override_reason = Some(format!(
             "reviewed-drop: {moved},{renamed},{reverted} -- reviewed migration moves and analytics retirement"
         ));
         let result = outcome(&window);
-        assert!(matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
+        assert!(
+            matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
             if note.contains("reviewed delivery content supersession accepted")
                 && note.contains(&moved) && note.contains(&renamed) && note.contains(&reverted)),
-            "pre-anchor reviewed supersession must close: {result:?}");
+            "pre-anchor reviewed supersession must close: {result:?}"
+        );
+    }
+
+    #[test]
+    fn reviewed_drop_requires_final_target_state_cas_f091() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("work.rs"), "replacement();\n").unwrap();
+        git(p, &["add", "."]);
+        git(
+            p,
+            &["commit", "-qm", "reviewed replacement on sibling branch"],
+        );
+        let replacement = head_sha(p);
+        assert!(!git_commit_is_ancestor(p, &anchor, &replacement));
+        assert!(!git_commit_is_ancestor(p, &replacement, &anchor));
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "integrate reviewed replacement",
+            ],
+        );
+        let paths = vec!["work.rs".to_string()];
+        let review = format!("reviewed-drop: {replacement} -- reviewed sibling replacement");
+        assert!(
+            validated_delivery_drop_review(p, &anchor, "main", &paths, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            validated_delivery_drop_review(p, &anchor, "main", &paths, Some(&review))
+                .unwrap()
+                .unwrap()
+                .contains(&replacement)
+        );
+        // The same reachable commit still touches the dropped path, but its
+        // state no longer covers the target. It cannot authorize a later loss.
+        std::fs::write(p.join("work.rs"), "unreviewed();\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "unreviewed later change"]);
+        let error =
+            validated_delivery_drop_review(p, &anchor, "main", &paths, Some(&review)).unwrap_err();
+        assert!(
+            error.contains("final target state") && error.contains("work.rs"),
+            "{error}"
+        );
     }
 
     #[test]

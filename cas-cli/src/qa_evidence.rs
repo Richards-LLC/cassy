@@ -692,6 +692,44 @@ struct VisualQaRun {
 struct VisualQaRender {
     #[serde(default)]
     valid: bool,
+    /// GH #1166: a project visual-qa.mjs records each render's unsuppressed
+    /// findings here (already annotated with viewport and scheme) instead of
+    /// a top-level `findings` list.
+    #[serde(default)]
+    issues: Option<Vec<serde_json::Value>>,
+}
+
+impl VisualQaRun {
+    /// The findings a scoped comparison pairs. The canonical report's
+    /// top-level `findings` list wins. Otherwise a per-render report
+    /// (`renders[].issues`, GH #1166) is flattened, each issue given the
+    /// report's page (`input`) when it names none. `None` when the report
+    /// carries neither shape.
+    fn comparable_findings(&self) -> Option<Vec<serde_json::Value>> {
+        if let Some(findings) = &self.findings {
+            return Some(findings.clone());
+        }
+        if self.renders.is_empty() || self.renders.iter().any(|render| render.issues.is_none()) {
+            return None;
+        }
+        let page = self.input.trim();
+        Some(
+            self.renders
+                .iter()
+                .flat_map(|render| render.issues.iter().flatten())
+                .map(|issue| {
+                    let mut issue = issue.clone();
+                    if let Some(object) = issue.as_object_mut()
+                        && !page.is_empty()
+                        && object.get("url").and_then(serde_json::Value::as_str).is_none_or(str::is_empty)
+                    {
+                        object.insert("url".into(), serde_json::Value::String(page.to_string()));
+                    }
+                    issue
+                })
+                .collect(),
+        )
+    }
 }
 
 /// Whether a visual-QA target is a local build: loopback or unspecified
@@ -1178,13 +1216,16 @@ pub fn check_visual_qa_scoped_at(
     )?;
     let base_run = read_visual_qa_run(baseline, claim)?;
     let base_targets = check_run_provenance(&base_run, baseline, claim, None, None)?;
-    let (Some(tip_findings), Some(base_findings)) = (&tip_run.findings, &base_run.findings) else {
+    let (Some(tip_findings), Some(base_findings)) =
+        (tip_run.comparable_findings(), base_run.comparable_findings())
+    else {
         return Err(format!(
-            "{claim} {} and {} must both carry the `findings` list visual-qa.mjs writes, so the two runs can be compared",
+            "{claim} {} and {} must both record their findings, as a top-level `findings` list (the builtin visual-qa.mjs) or per render as `renders[].issues` (a per-source project visual-qa.mjs), so the two runs can be compared",
             tip.display(),
             baseline.display()
         ));
     };
+    let (tip_findings, base_findings) = (&tip_findings, &base_findings);
     let base_pages: std::collections::BTreeSet<String> =
         base_targets.iter().map(|target| visual_qa_page(target)).collect();
     let missing: Vec<String> = tip_targets

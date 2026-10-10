@@ -523,11 +523,10 @@ impl CodeStore for SqliteCodeStore {
     // ========== Bulk Operations ==========
 
     fn add_symbols_batch(&self, symbols: &[CodeSymbol]) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
         // Bounded retry on acquisition: a single `ImmediateTx::new` gave up the
         // moment a foreign writer held the lock, and the indexer's fallback is
         // to re-insert every symbol one at a time (cas-8a03).
-        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
             for symbol in symbols {
                 let normalized_path = Self::normalize_path(&symbol.file_path);
                 tx.execute(
@@ -563,8 +562,7 @@ impl CodeStore for SqliteCodeStore {
     }
 
     fn add_relationships_batch(&self, relationships: &[CodeRelationship]) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
             for rel in relationships {
                 tx.execute(
                     "INSERT OR REPLACE INTO code_relationships

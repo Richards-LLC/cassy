@@ -2796,6 +2796,49 @@ echo 'Summary: 1 passed'
         }
     }
 
+    /// cas-398c: a passing integration proves release-binary-isa and
+    /// macos-check in the background through the repository's helper; a
+    /// failing helper is reported, and a newer merge cancels the run.
+    #[test]
+    fn cas_398c_row_proofs_run_through_helper_and_cancel() {
+        let repo = fixture();
+        assert!(!row_proofs_supported(repo.path()), "no helper, no row proofs");
+        let marker = repo.path().join("row-proof-ran");
+        let helper = |body: &str| {
+            fs::write(
+                repo.path().join("scripts/assembly-proof.py"),
+                format!(
+                    "import pathlib, sys, time\n# prove-rows\nassert sys.argv[1] == 'prove-rows', sys.argv\npathlib.Path({:?}).write_text(sys.argv[2])\n{body}\n",
+                    marker.to_str().unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        helper("print('row-proofs release-binary-isa=PASS macos-check=PASS')");
+        assert!(row_proofs_supported(repo.path()));
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.timeout = Duration::from_secs(30);
+        let log = repo.path().join("row-proofs.log");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let line = run_row_proofs(repo.path(), &log, &settings, &cancel).unwrap();
+        assert_eq!(line, "row-proofs release-binary-isa=PASS macos-check=PASS");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            repo.path().to_str().unwrap()
+        );
+
+        helper("print('row-proofs release-binary-isa=FAIL macos-check=PASS'); sys.exit(1)");
+        let error = run_row_proofs(repo.path(), &log, &settings, &cancel).unwrap_err();
+        assert!(error.contains("release-binary-isa=FAIL"), "{error}");
+
+        helper("time.sleep(30)");
+        cancel.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        let error = run_row_proofs(repo.path(), &log, &settings, &cancel).unwrap_err();
+        assert!(error.contains("interrupted"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
     /// cas-6f48: a merge that breaks a test turns its epic's gate red within
     /// one run and names that merge; merges into the epic are refused until
     /// a later run passes.

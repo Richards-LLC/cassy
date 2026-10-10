@@ -2,9 +2,9 @@
 # Probe the release report's PDF renderer the way `cas release report --pdf`
 # runs it (cas-be3a). The renderer installs the current Playwright into a
 # disposable workspace and launches headless Chromium, which needs that
-# Playwright release's browser build in the host cache. On the 3.49.0 cut the
-# report stage stopped after publication because chromium_headless_shell was
-# missing; this probe lets preflight catch that before anything publishes.
+# Playwright release's browser build in the host cache. When that build was
+# missing, the report stage stopped after publication; this probe lets
+# preflight catch it before anything publishes.
 #
 # Prints `playwright-version=<v>` and exits 0 when the browser launches.
 set -euo pipefail

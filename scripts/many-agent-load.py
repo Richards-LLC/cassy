@@ -64,6 +64,9 @@ HEADLESS_SLEEP_SECS = 0.5  # daemon idle sleep with no clients attached
 CALL_TIMEOUT_SECS = 120.0  # harness-side give-up for one call
 LOCK_WAIT_REPORT_SECS = 0.4  # matches the GH #1165 threshold
 
+# Every child process, so an interrupted run leaves nothing behind.
+CHILDREN: list[subprocess.Popen] = []
+
 BUSY_PATTERNS = re.compile(
     r"SQLite busy|write lock held|database busy|database is locked|retrying after backoff",
     re.IGNORECASE,
@@ -158,6 +161,8 @@ def prepare_run(args: argparse.Namespace, run_dir: Path) -> dict:
         shutil.copyfile(cached, cas_dir / "cas.db")
     if args.source_config and Path(args.source_config).expanduser().exists():
         shutil.copyfile(Path(args.source_config).expanduser(), cas_dir / "config.toml")
+    if args.code_index is not None:
+        set_code_index(cas_dir / "config.toml", args.code_index)
 
     # Logged in, as the field fleet was: the syncing task store (and its
     # task-sync-intents.lock) is only in play for a logged-in project. The
@@ -204,6 +209,21 @@ def prepare_run(args: argparse.Namespace, run_dir: Path) -> dict:
     }
 
 
+def set_code_index(config: Path, enabled: bool) -> None:
+    """Set `[code] enabled` in the scratch copy's config.toml."""
+    text = config.read_text() if config.exists() else ""
+    value = "true" if enabled else "false"
+    section = re.search(r"(?ms)^\[code\]\s*$(.*?)(?=^\[|\Z)", text)
+    if section is None:
+        text = text.rstrip("\n") + f"\n\n[code]\nenabled = {value}\n"
+    elif re.search(r"(?m)^enabled\s*=", section.group(1)):
+        body = re.sub(r"(?m)^enabled\s*=.*$", f"enabled = {value}", section.group(1), count=1)
+        text = text[:section.start(1)] + body + text[section.end(1):]
+    else:
+        text = text[:section.end(0)] + f"enabled = {value}\n" + text[section.end(0):]
+    config.write_text(text)
+
+
 def child_env(args: argparse.Namespace, env: dict, extra: dict) -> dict:
     base = {
         "PATH": f"{env['fake_bin']}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -241,6 +261,7 @@ class McpClient:
             stdout=subprocess.PIPE,
             stderr=self._stderr,
         )
+        CHILDREN.append(self.proc)
         self._next_id = 0
         self._lock = threading.Lock()
         self._pending: dict[int, dict] = {}
@@ -798,15 +819,27 @@ def prewarm(args, env, run_dir: Path) -> dict:
     try:
         client.initialize(CALL_TIMEOUT_SECS)
         boot = now() - started
-        last = None
-        stable_since = now()
+        first = code_index_rows(env["cas_dir"])
+        last_rows, rows_since = first, now()
         while True:
             rows = code_index_rows(env["cas_dir"])
             elapsed = now() - started
             samples.append({"t": round(elapsed, 1), **rows})
-            if rows != last:
-                last, stable_since = rows, now()
-            if elapsed >= args.prewarm_secs and now() - stable_since >= 10:
+            if rows != last_rows:
+                last_rows, rows_since = rows, now()
+            try:
+                reported = "Code index cop" in stderr_path.read_text(errors="replace")
+            except OSError:
+                reported = False
+            # The purge is done when the serve reports it (it prints only when
+            # it changed something or failed), or after a further minute with
+            # an unchanged footprint (nothing to purge).
+            purged = reported or (rows == first and elapsed >= args.prewarm_secs + 60)
+            # With indexing on, also let the canonical writer's first build
+            # settle: files present and unchanged for 20 s.
+            indexed = not args.code_index or (
+                rows.get("code_files", 0) > 0 and now() - rows_since >= 20)
+            if elapsed >= args.prewarm_secs and purged and indexed:
                 break
             if elapsed >= args.prewarm_max_secs:
                 break
@@ -838,7 +871,7 @@ def code_index_rows(cas_dir: Path) -> dict:
 def start_daemon(args, env, log_path: Path) -> subprocess.Popen:
     daemon_env = child_env(args, env, {"CAS_AGENT_ROLE": "supervisor"})
     log = open(log_path, "ab")
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [args.cas_bin, "factory", "daemon", "--session", env["session"], "--cwd",
          str(env["project"]), "--workers", "0", "--no-worktrees", "--no-phone-home",
          "--foreground", "--supervisor-name", "load-supervisor"],
@@ -849,6 +882,8 @@ def start_daemon(args, env, log_path: Path) -> subprocess.Popen:
         stderr=log,
         start_new_session=True,
     )
+    CHILDREN.append(proc)
+    return proc
 
 
 def stop_process_group(proc: subprocess.Popen | None) -> None:
@@ -1081,6 +1116,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "seed": args.seed,
         "excluded_workload": sorted(args.exclude),
         "prewarm": prewarm_report,
+        "code_index_enabled": args.code_index,
         "code_index": {"at_copy": index_at_copy, "at_load_start": index_at_load,
                        "at_end": index_at_end},
         "background_writers": {
@@ -1194,6 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
                              "load, so one-off boot work on the copied DB stays out of the "
                              "measured window")
     parser.add_argument("--prewarm-max-secs", type=float, default=600.0)
+    parser.add_argument("--code-index", action=argparse.BooleanOptionalAction, default=None,
+                        help="set [code] enabled in the scratch config (default: as copied)")
     parser.add_argument("--cloud-endpoint", default="http://127.0.0.1:9",
                         help="cloud endpoint for children; default is a closed local port")
     parser.add_argument("--lock-interval", type=float, default=0.2)
@@ -1218,10 +1256,22 @@ def main(argv: list[str] | None = None) -> int:
         live = Path(args.source_db).expanduser().resolve().parent
         if scratch == live or live in scratch.parents:
             parser.error("--scratch must not be inside the live .cas directory")
+    def interrupted(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
     try:
         return run(args)
     except KeyboardInterrupt:
         return 2
+    finally:
+        for proc in CHILDREN:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL) if os.getpgid(proc.pid) == proc.pid \
+                        else proc.kill()
+                except (ProcessLookupError, PermissionError):
+                    pass
 
 
 if __name__ == "__main__":

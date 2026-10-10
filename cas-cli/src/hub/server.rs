@@ -183,6 +183,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             post(session_operation::<R>).options(preflight::<R>),
         )
         .route(
+            "/v1/sessions/{session}/write-grants",
+            post(session_write_grant::<R>).options(preflight::<R>),
+        )
+        .route(
             "/v1/sessions/{session}/status",
             get(status::<R>).options(preflight::<R>),
         )
@@ -1219,6 +1223,32 @@ async fn session_operation<R: SessionReadModel>(
 /// Run one operation through the shared facade, checking `expected` first.
 /// Store work runs on a blocking thread; worker operations then await the
 /// same `CasService` body their MCP action runs.
+/// cas-ab04 (GH #1169 part 2): body of `POST /v1/sessions/{session}/write-grants`.
+#[derive(Debug, serde::Deserialize)]
+struct WriteGrantRequest {
+    action: String,
+    task: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn session_write_grant<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<WriteGrantRequest>,
+) -> Response {
+    let _ = (state, session, request);
+    with_cors(
+        launch_error(StatusCode::NOT_IMPLEMENTED, "not_implemented", "write grants"),
+        &headers,
+    )
+}
+
 async fn run_fleet_operation(
     cas_dir: std::path::PathBuf,
     session: String,

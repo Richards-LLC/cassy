@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use cas_store::{CodeStore, SqliteCodeVectorStore, WriteBatching};
+use cas_store::{SqliteCodeVectorStore, WriteBatching};
 
 use super::*;
 use crate::daemon::indexing::{code_scan_key, collect_source_files, reconcile_code_tree};

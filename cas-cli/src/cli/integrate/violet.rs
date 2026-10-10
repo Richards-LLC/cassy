@@ -1215,7 +1215,8 @@ fn load_machine_credentials_with_installer(
     }
     let mut loaded = 0;
     for (name, value) in values {
-        if excluded.contains(&name) || value.trim().is_empty() || std::env::var_os(&name).is_some() {
+        if excluded.contains(&name) || value.trim().is_empty() || std::env::var_os(&name).is_some()
+        {
             continue;
         }
         install(&name, &value);
@@ -1518,7 +1519,10 @@ fn same_hub(left: &ServerConfig, right: &ServerConfig) -> bool {
 
 /// The `env:` names a server's auth and headers reference, in order.
 fn server_env_references(server: &ServerConfig) -> Vec<String> {
-    probe_env_states(server, &NoEnv).into_iter().map(|(name, _)| name).collect()
+    probe_env_states(server, &NoEnv)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// An environment with nothing set, for name-only questions.
@@ -1657,7 +1661,9 @@ fn plan_project_proxy(
     let server_action = match (declares_server, &project_server) {
         (false, _) => ServerAction::Absent,
         (true, project) if project.as_ref() == machine_server => ServerAction::Drop,
-        (true, Some(project)) if machine_server.is_some_and(|machine| same_hub(project, machine)) => {
+        (true, Some(project))
+            if machine_server.is_some_and(|machine| same_hub(project, machine)) =>
+        {
             ServerAction::DropSameHub
         }
         (true, _) => ServerAction::Keep,
@@ -1675,7 +1681,10 @@ fn plan_project_proxy(
 
     let canonical = canonical_entries();
     let allowlist_is_canonical = existing_tools == VIOLET_TOOLS;
-    let drops_server = matches!(server_action, ServerAction::Drop | ServerAction::DropSameHub);
+    let drops_server = matches!(
+        server_action,
+        ServerAction::Drop | ServerAction::DropSameHub
+    );
     if allowlist_is_canonical && !drops_server {
         let mut note = "already names exactly the hub's current routes".to_string();
         if server_action == ServerAction::Keep {
@@ -1994,7 +2003,12 @@ fn run_with_credentials(
         .as_ref()
         .and_then(|(_, plan)| plan.server_override.as_ref())
         .map(|server| server_endpoint(server).to_string());
-    let verdict = claude_entry_verdict(&probe_outcome, override_url.as_deref(), &args.url, &token_env);
+    let verdict = claude_entry_verdict(
+        &probe_outcome,
+        override_url.as_deref(),
+        &args.url,
+        &token_env,
+    );
     for harness in harnesses.iter_mut().filter(|harness| {
         harness.harness == "claude-code"
             && matches!(
@@ -2231,20 +2245,22 @@ fn reconcile_claude_profile(
 ) -> Option<HarnessEntry> {
     let existing = existing_claude_violet_entry(path)?;
     let stale = stale_claude_reason(&existing);
-    Some(match apply_claude(path, url, token_env, bypass_env, dry_run) {
-        Ok(state) => HarnessEntry {
-            harness: "claude-code".to_string(),
-            path: Some(path.to_path_buf()),
-            state,
-            note: stale_claude_note(state, stale),
+    Some(
+        match apply_claude(path, url, token_env, bypass_env, dry_run) {
+            Ok(state) => HarnessEntry {
+                harness: "claude-code".to_string(),
+                path: Some(path.to_path_buf()),
+                state,
+                note: stale_claude_note(state, stale),
+            },
+            Err(error) => HarnessEntry {
+                harness: "claude-code".to_string(),
+                path: Some(path.to_path_buf()),
+                state: WriteState::Skipped,
+                note: Some(format!("{error:#}")),
+            },
         },
-        Err(error) => HarnessEntry {
-            harness: "claude-code".to_string(),
-            path: Some(path.to_path_buf()),
-            state: WriteState::Skipped,
-            note: Some(format!("{error:#}")),
-        },
-    })
+    )
 }
 
 /// The `mcpServers.violet` entry a Claude profile holds, if it parses.
@@ -2561,10 +2577,7 @@ pub fn doctor_row(
     if !missing.is_empty() {
         return DoctorRow {
             severity: DoctorSeverity::Error,
-            message: format!(
-                "hub {endpoint}: {}; {CREDENTIALS_HINT}",
-                missing.join(", ")
-            ),
+            message: format!("hub {endpoint}: {}; {CREDENTIALS_HINT}", missing.join(", ")),
         };
     }
     let credentials = states
@@ -3023,13 +3036,20 @@ mod tests {
             load_machine_credentials_with_installer(
                 &["WORKER_DENIED_FIXTURE_TOKEN".into()],
                 |name, value| env.set(name, value),
-            ).unwrap(),
+            )
+            .unwrap(),
             1,
         );
         assert!(std::env::var_os("WORKER_DENIED_FIXTURE_TOKEN").is_none());
-        assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "allowed-fixture");
+        assert_eq!(
+            std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(),
+            "allowed-fixture"
+        );
         assert!(std::env::var_os("WORKER_EMPTY_FIXTURE_TOKEN").is_none());
-        assert_eq!(std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(), "");
+        assert_eq!(
+            std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(),
+            ""
+        );
         assert_eq!(
             load_machine_credentials_with_installer(
                 &["WORKER_DENIED_FIXTURE_TOKEN".into()],
@@ -3045,10 +3065,19 @@ mod tests {
                 .unwrap(),
             1,
         );
-        assert_eq!(std::env::var("WORKER_DENIED_FIXTURE_TOKEN").unwrap(), "denied-fixture");
-        assert_eq!(std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(), "existing-fixture");
+        assert_eq!(
+            std::env::var("WORKER_DENIED_FIXTURE_TOKEN").unwrap(),
+            "denied-fixture"
+        );
+        assert_eq!(
+            std::env::var("WORKER_ALLOWED_FIXTURE_TOKEN").unwrap(),
+            "existing-fixture"
+        );
         assert!(std::env::var_os("WORKER_EMPTY_FIXTURE_TOKEN").is_none());
-        assert_eq!(std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(), "");
+        assert_eq!(
+            std::env::var("WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN").unwrap(),
+            ""
+        );
     }
 
     struct FakeEnv(HashMap<String, String>);
@@ -3445,10 +3474,12 @@ auth = "env:{token}"
                 .servers
                 .contains_key(&violet_compatibility().retired_server)
         );
-        assert_eq!(
-            server_endpoint(config.servers.get(VIOLET_SERVER).unwrap()),
-            violet_hub_url()
-        );
+        // GH #1164: the retired block pointed at this machine's hub with a
+        // per-machine token name, so it is not renamed into a project-level
+        // [servers.violet]; the machine registration supplies the server.
+        assert!(!config.servers.contains_key(VIOLET_SERVER), "{config:?}");
+        let note = &report.project_proxy.as_ref().unwrap().note;
+        assert!(note.contains("same hub URL"), "{note}");
         assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
         assert_eq!(
             config.worker_access.get(VIOLET_SERVER),
@@ -4411,8 +4442,14 @@ auth = "env:{token}"
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
         assert!(row.message.contains("violet_read"), "{row:?}");
         // GH #1157: the row states `cas violet` readiness, not just registration.
-        assert!(row.message.contains("reachable and bearer accepted"), "{row:?}");
-        assert!(row.message.contains("`cas violet post|thread|read` ready"), "{row:?}");
+        assert!(
+            row.message.contains("reachable and bearer accepted"),
+            "{row:?}"
+        );
+        assert!(
+            row.message.contains("`cas violet post|thread|read` ready"),
+            "{row:?}"
+        );
         assert!(!row.message.contains(FAKE_TOKEN));
     }
 
@@ -5156,7 +5193,10 @@ auth = "env:{token}"
         assert_eq!(probed.len(), 1, "the machine registration must be verified");
         match &probed[0] {
             ServerConfig::Http { auth, .. } => {
-                assert_eq!(auth.as_deref(), Some(format!("env:{TEST_TOKEN_ENV}").as_str()))
+                assert_eq!(
+                    auth.as_deref(),
+                    Some(format!("env:{TEST_TOKEN_ENV}").as_str())
+                )
             }
             other => panic!("unexpected probe server {other:?}"),
         }
@@ -5182,8 +5222,18 @@ auth = "env:{token}"
                  auth = \"env:STAGING_ONLY_TOKEN\"\n"
             ),
         );
-        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
-        let remedy = report.remedy.clone().expect("a missing token needs a remedy");
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
+        let remedy = report
+            .remedy
+            .clone()
+            .expect("a missing token needs a remedy");
         assert!(remedy.contains("STAGING_ONLY_TOKEN"), "{remedy}");
         assert!(remedy.contains(&project.display().to_string()), "{remedy}");
         assert!(!remedy.contains("cas login"), "{remedy}");
@@ -5212,7 +5262,10 @@ auth = "env:{token}"
         );
         assert!(remedy.contains("re-run `cas integrate violet`"), "{remedy}");
         assert!(!remedy.contains("cas login"), "{remedy}");
-        assert!(!CREDENTIALS_HINT.contains("cas login"), "{CREDENTIALS_HINT}");
+        assert!(
+            !CREDENTIALS_HINT.contains("cas login"),
+            "{CREDENTIALS_HINT}"
+        );
     }
 
     /// GH #1164 part 2: "already current" is a structural claim. Each
@@ -5234,9 +5287,19 @@ auth = "env:{token}"
             .unwrap();
         assert_eq!(claude.state, WriteState::AlreadyCurrent);
         let note = claude.note.clone().unwrap_or_default();
-        assert!(note.contains("authenticated tools/list: 2 tool(s)"), "{claude:?}");
+        assert!(
+            note.contains("authenticated tools/list: 2 tool(s)"),
+            "{claude:?}"
+        );
 
-        let rejected = run(&args, None, &paths, &env, &FakeProbe(ProbeOutcome::Unauthorized)).unwrap();
+        let rejected = run(
+            &args,
+            None,
+            &paths,
+            &env,
+            &FakeProbe(ProbeOutcome::Unauthorized),
+        )
+        .unwrap();
         let claude = rejected
             .harnesses
             .iter()
@@ -5274,7 +5337,10 @@ auth = "env:{token}"
                     violet_hub_url()
                 ),
             ),
-            (&untouched, r#"{"mcpServers": {"other": {"type": "http", "url": "https://x"}}}"#.to_string()),
+            (
+                &untouched,
+                r#"{"mcpServers": {"other": {"type": "http", "url": "https://x"}}}"#.to_string(),
+            ),
         ] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
@@ -5283,7 +5349,10 @@ auth = "env:{token}"
 
         let mut paths = paths_in(dir.path());
         paths.claude_profiles = discover_claude_profiles(&home, paths.claude_json.as_deref());
-        assert_eq!(paths.claude_profiles, vec![mecha.clone(), untouched.clone(), literal.clone()]);
+        assert_eq!(
+            paths.claude_profiles,
+            vec![mecha.clone(), untouched.clone(), literal.clone()]
+        );
         let env = ready_env();
         let report = run(&test_args(), None, &paths, &env, &FakeProbe(live_tools())).unwrap();
 
@@ -5292,18 +5361,30 @@ auth = "env:{token}"
                 .harnesses
                 .iter()
                 .find(|h| h.path.as_deref() == Some(path.as_path()))
-                .unwrap_or_else(|| panic!("{} not reported: {:?}", path.display(), report.harnesses));
+                .unwrap_or_else(|| {
+                    panic!("{} not reported: {:?}", path.display(), report.harnesses)
+                });
             assert_eq!(entry.state, WriteState::Written, "{entry:?}");
-            assert!(entry.note.as_deref().unwrap_or_default().contains(reason), "{entry:?}");
+            assert!(
+                entry.note.as_deref().unwrap_or_default().contains(reason),
+                "{entry:?}"
+            );
             let written: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             let headers = &written["mcpServers"][VIOLET_SERVER]["headers"];
-            assert_eq!(headers["Authorization"], format!("Bearer ${{{TEST_TOKEN_ENV}}}"));
+            assert_eq!(
+                headers["Authorization"],
+                format!("Bearer ${{{TEST_TOKEN_ENV}}}")
+            );
             assert_eq!(
                 headers[VIOLET_BYPASS_HEADER],
                 format!("${{{VIOLET_DEFAULT_BYPASS_ENV}}}")
             );
-            assert!(!std::fs::read_to_string(path).unwrap().contains("xoxb-revoked-literal"));
+            assert!(
+                !std::fs::read_to_string(path)
+                    .unwrap()
+                    .contains("xoxb-revoked-literal")
+            );
         }
         // Unrelated keys survive the rewrite.
         let mecha_doc: serde_json::Value =
@@ -5317,6 +5398,9 @@ auth = "env:{token}"
             "{:?}",
             report.harnesses
         );
-        assert_eq!(std::fs::read_to_string(&untouched).unwrap(), untouched_before);
+        assert_eq!(
+            std::fs::read_to_string(&untouched).unwrap(),
+            untouched_before
+        );
     }
 }

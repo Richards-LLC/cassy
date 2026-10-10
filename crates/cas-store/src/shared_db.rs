@@ -18,30 +18,52 @@ use crate::{Result, StoreError};
 /// Acquire a shared SQLite connection, converting a poisoned mutex into a
 /// recoverable store error instead of panicking the caller.
 ///
+/// Every store in this crate takes its connection through this (or
+/// [`lock_connection_recovering`]); a guard test refuses a raw `conn.lock()`
+/// in non-test code (GH #1165 / cas-06ef).
+///
 /// Under a thread wait budget ([`crate::wait_budget`]) the in-process mutex is
 /// polled only until the deadline: another thread of this process holding the
 /// connection across its own busy wait must not stall a UI thread (GH #1165).
-pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_, Connection>> {
-    lock_connection_mutex(conn)
+/// Without a budget this is a plain blocking lock.
+pub(crate) fn lock_connection(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+    lock_connection_with(conn, false)
 }
 
-/// [`lock_connection`] for a bare mutex (the pooled write path).
+/// [`lock_connection`] for stores that recover a poisoned mutex rather than
+/// fail on it. Fails only when the thread's wait budget runs out.
+pub(crate) fn lock_connection_recovering(
+    conn: &Mutex<Connection>,
+) -> Result<MutexGuard<'_, Connection>> {
+    lock_connection_with(conn, true)
+}
+
+/// [`lock_connection`] for the pooled write path's bare mutex.
 pub(crate) fn lock_connection_mutex(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+    lock_connection(conn)
+}
+
+fn lock_connection_with(
+    conn: &Mutex<Connection>,
+    recover_poison: bool,
+) -> Result<MutexGuard<'_, Connection>> {
+    let poisoned = || StoreError::Other("shared SQLite connection lock poisoned".to_string());
     crate::wait_budget::note_store_access("sqlite connection");
     if crate::wait_budget::wait_deadline().is_none() {
-        return conn
-            .lock()
-            .map_err(|_| StoreError::Other("shared SQLite connection lock poisoned".to_string()));
+        return match conn.lock() {
+            Ok(guard) => Ok(guard),
+            Err(error) if recover_poison => Ok(error.into_inner()),
+            Err(_) => Err(poisoned()),
+        };
     }
     let mut pause = Duration::from_micros(200);
     loop {
         match conn.try_lock() {
             Ok(guard) => return Ok(guard),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(StoreError::Other(
-                    "shared SQLite connection lock poisoned".to_string(),
-                ));
+            Err(std::sync::TryLockError::Poisoned(error)) if recover_poison => {
+                return Ok(error.into_inner());
             }
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(poisoned()),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         let Some(sleep) = crate::wait_budget::clamp_wait(pause) else {

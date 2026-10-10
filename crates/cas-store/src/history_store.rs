@@ -1090,7 +1090,7 @@ impl SqliteHistoryStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+        crate::shared_db::lock_connection_recovering(&self.conn)?
     }
 
     /// Shared body of "this commit is no longer awaiting a vector", whether

@@ -77,14 +77,10 @@ pub enum QaPassOpen {
 fn open_conn(cas_dir: &Path) -> Result<std::sync::Arc<std::sync::Mutex<Connection>>> {
     let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
     {
-        let guard = conn.lock().map_err(lock_err)?;
+        let guard = crate::shared_db::lock_connection(&conn)?;
         ensure_schema(&guard)?;
     }
     Ok(conn)
-}
-
-fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Parse("Failed to acquire lock".to_string())
 }
 
 /// Create the table and indexes when missing (idempotent).
@@ -230,7 +226,7 @@ pub fn open_qa_pass_reporting_superseded(
         ));
     }
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     expire_with_conn(&tx, new.task_id, now)?;
 
@@ -289,7 +285,7 @@ pub fn open_qa_pass_reporting_superseded(
 /// Link the QA work item the reviewer will start.
 pub fn set_qa_task(cas_dir: &Path, pass_id: &str, qa_task_id: &str) -> Result<QaPass> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     conn.execute(
         "UPDATE qa_passes SET qa_task_id = ?2 WHERE id = ?1",
         params![pass_id, qa_task_id],
@@ -323,7 +319,7 @@ pub fn claim_qa_pass(
     now: DateTime<Utc>,
 ) -> Result<QaPass> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     expire_with_conn(&tx, task_id, now)?;
     let active = active_with_conn(&tx, task_id)?.ok_or_else(|| {
@@ -369,7 +365,7 @@ pub fn release_qa_claim_for_reviewer(
 
 fn release_qa_claim(cas_dir: &Path, qa_task_id: &str, reviewer: Option<&str>) -> Result<bool> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     if let Some(reviewer) = reviewer {
         let conflicting: Option<String> = tx
@@ -403,7 +399,7 @@ pub fn assert_may_review_qa_task(
     agent_id: &str,
 ) -> Result<Option<QaPass>> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let pass = conn
         .query_row(
             &format!(
@@ -446,7 +442,7 @@ pub fn resolve_qa_pass(
         }
     }
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     expire_with_conn(&tx, task_id, now)?;
     let active = active_with_conn(&tx, task_id)?.ok_or_else(|| {
@@ -503,7 +499,7 @@ pub fn waive_qa_pass(
         ));
     }
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     if let Some(active) = active_with_conn(&tx, task_id)? {
         set_state(&tx, &active.id, QaPassState::Superseded, Some(now))?;
@@ -549,7 +545,7 @@ pub fn withdraw_open_qa_pass(
         ));
     }
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     expire_with_conn(&tx, task_id, now)?;
     let Some(active) = active_with_conn(&tx, task_id)? else {
@@ -591,7 +587,7 @@ pub fn withdraw_qa_pass_for_qa_task(
         ));
     }
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     let active = tx
         .query_row(
@@ -623,7 +619,7 @@ pub fn withdraw_qa_pass_for_qa_task(
 /// Latest round for a task, after lazily timing out an expired one.
 pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Result<Option<QaPass>> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     expire_with_conn(&conn, task_id, now)?;
     latest_with_conn(&conn, task_id)
 }
@@ -635,7 +631,7 @@ pub fn satisfying_qa_pass_for_head(
     head: &str,
 ) -> Result<Option<QaPass>> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     conn.query_row(
         &format!(
             "SELECT {COLUMNS} FROM qa_passes
@@ -662,7 +658,7 @@ pub fn list_qa_passes(cas_dir: &Path, task_id: &str) -> Result<Vec<QaPass>> {
 
 fn list_filtered(cas_dir: &Path, task_id: &str, satisfying_only: bool) -> Result<Vec<QaPass>> {
     let conn = open_conn(cas_dir)?;
-    let conn = conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
     let filter = if satisfying_only {
         "AND state IN ('passed', 'waived')"
     } else {

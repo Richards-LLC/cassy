@@ -11,11 +11,6 @@ use std::sync::{Arc, Mutex};
 use crate::Result;
 use crate::error::StoreError;
 
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
-
 /// A text snippet from a recording with search context
 #[derive(Debug, Clone)]
 pub struct RecordingTextEntry {
@@ -114,7 +109,7 @@ impl RecordingTextStore for SqliteRecordingTextStore {
     fn init(&self) -> Result<()> {
         // Tables are created via migration m167_recording_text_fts5
         // This just verifies the tables exist
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Check if tables exist (migration should have run)
         let table_exists: bool = conn.query_row(
@@ -139,7 +134,7 @@ impl RecordingTextStore for SqliteRecordingTextStore {
         timestamp_ms: i64,
         text_content: &str,
     ) -> Result<i64> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.execute(
             "INSERT INTO recording_text (recording_id, agent_name, timestamp_ms, text_content)
@@ -151,7 +146,7 @@ impl RecordingTextStore for SqliteRecordingTextStore {
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<RecordingSearchResult>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT
@@ -192,7 +187,7 @@ impl RecordingTextStore for SqliteRecordingTextStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<RecordingSearchResult>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT
@@ -228,7 +223,7 @@ impl RecordingTextStore for SqliteRecordingTextStore {
     }
 
     fn list_for_recording(&self, recording_id: &str) -> Result<Vec<RecordingTextEntry>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, recording_id, agent_name, timestamp_ms, text_content, created_at
@@ -246,7 +241,7 @@ impl RecordingTextStore for SqliteRecordingTextStore {
     }
 
     fn delete_for_recording(&self, recording_id: &str) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let deleted = conn.execute(
             "DELETE FROM recording_text WHERE recording_id = ?1",

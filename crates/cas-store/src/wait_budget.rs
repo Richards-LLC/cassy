@@ -359,6 +359,74 @@ mod tests {
         assert!(lock_mutex_within_budget(&mutex, "test mutex").is_some());
     }
 
+    /// Guard (GH #1165 / cas-06ef): every store takes its shared connection
+    /// through `shared_db::lock_connection` (or `lock_connection_recovering`),
+    /// so a thread's wait budget bounds the in-process mutex too. A raw
+    /// `conn.lock()` in non-test store code would let the factory daemon loop
+    /// wait behind another thread's unbudgeted busy wait.
+    #[test]
+    fn no_store_takes_the_shared_connection_mutex_directly() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Production code ends at the first `#[cfg(test)]` that opens a module.
+        fn production(text: &str) -> &str {
+            let mut from = 0;
+            while let Some(at) = text[from..].find("#[cfg(test)]") {
+                let at = from + at;
+                let rest = text[at + "#[cfg(test)]".len()..].trim_start();
+                let rest = rest
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| rest.strip_prefix("pub "))
+                    .unwrap_or(rest);
+                if rest.starts_with("mod ") {
+                    return &text[..at];
+                }
+                from = at + 1;
+            }
+            text
+        }
+        // `conn.lock()`, allowing whitespace and line breaks around the dot.
+        fn raw_locks(text: &str) -> Vec<usize> {
+            let mut hits = Vec::new();
+            let mut from = 0;
+            while let Some(at) = text[from..].find("conn") {
+                let at = from + at;
+                let rest = text[at + 4..].trim_start();
+                if let Some(rest) = rest.strip_prefix('.')
+                    && rest.trim_start().starts_with("lock()")
+                {
+                    hits.push(at);
+                }
+                from = at + 4;
+            }
+            hits
+        }
+        let mut offenders = Vec::new();
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if !name.ends_with(".rs") || name.contains("test") || name == "shared_db.rs" {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let production = production(&text);
+                for at in raw_locks(production) {
+                    let line = production[..at].matches('\n').count() + 1;
+                    offenders.push(format!("{}:{line}", path.display()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "take the connection with shared_db::lock_connection: {offenders:?}"
+        );
+    }
+
     #[test]
     fn file_lock_gives_up_at_the_deadline() {
         use fs2::FileExt;

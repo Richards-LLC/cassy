@@ -12,9 +12,7 @@ impl CodeStore for SqliteCodeStore {
         // Tables are created by migrations (m131-m140)
         // This just verifies the tables exist
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.execute_batch(
             "SELECT 1 FROM code_files LIMIT 0;
              SELECT 1 FROM code_symbols LIMIT 0;
@@ -61,9 +59,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_file(&self, id: &str) -> Result<CodeFile> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.query_row(
             "SELECT id, path, repository, language, size, line_count, commit_hash, content_hash, created, updated, scope
              FROM code_files WHERE id = ?1",
@@ -78,9 +74,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_file_by_path(&self, repository: &str, path: &str) -> Result<Option<CodeFile>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let normalized_path = Self::normalize_path(path);
         conn.query_row(
             "SELECT id, path, repository, language, size, line_count, commit_hash, content_hash, created, updated, scope
@@ -94,9 +88,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn list_files(&self, repository: &str, language: Option<Language>) -> Result<Vec<CodeFile>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
 
         let sql = if language.is_some() {
             "SELECT id, path, repository, language, size, line_count, commit_hash, content_hash, created, updated, scope
@@ -179,9 +171,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_symbol(&self, id: &str) -> Result<CodeSymbol> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.query_row(
             "SELECT id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
                     source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope
@@ -197,9 +187,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_symbols_by_name(&self, qualified_name: &str) -> Result<Vec<CodeSymbol>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
                     source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope
@@ -212,9 +200,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_symbols_in_file(&self, file_id: &str) -> Result<Vec<CodeSymbol>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, qualified_name, name, kind, language, file_path, file_id, line_start, line_end,
                     source, documentation, signature, parent_id, repository, created, updated, commit_hash, content_hash, scope
@@ -233,9 +219,7 @@ impl CodeStore for SqliteCodeStore {
         limit: usize,
     ) -> Result<Vec<CodeSymbol>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
 
         // Build query dynamically based on filters
         let mut sql = String::from(
@@ -277,9 +261,7 @@ impl CodeStore for SqliteCodeStore {
         offset: usize,
     ) -> Result<Vec<CodeSymbol>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
 
         // Build query dynamically based on filters
         let mut sql = String::from(
@@ -338,9 +320,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn add_relationship(&self, rel: &CodeRelationship) -> Result<()> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO code_relationships
              (id, source_id, target_id, relation_type, weight, created)
@@ -359,9 +339,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_callers(&self, symbol_id: &str) -> Result<Vec<CodeSymbol>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT s.id, s.qualified_name, s.name, s.kind, s.language, s.file_path, s.file_id,
                     s.line_start, s.line_end, s.source, s.documentation, s.signature, s.parent_id,
@@ -377,9 +355,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_callees(&self, symbol_id: &str) -> Result<Vec<CodeSymbol>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT s.id, s.qualified_name, s.name, s.kind, s.language, s.file_path, s.file_id,
                     s.line_start, s.line_end, s.source, s.documentation, s.signature, s.parent_id,
@@ -395,9 +371,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_relationships_from(&self, symbol_id: &str) -> Result<Vec<CodeRelationship>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, source_id, target_id, relation_type, weight, created
              FROM code_relationships WHERE source_id = ?1",
@@ -409,9 +383,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_relationships_to(&self, symbol_id: &str) -> Result<Vec<CodeRelationship>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, source_id, target_id, relation_type, weight, created
              FROM code_relationships WHERE target_id = ?1",
@@ -423,9 +395,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn delete_relationships_for_symbol(&self, symbol_id: &str) -> Result<()> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.execute(
             "DELETE FROM code_relationships WHERE source_id = ?1 OR target_id = ?1",
             params![symbol_id],
@@ -437,9 +407,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn link_to_memory(&self, link: &CodeMemoryLink) -> Result<()> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO code_memory_links
              (code_id, entry_id, link_type, confidence, created)
@@ -457,9 +425,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_linked_memories(&self, code_id: &str) -> Result<Vec<String>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached("SELECT entry_id FROM code_memory_links WHERE code_id = ?1")?;
         let rows = stmt.query_map(params![code_id], |row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<String>, _>>()
@@ -468,9 +434,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_linked_code(&self, entry_id: &str) -> Result<Vec<String>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached("SELECT code_id FROM code_memory_links WHERE entry_id = ?1")?;
         let rows = stmt.query_map(params![entry_id], |row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<String>, _>>()
@@ -479,9 +443,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn get_memory_links(&self, code_id: &str) -> Result<Vec<CodeMemoryLink>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT code_id, entry_id, link_type, confidence, created
              FROM code_memory_links WHERE code_id = ?1",
@@ -498,9 +460,7 @@ impl CodeStore for SqliteCodeStore {
         link_type: CodeMemoryLinkType,
     ) -> Result<()> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.execute(
             "DELETE FROM code_memory_links WHERE code_id = ?1 AND entry_id = ?2 AND link_type = ?3",
             params![code_id, entry_id, link_type.to_string()],
@@ -510,9 +470,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn delete_memory_links_for_code(&self, code_id: &str) -> Result<()> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.execute(
             "DELETE FROM code_memory_links WHERE code_id = ?1",
             params![code_id],
@@ -588,9 +546,7 @@ impl CodeStore for SqliteCodeStore {
         }
 
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
 
         // Build IN clause with placeholders
         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
@@ -614,9 +570,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn count_files(&self) -> Result<usize> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.query_row("SELECT COUNT(*) FROM code_files", [], |row| {
             row.get::<_, i64>(0)
         })
@@ -626,9 +580,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn count_symbols(&self) -> Result<usize> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         conn.query_row("SELECT COUNT(*) FROM code_symbols", [], |row| {
             row.get::<_, i64>(0)
         })
@@ -638,9 +590,7 @@ impl CodeStore for SqliteCodeStore {
 
     fn count_files_by_language(&self) -> Result<std::collections::HashMap<Language, usize>> {
         let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+            crate::shared_db::lock_connection(&.conn)?;
         let mut stmt =
             conn.prepare_cached("SELECT language, COUNT(*) FROM code_files GROUP BY language")?;
         let rows = stmt.query_map([], |row| {

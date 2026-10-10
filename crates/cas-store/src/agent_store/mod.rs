@@ -397,9 +397,7 @@ impl SqliteAgentStore {
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|e| StoreError::Other(format!("agent store lock poisoned: {e}")))
+        crate::shared_db::lock_connection(&self.conn)
     }
 
     fn agent_from_row(row: &rusqlite::Row) -> rusqlite::Result<Agent> {

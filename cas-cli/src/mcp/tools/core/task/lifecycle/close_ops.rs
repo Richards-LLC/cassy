@@ -29059,6 +29059,81 @@ mod merge_state_gate_tests {
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
     }
 
+    /// GH #1160: the final sync anchor comes after two migration renames and
+    /// an intentional revert. The old paths are absent at that anchor, but
+    /// attribution still measures their earlier task commits as dropped.
+    #[test]
+    fn reviewed_drop_before_delivery_anchor_closes_cas_f091() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let loose = "migrations/receipt.sql";
+        let intermediate = "migrations/early/migration.sql";
+        let final_path = "migrations/final/migration.sql";
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
+        std::fs::write(p.join(loose), "CREATE TABLE receipt (id INT);\n").unwrap();
+        std::fs::write(p.join("analytics.vue"), "delivered();\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: deliver migration and analytics"]);
+        let introduction = head_sha(p);
+        std::fs::create_dir_all(p.join("migrations/early")).unwrap();
+        git(p, &["mv", loose, intermediate]);
+        git(p, &["commit", "-qm", "cas-test1: move migration into Prisma directory"]);
+        let moved = head_sha(p);
+        git(p, &["mv", "migrations/early", "migrations/final"]);
+        git(p, &["commit", "-qm", "cas-test1: rename migration directory"]);
+        let renamed = head_sha(p);
+        git(p, &["rm", "analytics.vue"]);
+        git(p, &["commit", "-qm", "revert: deliberately retire cas-test1 analytics"]);
+        let reverted = head_sha(p);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("sibling.txt"), "sibling\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-sibling: documentation"]);
+        git(p, &["checkout", "factory/worker"]);
+        git(p, &["merge", "--no-ff", "main", "-m", "cas-test1: sync target before parking"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--ff-only", "factory/worker"]);
+        assert!(!p.join(loose).exists() && !p.join(intermediate).exists());
+        assert!(p.join(final_path).exists());
+        for receipt in [&moved, &renamed, &reverted] {
+            assert!(git_commit_is_ancestor(p, receipt, &anchor));
+            assert_ne!(receipt, &anchor);
+        }
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let req = base_req(&task.id);
+        let mut window = window_at(0, "pre-anchor supersession");
+        window.identity.task_id = Some(task.id.clone());
+        let outcome = |window: &TaskCommitReceiptWindow| {
+            run_factory_branch_merge_gate_with_attribution(
+                &task, &req, "main", p,
+                TaskCommitAttribution { receipt: None, window: Some(window) },
+            )
+        };
+        assert!(matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "unreviewed drops must still refuse");
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {introduction} -- original delivery is not a replacement"
+        ));
+        assert!(matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "an old path touch without final-state coverage must refuse");
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {moved},{renamed} -- analytics is not covered"
+        ));
+        assert!(matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
+            "every dropped path needs a covering commit");
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {moved},{renamed},{reverted} -- reviewed migration moves and analytics retirement"
+        ));
+        let result = outcome(&window);
+        assert!(matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
+            if note.contains("reviewed delivery content supersession accepted")
+                && note.contains(&moved) && note.contains(&renamed) && note.contains(&reverted)),
+            "pre-anchor reviewed supersession must close: {result:?}");
+    }
+
     #[test]
     fn delivery_drop_review_requires_reachable_path_receipts_cas_0930() {
         let dir = init_factory_repo("worker");

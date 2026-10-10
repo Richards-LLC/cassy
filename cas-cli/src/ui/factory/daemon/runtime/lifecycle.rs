@@ -2324,11 +2324,13 @@ impl FactoryDaemon {
                 // A successful PTY spawn is not a verified worker. Confirm the
                 // harness reached Cassy registration (or surface a bounded
                 // timeout) on the existing two-second lifecycle cadence.
+                loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshSpawnVerify);
                 self.reconcile_spawn_verifications().await;
                 // cas-f9e8 telemetry: the gap between the previous refresh
                 // and this one is Channel C's worst-case delivery latency
                 // for director-generated events. Logged at debug; enable
                 // via `RUST_LOG=cas::coordination=debug`.
+                loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
                 let refresh_started = std::time::Instant::now();
                 let tick_interval_ms = last_refresh.elapsed().as_secs_f64() * 1000.0;
                 if let Ok(events) = self.app.refresh_data() {
@@ -2339,6 +2341,7 @@ impl FactoryDaemon {
                     // instead of two independent (and possibly divergent)
                     // full DirectorData loads. See
                     // `revalidate_and_prompt_for_delivery` doc comment.
+                    loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDelivery);
                     let (delivery_events, prompts, unfiltered_data_for_sweep) =
                         self.app.revalidate_and_prompt_for_delivery(&events);
                     tracing::debug!(
@@ -2353,6 +2356,7 @@ impl FactoryDaemon {
                     );
 
                     // Record events for export
+                    loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshRelays);
                     self.app.record_events(&delivery_events);
                     if !delivery_events.is_empty() {
                         self.session_summarizer.note_semantic_event();
@@ -2389,6 +2393,7 @@ impl FactoryDaemon {
                     }
 
                     // Handle epic state transitions
+                    loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshFollowUp);
                     let changes = self.app.handle_epic_events(&delivery_events);
                     for change in changes {
                         let _ = self.handle_epic_change(change).await;
@@ -2514,6 +2519,7 @@ impl FactoryDaemon {
                     }
 
                     // Inject prompts (config already checked in generate_prompt)
+                    loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshInject);
                     for prompt in prompts {
                         if !self.app.prompt_is_still_deliverable(&prompt) {
                             tracing::info!(

@@ -1655,6 +1655,7 @@ impl FactoryApp {
     /// work on every refresh. Removed rather than kept as a second,
     /// drift-prone prompt-generation path (cas-627f).
     pub fn refresh_data(&mut self) -> anyhow::Result<Vec<DirectorEvent>> {
+        let profile_started = Instant::now();
         let next_fingerprint = CasDbFingerprint::from_cas_dir(&self.cas_dir);
         let db_changed = match self.last_db_fingerprint {
             Some(prev) => prev != next_fingerprint,
@@ -1705,10 +1706,20 @@ impl FactoryApp {
             // refresh path; otherwise a just-written hold leaks one more
             // WorkerIdle event before unrelated database activity occurs.
             self.apply_session_metadata_worker_holds();
-            return Ok(self.detect_supervisor_stall().into_iter().collect());
+            let events: Vec<DirectorEvent> = self.detect_supervisor_stall().into_iter().collect();
+            tracing::debug!(
+                target: "cas::refresh_profile",
+                db_changed,
+                git_due,
+                total_ms = profile_started.elapsed().as_millis(),
+                "director refresh steps (unchanged database)"
+            );
+            return Ok(events);
         }
 
+        let load_ms = profile_started.elapsed().as_millis();
         self.refresh_branch_visibility_cache();
+        let branch_ms = profile_started.elapsed().as_millis();
         self.last_db_fingerprint = Some(next_fingerprint);
         self.last_refresh = Instant::now();
 
@@ -1734,15 +1745,31 @@ impl FactoryApp {
         // Pass the currently-tracked epic id so `EpicStarted` is gated on
         // strict improvement: a stray zero-subtask Open-with-branch epic
         // cannot hijack `epic_state` mid-session (see task cas-4181).
+        let mappings_ms = profile_started.elapsed().as_millis();
         let mut events = self
             .event_detector
             .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id());
+        let detect_ms = profile_started.elapsed().as_millis();
         events.extend(self.detect_supervisor_stall());
+        let stall_ms = profile_started.elapsed().as_millis();
 
         // Now filter to current session (agents + tasks scoped to active epic)
         if db_changed {
             self.filter_director_agents_to_current_session();
         }
+        // cas-ee9ab: cumulative step times of a changed-DB refresh.
+        tracing::debug!(
+            target: "cas::refresh_profile",
+            db_changed,
+            git_due,
+            load_ms,
+            branch_ms,
+            mappings_ms,
+            detect_ms,
+            stall_ms,
+            total_ms = profile_started.elapsed().as_millis(),
+            "director refresh steps"
+        );
 
         Ok(events)
     }

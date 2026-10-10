@@ -204,11 +204,39 @@ impl LoopProgress {
     pub(crate) fn take_phase_window(
         &self,
     ) -> std::collections::BTreeMap<String, crate::factory_daemon_health::PhaseLatency> {
-        std::collections::BTreeMap::new()
+        self.phase_window
+            .lock()
+            .map(|mut window| std::mem::take(&mut *window))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, latency)| (name.to_string(), latency))
+            .collect()
     }
 
+    /// Record the loop entering `phase`. The phase it leaves is timed into
+    /// the per-phase window, except the idle sleep between passes.
     pub(crate) fn enter(&self, phase: LoopPhase) {
         self.phase.store(phase as u8, Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        let left = self.phase_clock.lock().ok().and_then(|mut clock| {
+            let left = clock.take();
+            if phase != LoopPhase::Idle {
+                *clock = Some((phase, now));
+            }
+            left
+        });
+        if let Some((left, started)) = left
+            && left != LoopPhase::Idle
+            && let Ok(mut window) = self.phase_window.lock()
+        {
+            let ms = now.duration_since(started).as_millis() as u64;
+            let latency = window.entry(left.name()).or_default();
+            latency.entries += 1;
+            latency.max_ms = latency.max_ms.max(ms);
+            if ms >= SLOW_PASS_MS {
+                latency.over_100ms += 1;
+            }
+        }
     }
 
     /// Mark a pass complete. The loop's future may move between runtime

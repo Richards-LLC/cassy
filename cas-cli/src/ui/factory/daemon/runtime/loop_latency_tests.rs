@@ -344,7 +344,8 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
         (agents.list(None), events.list_recent(10))
     };
     let waited = started.elapsed();
-    release.send(()).unwrap();
+    // The holder may already have given up if the reads waited it out.
+    let _ = release.send(());
     holder.join().unwrap();
 
     assert!(agent_list.is_err(), "the agent list did not wait for the held connection");

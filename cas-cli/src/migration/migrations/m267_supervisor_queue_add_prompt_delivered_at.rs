@@ -86,42 +86,38 @@ mod tests {
         );
     }
 
-    /// The acceptance path: a store migrated from scratch has the column, and
-    /// the prompt-queue retention sweep prunes on it.
+    /// The acceptance path: a store created by `cas init` (every migration
+    /// from scratch) has the column, and the prompt-queue retention sweep
+    /// prunes on it.
     #[test]
     fn retention_prunes_on_a_store_migrated_from_scratch() {
-        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
-            let cas_dir = home.join("project/.cas");
-            std::fs::create_dir_all(&cas_dir).unwrap();
-            let entries = cas_store::SqliteStore::open(&cas_dir).unwrap();
-            cas_store::Store::init(&entries).unwrap();
-            crate::migration::run_migrations(&cas_dir, false).unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
 
-            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-            assert_eq!(
-                detected(&conn),
-                1,
-                "a migrated store has prompt_delivered_at"
-            );
-            drop(conn);
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        assert_eq!(
+            detected(&conn),
+            1,
+            "a migrated store has prompt_delivered_at"
+        );
+        drop(conn);
 
-            let queue = cas_store::SqlitePromptQueueStore::open(&cas_dir).unwrap();
-            cas_store::PromptQueueStore::init(&queue).unwrap();
-            let id = cas_store::PromptQueueStore::enqueue(&queue, "supervisor", "worker", "old")
-                .unwrap();
-            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-            let aged = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
-            conn.execute(
-                "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
-                rusqlite::params![aged, id],
-            )
-            .unwrap();
-            drop(conn);
+        let queue = cas_store::SqlitePromptQueueStore::open(&cas_dir).unwrap();
+        cas_store::PromptQueueStore::init(&queue).unwrap();
+        let id =
+            cas_store::PromptQueueStore::enqueue(&queue, "supervisor", "worker", "old").unwrap();
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        let aged = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        conn.execute(
+            "UPDATE prompt_queue SET processed_at = ?1 WHERE id = ?2",
+            rusqlite::params![aged, id],
+        )
+        .unwrap();
+        drop(conn);
 
-            let sweep =
-                cas_store::PromptQueueStore::prune_terminal_older_than(&queue, 7 * 24 * 60 * 60)
-                    .expect("retention must not fail on a migrated store");
-            assert_eq!(sweep.pruned, 1);
-        });
+        let sweep =
+            cas_store::PromptQueueStore::prune_terminal_older_than(&queue, 7 * 24 * 60 * 60)
+                .expect("retention must not fail on a migrated store");
+        assert_eq!(sweep.pruned, 1);
     }
 }

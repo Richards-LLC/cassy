@@ -91,7 +91,9 @@ impl SweepSummary {
                 }
                 OpportunisticOutcome::RefusedSymlink
                 | OpportunisticOutcome::InboundSymlinksBlocked { .. }
-                | OpportunisticOutcome::Error { .. } => self.errors += 1,
+                | OpportunisticOutcome::Error { .. } => {
+                    self.errors += 1
+                }
             }
         }
         self.per_repo.push(repo);

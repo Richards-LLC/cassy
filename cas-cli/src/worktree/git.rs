@@ -366,10 +366,7 @@ fn dirty_summary(dir: &Path) -> Option<(usize, String)> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .peekable();
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty()).peekable();
     let first = (*lines.peek()?).trim().to_string();
     Some((text.lines().filter(|l| !l.trim().is_empty()).count(), first))
 }

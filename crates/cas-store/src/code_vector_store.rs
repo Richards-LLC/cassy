@@ -824,10 +824,7 @@ mod tests {
         let done = symbol("sym-1", "a", SymbolKind::Function);
         let waiting = symbol("sym-2", "b", SymbolKind::Struct);
         let broken = symbol("sym-3", "c", SymbolKind::Trait);
-        seed_symbols(
-            root.path(),
-            &[done.clone(), waiting.clone(), broken.clone()],
-        );
+        seed_symbols(root.path(), &[done.clone(), waiting.clone(), broken.clone()]);
         store
             .sync_file_symbols(&[done, waiting, broken], &[])
             .unwrap();
@@ -1034,10 +1031,7 @@ mod tests {
             .sync_file_symbols(&[symbol("sym-1", "a", SymbolKind::Function)], &[])
             .unwrap();
 
-        assert_eq!(
-            store.reconcile(false).unwrap(),
-            CodeVectorReconcile::default()
-        );
+        assert_eq!(store.reconcile(false).unwrap(), CodeVectorReconcile::default());
         assert_eq!(store.stats().unwrap().pending, 1);
     }
 

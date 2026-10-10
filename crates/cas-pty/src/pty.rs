@@ -1915,8 +1915,10 @@ fn worker_concurrency_divisor(active_workers: Option<usize>) -> usize {
 /// Each value is valid TOML so Codex's `-c key=value` parser (value parsed as
 /// TOML, raw-string fallback) yields the intended types: quoted strings stay
 /// strings, `["serve"]` becomes a string array. If a project DOES ship a
-/// `.codex/config.toml`, these `-c` overrides simply add the `cs` server on top
-/// — they never remove the project's own entries.
+/// `.codex/config.toml`, its `cs` entry merges with these overrides. Cassy
+/// entries under any other key (e.g. a user-level `[mcp_servers.cas]`) are
+/// disabled by the cas-mux Codex backend so each agent runs one `cas serve`
+/// (cas-8a20).
 fn push_codex_mcp_server_args(
     args: &mut Vec<String>,
     session_id: &str,

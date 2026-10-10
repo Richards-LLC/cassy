@@ -2994,6 +2994,7 @@ for line in sys.stdin:
                 None,
             )
             .await
+            .map(|result| result.text)
             .unwrap_err()
             .to_string();
         assert!(error.contains("is absent"), "{error}");

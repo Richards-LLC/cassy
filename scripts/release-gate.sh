@@ -21,6 +21,7 @@ readonly -a gate_check_ids=(
     version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
+    journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
 )
 
 usage() {
@@ -1475,6 +1476,58 @@ check_builtin_doc_hygiene() {
     python3 scripts/check-builtin-contract-phrases.py
 }
 
+# Fast mode runs a lane row only when the lane changes one of its inputs; the
+# full gate always runs it.
+lane_touches() {
+    [[ "$fast_rows" == true ]] || return 0
+    ! git diff --quiet "${fast_base:-HEAD^}" -- "$@"
+}
+
+check_journey_catalog() {
+    if ! lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
+        printf 'journey-catalog: no journey catalog or spec change\n'
+        return 0
+    fi
+    python3 scripts/journeys-for-diff.py --check
+}
+
+check_builtin_skill_limits() {
+    if ! lane_touches cas-cli/src/builtins.rs cas-cli/src/builtins AGENTS.md CLAUDE.md \
+        scripts/check-builtin-skill-limits.py; then
+        printf 'builtin-skill-limits: no builtin skill change\n'
+        return 0
+    fi
+    python3 scripts/check-builtin-skill-limits.py .
+}
+
+check_doctor_snapshot() {
+    if ! lane_touches cas-cli/src/cli/doctor.rs cas-cli/tests/snapshots scripts/check-doctor-snapshot.py; then
+        printf 'doctor-snapshot: no doctor or snapshot change\n'
+        return 0
+    fi
+    if [[ "$fast_rows" == true ]]; then
+        python3 scripts/check-doctor-snapshot.py . --base "${fast_base:-HEAD^}"
+    else
+        python3 scripts/check-doctor-snapshot.py .
+    fi
+}
+
+check_migration_registry() {
+    if ! lane_touches cas-cli/src/migration scripts/check-migration-registry.py; then
+        printf 'migration-registry: no migration change\n'
+        return 0
+    fi
+    python3 scripts/check-migration-registry.py .
+}
+
+check_ci_script_tests_changed() (
+    if [[ "$fast_rows" != true ]]; then
+        printf 'ci-script-tests-changed: the full gate runs every entry in ci-script-tests\n'
+        exit 0
+    fi
+    release_test_child python3 scripts/ci-script-tests-for-diff.py --base "${fast_base:-HEAD^}"
+)
+
 check_ci_script_tests() (
     # This is the queue's script-only preflight, not a Cargo test target.
     # Nested gate self-tests own their receipts and synchronization. Otherwise
@@ -1618,6 +1671,16 @@ else
 fi
 run_check test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
+run_check journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
+    check_journey_catalog
+run_check builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
+    check_builtin_skill_limits
+run_check doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
+    check_doctor_snapshot
+run_check migration-registry 'python3 scripts/check-migration-registry.py (every migration declared, registered, in order)' \
+    check_migration_registry
+run_check ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \
+    check_ci_script_tests_changed
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree

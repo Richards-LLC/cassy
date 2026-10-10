@@ -13,6 +13,8 @@ FAST_ROWS = (
     "failure-log", "version-literals", "changelog-and-versions", "release-script",
     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
+    "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
+    "ci-script-tests-changed",
 )
 REQUIRED_ROWS = (*FAST_ROWS, "ci-script-tests")
 

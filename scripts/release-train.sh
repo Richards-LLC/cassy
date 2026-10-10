@@ -153,6 +153,23 @@ valid_gate_row() {
     return 1
 }
 
+# cas-846f: true when this run's assembly came from main (no merge sweep) and
+# its receipt requires a full gate. release-integrate.py writes the receipt.
+from_main_full_gate_required() {
+    local receipt="$run_dir/assemble.integration.json"
+    [[ -r "$receipt" ]] || return 1
+    python3 - "$receipt" <<'PY_FROM_MAIN'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+ok = isinstance(value, dict) and value.get("mode") == "from-main" \
+    and value.get("full_gate_required", True) is not False
+sys.exit(0 if ok else 1)
+PY_FROM_MAIN
+}
+
 # The pid recorded for this run, if it is still alive. Liveness is asked of the
 # recorded pid directly — never inferred from a process name.
 live_gate_pid() {
@@ -1239,6 +1256,20 @@ case "$action" in
             usage >&2
             exit 2
         fi
+        # cas-846f: a from-main assembly ran no merge sweep, so its receipt
+        # requires a full gate. Neither a diagnostic subset nor reused rows
+        # may stand in for it, and the full gate itself reuses nothing.
+        if from_main_full_gate_required; then
+            if [[ -n "$only_rows" ]]; then
+                printf 'error: --gate --only refused: %s/assemble.integration.json is a from-main assembly that requires a full gate; run --gate with no row selection\n' "$run_dir" >&2
+                exit 2
+            fi
+            if "$reuse_rows"; then
+                printf 'error: --gate --reuse refused: %s/assemble.integration.json is a from-main assembly that requires every gate row to run fresh; run --gate without --reuse\n' "$run_dir" >&2
+                exit 2
+            fi
+            full_gate_fresh=true
+        fi
         ;;
     *)
         usage >&2
@@ -1318,6 +1349,12 @@ export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 # replaced on the next full run. Only full gates populate/read row PASS cache.
 export CAS_RELEASE_GATE_LOG_DIR="$receipt_dir/rows/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export CAS_RELEASE_GATE_CACHE_DIR="$run_dir/row-cache"
+if [[ "${full_gate_fresh:-false}" == true ]]; then
+    # cas-846f: from-main releases prove every row fresh (see --gate above).
+    unset CAS_RELEASE_GATE_CACHE_DIR
+    export CAS_RELEASE_GATE_NO_REUSE=1
+    printf 'from-main assembly: full gate, every row runs fresh (no row, sweep or assembly reuse)\n'
+fi
 gate_args=("$version")
 if [[ -n "${only_rows:-}" ]]; then
     gate_args+=(--only "$only_rows")

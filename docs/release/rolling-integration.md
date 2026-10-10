@@ -72,6 +72,14 @@ not rewrite the daemon's sweep receipt or integration branch. Subsequent
 later stage receipts when main moves. Run the full `--gate` before `--pipeline`;
 main mode supplies no test proof and cannot bypass that gate.
 
+`full_gate_required` is enforced. While the run's receipt says `mode=from-main`:
+
+- `--gate --reuse` and `--gate --only <rows>` are refused with exit 2.
+- The full gate, including the `--cut` gate stage, runs every row fresh. The
+  train withholds the row cache and sets `CAS_RELEASE_GATE_NO_REUSE=1`, so
+  `release-gate.sh` reuses no row receipt, sweep receipt or assembly proof and
+  refuses `--reuse`.
+
 A stale-base self-heal passes only the sweep receipt's epic IDs to
 `cas factory integration-recover --base-only --release-epics cas-one,cas-two`.
 An empty `--release-epics ""` means trunk only. A legacy receipt without epic IDs

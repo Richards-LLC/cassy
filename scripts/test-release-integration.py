@@ -329,6 +329,87 @@ PY
         self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
         self.assertEqual((self.root / "CHANGELOG.md").read_text(), "release prose\n")
 
+    def assemble_from_main(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        self.receipt_path.unlink()
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble", "--from-main"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return Path(os.environ["CAS_RELEASE_ARTIFACTS_ROOT"]) / "v0.0.0-project"
+
+    def recording_gate(self):
+        """A stand-in release gate that records its arguments and reuse env."""
+        record = Path(self.temp.name) / "gate-record.json"
+        gate = Path(self.temp.name) / "fake-release-gate.sh"
+        script = (
+            "import json, os, sys\n"
+            "json.dump({'args': sys.argv[1:],\n"
+            "           'cache_dir': os.environ.get('CAS_RELEASE_GATE_CACHE_DIR'),\n"
+            "           'no_reuse': os.environ.get('CAS_RELEASE_GATE_NO_REUSE')},\n"
+            f"          open({str(record)!r}, 'w'))\n")
+        gate.write_text("#!/usr/bin/env bash\npython3 - \"$@\" <<'PY'\n" + script + "PY\n")
+        gate.chmod(0o755)
+        return gate, record
+
+    def run_gate(self, *extra, internal=False):
+        gate, record = self.recording_gate()
+        env = {**os.environ, "CAS_RELEASE_TRAIN_GATE_CMD": str(gate)}
+        if internal:
+            # The --cut gate stage invokes the train exactly like this (gate.sh).
+            env.update({"CAS_RELEASE_TRAIN_INVOCATION_KIND": "internal",
+                        "CAS_RELEASE_TRAIN_STAGE": "gate"})
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--gate", *extra],
+                                capture_output=True, text=True, env=env)
+        return result, record
+
+    def wait_for_gate(self, run, record):
+        import time
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (run / "gate.done").exists():
+            time.sleep(0.05)
+        log = (run / "gate.log").read_text() if (run / "gate.log").exists() else ""
+        self.assertEqual((run / "gate.done").read_text().strip(), "0", log)
+        return json.loads(record.read_text())
+
+    def test_from_main_refuses_gate_reuse(self):
+        run = self.assemble_from_main()
+        result, record = self.run_gate("--reuse")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--gate --reuse refused", result.stderr)
+        self.assertIn("from-main", result.stderr)
+        self.assertFalse(record.exists(), "no gate may start")
+        self.assertFalse((run / "gate.done").exists())
+
+    def test_from_main_refuses_gate_only(self):
+        run = self.assemble_from_main()
+        result, record = self.run_gate("--only", "nextest")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--gate --only refused", result.stderr)
+        self.assertFalse(record.exists(), "no gate may start")
+        self.assertFalse((run / "diagnostics").exists())
+
+    def test_from_main_cut_gate_stage_runs_every_row_fresh(self):
+        run = self.assemble_from_main()
+        result, record = self.run_gate(internal=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("every row runs fresh", result.stdout)
+        recorded = self.wait_for_gate(run, record)
+        self.assertEqual(recorded["args"], ["0.0.0"], "no --reuse or --only")
+        self.assertIsNone(recorded["cache_dir"], "the row cache is withheld")
+        self.assertEqual(recorded["no_reuse"], "1")
+
+    def test_sweep_assembly_gate_keeps_reuse(self):
+        # Control: an ordinary sweep-backed assembly keeps its reuse paths.
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(os.environ["CAS_RELEASE_ARTIFACTS_ROOT"]) / "v0.0.0-project"
+        result, record = self.run_gate("--reuse")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        recorded = self.wait_for_gate(run, record)
+        self.assertEqual(recorded["args"], ["0.0.0", "--reuse"])
+        self.assertEqual(recorded["cache_dir"], str(run / "row-cache"))
+        self.assertIsNone(recorded["no_reuse"])
+
     def test_self_heal_refuses_legacy_epics_without_ids(self):
         self.git("update-ref", "refs/remotes/origin/main", self.tip)
         self.receipt["epics"][0].pop("id")

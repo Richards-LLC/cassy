@@ -9928,6 +9928,65 @@ mod tests {
         );
     }
 
+    /// cas-366b: the 2026-09-29/30 missing-inbox storm (18,090 `error`
+    /// injection rows, 120 per prompt over about 10 minutes) was this retry
+    /// path. A failing delivery backs off exponentially from 250 ms to a 5 s
+    /// cap, then stops at PROMPT_RETRY_MAX_ATTEMPTS. It never retries on the
+    /// 100 ms poll and never retries forever.
+    #[test]
+    fn failing_delivery_backs_off_to_the_cap_then_stops_at_the_bound_cas_366b() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "deliver me", "factory-a")
+            .unwrap();
+        let mut delays_ms = Vec::new();
+        let mut disposition = None;
+        for _ in 0..PROMPT_RETRY_MAX_ATTEMPTS {
+            let before = Utc::now();
+            let result = store
+                .record_retry(
+                    id,
+                    PendingReason::AdapterRetryable,
+                    Some("No such file or directory (os error 2)"),
+                )
+                .unwrap();
+            if let PromptRetryDisposition::Scheduled { retry_at, .. } = &result {
+                delays_ms.push((*retry_at - before).num_milliseconds());
+            }
+            disposition = Some(result);
+        }
+        assert_eq!(
+            disposition,
+            Some(PromptRetryDisposition::Abandoned {
+                attempts: PROMPT_RETRY_MAX_ATTEMPTS
+            })
+        );
+        assert_eq!(delays_ms.len() as u32, PROMPT_RETRY_MAX_ATTEMPTS - 1);
+        // 250, 500, 1000, 2000, 4000 ms, then capped at 5 s (small clock skew
+        // between `before` and the store's own `now` is tolerated).
+        let expected = [250, 500, 1_000, 2_000, 4_000, 5_000, 5_000];
+        for (attempt, (got, want)) in delays_ms.iter().zip(expected).enumerate() {
+            assert!(
+                (*got - want).abs() <= 50,
+                "attempt {} delay {got} ms, expected ~{want} ms",
+                attempt + 1
+            );
+        }
+        assert!(
+            delays_ms
+                .iter()
+                .all(|delay| *delay <= PROMPT_RETRY_MAX_DELAY_MS + 50),
+            "{delays_ms:?}"
+        );
+        assert!(
+            store
+                .peek_for_targets(&["worker"], Some("factory-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "an exhausted row is terminal"
+        );
+    }
+
     #[test]
     fn retry_is_backed_off_then_permanently_terminal_after_bound() {
         let (_temp, store) = create_test_store();

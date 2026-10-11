@@ -159,6 +159,13 @@ inset; `#toast` already offsets by it), the full-screen Attention and launch
 sheets, and the desktop Raw output drawer. In a browser tab the insets are 0
 and nothing moves. `e2e/installed-safe-area.spec.ts` emulates a 47px status
 bar and a 44px landscape notch and fails if any control sits under either.
+A phone on its side gets both side insets in a Safari tab too
+(`viewport-fit=cover`), so the phone body adds them to its own edge spacing:
+the conversation rows, Write to a supervisor, the footer, the thread, the
+Waiting-on-you strip, the composer (glass margin and base padding) and the
+Raw output bottom sheet (cas-5072); the wider side drawer pads only its right
+edge. HUB-J9's sideways parts in `phone.journey.ts` check every control at
+844×390 and 932×430 with 44px side insets.
 
 Rules:
 

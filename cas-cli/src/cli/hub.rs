@@ -1904,6 +1904,28 @@ fn auth_store() -> Result<AuthStore> {
     AuthStore::open(paths.root(), machine.id)
 }
 
+/// The account's home from the passwd database, never `$HOME` (which any
+/// process can point at a scratch directory).
+fn account_home() -> Option<PathBuf> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+}
+
+/// cas-3c26: whether `hub_root` is the account's own machine hub, the one
+/// that controls the operator's real factory panes. A hub under another
+/// `HOME` (a test fixture's) controls nothing real. Unknown fails closed.
+pub(crate) fn pairing_targets_operator_hub(hub_root: &Path, account_home: Option<&Path>) -> bool {
+    let Some(home) = account_home else {
+        return true;
+    };
+    let operator_root = HubRuntimePaths::for_home(home).root().to_path_buf();
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(hub_root) == canonical(&operator_root)
+}
+
 /// cas-3c26: admit a `cas hub pair`. Minting an invitation hands a device
 /// the scopes it names (`pane:input`, `message:send` drive this machine's
 /// agents), so only the operator does it: an agent context is refused, then
@@ -1928,7 +1950,11 @@ pub(crate) fn pairing_admission(
             .filter(|scope| super::hub_reverse_pairing::is_control_scope(**scope) == control)
             .map(|scope| scope.as_str())
             .collect();
-        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        }
     };
     let summary = format!(
         "Pair a Commander device from {origin}\nRead scopes: {}\nControl scopes: {} \
@@ -1948,21 +1974,29 @@ fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
         .iter()
         .map(|scope| Scope::parse(scope))
         .collect::<Result<_>>()?;
-    // cas-3c26: only the operator mints an invitation, and only after
-    // confirming the origin and scopes at their own terminal.
-    pairing_admission(
-        &crate::config::operator_policy::InvocationContext::from_process(),
-        &args.origin,
-        &scopes,
-        &mut |summary| {
-            eprintln!("{summary}");
-            inquire::Confirm::new("Mint this one-time pairing invitation?")
-                .with_default(false)
-                .prompt()
-                .unwrap_or(false)
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
+    // cas-3c26: only the operator mints an invitation for their own machine
+    // hub, and only after confirming the origin and scopes at their own
+    // terminal. A hub under another HOME (a journey fixture) controls nothing
+    // real and is not gated.
+    let operator_hub = pairing_targets_operator_hub(
+        HubRuntimePaths::default_for_user()?.root(),
+        account_home().as_deref(),
+    );
+    if operator_hub {
+        pairing_admission(
+            &crate::config::operator_policy::InvocationContext::from_process(),
+            &args.origin,
+            &scopes,
+            &mut |summary| {
+                eprintln!("{summary}");
+                inquire::Confirm::new("Mint this one-time pairing invitation?")
+                    .with_default(false)
+                    .prompt()
+                    .unwrap_or(false)
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+    }
     let scopes = scopes.into_iter().collect();
     let paths = HubRuntimePaths::default_for_user()?;
     let configured_hub_url = crate::store::find_cas_root()
@@ -3077,7 +3111,10 @@ fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn invocation(ancestors: &[&str], tty: bool) -> crate::config::operator_policy::InvocationContext {
+    fn invocation(
+        ancestors: &[&str],
+        tty: bool,
+    ) -> crate::config::operator_policy::InvocationContext {
         crate::config::operator_policy::InvocationContext {
             env_names: Default::default(),
             ancestors: ancestors.iter().map(|line| line.to_string()).collect(),
@@ -3085,6 +3122,36 @@ mod tests {
             stdout_is_terminal: tty,
             cgroup: String::new(),
         }
+    }
+
+    /// cas-3c26: only the account's own hub is gated; a fixture hub under a
+    /// scratch HOME is not, and an unknown account home fails closed.
+    #[test]
+    fn cas_3c26_only_the_operators_own_hub_is_gated() {
+        let account = tempfile::tempdir().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let operator_hub = HubRuntimePaths::for_home(account.path());
+        std::fs::create_dir_all(operator_hub.root()).unwrap();
+        assert!(pairing_targets_operator_hub(
+            operator_hub.root(),
+            Some(account.path())
+        ));
+        let fixture_hub = HubRuntimePaths::for_home(fixture.path());
+        assert!(!pairing_targets_operator_hub(
+            fixture_hub.root(),
+            Some(account.path())
+        ));
+        assert!(
+            pairing_targets_operator_hub(fixture_hub.root(), None),
+            "unknown fails closed"
+        );
+        // A symlink to the operator's hub is the operator's hub.
+        let link = fixture.path().join("link-home");
+        std::os::unix::fs::symlink(account.path(), &link).unwrap();
+        assert!(pairing_targets_operator_hub(
+            HubRuntimePaths::for_home(&link).root(),
+            Some(account.path())
+        ));
     }
 
     /// cas-3c26: an agent context is refused before any prompt, even through
@@ -3117,9 +3184,17 @@ mod tests {
         assert!(summary.contains("message:send"), "{summary}");
         assert!(summary.to_lowercase().contains("control"), "{summary}");
 
-        assert_eq!(pairing_admission(&operator, origin, &scopes, &mut |_| true), Ok(()));
+        assert_eq!(
+            pairing_admission(&operator, origin, &scopes, &mut |_| true),
+            Ok(())
+        );
         // No terminal, so no confirmation: refused.
-        assert!(pairing_admission(&invocation(&["-bash"], false), origin, &scopes, &mut |_| true).is_err());
+        assert!(
+            pairing_admission(&invocation(&["-bash"], false), origin, &scopes, &mut |_| {
+                true
+            })
+            .is_err()
+        );
     }
 
     #[test]

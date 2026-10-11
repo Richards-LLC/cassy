@@ -111,7 +111,8 @@ fn handle_pre_tool_use_inner(
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
             .and_then(|command| {
-                operator_policy_command_denial(command).or_else(|| role_env_tampering_denial(command))
+                operator_policy_command_denial(command)
+                    .or_else(|| role_env_tampering_denial(command))
             })
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
@@ -4237,7 +4238,9 @@ fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
         // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
         let mut index = 0;
         while let Some(word) = words.get(index) {
-            let Some((name, _)) = word.split_once('=') else { break };
+            let Some((name, _)) = word.split_once('=') else {
+                break;
+            };
             if !is_shell_variable_name(name) {
                 break;
             }
@@ -4246,7 +4249,9 @@ fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
             }
             index += 1;
         }
-        let Some(program) = words.get(index) else { continue };
+        let Some(program) = words.get(index) else {
+            continue;
+        };
         let args = &words[index + 1..];
         match shell_word_basename(program) {
             "env" => {
@@ -4258,7 +4263,9 @@ fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
                         args.get(position).map(String::as_str)
                     } else if let Some(name) = arg.strip_prefix("--unset=") {
                         Some(name)
-                    } else if let Some(name) = arg.strip_prefix("-u").filter(|name| !name.is_empty()) {
+                    } else if let Some(name) =
+                        arg.strip_prefix("-u").filter(|name| !name.is_empty())
+                    {
                         Some(name)
                     } else {
                         None
@@ -4300,7 +4307,8 @@ fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
             // Wrappers whose option value is itself a shell command.
             "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
                 for (position, arg) in args.iter().enumerate() {
-                    let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                    let flags_c =
+                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
                     if (flags_c || arg == "--command")
                         && let Some(payload) = args.get(position + 1)
                         && let Some(denial) = role_env_tampering_at_depth(payload, depth + 1)

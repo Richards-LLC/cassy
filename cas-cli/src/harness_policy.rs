@@ -559,11 +559,20 @@ mod tests {
     /// cas-3c26: a worker cgroup outranks a spoofed or unset role variable.
     #[test]
     fn cas_3c26_a_worker_cgroup_is_a_worker_whatever_the_environment_claims() {
-        assert_eq!(effective_role(Some("supervisor"), true).as_deref(), Some("worker"));
+        assert_eq!(
+            effective_role(Some("supervisor"), true).as_deref(),
+            Some("worker")
+        );
         assert_eq!(effective_role(None, true).as_deref(), Some("worker"));
         assert_eq!(effective_role(Some(" "), true).as_deref(), Some("worker"));
-        assert_eq!(effective_role(Some("supervisor"), false).as_deref(), Some("supervisor"));
-        assert_eq!(effective_role(Some("worker"), false).as_deref(), Some("worker"));
+        assert_eq!(
+            effective_role(Some("supervisor"), false).as_deref(),
+            Some("supervisor")
+        );
+        assert_eq!(
+            effective_role(Some("worker"), false).as_deref(),
+            Some("worker")
+        );
         assert_eq!(effective_role(None, false), None);
         assert_eq!(effective_role(Some(""), false), None);
     }

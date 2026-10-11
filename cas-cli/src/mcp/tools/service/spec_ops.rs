@@ -536,8 +536,11 @@ impl CasService {
 pub(crate) fn spec_approval_stamp(agent_id: Option<&str>, role: Option<&str>) -> Option<String> {
     Some(format!(
         "agent:{} ({})",
-        agent_id.filter(|id| !id.trim().is_empty()).unwrap_or("unknown"),
-        role.filter(|role| !role.trim().is_empty()).unwrap_or("unregistered role")
+        agent_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or("unknown"),
+        role.filter(|role| !role.trim().is_empty())
+            .unwrap_or("unregistered role")
     ))
 }
 
@@ -555,6 +558,9 @@ mod spec_approval_tests {
             spec_approval_stamp(Some("w-2"), None).as_deref(),
             Some("agent:w-2 (unregistered role)")
         );
-        assert_eq!(spec_approval_stamp(None, None).as_deref(), Some("agent:unknown (unregistered role)"));
+        assert_eq!(
+            spec_approval_stamp(None, None).as_deref(),
+            Some("agent:unknown (unregistered role)")
+        );
     }
 }

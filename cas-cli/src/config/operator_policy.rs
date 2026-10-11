@@ -503,7 +503,9 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
     match cli.command? {
         Commands::Hub(hub) => match hub.command? {
             HubCommands::Pair(_) => Some("Pairing a Commander device (`cas hub pair`)"),
-            HubCommands::Authorize(_) => Some("Authorizing a Commander pairing (`cas hub authorize`)"),
+            HubCommands::Authorize(_) => {
+                Some("Authorizing a Commander pairing (`cas hub authorize`)")
+            }
             _ => None,
         },
         Commands::Factory(factory) if factory.command.is_none() => {
@@ -651,13 +653,29 @@ mod tests {
         let action = "Pairing a Commander device";
         let remedy = "run `cas hub pair` yourself";
         // `env -u CAS_AGENT_ROLE -u CLAUDECODE … cas hub pair` from Claude Code.
-        let env_spoof = context(&[], &["bash -c cas hub pair", "claude --dangerously-skip-permissions"], true);
-        let refused = operator_action_refusal(action, remedy, &env_spoof).expect("env spoof refused");
+        let env_spoof = context(
+            &[],
+            &[
+                "bash -c cas hub pair",
+                "claude --dangerously-skip-permissions",
+            ],
+            true,
+        );
+        let refused =
+            operator_action_refusal(action, remedy, &env_spoof).expect("env spoof refused");
         assert!(refused.contains("descends from an agent"), "{refused}");
         assert!(refused.contains(action), "{refused}");
 
         // `script -qc 'cas hub pair'` from Codex: a terminal, but an agent ancestor.
-        let pty = context(&[], &["script -qc cas hub pair", "/usr/bin/bash", "/opt/codex/bin/codex exec"], true);
+        let pty = context(
+            &[],
+            &[
+                "script -qc cas hub pair",
+                "/usr/bin/bash",
+                "/opt/codex/bin/codex exec",
+            ],
+            true,
+        );
         assert!(operator_action_refusal(action, remedy, &pty).is_some());
 
         // A role variable alone is an agent marker.
@@ -666,30 +684,48 @@ mod tests {
 
         // A worker scope, even with a clean environment and a terminal.
         let mut worker = context(&[], &[], true);
-        worker.cgroup = "0::/user.slice/cas-worker-cas-src-mighty-crane-74/cas-private-server-1".into();
-        let refused = operator_action_refusal(action, remedy, &worker).expect("worker cgroup refused");
+        worker.cgroup =
+            "0::/user.slice/cas-worker-cas-src-mighty-crane-74/cas-private-server-1".into();
+        let refused =
+            operator_action_refusal(action, remedy, &worker).expect("worker cgroup refused");
         assert!(refused.contains("worker cgroup"), "{refused}");
 
         // The operator at a terminal passes; without a terminal it is refused.
-        assert_eq!(operator_action_refusal(action, remedy, &context(&[], &["-bash"], true)), None);
-        assert!(operator_action_refusal(action, remedy, &context(&[], &["-bash"], false)).is_some());
+        assert_eq!(
+            operator_action_refusal(action, remedy, &context(&[], &["-bash"], true)),
+            None
+        );
+        assert!(
+            operator_action_refusal(action, remedy, &context(&[], &["-bash"], false)).is_some()
+        );
     }
 
     /// cas-3c26: `--yes` paths drop only the terminal requirement.
     #[test]
     fn cas_3c26_unattended_operator_paths_still_refuse_agents() {
         let (action, remedy) = ("Authorizing a Commander pairing", "run it yourself");
-        assert_eq!(agent_context_refusal(action, remedy, &context(&[], &["cron"], false)), None);
+        assert_eq!(
+            agent_context_refusal(action, remedy, &context(&[], &["cron"], false)),
+            None
+        );
         assert!(agent_context_refusal(action, remedy, &context(&[], &["claude"], false)).is_some());
-        assert!(agent_context_refusal(action, remedy, &context(&["CLAUDECODE"], &[], true)).is_some());
+        assert!(
+            agent_context_refusal(action, remedy, &context(&["CLAUDECODE"], &[], true)).is_some()
+        );
     }
 
     #[test]
     fn cas_3c26_worker_cgroups_are_recognized_and_server_scopes_are_not() {
-        assert!(in_factory_worker_cgroup("0::/user.slice/x.scope/cas-worker-cas-src-a-b"));
-        assert!(in_factory_worker_cgroup("0::/user.slice/cas-worker-a/cas-private-server-9"));
+        assert!(in_factory_worker_cgroup(
+            "0::/user.slice/x.scope/cas-worker-cas-src-a-b"
+        ));
+        assert!(in_factory_worker_cgroup(
+            "0::/user.slice/cas-worker-a/cas-private-server-9"
+        ));
         assert!(!in_factory_worker_cgroup("0::/user.slice/cas-server-hub"));
-        assert!(!in_factory_worker_cgroup("0::/user.slice/user@1000.service/app.slice"));
+        assert!(!in_factory_worker_cgroup(
+            "0::/user.slice/user@1000.service/app.slice"
+        ));
         assert!(!in_factory_worker_cgroup(""));
     }
 
@@ -704,9 +740,18 @@ mod tests {
             "factory --workers 3",
             "--verbose factory -w 2",
         ] {
-            assert!(operator_only_cas_invocation(&words(line)).is_some(), "{line}");
+            assert!(
+                operator_only_cas_invocation(&words(line)).is_some(),
+                "{line}"
+            );
         }
-        for line in ["hub status", "factory status", "task list", "hub", "config get factory.write_roots"] {
+        for line in [
+            "hub status",
+            "factory status",
+            "task list",
+            "hub",
+            "config get factory.write_roots",
+        ] {
             assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
         }
     }

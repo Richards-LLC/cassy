@@ -183,6 +183,23 @@ created for the tag, so a rerun can never flatter the number, and it exits
 non-zero when the latency exceeds its budget (600s by default). A release that
 cannot produce a passing latency receipt has not demonstrated fast publication.
 
+Tag to published is only the last few minutes. The same receipt also reports
+the whole wall clock, from the release-train run directory:
+
+- `REQUEST_TO_PUBLISHED_SECS` runs from the release request to publication.
+  Set `CAS_RELEASE_TRAIN_REQUESTED_AT` (epoch seconds or ISO 8601 UTC) on the
+  first `--cut`. Without it, `REQUEST_SOURCE=cut-start` and the clock starts at
+  the first cut.
+- `CUT_TO_PUBLISHED_SECS` runs from the first `--cut` (`cut.start.epoch`,
+  never moved by a resume) to publication.
+- `BLOCKER_COUNT`, `BLOCKER_COSTS` (`stage:secs`, with a trailing `+` when the
+  stage was still blocked at publication) and `BLOCKED_SECS` price each
+  blocked stage from its block to its next completion. `STAGE_SECS` gives each
+  stage's last attempt. The cut writes them as `stage-events.tsv` rows.
+
+The release report shows request to published, cut to published and each
+blocker with its time cost.
+
 ## Contract
 
 `scripts/test-ci-test-tiers.sh` pins the properties above — trigger surface,

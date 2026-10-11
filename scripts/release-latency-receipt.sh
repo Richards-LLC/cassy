@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Measure the only release number an operator feels: tag push -> published
-# release (cas-3b7c0 / GH #449).
+# Measure tag push -> published release (cas-3b7c0 / GH #449), and the whole
+# wall clock an operator feels: request and first cut -> published, with each
+# blocker's time cost (cas-a629).
 #
 # The digest receipt (scripts/release-published-receipt.sh) proves *what* was
 # published. This proves *how fast*. Both are needed before a release is
@@ -137,6 +138,9 @@ printf 'INTERVENTIONS=%s\n' "$(intervention_count)"
 printf 'BLOCKERS=%s\n' "$(intervention_blockers)"
 printf 'GREEN_TO_PIPELINE_SECS=%s\n' "$(epoch_delta "${run_dir:-}/gate.green.epoch" "${run_dir:-}/pipeline.start.epoch")"
 printf 'MERGED_TO_PUBLISHER_SECS=%s\n' "$(epoch_delta "${run_dir:-}/pipeline.merged.epoch" "${run_dir:-}/publisher.start.epoch")"
+# End to end (cas-a629): request and first cut to publication, and every
+# blocker priced from its block to its stage's next completion.
+python3 "$(dirname "${BASH_SOURCE[0]}")/release-metrics.py" "${run_dir:-}" "$end"
 
 if ! "$within"; then
     echo "WARN: $tag took ${latency}s from tag push to publication, over the ${budget}s budget" >&2

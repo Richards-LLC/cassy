@@ -142,10 +142,38 @@ struct ReleaseEvidence {
     green_at: Option<String>,
     green_to_published_seconds: Option<i64>,
     receipt_path: Option<String>,
+    /// cas-a629: the whole wall clock and what cost it.
+    request_to_published_seconds: Option<i64>,
+    request_source: Option<String>,
+    cut_to_published_seconds: Option<i64>,
+    blocker_count: Option<u64>,
+    /// (stage, seconds, resolved); empty with `blocker_count` set means the
+    /// run predates priced blockers.
+    blocker_costs: Vec<(String, i64, bool)>,
 }
 
 impl ReleaseEvidence {
     fn record_latency(&mut self, values: &HashMap<String, String>) {
+        let seconds = |key: &str| {
+            values
+                .get(key)
+                .and_then(|value| value.parse::<i64>().ok())
+                .filter(|seconds| *seconds >= 0)
+        };
+        self.request_to_published_seconds = seconds("REQUEST_TO_PUBLISHED_SECS");
+        self.cut_to_published_seconds = seconds("CUT_TO_PUBLISHED_SECS");
+        self.request_source = values
+            .get("REQUEST_SOURCE")
+            .filter(|source| matches!(source.as_str(), "recorded" | "cut-start"))
+            .cloned();
+        self.blocker_count = values
+            .get("BLOCKER_COUNT")
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse().ok());
+        self.blocker_costs = values
+            .get("BLOCKER_COSTS")
+            .map(|costs| parse_blocker_costs(costs))
+            .unwrap_or_default();
         self.interventions = values
             .get("INTERVENTIONS")
             .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
@@ -166,6 +194,56 @@ impl ReleaseEvidence {
             });
     }
 
+    fn request_timing(&self) -> String {
+        match (
+            self.request_to_published_seconds,
+            self.request_source.as_deref(),
+        ) {
+            (Some(seconds), Some("cut-start")) => {
+                format!(
+                    "{} — from the first cut; no request time recorded",
+                    format_duration(seconds)
+                )
+            }
+            (Some(seconds), _) => format_duration(seconds),
+            (None, _) => "unavailable".to_string(),
+        }
+    }
+
+    fn blocker_summary(&self) -> String {
+        let Some(count) = self.blocker_count else {
+            return "unavailable".to_string();
+        };
+        if count == 0 {
+            return "0".to_string();
+        }
+        if self.blocker_costs.is_empty() {
+            return format!("{count} — time cost unavailable");
+        }
+        let total: i64 = self
+            .blocker_costs
+            .iter()
+            .map(|(_, seconds, _)| seconds)
+            .sum();
+        let each = self
+            .blocker_costs
+            .iter()
+            .map(|(stage, seconds, resolved)| {
+                format!(
+                    "{stage} {}{}",
+                    format_duration(*seconds),
+                    if *resolved {
+                        ""
+                    } else {
+                        " (unresolved at publication)"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("{count} — {} blocked: {each}", format_duration(total))
+    }
+
     fn publication_timing(&self) -> String {
         let Some(seconds) = self.tag_to_published_seconds else {
             return "unavailable".to_string();
@@ -184,6 +262,26 @@ impl ReleaseEvidence {
             None => format!("{timing} — budget unavailable"),
         }
     }
+}
+
+/// `stage:secs[+],…` from the latency receipt's BLOCKER_COSTS; a trailing `+`
+/// marks a blocker still open at publication.
+fn parse_blocker_costs(costs: &str) -> Vec<(String, i64, bool)> {
+    costs
+        .split(',')
+        .filter_map(|item| {
+            let (stage, seconds) = item.trim().rsplit_once(':')?;
+            let (seconds, resolved) = match seconds.strip_suffix('+') {
+                Some(open) => (open, false),
+                None => (seconds, true),
+            };
+            let seconds = seconds
+                .parse::<i64>()
+                .ok()
+                .filter(|seconds| *seconds >= 0)?;
+            (!stage.is_empty()).then(|| (stage.to_string(), seconds, resolved))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -1256,8 +1354,24 @@ fn assemble_markdown(
         "| Green to published | {latency} | gate.green.epoch to the published receipt, when available |\n"
     ));
     output.push_str(&format!(
+        "| Request to published | {} | The release request (or first cut) to publication; receipt REQUEST_TO_PUBLISHED_SECS |\n",
+        sources.release_evidence.request_timing()
+    ));
+    output.push_str(&format!(
+        "| Cut to published | {} | The first release-train cut to publication; receipt CUT_TO_PUBLISHED_SECS |\n",
+        sources
+            .release_evidence
+            .cut_to_published_seconds
+            .map(format_duration)
+            .unwrap_or_else(|| "unavailable".to_string())
+    ));
+    output.push_str(&format!(
         "| Tag to published | {} | First tag workflow to publication; measured budget result |\n",
         sources.release_evidence.publication_timing()
+    ));
+    output.push_str(&format!(
+        "| Blockers | {} | Each blocked stage, from the block to its next completion; receipt BLOCKER_COSTS |\n",
+        sources.release_evidence.blocker_summary()
     ));
     output.push_str(&format!(
         "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
@@ -2265,6 +2379,35 @@ mod tests {
         assert_eq!(evidence.interventions, None);
     }
 
+    /// cas-a629: open blockers, a request time that fell back to the cut,
+    /// and a pre-event run with a count but no costs.
+    #[test]
+    fn end_to_end_release_metrics_render_each_blocker_with_its_cost() {
+        let mut evidence = ReleaseEvidence::default();
+        evidence.record_latency(&parse_key_values(
+            "REQUEST_TO_PUBLISHED_SECS=3600\nREQUEST_SOURCE=cut-start\nCUT_TO_PUBLISHED_SECS=3600\n\
+             BLOCKER_COUNT=3\nBLOCKER_COSTS=gate:600,pipeline:1700,receipts:100+\n",
+        ));
+        assert_eq!(
+            evidence.request_timing(),
+            "60m 0s — from the first cut; no request time recorded"
+        );
+        assert_eq!(
+            evidence.blocker_summary(),
+            "3 — 40m 0s blocked: gate 10m 0s; pipeline 28m 20s; receipts 1m 40s (unresolved at publication)"
+        );
+        evidence.record_latency(&parse_key_values(
+            "BLOCKER_COUNT=2\nBLOCKER_COSTS=unavailable\nCUT_TO_PUBLISHED_SECS=unavailable\n",
+        ));
+        assert_eq!(evidence.blocker_summary(), "2 — time cost unavailable");
+        assert_eq!(evidence.cut_to_published_seconds, None);
+        assert_eq!(evidence.request_timing(), "unavailable");
+        evidence.record_latency(&parse_key_values("BLOCKER_COUNT=0\nBLOCKER_COSTS=none\n"));
+        assert_eq!(evidence.blocker_summary(), "0");
+        evidence.record_latency(&HashMap::new());
+        assert_eq!(evidence.blocker_summary(), "unavailable");
+    }
+
     #[test]
     fn publication_receipt_overrun_remains_visible_in_report_timing() {
         let mut evidence = ReleaseEvidence::default();
@@ -2390,11 +2533,23 @@ Dev reply
             retrieved_at: "2026-09-09T00:00:00Z".to_string(),
         };
         sources.release_evidence.record_latency(&parse_key_values(
-            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\nINTERVENTIONS=8\n",
+            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\nINTERVENTIONS=8\n\
+             REQUEST_TO_PUBLISHED_SECS=7200\nREQUEST_SOURCE=recorded\nCUT_TO_PUBLISHED_SECS=3600\n\
+             BLOCKER_COUNT=2\nBLOCKER_COSTS=gate:600,pipeline:1700\nBLOCKED_SECS=2300\n",
         ));
         let report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(report.contains("| Tag to published | 15m 8s — over budget (10m 0s budget) |"));
         assert!(report.contains("| Manual interventions | 8 |"));
+        // cas-a629: the whole wall clock and each blocker's cost.
+        assert!(
+            report.contains("| Request to published | 120m 0s |"),
+            "{report}"
+        );
+        assert!(report.contains("| Cut to published | 60m 0s |"), "{report}");
+        assert!(
+            report.contains("| Blockers | 2 — 38m 20s blocked: gate 10m 0s; pipeline 28m 20s |"),
+            "{report}"
+        );
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(unavailable.contains("| Manual interventions | unavailable |"));

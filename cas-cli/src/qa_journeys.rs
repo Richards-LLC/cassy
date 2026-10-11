@@ -377,6 +377,49 @@ pub fn validate_bundle_journeys(
     validate_journey_receipt(ctx, &path, base, ids, false)
 }
 
+/// cas-147e: the close gate reads the journey receipt only through the cited
+/// qa-bundle. With no `qa-bundle:` note, name that, and say whether the task's
+/// own receipt is already usable so the worker does not rerun the browsers.
+fn missing_bundle_citation(
+    ctx: &EvidenceContext<'_>,
+    base: &str,
+    ids: &[String],
+) -> EvidenceRefusal {
+    let selected = ids.join(", ");
+    let bundle = ctx.task_artifacts_dir.join("qa/bundle.json");
+    let receipt = ctx.task_artifacts_dir.join("journey-receipt.json");
+    if !receipt.is_file() {
+        return EvidenceRefusal::new(
+            format!("missing journey receipt for selected IDs [{selected}]"),
+            repair_command(ctx, base, false),
+        );
+    }
+    let no_citation = format!(
+        "no qa-bundle cited for selected IDs [{selected}]: add a task note \"qa-bundle: {}\" (cas-qa-craft references/evidence-bundle.md); the bundle's journey_receipt is validated from there",
+        bundle.display()
+    );
+    match validate_journey_receipt(ctx, &receipt, base, ids, false) {
+        Ok(path) => EvidenceRefusal::new(
+            no_citation,
+            format!(
+                "receipt present at {} (head {}); only the bundle citation is missing: write the cas-qa-craft bundle at {} with journey_receipt pointing at that receipt, add the task note \"qa-bundle: {}\", then retry close",
+                path.display(),
+                ctx.delivered_head,
+                bundle.display(),
+                bundle.display()
+            ),
+        ),
+        Err(unusable) => EvidenceRefusal::new(
+            format!(
+                "{no_citation}; the journey receipt at {} is unusable: {}",
+                receipt.display(),
+                unusable.problem
+            ),
+            unusable.command,
+        ),
+    }
+}
+
 pub fn check_close_journeys(
     ctx: &EvidenceContext<'_>,
     reasons: &[String],
@@ -401,15 +444,8 @@ pub fn check_close_journeys(
             .map(str::to_string)
             .collect()
     };
-    let citation = cited_bundle_path(ctx.notes).ok_or_else(|| {
-        EvidenceRefusal::new(
-            format!(
-                "missing journey receipt for selected IDs [{}]",
-                ids.join(", ")
-            ),
-            repair_command(ctx, base, false),
-        )
-    })?;
+    let citation =
+        cited_bundle_path(ctx.notes).ok_or_else(|| missing_bundle_citation(ctx, base, &ids))?;
     validate_bundle_journeys(ctx, Path::new(&citation), base, &ids)?;
     Ok(Some(format!(
         "JOURNEY_SELECTION: head={} base={base} ids={}",

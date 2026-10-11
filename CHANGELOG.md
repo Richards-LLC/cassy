@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — the close gate names a missing qa-bundle citation (cas-147e)
+
+- When a user-facing task's notes cite no `qa-bundle:` and its
+  `journey-receipt.json` already passes for the delivered head, close now says
+  "no qa-bundle cited for selected IDs [...]". It names the bundle path to
+  cite and says the receipt is present. It no longer says "missing journey
+  receipt" and asks for a browser rerun. A missing or unusable receipt still
+  gets the `scripts/journey-eval.sh` repair.
+
 ### Changed — parallel epics' CHANGELOG entries no longer conflict (cas-7aa5)
 
 - Two epics that each add a section under `## [Unreleased]` now merge with

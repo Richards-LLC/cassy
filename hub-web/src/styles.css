@@ -1718,6 +1718,8 @@ dialog form > *,
 .app-switcher a.app-switcher-item:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 .app-switcher-item[aria-disabled="true"] { opacity: 0.55; }
 .app-switcher-out { font-size: 0.85em; }
+.context-explorer-link { display: inline-flex; align-items: center; gap: var(--space-1); min-height: 32px; margin: 0 0 var(--space-2); font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); color: var(--color-action); text-underline-offset: 3px; }
+.context-explorer-link:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .app-switcher-item { min-height: 40px; }
 }

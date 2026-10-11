@@ -49,3 +49,8 @@ export function appSwitcherMarkup(href: string | null): string {
     : '<span class="app-switcher-item" aria-disabled="true" title="Explorer is not configured for this deployment">Explorer</span>';
   return `<nav class="app-switcher" aria-label="Cassy Cloud apps"><span class="app-switcher-item" aria-current="page">Commander</span>${explorer}</nav>`;
 }
+
+/** From an open conversation's Tasks & progress: the same project in Explorer (phone and desktop). */
+export function projectExplorerLinkMarkup(href: string): string {
+  return `<a class="context-explorer-link" href="${escapeHtml(href)}" target="${EXPLORER_TARGET}" rel="noopener noreferrer" referrerpolicy="no-referrer">All tasks in Explorer<span class="app-switcher-out" aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>`;
+}

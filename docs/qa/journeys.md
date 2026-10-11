@@ -646,3 +646,27 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A closed task or a folder that does not resolve is refused by the hub, and the panel shows the hub's reason.
 
+
+### HUB-J21 · Switch from Commander to Explorer for my project
+
+- **Entry:** `/commander/` at 1280 (light) and 390 (dark), two paired machines, one session whose project has a Cassy Cloud identity and one without
+- **Goal:** reach Cassy Cloud's Explorer from Commander, on its home or on the open conversation's project, in its own tab, carrying nothing but the path and the project id
+- **Touches:** `hub-web/src/app-switcher.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`, `hub-web/index.html`
+- **Suite:** `hub-web/e2e/journeys/app-switcher.journey.ts`
+- **Gaps:** Explorer is stubbed at the cloud origin; Explorer's own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148; that the hub reports `cloud_project_id` from the project's canonical id is proven by the Rust hub test (cas-eaa3)
+
+#### Steps
+
+1. Commander is the current app — the list shows the "Cassy Cloud apps" switcher with Commander current and Explorer as a link
+2. Switch to Explorer from the list — Explorer opens at the cloud origin's /explorer in its own tab, with no referrer, cookie or authorization sent, and Commander stays as it was
+3. Open this project's tasks in Explorer — from Tasks & progress, "All tasks in Explorer" opens /explorer/tasks?project_id=<the project's cloud id>; on desktop the switcher points there too
+4. A project without a cloud identity opens Explorer's home — its conversation offers no project link, and the switcher opens /explorer
+
+#### Expected experience
+
+- Commander and Explorer read as one app: the same switcher, labels and position in both.
+- Switching never signs anything in or out; each app keeps its own sign-in.
+
+#### Edge paths
+
+- With no cloud origin configured, Explorer is a disabled segment that says so.

@@ -22,6 +22,8 @@ export type Session = {
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;
   last_activity?: string;
+  /** The project's Cassy Cloud identity (cas-eaa3), as the hub reports it. */
+  cloud_project_id?: string;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };

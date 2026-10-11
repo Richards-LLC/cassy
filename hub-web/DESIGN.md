@@ -226,6 +226,9 @@ tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
   left-aligned, `--space-3` below it, on desktop and phone. A phone shows the
   list screen as Commander's home, so the switcher is there and not in the
   56px thread header. Explorer puts it in the same place under its own lockup.
+  An open conversation whose project has a cloud identity also offers
+  **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone
+  reaches the project's tasks without leaving the thread.
 - **Shape.** `nav.app-switcher` (`aria-label="Cassy Cloud apps"`) holds two
   segments in a pill track (`--bg-hover` with a hairline `--line` edge).
   Labels are exactly **Commander** and **Explorer**, in that order in both

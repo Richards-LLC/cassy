@@ -526,6 +526,14 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_target: Option<WorkTarget>,
 
+    /// cas-3b42: a live supervisor cleared this no-code task's code target
+    /// (`proof_scope_fix target_repo=""`). Only then is the task's work
+    /// target absent by review rather than by default, so only commits that
+    /// name the task count as its own (GH #1167). A task that never had a
+    /// work target keeps the cas-2387 rule: unnamed lane work may be its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_target_cleared: bool,
+
     /// Last successfully selected close-hook scope. This is sync-safe audit
     /// evidence, not an authoritative host-local path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -639,6 +647,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     work_target: Option<WorkTarget>,
     #[serde(default)]
+    work_target_cleared: bool,
+    #[serde(default)]
     pre_close_hook: Option<PreCloseHookEvidence>,
     #[serde(default)]
     negative_result: Option<NegativeResultEvidence>,
@@ -675,6 +685,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
         Self {
             integration_batch: value.integration_batch,
             work_target: value.work_target,
+            work_target_cleared: value.work_target_cleared,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
             evidence_only: value.evidence_only,

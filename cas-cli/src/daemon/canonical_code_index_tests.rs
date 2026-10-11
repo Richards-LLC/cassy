@@ -257,16 +257,16 @@ fn removal_of_a_worktree_never_purges_the_canonical_repository_cas_8256() {
 }
 
 /// Acceptance measurement (cas-8256): before/after row counts on a COPY of a
-/// real store. Runs only when `target/cas-8256-measure-root` names that copy's
-/// cas root; otherwise it returns at once. It refuses a store that has a
+/// real store. Manual only: run it with `--run-ignored only` and
+/// `CAS_8256_MEASURE_ROOT=<copy's cas root>`. It refuses a store that has a
 /// `worktrees` directory, which every live factory store has.
 #[test]
+#[ignore = "manual cas-8256 measurement on a store copy named by CAS_8256_MEASURE_ROOT"]
 fn measure_purge_on_a_store_copy_cas_8256() {
-    let pointer = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/cas-8256-measure-root");
-    let Ok(raw) = std::fs::read_to_string(&pointer) else {
+    let Some(raw) = std::env::var_os("CAS_8256_MEASURE_ROOT") else {
         return;
     };
-    let cas_root = PathBuf::from(raw.trim());
+    let cas_root = PathBuf::from(raw);
     assert!(
         !cas_root.join("worktrees").exists(),
         "refusing to measure on a live store: {}",

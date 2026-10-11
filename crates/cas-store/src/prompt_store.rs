@@ -12,11 +12,6 @@ use crate::Result;
 use crate::error::StoreError;
 use cas_types::{Message, Prompt, Scope};
 
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
-
 /// Schema for prompts table (also defined in migration m141)
 pub const PROMPT_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS prompts (
@@ -149,13 +144,13 @@ impl SqlitePromptStore {
 
 impl PromptStore for SqlitePromptStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(PROMPT_SCHEMA)?;
         Ok(())
     }
 
     fn add(&self, prompt: &Prompt) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Serialize messages to JSON
         let messages_json = if prompt.messages.is_empty() {
@@ -191,7 +186,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn get(&self, id: &str) -> Result<Option<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -207,7 +202,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn get_by_hash(&self, content_hash: &str, session_id: &str) -> Result<Option<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -223,7 +218,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -242,7 +237,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_by_task(&self, task_id: &str, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -261,7 +256,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -279,7 +274,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn list_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<Prompt>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, agent_id, content, content_hash, timestamp, response_started, task_id, scope, messages_json, model, tool_version
@@ -301,7 +296,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn mark_response_started(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.execute(
             "UPDATE prompts SET response_started = ?1 WHERE id = ?2",
@@ -318,7 +313,7 @@ impl PromptStore for SqlitePromptStore {
         model: Option<&str>,
         tool_version: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let messages_json = if messages.is_empty() {
             None
@@ -361,7 +356,7 @@ impl PromptStore for SqlitePromptStore {
     }
 
     fn prune(&self, days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days);
 

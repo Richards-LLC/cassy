@@ -9,13 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::Result;
-use crate::error::StoreError;
 use cas_types::{ChangeType, FileChange, Scope};
-
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
 
 /// Schema for file_changes table
 ///
@@ -144,13 +138,13 @@ impl SqliteFileChangeStore {
 
 impl FileChangeStore for SqliteFileChangeStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(FILE_CHANGE_SCHEMA)?;
         Ok(())
     }
 
     fn add(&self, change: &FileChange) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.execute(
             "INSERT OR REPLACE INTO file_changes
@@ -181,7 +175,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn get(&self, id: &str) -> Result<Option<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes WHERE id = ?1"
@@ -195,7 +189,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes
@@ -213,7 +207,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn list_by_prompt(&self, prompt_id: &str, limit: usize) -> Result<Vec<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes
@@ -236,7 +230,7 @@ impl FileChangeStore for SqliteFileChangeStore {
         file_path: &str,
         limit: usize,
     ) -> Result<Vec<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes
@@ -257,7 +251,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn list_uncommitted(&self, session_id: &str) -> Result<Vec<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes
@@ -274,7 +268,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn link_to_commit(&self, ids: &[String], commit_hash: &str) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let now = Utc::now().to_rfc3339();
         let mut updated = 0;
@@ -304,7 +298,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn list_by_commit(&self, commit_hash: &str) -> Result<Vec<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes
@@ -321,7 +315,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<FileChange>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {SELECT_COLS} FROM file_changes
@@ -338,7 +332,7 @@ impl FileChangeStore for SqliteFileChangeStore {
     }
 
     fn prune(&self, days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days);
 

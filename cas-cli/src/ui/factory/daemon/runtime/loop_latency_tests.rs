@@ -279,7 +279,12 @@ fn a_task_sync_mutation_under_a_foreign_sqlite_write_lock_stays_in_budget() {
 /// Use `cas_store::shared_db::install_busy_handler` instead.
 #[test]
 fn no_production_code_installs_sqlites_builtin_busy_timeout() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    // Source scan: the archived test binary on a merge-queue shard has no
+    // checkout, so this guard runs only where the sources exist.
+    let root = crate::test_paths::workspace_root();
+    if !root.join("cas-cli/src").is_dir() || !root.join("crates").is_dir() {
+        return; // not a source checkout; nothing to assert against
+    }
     let mut roots = vec![root.join("cas-cli/src")];
     for entry in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
         roots.push(entry.path().join("src"));

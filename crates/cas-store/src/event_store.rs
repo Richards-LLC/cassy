@@ -176,7 +176,6 @@ pub struct SqliteEventStore {
 }
 
 impl SqliteEventStore {
-
     /// A store on an existing connection, e.g. a
     /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
     /// schema setup; this never runs DDL.
@@ -367,7 +366,8 @@ impl EventStore for SqliteEventStore {
         session_id: &str,
         since: DateTime<Utc>,
     ) -> Result<bool> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        // GH #1165: the factory daemon loop calls this; honour its wait budget.
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         Ok(conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM events
              WHERE session_id = ?1 AND event_type = ?2

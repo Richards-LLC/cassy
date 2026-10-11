@@ -2241,6 +2241,21 @@ pub trait PromptQueueStore: Send + Sync {
     /// daemon may initialize its mirror cursor after the first reply ended.
     fn first_verified_operator_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
 
+    /// cas-5c89: the first sign of an operator in this session: a verified
+    /// paired-device Commander send or a terminal operator turn.
+    fn first_operator_activity_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
+
+    /// cas-5c89: the terminal operator turn in this session whose text is
+    /// `prompt` (trimmed), recorded within `window_secs` of `at`; the nearest
+    /// one when several match.
+    fn terminal_operator_turn_near(
+        &self,
+        factory_session: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<Option<i64>>;
+
     /// Atomically mirror a completed supervisor turn unless that turn already
     /// sent an explicit operator reply. The turn key also makes daemon replay
     /// and concurrent polls harmless.
@@ -2544,7 +2559,6 @@ impl SqlitePromptQueueStore {
         let _ = std::fs::write(dir.join(inbox_signal_file_name(recipient)), stamp);
     }
 
-    /// Open or create a SQLite prompt queue store
     /// A store on an existing connection, e.g. a
     /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
     /// schema setup; this never runs DDL.
@@ -2552,6 +2566,7 @@ impl SqlitePromptQueueStore {
         Self { conn }
     }
 
+    /// Open or create a SQLite prompt queue store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;
@@ -5501,6 +5516,63 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .transpose()
     }
 
+    fn first_operator_activity_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let at: Option<String> = conn.query_row(
+            "SELECT MIN(created_at) FROM prompt_queue
+              WHERE factory_session = ?
+                AND ((source LIKE 'commander:%' AND origin_kind = 'paired_device'
+                      AND operator_verified = 1)
+                     OR (source = 'terminal' AND target = 'terminal-history'))",
+            params![factory_session],
+            |row| row.get(0),
+        )?;
+        at.map(|at| DateTime::parse_from_rfc3339(&at)
+            .map(|at| at.with_timezone(&Utc))
+            .map_err(|error| StoreError::Parse(error.to_string())))
+            .transpose()
+    }
+
+    fn terminal_operator_turn_near(
+        &self,
+        factory_session: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<Option<i64>> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Ok(None);
+        }
+        let window = chrono::Duration::seconds(window_secs.max(0));
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut statement = conn.prepare_cached(
+            "SELECT id, created_at FROM prompt_queue
+              WHERE factory_session = ?1 AND source = 'terminal'
+                AND target = 'terminal-history' AND prompt = ?2
+                AND created_at >= ?3 AND created_at <= ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    factory_session,
+                    prompt,
+                    (at - window).to_rfc3339(),
+                    (at + window).to_rfc3339()
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, created)| {
+                let created = DateTime::parse_from_rfc3339(&created).ok()?.with_timezone(&Utc);
+                Some((id, (created - at).num_milliseconds().abs()))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(id, _)| id))
+    }
+
     fn mirror_supervisor_turn(
         &self,
         factory_session: &str,
@@ -6268,15 +6340,32 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 [],
                 |row| row.get(0),
             )?;
+            // cas-194c: m153 creates the table without `prompt_delivered_at`;
+            // m267 or `SupervisorQueueStore::init` adds it. Never reference
+            // the column on a store that lacks it.
+            let has_delivery_marker: bool = has_supervisor_queue
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('supervisor_queue')
+                                   WHERE name = 'prompt_delivered_at')",
+                    [],
+                    |row| row.get(0),
+                )?;
             // A supervisor-queue outbox key ("<kind>-outbox:<notification id>")
             // is released once its notification is delivered or gone; the
             // outbox re-relays only undelivered notifications (cas-f207).
-            let outbox_released = if has_supervisor_queue {
-                "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+            // Without the delivery marker, delivery cannot be proven: release
+            // only keys whose notification is gone.
+            let outbox_released = match (has_supervisor_queue, has_delivery_marker) {
+                (true, true) => {
+                    "NOT EXISTS (SELECT 1 FROM supervisor_queue s
                      WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER)
                        AND s.prompt_delivered_at IS NULL)"
-            } else {
-                "1"
+                }
+                (true, false) => {
+                    "NOT EXISTS (SELECT 1 FROM supervisor_queue s
+                     WHERE s.id = CAST(substr(q.dedupe_key, instr(q.dedupe_key, ':') + 1) AS INTEGER))"
+                }
+                (false, _) => "1",
             };
             let ids: Vec<i64> = {
                 let mut stmt = tx.prepare(&format!(
@@ -7334,6 +7423,46 @@ mod tests {
         assert_eq!(
             store.latest_verified_operator_device("factory-7").unwrap(),
             Some("device-7".into())
+        );
+    }
+
+    /// cas-5c89: an operator who only types in the supervisor's terminal is
+    /// still an operator. Their terminal turn activates the reply mirror, and
+    /// the mirror finds that turn by its prompt to thread the answer under it.
+    #[test]
+    fn terminal_turns_count_as_operator_activity_and_are_found_by_prompt_cas_5c89() {
+        let (_temp, store) = create_test_store();
+        assert_eq!(store.first_operator_activity_at("factory-7").unwrap(), None);
+        let before = Utc::now();
+        let id = store
+            .record_terminal_operator_turn("factory-7", "what is the release status?")
+            .unwrap();
+        let first = store
+            .first_operator_activity_at("factory-7")
+            .unwrap()
+            .expect("a terminal turn is operator activity");
+        assert!(first >= before - chrono::Duration::seconds(1), "{first}");
+        assert_eq!(store.first_operator_activity_at("factory-other").unwrap(), None);
+
+        let found = |session: &str, prompt: &str, at: DateTime<Utc>| {
+            store
+                .terminal_operator_turn_near(session, prompt, at, 120)
+                .unwrap()
+        };
+        let now = Utc::now();
+        assert_eq!(found("factory-7", "what is the release status?", now), Some(id));
+        // Surrounding whitespace is not part of the question.
+        assert_eq!(found("factory-7", "  what is the release status?\n", now), Some(id));
+        assert_eq!(found("factory-7", "a different question", now), None);
+        assert_eq!(found("factory-other", "what is the release status?", now), None);
+        assert_eq!(
+            found(
+                "factory-7",
+                "what is the release status?",
+                now + chrono::Duration::seconds(600)
+            ),
+            None,
+            "a turn far from the recorded question is not its answer"
         );
     }
 
@@ -12603,6 +12732,67 @@ mod tests {
         kept_receipts.sort();
         assert_eq!(ids("prompt_queue_recipient_seen", "prompt_id"), kept_receipts);
         assert!(store.prune_terminal_batch(0, 10).is_err(), "a zero window is refused");
+    }
+
+    /// cas-194c: `supervisor_queue` as migrations create it (m153) has no
+    /// `prompt_delivered_at` until `SupervisorQueueStore::init` adds it, so a
+    /// store that never opened the supervisor queue made every retention sweep
+    /// fail with "no such column: s.prompt_delivered_at" and prune nothing.
+    /// Without the column the sweep still prunes plain rows and outbox rows
+    /// whose notification is gone, and keeps an outbox row whose notification
+    /// still exists (its delivery cannot be proven).
+    #[test]
+    fn cas_194c_retention_sweep_prunes_when_supervisor_queue_lacks_prompt_delivered_at() {
+        let (_temp, store) = create_test_store();
+        let notification_id: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE supervisor_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    supervisor_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed_at TEXT
+                );
+                INSERT INTO supervisor_queue (supervisor_id, event_type, payload)
+                VALUES ('supervisor', 'task_lifecycle', '{}');",
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let keyed = |key: String| -> i64 {
+            match store
+                .enqueue_idempotent("daemon", "supervisor", "relay", Some("s"), None, None, &key, None)
+                .unwrap()
+            {
+                EnqueueIdempotentResult::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let plain = store.enqueue("supervisor", "worker-a", "old").unwrap();
+        let outbox_gone = keyed("lifecycle-outbox:999999".to_string());
+        let outbox_present = keyed(format!("lifecycle-outbox:{notification_id}"));
+        {
+            let aged = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            for id in [plain, outbox_gone, outbox_present] {
+                conn.execute("UPDATE prompt_queue SET processed_at = ? WHERE id = ?", params![aged, id])
+                    .unwrap();
+            }
+        }
+
+        let sweep = store
+            .prune_terminal_older_than(7 * 24 * 60 * 60)
+            .expect("the sweep must not depend on a column only the supervisor store adds");
+        assert_eq!(sweep.pruned, 2);
+        let remaining: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM prompt_queue ORDER BY id").unwrap();
+            stmt.query_map([], |row| row.get(0)).unwrap().map(|id| id.unwrap()).collect()
+        };
+        assert_eq!(remaining, vec![outbox_present]);
     }
 
     #[test]

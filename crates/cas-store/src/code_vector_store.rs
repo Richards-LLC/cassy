@@ -199,8 +199,7 @@ impl SqliteCodeVectorStore {
         // creation sits on a hot path that runs beside `cas doctor`. Retry the
         // DDL rather than surfacing SQLITE_BUSY as a file failure (cas-8a03).
         crate::shared_db::with_write_retry(|| {
-            conn.lock()
-                .map_err(|_| StoreError::Other("lock poisoned".to_string()))?
+            crate::shared_db::lock_connection(&conn)?
                 .execute_batch(CODE_VECTOR_SCHEMA)
                 .map_err(StoreError::from)
         })?;
@@ -283,10 +282,7 @@ impl SqliteCodeVectorStore {
     }
 
     pub fn list_pending(&self, limit: usize) -> Result<Vec<CodeVectorWork>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT symbol_id, content_hash FROM code_vector_queue
              WHERE status IN ('pending', 'failed')
@@ -303,10 +299,7 @@ impl SqliteCodeVectorStore {
     }
 
     pub fn mark_vectorized(&self, symbol_id: &str, content_hash: &str) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         Ok(conn.execute(
             "UPDATE code_vector_queue
              SET status = 'vectorized', last_error = NULL, updated_at = ?3
@@ -750,9 +743,7 @@ impl SqliteCodeVectorStore {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".to_string()))
+        crate::shared_db::lock_connection(&self.conn)
     }
 }
 

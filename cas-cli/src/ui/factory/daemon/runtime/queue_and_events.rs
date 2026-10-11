@@ -1,5 +1,16 @@
 use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
+
+/// What a delivery probe learned about recipient-authored activity (GH #1163).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecipientActivity {
+    /// A reply or attributed task note after delivery.
+    Found,
+    /// The store answered: none yet.
+    Absent,
+    /// The store could not answer this pass (busy or out of wait budget).
+    Unknown,
+}
 use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -2962,37 +2973,61 @@ impl FactoryDaemon {
     /// GH #1163: replies and attributed task notes prove the recipient is
     /// handling work even when a mid-turn message starts no new harness turn.
     /// Retire only the health probe: leave per-message read/ack receipts alone.
+    ///
+    /// GH #1165: this runs on the daemon loop thread under its store wait
+    /// budget. The worker's agent id comes from the director snapshot (a store
+    /// read only when the snapshot lacks it), and a store read that fails or
+    /// runs out of budget is `Unknown`: the probe waits for a later pass
+    /// instead of being judged on missing evidence.
     fn recipient_authored_activity_after(
         &self,
         queue: &dyn cas_store::PromptQueueStore,
         worker: &str,
         after: chrono::DateTime<chrono::Utc>,
-    ) -> bool {
+    ) -> RecipientActivity {
         match queue.has_message_from_since(worker, &self.session_name, after) {
-            Ok(true) => return true,
+            Ok(true) => return RecipientActivity::Found,
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, worker, "failed to read recipient reply evidence"),
+            Err(error) => {
+                tracing::debug!(%error, worker, "recipient reply evidence unavailable this pass");
+                return RecipientActivity::Unknown;
+            }
         }
-        let agent = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .and_then(|agents| {
-                agents
+        let snapshot = self
+            .app
+            .director_data()
+            .agents
+            .iter()
+            .filter(|agent| agent.name == worker)
+            .max_by_key(|agent| agent.registered_at)
+            .map(|agent| agent.id.clone());
+        let agent_id = match snapshot {
+            Some(id) => id,
+            None => match open_agent_store(self.app.cas_dir()).and_then(|store| {
+                store.list(None).map_err(crate::error::CasError::from)
+            }) {
+                Ok(agents) => match agents
                     .into_iter()
                     .filter(|agent| agent.name == worker)
                     .max_by_key(|agent| agent.registered_at)
-            });
-        let Some(agent) = agent else {
-            return false;
+                {
+                    Some(agent) => agent.id,
+                    None => return RecipientActivity::Absent,
+                },
+                Err(error) => {
+                    tracing::debug!(%error, worker, "recipient agent unavailable this pass");
+                    return RecipientActivity::Unknown;
+                }
+            },
         };
-        let note = crate::store::open_event_store(self.app.cas_dir()).and_then(|store| {
-            Ok(store.has_event_since(cas_types::EventType::TaskNoteAdded, &agent.id, after)?)
-        });
-        match note {
-            Ok(found) => found,
+        match crate::store::open_event_store(self.app.cas_dir()).and_then(|store| {
+            Ok(store.has_event_since(cas_types::EventType::TaskNoteAdded, &agent_id, after)?)
+        }) {
+            Ok(true) => RecipientActivity::Found,
+            Ok(false) => RecipientActivity::Absent,
             Err(error) => {
-                tracing::warn!(%error, worker, "failed to read recipient note evidence");
-                false
+                tracing::debug!(%error, worker, "recipient note evidence unavailable this pass");
+                RecipientActivity::Unknown
             }
         }
     }
@@ -3016,9 +3051,14 @@ impl FactoryDaemon {
             .collect();
         let mut actions = Vec::with_capacity(due.len());
         for (row_id, probe) in due {
-            if self.recipient_authored_activity_after(queue, &probe.pane, probe.delivered_at_utc) {
-                self.normal_delivery_probes.remove(&row_id);
-                continue;
+            match self.recipient_authored_activity_after(queue, &probe.pane, probe.delivered_at_utc) {
+                RecipientActivity::Found => {
+                    self.normal_delivery_probes.remove(&row_id);
+                    continue;
+                }
+                // GH #1165: the store was busy; judge this probe on a later pass.
+                RecipientActivity::Unknown => continue,
+                RecipientActivity::Absent => {}
             }
             let pane_output_grew = self
                 .app

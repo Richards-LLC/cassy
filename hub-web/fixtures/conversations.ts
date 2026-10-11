@@ -293,6 +293,15 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   } else if (state === 'conversation-empty' || state === 'conversation-empty-long-machine') {
     // empty.html: nothing in the thread, the last thing said as a faint echo.
     echo = 'Promoted the hub to production on Monday.';
+  } else if (state === 'conversation-terminal') {
+    // cas-5c89: the operator typed at the supervisor's terminal and never sent
+    // from a phone. Each supervisor answer is mirrored and threads under the
+    // terminal question it answers, so the phone shows both halves.
+    const stamp = (hh: number, mm: number) => new Date(at(hh, mm)).toISOString();
+    history.hydrateSend({ notification_id: 301, target: 'supervisor', text: 'What changed in Violet today?', state: 'acknowledged', stamped: false, device_id: 'terminal', operator_label: 'Terminal', at: stamp(13, 24) });
+    history.hydrateReply({ notification_id: 302, reply_to: 301, message: '**Two fixes landed.**\n- Setup no longer loops on a token sign-in cannot create.\n- Claude Code now shows whether Slack accepts its key.', summary: '', device_id: '*', kind: 'answer', attachments: [], at: stamp(13, 25) });
+    history.hydrateSend({ notification_id: 303, target: 'supervisor', text: 'Is the release branch green?', state: 'acknowledged', stamped: false, device_id: 'terminal', operator_label: 'Terminal', at: stamp(13, 34) });
+    history.hydrateReply({ notification_id: 304, reply_to: 303, message: 'Yes. Every check passed on the release branch; the tag goes out after the notes are reviewed.', summary: '', device_id: '*', kind: 'answer', attachments: [], at: stamp(13, 35) });
   } else if (state === 'conversation-sessions' || state === 'conversation-earlier') {
     // cas-55a4: other sessions' turns, beside the thread and never in it.
     const own = 'gabber-studio-calm-puma-34';

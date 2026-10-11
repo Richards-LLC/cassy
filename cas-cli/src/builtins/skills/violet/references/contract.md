@@ -124,7 +124,8 @@ the thread with `thread_id` before doing anything else. `ambiguous_post` means
 another call with that key may still finish. Never change the key to get past a
 stopped record. A hub without the thread journal answers
 `capability_unavailable`; post the parent and replies one by one with
-`reply_to`.
+`reply_to` set to the parent's `message_id`, spacing same-channel writes at
+least 1 second apart. A reply without `reply_to` is stray.
 
 ### Receipts
 

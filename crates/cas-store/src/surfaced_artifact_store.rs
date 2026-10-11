@@ -86,7 +86,7 @@ impl SqliteSurfacedArtifactStore {
     }
 
     pub fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.execute_batch(SURFACED_ARTIFACT_SCHEMA)?;
         Ok(())
     }
@@ -117,7 +117,7 @@ impl SqliteSurfacedArtifactStore {
             return Ok(0);
         }
 
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let tx = ImmediateTx::new(&conn)?;
         let surfaced_at = Utc::now().to_rfc3339();
         for artifact in artifacts {
@@ -148,7 +148,7 @@ impl SqliteSurfacedArtifactStore {
 
     /// Return the number of persisted rows for one session.
     pub fn count_for_session(&self, session_id: &str) -> Result<u64> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.query_row(
             "SELECT COUNT(*) FROM surfaced_artifacts WHERE session_id = ?1",
             params![session_id],
@@ -160,7 +160,7 @@ impl SqliteSurfacedArtifactStore {
 
     /// Aggregate injected artifacts and join each row to its session outcome.
     pub fn aggregate(&self, limit: usize) -> Result<Vec<SurfacedArtifactImpact>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut stmt = conn.prepare(
             "SELECT sa.artifact_id, sa.artifact_type,
                     COUNT(*) AS surfaced_count,

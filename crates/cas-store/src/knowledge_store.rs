@@ -818,7 +818,7 @@ impl SqliteKnowledgeStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+        crate::shared_db::lock_connection_infallible(&self.conn)
     }
 
     fn parse_datetime(value: &str) -> DateTime<Utc> {

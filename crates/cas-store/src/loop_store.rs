@@ -12,10 +12,6 @@ use crate::error::StoreError;
 use cas_types::{Loop, LoopStatus};
 
 // Helper to convert lock errors
-fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Parse("Failed to acquire lock".to_string())
-}
-
 /// SQLite DDL for the `loops` table and its indexes.
 ///
 /// Re-exported via `cas_store::LOOP_SCHEMA` so the migration runner in
@@ -94,7 +90,7 @@ impl SqliteLoopStore {
 
     /// Keep the random source injectable while checking the real database.
     fn generate_id_with_random(&self, mut random: impl FnMut() -> u64) -> Result<String> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         for _ in 0..16 {
             let id = format!("loop-{:016x}", random());
             let exists: bool = conn.query_row(
@@ -144,7 +140,7 @@ impl SqliteLoopStore {
 
 impl LoopStore for SqliteLoopStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(LOOP_SCHEMA)?;
         Ok(())
     }
@@ -154,7 +150,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn add(&self, loop_state: &Loop) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.execute(
             "INSERT INTO loops (id, session_id, prompt, completion_promise, iteration,
@@ -180,7 +176,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn get(&self, id: &str) -> Result<Loop> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.query_row(
             "SELECT id, session_id, prompt, completion_promise, iteration, max_iterations,
@@ -196,7 +192,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn update(&self, loop_state: &Loop) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let rows = conn.execute(
             "UPDATE loops SET session_id = ?2, prompt = ?3, completion_promise = ?4,
@@ -227,7 +223,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let rows = conn.execute("DELETE FROM loops WHERE id = ?1", params![id])?;
 
@@ -239,7 +235,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn get_active_for_session(&self, session_id: &str) -> Result<Option<Loop>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         conn.query_row(
             "SELECT id, session_id, prompt, completion_promise, iteration, max_iterations,
@@ -254,7 +250,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<Loop>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, session_id, prompt, completion_promise, iteration, max_iterations,
@@ -271,7 +267,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn prune(&self, older_than_days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
 
         let rows = conn.execute("DELETE FROM loops WHERE started_at < ?", params![cutoff])?;

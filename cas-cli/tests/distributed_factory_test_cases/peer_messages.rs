@@ -331,6 +331,9 @@ async fn coordinate(
 /// replies with `in_reply_to`, and `message_status id=` reads the receipt.
 #[tokio::test]
 async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receipt() {
+    // The MCP caller identity comes from the registry, never from the runner's
+    // ambient CAS_* environment (a factory worker runs these tests).
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
     let endpoint = server.uri();
     let alpha = TestMachine::new("machine-alpha");

@@ -68,6 +68,85 @@ VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR
             # test variables are still included by their own names.
             "CAS_RELEASE_ENV_FILE"}
 
+# cas-398c: the proof key is the whole scrubbed environment, so a proof made by
+# the factory daemon in the background satisfies a cut run from a supervisor
+# shell only when nothing test-relevant differs. Every name below is excluded
+# from the key AND scrubbed from the environment the proof's test rows run in,
+# so it cannot change a test outcome. Anything not listed stays a key input,
+# including unknown future names; a miss then names the differing variable.
+HARNESS_NOISE = {
+    # Terminal and login-session plumbing of whoever launched the proof.
+    "TERM": "terminal type of the launching shell",
+    "COLORTERM": "terminal colour capability of the launching shell",
+    "TERM_PROGRAM": "terminal emulator of the launching shell",
+    "TERM_PROGRAM_VERSION": "terminal emulator of the launching shell",
+    "TERM_SESSION_ID": "terminal session of the launching shell",
+    "TMUX": "multiplexer socket of the launching shell",
+    "TMUX_PANE": "multiplexer pane of the launching shell",
+    "STY": "screen session of the launching shell",
+    "WINDOW": "screen window of the launching shell",
+    "WINDOWID": "X window of the launching shell",
+    "DISPLAY": "graphical session of the launching shell",
+    "WAYLAND_DISPLAY": "graphical session of the launching shell",
+    "DBUS_SESSION_BUS_ADDRESS": "desktop bus of the login session",
+    "XDG_SESSION_ID": "login session id",
+    "XDG_SESSION_TYPE": "login session type",
+    "XDG_SESSION_CLASS": "login session class",
+    "XDG_VTNR": "login virtual terminal",
+    "SSH_AUTH_SOCK": "ssh agent of the launching shell; proof rows use no remote",
+    "SSH_AGENT_PID": "ssh agent of the launching shell; proof rows use no remote",
+    "SSH_CLIENT": "remote login address",
+    "SSH_CONNECTION": "remote login address",
+    "SSH_TTY": "remote login terminal",
+    # Interactive editors: a proof row never opens one.
+    "EDITOR": "interactive editor; proof rows never open one",
+    "VISUAL": "interactive editor; proof rows never open one",
+    "GIT_EDITOR": "interactive editor; proof rows never open one",
+    # Agent harness settings exported to the harness's own child shells.
+    "COREPACK_ENABLE_AUTO_PIN": "Claude Code child-shell default; rows see corepack's default",
+    "DISABLE_AUTOUPDATER": "Claude Code harness setting",
+    "DISABLE_COST_WARNINGS": "Claude Code harness setting",
+    "IS_DEMO": "Claude Code harness setting",
+    "NoDefaultCurrentDirectoryInExePath": "Claude Code harness setting (Windows lookup)",
+    # Factory worker spawn settings: they configure the agent, not the build.
+    "CAS_FACTORY_WORKER_MODEL": "factory worker spawn setting (agent model)",
+    "CAS_FACTORY_WORKER_EFFORT": "factory worker spawn setting (agent effort)",
+    "CAS_FACTORY_WORKER_ACCOUNT_DIR": "factory worker spawn setting (agent account)",
+    "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE": "factory worker spawn setting (agent config)",
+    "CAS_FACTORY_NICE_WORKER": "factory worker CPU priority; changes scheduling, not results",
+}
+EXCLUDED_PREFIXES = (
+    ("CLAUDE_", "Claude Code harness session plumbing"),
+    ("CODEX_", "Codex harness session plumbing"),
+)
+CREDENTIAL_SUFFIXES = ("_TOKEN", "_API_KEY", "_SECRET", "_PASSWORD")
+
+
+def exclusion_reason(name):
+    """Why `name` is scrubbed from proof rows and excluded from the key."""
+    if name in IDENTITY:
+        return "harness/session identity"
+    if name in HARNESS_NOISE:
+        return HARNESS_NOISE[name]
+    for prefix, reason in EXCLUDED_PREFIXES:
+        if name.startswith(prefix):
+            return reason
+    if name.endswith(CREDENTIAL_SUFFIXES):
+        return "credential; scrubbed so no proof row can reach a live service"
+    return None
+
+
+def key_only_exclusion(name):
+    """Why `name` stays in the row environment but is not a key input."""
+    if name in VOLATILE:
+        return "output location, shell bookkeeping or build parallelism; not the tested candidate"
+    if name.startswith("CAS_RELEASE_GATE_") or name.startswith("CAS_RELEASE_TRAIN_"):
+        return "release gate/train orchestration control"
+    if name == "ZIG":
+        return "replaced by ZIG_SHA256 of the resolved binary"
+    return None
+
+
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
@@ -192,7 +271,7 @@ def with_cargo_bin(env):
 
 
 def test_environment(root):
-    env = {key: value for key, value in os.environ.items() if key not in IDENTITY}
+    env = {key: value for key, value in os.environ.items() if exclusion_reason(key) is None}
     with_cargo_bin(env)
     env.setdefault("CAS_INIT_TIMEOUT_SECS", "900")
     if "ZIG" in env:
@@ -238,8 +317,7 @@ def environment_material(root, env):
     """
     material = {}
     for key, value in env.items():
-        if (key in VOLATILE or key.startswith("CAS_RELEASE_GATE_")
-                or key.startswith("CAS_RELEASE_TRAIN_") or key == "ZIG"):
+        if key_only_exclusion(key) or exclusion_reason(key):
             continue
         material[key] = value
     zig = env.get("ZIG")
@@ -250,6 +328,17 @@ def environment_material(root, env):
         path = root / name
         material["local:" + name] = digest(path.read_bytes()) if path.is_file() else "absent"
     return material
+
+
+def environment_policy(root):
+    """Names only: which variables key this proof and why the rest do not."""
+    env = test_environment(root)
+    excluded = {}
+    for name in os.environ:
+        reason = exclusion_reason(name) or key_only_exclusion(name)
+        if reason:
+            excluded[name] = reason
+    return {"included": sorted(environment_material(root, env)), "excluded": dict(sorted(excluded.items()))}
 
 
 def receipt_path(root, expected):
@@ -634,7 +723,8 @@ def prove_owned(root):
         record = {"inputs": expected, "status": "RUNNING", "head": head,
                   "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {}, "scratch": scratch_report,
                   "environment_keys": {key: digest(value.encode())
-                                       for key, value in environment_material(root, env).items()}}
+                                       for key, value in environment_material(root, env).items()},
+                  "environment_policy": environment_policy(root)}
         write(path, record)
         log_dir = path.parent / (path.stem + "-logs")
         log_dir.mkdir(exist_ok=True)
@@ -686,15 +776,180 @@ def prove_owned(root):
         return record, path
 
 
+# cas-398c: release rows that are a pure function of the code input, toolchain
+# and target. The factory daemon proves them in the background on a green
+# integration tip; the cut's gate reuses a matching PASS instead of rebuilding.
+# The code input masks only release prose, member versions and the ledger, so
+# prep's version bump keeps the proof (the ISA audit and the Darwin check do
+# not depend on version literals).
+ROW_PROOF_ROWS = ("release-binary-isa", "macos-check")
+ROW_TARGETS = {"release-binary-isa": "x86_64-unknown-linux-gnu",
+               "macos-check": "aarch64-apple-darwin"}
+
+
+def row_toolchain(root, row, env):
+    """Digest of every tool the row's build or audit runs."""
+    # rustc -Vv names the exact toolchain commit, which also fixes the
+    # version of an installed target's standard library. Zig is already an
+    # environment input (ZIG_SHA256 of the resolved binary).
+    cargo = env.get("CARGO", "cargo")
+    commands = [[cargo, "--version"], ["rustc", "-Vv"]]
+    if row == "release-binary-isa":
+        objdump = "gobjdump" if platform.system() == "Darwin" else "objdump"
+        commands += [["cargo-zigbuild", "--version"], [objdump, "--version"]]
+    outputs = []
+    for command in commands:
+        try:
+            outputs.append(subprocess.run(command, cwd=root, env=env, capture_output=True,
+                                          check=True).stdout)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError(f"{row} toolchain probe {command[0]} failed: {error}") from error
+    return digest(b"\0".join(outputs))
+
+
+def row_inputs(root, row):
+    if row not in ROW_TARGETS:
+        raise ValueError(f"no row proof for {row}")
+    base, env = inputs(root)
+    return dict(base, row=row, target=ROW_TARGETS[row],
+                row_toolchain=row_toolchain(root, row, env)), env
+
+
+def row_receipt_path(root, expected):
+    key = digest(json.dumps(expected, sort_keys=True).encode())
+    return common_dir(root).parent / ".cas/merge-sweeps/row-proofs" / (key + ".json")
+
+
+def row_matching(root, expected, diagnostic=False):
+    path = row_receipt_path(root, expected)
+
+    def miss(key, reason):
+        if diagnostic:
+            print(f"MISS row-proof row={expected['row']} key={key} reason={reason} receipt={path}",
+                  file=sys.stderr)
+        return None
+
+    try:
+        record = json.loads(path.read_text())
+        if record["inputs"] != expected:
+            return miss("inputs", "different")
+        if record["status"] != "PASS":
+            return miss("status", "not_PASS")
+        if not 0 <= time.time() - record["completed_epoch"] <= MAX_AGE:
+            return miss("completed_epoch", "future_or_expired")
+        if git(root, "rev-parse", record["head"] + "^{tree}").decode().strip() != record["tree"]:
+            return miss("head", "tested_tree_differs")
+        if code_input(root, record["head"]) != expected["code_input"]:
+            return miss("code_input", "tested_commit_differs")
+        return record, path
+    except FileNotFoundError:
+        if diagnostic:
+            print(explain_row_miss(root, expected), file=sys.stderr)
+        return None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+        return miss("receipt", "malformed_or_unavailable_object")
+
+
+def explain_row_miss(root, expected):
+    """Name the first differing input of the newest PASS for the same row."""
+    paths = sorted(row_receipt_path(root, expected).parent.glob("*.json"),
+                   key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths[:100]:
+        try:
+            record = json.loads(path.read_text())
+            recorded = record["inputs"]
+            if (record.get("status") != "PASS" or recorded.get("row") != expected["row"]
+                    or recorded.get("repository") != expected.get("repository")):
+                continue
+            for key in expected:
+                if recorded.get(key) != expected[key]:
+                    detail = ""
+                    if key == "environment" and isinstance(record.get("environment_keys"), dict):
+                        current = {name: digest(value.encode())
+                                   for name, value in environment_material(root, test_environment(root)).items()}
+                        prior = record["environment_keys"]
+                        differing = next((name for name in sorted(set(prior) | set(current))
+                                          if prior.get(name) != current.get(name)), None)
+                        if differing:
+                            detail = f" environment_key={differing}"
+                    return (f"MISS row-proof row={expected['row']} key={key} reason=different{detail} "
+                            f"receipt={path}")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return f"MISS row-proof row={expected['row']} key=receipt reason=no_matching_receipt"
+
+
+def run_gate_row(root, row, env, log):
+    """Run one gate row fresh (--only never reuses) and report its PASS."""
+    row_env = proof_target.environment(env, proof_target.identity(root))
+    row_env["CAS_RELEASE_GATE_LOG_DIR"] = str(log.with_suffix("")) + "-rows"
+    with log.open("w") as stream:
+        result = release_scratch.child_run(["bash", str(root / "scripts/release-gate.sh"),
+                                            "0.0.0", "--only", row], cwd=root, env=row_env,
+                                           stdout=stream, stderr=subprocess.STDOUT)
+    return result.returncode == 0 and bool(
+        re.search(r"^PASS " + re.escape(row) + r" ", log.read_text(), re.M))
+
+
+def prove_rows(root, rows=ROW_PROOF_ROWS):
+    """Prove each row once per input key; return {row: PASS|FAIL}."""
+    results = {}
+    for row in rows:
+        expected, env = row_inputs(root, row)
+        path = row_receipt_path(root, expected)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if row_matching(root, expected):
+                results[row] = "PASS"
+                continue
+            head = git(root, "rev-parse", "HEAD").decode().strip()
+            record = {"inputs": expected, "status": "RUNNING", "row": row, "head": head,
+                      "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
+                      "environment_keys": {key: digest(value.encode())
+                                           for key, value in environment_material(root, env).items()},
+                      "environment_policy": environment_policy(root)}
+            write(path, record)
+            log = path.with_suffix(".log")
+            started = time.time()
+            passed = run_gate_row(root, row, env, log)
+            record["wall_s"] = round(time.time() - started, 3)
+            current, _ = row_inputs(root, row)
+            if current != expected or git(root, "rev-parse", "HEAD").decode().strip() != head:
+                record["status"] = "FAIL"
+                write(path, record)
+                raise ValueError(f"{row} inputs changed while the row ran")
+            record["status"] = "PASS" if passed else "FAIL"
+            record["completed_epoch"] = int(time.time())
+            record["log"] = str(log)
+            write(path, record)
+            results[row] = record["status"]
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prove", "check", "input"))
+    parser.add_argument("action", choices=("prove", "check", "input", "prove-rows", "check-row"))
     parser.add_argument("root", type=Path)
+    parser.add_argument("row", nargs="?")
     args = parser.parse_args()
     try:
         root = args.root.resolve()
         if args.action == "input":
             print(code_input(root))
+            return 0
+        if args.action == "prove-rows":
+            results = prove_rows(root)
+            print("row-proofs " + " ".join(f"{row}={status}" for row, status in results.items()))
+            return 0 if all(status == "PASS" for status in results.values()) else 1
+        if args.action == "check-row":
+            expected, _ = row_inputs(root, args.row)
+            found = row_matching(root, expected, diagnostic=True)
+            if not found:
+                return 1
+            record, path = found
+            print(f"PASS row-proof row={args.row} receipt={path} source_sha={record['head']} "
+                  f"tree={record['tree']} code_input={expected['code_input']} target={expected['target']}")
             return 0
         found = prove(root) if args.action == "prove" else matching(root, inputs(root)[0], diagnostic=True)
         if not found:
@@ -709,6 +964,10 @@ def main():
             print("FAIL assembly proof: " + str(exc), file=sys.stderr)
         elif args.action == "check":
             print("MISS assembly key=checkout reason=" + str(exc), file=sys.stderr)
+        elif args.action == "check-row":
+            print(f"MISS row-proof row={args.row} key=checkout reason=" + str(exc), file=sys.stderr)
+        elif args.action == "prove-rows":
+            print("FAIL row proof: " + str(exc), file=sys.stderr)
         return 1
 
 

@@ -34,6 +34,10 @@ struct IntegrationReceipt {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     no_build: Option<NoBuildReceipt>,
+    /// cas-398c: background proof of release-binary-isa and macos-check for
+    /// this tip (`row-proofs …=PASS`, `FAIL: …` or `DEFERRED: …`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_rows: Option<String>,
     detail: String,
     affected: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -63,6 +67,84 @@ struct HeldEpic {
 struct NoBuildReceipt {
     tip: String,
     rows: std::collections::BTreeMap<String, String>,
+}
+
+/// cas-398c: the repository's proof helper can prove release rows.
+fn row_proofs_supported(worktree: &Path) -> bool {
+    fs::read_to_string(worktree.join("scripts/assembly-proof.py"))
+        .is_ok_and(|helper| helper.contains("prove-rows"))
+}
+
+/// cas-398c: prove release-binary-isa and macos-check for the checked-out
+/// tip, so the cut's gate reuses them. The helper keys each proof on code
+/// input, toolchain, target and test-relevant environment and skips a key it
+/// already proved. A newer merge cancels the run (the sweep's debounce).
+fn run_row_proofs(
+    worktree: &Path,
+    log_path: &Path,
+    settings: &SweepSettings,
+    cancel: &Arc<AtomicBool>,
+) -> Result<String, String> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let log = File::create(log_path).map_err(|error| error.to_string())?;
+    let mut command = Command::new("python3");
+    command
+        .arg(worktree.join("scripts/assembly-proof.py"))
+        .arg("prove-rows")
+        .arg(worktree)
+        .current_dir(worktree)
+        .envs(settings.env.iter())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            log.try_clone().map_err(|error| error.to_string())?,
+        ))
+        .stderr(Stdio::from(log));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid and signal are async-signal-safe before exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) || started.elapsed() >= settings.timeout {
+            terminate_child(&mut child);
+            return Err("row proofs interrupted or timed out".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Err(error) => {
+                terminate_child(&mut child);
+                return Err(error.to_string());
+            }
+        }
+    };
+    let output = fs::read_to_string(log_path).unwrap_or_default();
+    let summary = output
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("row-proofs "))
+        .map(str::to_owned);
+    match summary {
+        Some(line) if status.success() => Ok(line),
+        Some(line) => Err(format!("{line}; log {}", log_path.display())),
+        None => Err(format!(
+            "row proofs exited {status} without a summary; log {}",
+            log_path.display()
+        )),
+    }
 }
 
 /// The repository owns its release row inventory and environment scrub. The
@@ -598,6 +680,7 @@ fn integrate(
         tip: None,
         status: "RUNNING".to_owned(),
         no_build: None,
+        release_rows: None,
         detail: format!(
             "Triggered by {} at {}; {}",
             request.epic_id,
@@ -790,11 +873,22 @@ fn integrate(
         receipt.detail = detail.clone();
         receipt.deferrals = 0;
         write_receipt(&receipt_path, &receipt)?;
+        let gate_note = gate_no_build_failure(
+            project_root,
+            &worktree,
+            &shared_cas,
+            request,
+            &base,
+            &tip,
+            receipt.no_build.as_ref(),
+            settings,
+            cancel,
+        );
         return Ok(SweepResult {
             request: request.clone(),
             status: SweepStatus::Failed,
             log_path: receipt_path,
-            summary: detail,
+            summary: format!("{detail}{gate_note}"),
             failures: Vec::new(),
             integration_epics: receipt.affected.clone(),
             base_failure: None,
@@ -894,6 +988,15 @@ fn integrate(
                         "; reported failing targets introduced by {}",
                         receipt.epics[index].id
                     ));
+                    let gate_note = gate_attributed_epic(
+                        project_root,
+                        &shared_cas,
+                        &receipt.epics,
+                        index,
+                        &failed_targets,
+                        &mut probe,
+                    );
+                    result.summary.push_str(&gate_note);
                     affected = receipt.epics[..=index]
                         .iter()
                         .map(|epic| epic.id.clone())
@@ -917,6 +1020,16 @@ fn integrate(
             }
         }
     }
+    if result.status == SweepStatus::Passed {
+        // cas-6f48: every epic in a passing union is green at its tip.
+        for epic in receipt.epics.iter().chain(&receipt.already_integrated) {
+            if let Err(error) =
+                crate::epic_gate::record_green(&shared_cas, &epic.id, &epic.branch, &epic.tip)
+            {
+                tracing::warn!(%error, epic = %epic.id, "could not record green epic gate");
+            }
+        }
+    }
     // Leave the scratch checkout at the published tip, even after probes.
     git_output(&worktree, &["reset", "--hard", &tip])?;
     if let Some(resolution) = &receipt.resolution {
@@ -933,6 +1046,30 @@ fn integrate(
         result
             .summary
             .push_str(&format!("; held for another release: {}", held.join(", ")));
+    }
+    // cas-398c: a green tip also proves the release rows the cut would
+    // otherwise rebuild (release-binary-isa, macos-check), unless the build
+    // guard says the host is busy.
+    if result.status == SweepStatus::Passed
+        && settings.command.is_none()
+        && row_proofs_supported(&worktree)
+    {
+        let guard = crate::factory_build_guard::inspect(cas_dir, &settings_to_config(settings), 1);
+        let outcome = if !guard.violations().is_empty() {
+            format!("DEFERRED: {}", guard.violations().join("; "))
+        } else {
+            let log = shared_cas
+                .join(LOG_DIR)
+                .join(format!("row-proofs-{tip}.log"));
+            match run_row_proofs(&worktree, &log, settings, cancel) {
+                Ok(line) => line,
+                Err(error) => format!("FAIL: {error}"),
+            }
+        };
+        result
+            .summary
+            .push_str(&format!("; release rows: {outcome}"));
+        receipt.release_rows = Some(outcome);
     }
     result.summary = format!("{branch} at {tip}: {}", result.summary);
     result.request = request.clone();
@@ -1423,6 +1560,182 @@ fn toolchain_fingerprint() -> Result<String, String> {
         Ok(digest)
     } else {
         Err("toolchain fingerprint was not a SHA-256 digest".to_owned())
+    }
+}
+
+/// cas-6f48: the union failed and `epics[index]` introduced the failing
+/// targets. Epics merged before it are green; it is red, naming the first
+/// merge on it whose failing targets fail. The bisect re-runs only those
+/// targets, once per red episode: a named culprit is never bisected again.
+fn gate_attributed_epic(
+    project_root: &Path,
+    shared_cas: &Path,
+    epics: &[EpicTip],
+    index: usize,
+    failing: &[String],
+    probe: &mut impl FnMut(&str) -> Result<bool, String>,
+) -> String {
+    for epic in &epics[..index] {
+        if let Err(error) =
+            crate::epic_gate::record_green(shared_cas, &epic.id, &epic.branch, &epic.tip)
+        {
+            tracing::warn!(%error, epic = %epic.id, "could not record green epic gate");
+        }
+    }
+    let epic = &epics[index];
+    let gate = crate::epic_gate::load(shared_cas);
+    let entry = gate.epics.get(&epic.branch);
+    let named = entry
+        .and_then(|entry| entry.red.as_ref())
+        .is_some_and(|red| red.first_red_merge.is_some());
+    let last_green = entry.and_then(|entry| entry.last_green_tip.clone());
+    let started = Instant::now();
+    let mut runs = 0usize;
+    let mut counted = |commit: &str| {
+        runs += 1;
+        probe(commit)
+    };
+    let (culprit, detail) = if named {
+        (None, "culprit already named by an earlier run".to_owned())
+    } else {
+        match crate::epic_gate::first_red_merge(
+            project_root,
+            last_green.as_deref(),
+            &epic.tip,
+            &mut counted,
+        ) {
+            Ok(Some(culprit)) if culprit.isolated => (Some(culprit), String::new()),
+            Ok(Some(culprit)) => (
+                Some(culprit),
+                format!(
+                    "no green tip bounds the {}-merge window; this merge or an earlier one",
+                    crate::epic_gate::MAX_BISECT_WINDOW
+                ),
+            ),
+            Ok(None) => (
+                None,
+                "failing targets pass on the epic alone; only the integration union fails"
+                    .to_owned(),
+            ),
+            Err(error) => (None, format!("culprit bisect incomplete: {error}")),
+        }
+    };
+    let bisect = (!named).then(|| crate::epic_gate::BisectCost {
+        runs,
+        secs: started.elapsed().as_secs(),
+    });
+    let first_red_subject = culprit
+        .as_ref()
+        .and_then(|culprit| crate::epic_gate::commit_subject(project_root, &culprit.commit));
+    let red = crate::epic_gate::RedTip {
+        tip: epic.tip.clone(),
+        first_red_merge: culprit.map(|culprit| culprit.commit),
+        first_red_subject,
+        failing: failing.to_vec(),
+        detail: if detail.is_empty() {
+            format!(
+                "{} failing target(s) in the integration union",
+                failing.len()
+            )
+        } else {
+            detail
+        },
+        since: chrono::Utc::now().to_rfc3339(),
+        bisect,
+        overrides: Vec::new(),
+    };
+    if let Err(error) = crate::epic_gate::record_red(shared_cas, &epic.id, &epic.branch, red) {
+        tracing::warn!(%error, epic = %epic.id, "could not record red epic gate");
+        return format!("; epic gate not recorded: {error}");
+    }
+    let gate = crate::epic_gate::load(shared_cas);
+    let culprit = gate
+        .epics
+        .get(&epic.branch)
+        .and_then(|entry| entry.red.as_ref())
+        .and_then(|red| red.first_red_merge.clone())
+        .map(|merge| format!(", first red merge {merge}"))
+        .unwrap_or_default();
+    format!(
+        "; epic gate RED for {}{culprit} ({runs} bisect run(s)); merges into it are refused",
+        epic.branch
+    )
+}
+
+/// cas-6f48: no-build release rows failed on the union. Re-run them once on
+/// the trunk base (they need no build): a row that also fails there is a
+/// base failure and gates nothing; otherwise the merge that triggered this
+/// run is the culprit and its epic turns red.
+#[allow(clippy::too_many_arguments)]
+fn gate_no_build_failure(
+    project_root: &Path,
+    worktree: &Path,
+    shared_cas: &Path,
+    request: &SweepRequest,
+    base: &str,
+    tip: &str,
+    proof: Option<&NoBuildReceipt>,
+    settings: &SweepSettings,
+    cancel: &Arc<AtomicBool>,
+) -> String {
+    let failed: Vec<String> = proof
+        .filter(|proof| proof.tip == tip)
+        .map(|proof| {
+            proof
+                .rows
+                .iter()
+                .filter(|(_, value)| value.as_str() != "PASS")
+                .map(|(row, _)| row.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    if failed.is_empty() {
+        // Missing rows, a timeout or a crash: an infrastructure verdict.
+        return String::new();
+    }
+    let started = Instant::now();
+    let output = shared_cas
+        .join(LOG_DIR)
+        .join(format!("no-build-base-{base}.json"));
+    let at_base = git_output(worktree, &["checkout", "-q", "--detach", base])
+        .and_then(|_| run_no_build_rows(worktree, base, &output, settings, cancel));
+    let _ = git_output(worktree, &["reset", "-q", "--hard", tip]);
+    let base_rows = match at_base {
+        Ok(Some(proof)) => proof.rows,
+        Ok(None) => return "; epic gate unchanged: base has no no-build rows".to_owned(),
+        Err(error) => return format!("; epic gate unchanged: base no-build rerun failed: {error}"),
+    };
+    let introduced: Vec<String> = failed
+        .into_iter()
+        .filter(|row| base_rows.get(row).is_some_and(|value| value == "PASS"))
+        .collect();
+    if introduced.is_empty() {
+        return "; failing no-build rows also fail on the base (epic gate unchanged)".to_owned();
+    }
+    let red = crate::epic_gate::RedTip {
+        tip: request.commit.clone(),
+        first_red_merge: Some(request.commit.clone()),
+        first_red_subject: crate::epic_gate::commit_subject(project_root, &request.commit),
+        failing: introduced
+            .iter()
+            .map(|row| format!("no-build row {row}"))
+            .collect(),
+        detail: "no-build release rows pass on the base and fail with this merge".to_owned(),
+        since: chrono::Utc::now().to_rfc3339(),
+        bisect: Some(crate::epic_gate::BisectCost {
+            runs: 1,
+            secs: started.elapsed().as_secs(),
+        }),
+        overrides: Vec::new(),
+    };
+    match crate::epic_gate::record_red(shared_cas, &request.epic_id, &request.target_branch, red) {
+        Ok(()) => format!(
+            "; epic gate RED for {}: no-build {} fail with merge {}",
+            request.target_branch,
+            introduced.join(", "),
+            request.commit
+        ),
+        Err(error) => format!("; epic gate not recorded: {error}"),
     }
 }
 
@@ -2588,6 +2901,167 @@ echo 'Summary: 1 passed'
                 &["merge-base", "--is-ancestor", &receipt.base, tip],
             );
         }
+    }
+
+    /// cas-398c: a passing integration proves release-binary-isa and
+    /// macos-check in the background through the repository's helper; a
+    /// failing helper is reported, and a newer merge cancels the run.
+    #[test]
+    fn cas_398c_row_proofs_run_through_helper_and_cancel() {
+        let repo = fixture();
+        assert!(
+            !row_proofs_supported(repo.path()),
+            "no helper, no row proofs"
+        );
+        let marker = repo.path().join("row-proof-ran");
+        let helper = |body: &str| {
+            fs::write(
+                repo.path().join("scripts/assembly-proof.py"),
+                format!(
+                    "import pathlib, sys, time\n# prove-rows\nassert sys.argv[1] == 'prove-rows', sys.argv\npathlib.Path({:?}).write_text(sys.argv[2])\n{body}\n",
+                    marker.to_str().unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        helper("print('row-proofs release-binary-isa=PASS macos-check=PASS')");
+        assert!(row_proofs_supported(repo.path()));
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.timeout = Duration::from_secs(30);
+        let log = repo.path().join("row-proofs.log");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let line = run_row_proofs(repo.path(), &log, &settings, &cancel).unwrap();
+        assert_eq!(line, "row-proofs release-binary-isa=PASS macos-check=PASS");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            repo.path().to_str().unwrap()
+        );
+
+        helper("print('row-proofs release-binary-isa=FAIL macos-check=PASS'); sys.exit(1)");
+        let error = run_row_proofs(repo.path(), &log, &settings, &cancel).unwrap_err();
+        assert!(error.contains("release-binary-isa=FAIL"), "{error}");
+
+        helper("time.sleep(30)");
+        cancel.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        let error = run_row_proofs(repo.path(), &log, &settings, &cancel).unwrap_err();
+        assert!(error.contains("interrupted"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// cas-6f48: a merge that breaks a test turns its epic's gate red within
+    /// one run and names that merge; merges into the epic are refused until
+    /// a later run passes.
+    #[test]
+    fn cas_6f48_red_then_green_epic_gate_names_first_red_merge() {
+        let repo = fixture();
+        let clean = epic(repo.path(), "cas-0081", "a", "one");
+        let broken = epic(repo.path(), "cas-6f48a", "harmless", "fine");
+        git(repo.path(), &["checkout", &broken.branch]);
+        fs::write(repo.path().join("b"), "breaks union_test").unwrap();
+        git(repo.path(), &["add", "b"]);
+        git(repo.path(), &["commit", "-m", "Merge factory/w-cas-bad"]);
+        let culprit = git(repo.path(), &["rev-parse", "HEAD"]);
+        fs::write(repo.path().join("c"), "later").unwrap();
+        git(repo.path(), &["add", "c"]);
+        git(repo.path(), &["commit", "-m", "later merge"]);
+        let red_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(
+            &stub,
+            r#"#!/bin/sh
+if [ -f b ]; then
+  echo 'FAIL [0.1s] fixture union_test'
+  echo 'Summary: 1 failed'
+  exit 1
+fi
+echo 'Summary: 1 passed'
+"#,
+        );
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        for epic in [&clean, &broken] {
+            let mut task = Task::new(epic.id.clone(), epic.id.clone());
+            task.task_type = TaskType::Epic;
+            task.branch = Some(epic.branch.clone());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".to_owned(),
+                target_branch: "main".to_owned(),
+            });
+            tasks.add(&task).unwrap();
+        }
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+        let run = |commit: &str| {
+            execute(
+                repo.path(),
+                &cas_dir,
+                SweepRequest {
+                    epic_id: broken.id.clone(),
+                    target_branch: broken.branch.clone(),
+                    commit: commit.to_owned(),
+                },
+                settings.clone(),
+                Arc::new(AtomicBool::new(false)),
+                false,
+            )
+        };
+
+        // Red: one run flags the epic and names the merge that broke it.
+        let result = run(&red_tip);
+        assert_eq!(result.status, SweepStatus::Failed, "{}", result.summary);
+        assert!(
+            result.summary.contains("epic gate RED"),
+            "{}",
+            result.summary
+        );
+        let gate = crate::epic_gate::load(&cas_dir);
+        assert_eq!(
+            gate.epics[&clean.branch].last_green_tip.as_deref(),
+            Some(clean.tip.as_str()),
+            "the epic merged before the culprit is green"
+        );
+        let red = gate.epics[&broken.branch].red.clone().expect("red gate");
+        assert_eq!(red.first_red_merge.as_deref(), Some(culprit.as_str()));
+        assert_eq!(
+            red.first_red_subject.as_deref(),
+            Some("Merge factory/w-cas-bad")
+        );
+        assert_eq!(red.tip, red_tip);
+        let cost = red.bisect.expect("bisect cost recorded");
+        assert!((1..=4).contains(&cost.runs), "{cost:?}");
+        let refusal = crate::epic_gate::merge_refusal(&cas_dir, &broken.branch)
+            .expect("a further merge is refused");
+        assert!(refusal.contains(&culprit[..9]), "{refusal}");
+        assert!(refusal.contains("Merge factory/w-cas-bad"), "{refusal}");
+        assert!(crate::epic_gate::merge_refusal(&cas_dir, &clean.branch).is_none());
+        assert!(crate::epic_gate::status_section(&cas_dir).contains(&broken.branch));
+
+        // Green: the fix lands and the next run clears the gate.
+        git(repo.path(), &["checkout", &broken.branch]);
+        git(repo.path(), &["rm", "-q", "b"]);
+        git(repo.path(), &["commit", "-m", "Merge factory/w-cas-fix"]);
+        let green_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let result = run(&green_tip);
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        let gate = crate::epic_gate::load(&cas_dir);
+        assert!(gate.epics[&broken.branch].red.is_none());
+        assert_eq!(
+            gate.epics[&broken.branch].last_green_tip.as_deref(),
+            Some(green_tip.as_str())
+        );
+        assert!(crate::epic_gate::merge_refusal(&cas_dir, &broken.branch).is_none());
+        assert_eq!(crate::epic_gate::status_section(&cas_dir), "");
     }
 
     /// GH #1006: a deferred rolling integration relays nothing when it

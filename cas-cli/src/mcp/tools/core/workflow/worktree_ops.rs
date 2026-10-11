@@ -76,6 +76,24 @@ const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
+const EPIC_GATE_OVERRIDE_POLICY_NOTICE: &str = "Merge policy: the target epic's red integration gate was explicitly overridden by a registered supervisor.\n\n";
+
+/// cas-6f48: admit a merge into an epic whose integration gate is red only
+/// with a supervisor override and a reason. `Ok(true)` means overridden.
+fn admit_epic_gate(
+    refusal: Option<&str>,
+    override_requested: bool,
+    reason: Option<&str>,
+) -> Result<bool, String> {
+    let Some(refusal) = refusal else {
+        return Ok(false);
+    };
+    if override_requested && reason.is_some_and(|reason| !reason.trim().is_empty()) {
+        return Ok(true);
+    }
+    Err(refusal.to_string())
+}
+
 /// Decide admission from bounded evidence; never poll for pending CI.
 fn admit_branch_ci(
     state: &BranchCiState,
@@ -3328,9 +3346,25 @@ impl CasCore {
         let branch_ci_lookup = lookup_branch_ci(&worktree.branch, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup);
         let branch_ci_state = branch_ci_lookup.state;
-        let ci_override = match admit_branch_ci(&branch_ci_state, supervisor_override, reason) {
+        // cas-6f48: a red integration gate on the target epic refuses the
+        // merge like red CI does. A reconciled delivery already landed.
+        let epic_gate_refusal = (!reconciled_delivery)
+            .then(|| crate::epic_gate::merge_refusal(&cas_root, &worktree.parent_branch))
+            .flatten();
+        let admission = admit_branch_ci(&branch_ci_state, supervisor_override, reason).and_then(
+            |ci_override| {
+                admit_epic_gate(epic_gate_refusal.as_deref(), supervisor_override, reason)
+                    .map(|gate_override| (ci_override, gate_override))
+            },
+        );
+        let (ci_override, epic_gate_override) = match admission {
             Ok(accepted) => accepted,
             Err(message) => {
+                let refusal_kind = if message.starts_with("EPIC GATE RED") {
+                    "epic_gate_refused"
+                } else {
+                    "ci_refused"
+                };
                 // cas-d1eb: CI refuses before Git runs. Withdraw the durable
                 // intent, including one stranded by an earlier attempt, while
                 // retaining the approved receipt for a supervisor retry.
@@ -3348,7 +3382,7 @@ impl CasCore {
                         Some(&authority.agent_id),
                         None,
                         None,
-                        Some(("ci_refused", &message)),
+                        Some((refusal_kind, &message)),
                     )
                     .map_err(|error| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
@@ -3373,6 +3407,30 @@ impl CasCore {
             })?)
         } else {
             None
+        };
+        let epic_gate_notice = if epic_gate_override {
+            let supervisor = override_authority
+                .as_ref()
+                .expect("epic gate override has authority");
+            let note = format!(
+                "[{}] ✅ DECISION Supervisor {} merged {} into red integration gate {}: {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                supervisor.id,
+                worktree.branch,
+                worktree.parent_branch,
+                reason.unwrap_or_default().trim(),
+            );
+            if let Err(error) =
+                crate::epic_gate::record_override(&cas_root, &worktree.parent_branch, &note)
+            {
+                tracing::warn!(%error, "could not record epic gate override");
+            }
+            if let Some(task_id) = task_id {
+                let _ = self.open_task_store()?.append_note(task_id, &note);
+            }
+            EPIC_GATE_OVERRIDE_POLICY_NOTICE
+        } else {
+            ""
         };
         let ci_policy_notice = if ci_override {
             let supervisor = override_authority
@@ -3987,7 +4045,9 @@ impl CasCore {
             // content block so the gate's own text stays verbatim.
             close_result.content.insert(
                 0,
-                Content::text(format!("{ci_prefix}{trunk_notice}{ci_policy_notice}")),
+                Content::text(format!(
+                    "{ci_prefix}{trunk_notice}{epic_gate_notice}{ci_policy_notice}"
+                )),
             );
             if !push_outcome.is_published() {
                 close_result.content.push(Content::text(push_note));
@@ -4000,7 +4060,7 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}{trunk_notice}{epic_gate_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
@@ -4015,7 +4075,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
+            "{ci_prefix}{trunk_notice}{epic_gate_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
@@ -4209,6 +4269,49 @@ mod tests {
             "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n*) exit 97 ;;\nesac\n"
         ));
         (temp, code_sha, tip)
+    }
+
+    #[test]
+    fn cas_6f48_red_epic_gate_refuses_merge_unless_supervisor_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let branch = "epic/release-cas-baa3";
+        assert_eq!(super::admit_epic_gate(None, false, None), Ok(false));
+        crate::epic_gate::record_red(
+            dir.path(),
+            "cas-baa3",
+            branch,
+            crate::epic_gate::RedTip {
+                tip: "c0ffee0000000".into(),
+                first_red_merge: Some("badbadbad0000".into()),
+                first_red_subject: Some("Merge factory/w-cas-1111".into()),
+                failing: vec!["cas::lib store::tests::breaks".into()],
+                detail: "1 failing target".into(),
+                since: "2026-10-10T00:00:00Z".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let refusal = crate::epic_gate::merge_refusal(dir.path(), branch);
+        let refused = super::admit_epic_gate(refusal.as_deref(), false, None).unwrap_err();
+        assert!(refused.starts_with("EPIC GATE RED"), "{refused}");
+        assert!(refused.contains("badbadbad"), "{refused}");
+        assert!(refused.contains("Merge factory/w-cas-1111"), "{refused}");
+        assert!(
+            super::admit_epic_gate(refusal.as_deref(), true, Some("  ")).is_err(),
+            "an override needs a reason"
+        );
+        assert_eq!(
+            super::admit_epic_gate(refusal.as_deref(), true, Some("merging the fix")),
+            Ok(true)
+        );
+        assert_eq!(
+            super::admit_epic_gate(
+                crate::epic_gate::merge_refusal(dir.path(), "epic/other").as_deref(),
+                false,
+                None
+            ),
+            Ok(false)
+        );
     }
 
     #[cfg(unix)]

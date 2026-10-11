@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — fewer wasted CI rounds from factory lanes (cas-12ab)
+
+- In a repository that ships the fast release rows, a worker's park now
+  refuses a tip that has no `release-gate.sh --fast-rows` PASS for that exact
+  commit. The refusal names the command to run. A passing, committed run
+  writes the receipt under the clone's `.git/cas/fast-rows/`.
+- A newer push to the same `factory/*` branch cancels the CI run it
+  supersedes. Main, epic, tag, merge-queue and PR runs are unaffected.
+- The worker skill and worker contract now say to commit locally and push
+  once, when parking for merge.
+- `docs/ci/merge-queue-time.md` breaks down 3.47.0's merge-to-publisher time
+  and scopes the reuse of a validated-tree receipt in the merge queue.
+
 ### Changed — parallel epics' CHANGELOG entries no longer conflict (cas-7aa5)
 
 - Two epics that each add a section under `## [Unreleased]` now merge with

@@ -1939,7 +1939,7 @@ mod tests {
     /// environment blocker with its fix, never a test failure.
     #[test]
     fn compile_infra_failure_is_an_environment_blocker_cas_ca55() {
-        let sccache = "   Compiling cas v3.50.0\nerror: failed to execute compile\n\
+        let sccache = "   Compiling cas v9.99.0\nerror: failed to execute compile\n\
                        sccache: error: Server startup failed: cache storage failed to read\n\
                        error: could not compile `cas` (lib)\n";
         let failures = vec!["error: could not compile `cas` (lib) FAILED".to_owned()];

@@ -256,7 +256,7 @@ fn assemble(
     })
 }
 
-/// Label naming the release an epic ships in (`release:3.51`, `release:next`).
+/// Label naming the release an epic ships in (`release:<version>`, `release:next`).
 const RELEASE_LABEL: &str = "release:";
 /// Local git config naming the release being assembled.
 const RELEASE_TARGET_CONFIG: &str = "cas.releaseTarget";
@@ -2027,14 +2027,14 @@ exit "$failed"
     fn next_release_epic_stays_out_of_the_sweep_cas_ca55() {
         let tasks = vec![
             release_epic("unlabelled", None),
-            release_epic("current", Some("release:3.51")),
-            release_epic("next", Some("release:3.52")),
+            release_epic("current", Some("release:9.98")),
+            release_epic("next", Some("release:9.99")),
         ];
-        assert_eq!(epic_release(&tasks[2]), Some("3.52"));
-        let (included, held) = hold_other_releases(tasks.clone(), Some("3.51"));
+        assert_eq!(epic_release(&tasks[2]), Some("9.99"));
+        let (included, held) = hold_other_releases(tasks.clone(), Some("9.98"));
         let ids: Vec<_> = included.iter().map(|task| task.id.as_str()).collect();
         assert_eq!(ids, ["unlabelled", "current"]);
-        assert_eq!(held, [("next".to_owned(), "3.52".to_owned())]);
+        assert_eq!(held, [("next".to_owned(), "9.99".to_owned())]);
         // With no release being assembled, only `release:next` is held.
         let mut tasks = tasks;
         tasks.push(release_epic("later", Some("release:next")));

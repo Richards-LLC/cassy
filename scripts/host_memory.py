@@ -20,11 +20,13 @@ import os
 import re
 from pathlib import Path
 import secrets
+import shutil
 import select
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'
@@ -454,6 +456,24 @@ def start_compiler_cache(env):
     except (OSError, subprocess.SubprocessError):
         return False
     return True
+
+
+def compiler_cache_tmpdir(env):
+    """The TMPDIR the shared sccache server runs under (cas-3a29)."""
+    return Path(env.get('TMPDIR') or tempfile.gettempdir())
+
+
+def ensure_compiler_cache(env):
+    """Start sccache's server and prove it can compile (cas-3a29).
+
+    Returns ``(status, detail)`` with status ``off`` (no sccache wrapper),
+    ``ok``, ``restarted`` or ``blocked``.
+    """
+    wrapper = env.get('RUSTC_WRAPPER') or env.get('CARGO_BUILD_RUSTC_WRAPPER')
+    if not wrapper or Path(wrapper).name != 'sccache':
+        return 'off', ''
+    start_compiler_cache(env)
+    return 'ok', ''
 
 
 if __name__ == '__main__':

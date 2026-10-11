@@ -20,6 +20,35 @@
 //! against agents; the CLI checks are defence in depth. An agent that
 //! deliberately hides a same-user write outside its tool calls is out of
 //! reach; a hard boundary needs agents under a separate Unix user.
+//!
+//! # Operator-only actions and role signals (cas-3c26)
+//!
+//! The same gate guards the other operator-only actions:
+//! - `cas hub pair` also needs the operator to confirm the origin and scopes.
+//! - `cas hub authorize` refuses agents even with `--yes`.
+//! - Launching `cas factory` refuses agents too.
+//!
+//! [`operator_action_refusal`] checks four signals in turn:
+//! 1. agent environment markers;
+//! 2. agent or Cassy-server ancestors, which a PTY wrapper such as
+//!    `script -qc` does not hide;
+//! 3. a factory worker cgroup;
+//! 4. an interactive terminal.
+//!
+//! The PreToolUse hook refuses the same commands from an agent's shell,
+//! however they are wrapped. It also refuses any agent command that sets,
+//! unsets or clears `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, so the role gates
+//! that read them see the role the factory gave the agent.
+//!
+//! Residual limit (the same as above): every signal is same-user process
+//! state.
+//! - An agent can write a script file that changes its role environment
+//!   and run it, and the hook sees only the script's name.
+//! - It can strip its ancestry with a double-forked daemon, or leave its
+//!   cgroup through the user's delegated cgroup tree.
+//!
+//! These are deliberate evasions, not mistakes. Only a separate Unix user
+//! for agents closes them.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -425,8 +454,7 @@ pub fn operator_action_refusal(
     remedy: &str,
     context: &InvocationContext,
 ) -> Option<String> {
-    let _ = (action, remedy, context);
-    None
+    context_refusal(context, &format!("{action} is operator-only"), remedy)
 }
 
 /// cas-3c26: [`operator_action_refusal`] without the interactive-terminal
@@ -437,28 +465,52 @@ pub fn agent_context_refusal(
     remedy: &str,
     context: &InvocationContext,
 ) -> Option<String> {
-    let _ = (action, remedy, context);
-    None
+    let unattended = InvocationContext {
+        stdin_is_terminal: true,
+        stdout_is_terminal: true,
+        ..context.clone()
+    };
+    context_refusal(&unattended, &format!("{action} is operator-only"), remedy)
 }
 
 /// cas-3c26: whether a `/proc/self/cgroup` path places the process in a
 /// Cassy factory worker's scope (or a server nested under one).
 pub fn in_factory_worker_cgroup(cgroup: &str) -> bool {
-    let _ = cgroup;
-    false
+    cgroup
+        .lines()
+        .any(|line| line.split('/').any(|part| part.starts_with("cas-worker-")))
 }
 
 /// cas-3c26: whether this process runs in a factory worker's cgroup. Read
 /// once; a process does not change cgroup by itself.
 pub fn process_in_factory_worker_cgroup() -> bool {
-    false
+    static IN_WORKER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IN_WORKER.get_or_init(|| {
+        std::fs::read_to_string("/proc/self/cgroup")
+            .map(|cgroup| in_factory_worker_cgroup(&cgroup))
+            .unwrap_or(false)
+    })
 }
 
 /// cas-3c26: the operator-only action a `cas` invocation performs, judged
 /// by the real CLI parser (`args` are the words after `cas`).
 pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
-    let _ = args;
-    None
+    use crate::cli::Commands;
+    use crate::cli::hub::HubCommands;
+    use clap::Parser;
+    let argv = std::iter::once("cas".to_string()).chain(args.iter().cloned());
+    let cli = crate::cli::Cli::try_parse_from(argv).ok()?;
+    match cli.command? {
+        Commands::Hub(hub) => match hub.command? {
+            HubCommands::Pair(_) => Some("Pairing a Commander device (`cas hub pair`)"),
+            HubCommands::Authorize(_) => Some("Authorizing a Commander pairing (`cas hub authorize`)"),
+            _ => None,
+        },
+        Commands::Factory(factory) if factory.command.is_none() => {
+            Some("Launching a factory (`cas factory`)")
+        }
+        _ => None,
+    }
 }
 
 /// `subject` states what is operator-only; `remedy` what the operator runs.

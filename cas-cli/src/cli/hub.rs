@@ -1915,16 +1915,55 @@ pub(crate) fn pairing_admission(
     scopes: &[Scope],
     confirm: &mut dyn FnMut(&str) -> bool,
 ) -> std::result::Result<(), String> {
-    let _ = (context, origin, scopes, confirm);
+    if let Some(refusal) = crate::config::operator_policy::operator_action_refusal(
+        "Pairing a Commander device",
+        "run `cas hub pair` yourself from your own terminal",
+        context,
+    ) {
+        return Err(refusal);
+    }
+    let names = |control: bool| {
+        let names: Vec<&str> = scopes
+            .iter()
+            .filter(|scope| super::hub_reverse_pairing::is_control_scope(**scope) == control)
+            .map(|scope| scope.as_str())
+            .collect();
+        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+    };
+    let summary = format!(
+        "Pair a Commander device from {origin}\nRead scopes: {}\nControl scopes: {} \
+         (control lets the device type into panes, message and interrupt this machine's agents)",
+        names(false),
+        names(true)
+    );
+    if !confirm(&summary) {
+        return Err("Pairing not confirmed by the operator; no invitation was minted.".to_string());
+    }
     Ok(())
 }
 
 fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
-    let scopes = args
+    let scopes: Vec<Scope> = args
         .scopes
         .iter()
         .map(|scope| Scope::parse(scope))
         .collect::<Result<_>>()?;
+    // cas-3c26: only the operator mints an invitation, and only after
+    // confirming the origin and scopes at their own terminal.
+    pairing_admission(
+        &crate::config::operator_policy::InvocationContext::from_process(),
+        &args.origin,
+        &scopes,
+        &mut |summary| {
+            eprintln!("{summary}");
+            inquire::Confirm::new("Mint this one-time pairing invitation?")
+                .with_default(false)
+                .prompt()
+                .unwrap_or(false)
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    let scopes = scopes.into_iter().collect();
     let paths = HubRuntimePaths::default_for_user()?;
     let configured_hub_url = crate::store::find_cas_root()
         .ok()

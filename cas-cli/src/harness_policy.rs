@@ -64,7 +64,9 @@ pub fn supervisor_harness_from_env() -> SupervisorCli {
 /// environment's claim, which an agent can set or unset from its shell; a
 /// process inside a factory worker's cgroup is a worker whatever it claims.
 pub(crate) fn effective_role(env_role: Option<&str>, worker_cgroup: bool) -> Option<String> {
-    let _ = worker_cgroup;
+    if worker_cgroup {
+        return Some("worker".to_string());
+    }
     env_role
         .map(str::trim)
         .filter(|role| !role.is_empty())

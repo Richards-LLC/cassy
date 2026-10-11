@@ -4213,7 +4213,105 @@ const ROLE_ENV_NAMES: &[&str] = &["CAS_AGENT_ROLE", "CAS_FACTORY_MODE"];
 /// environment: an assignment prefix, `env NAME=`, `env -u NAME`, `env -i`
 /// before `cas`, `export`/`declare -x NAME=` or `unset NAME`.
 fn role_env_tampering_denial(command: &str) -> Option<String> {
-    let _ = (command, ROLE_ENV_NAMES);
+    role_env_tampering_at_depth(command, 0)
+}
+
+fn role_env_denial(what: &str) -> String {
+    format!(
+        "🚫 ROLE SPOOF REFUSED (cas-3c26): {what}. {} tell Cassy which role this agent has; an agent may not set, unset or clear them for the commands it runs. Run the command as you are. Operator-only actions are the operator's to run from their own terminal.",
+        ROLE_ENV_NAMES.join(" and ")
+    )
+}
+
+fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    let role_name = |name: &str| ROLE_ENV_NAMES.contains(&name);
+    let assigned_role = |word: &str| {
+        word.split_once('=')
+            .filter(|(name, _)| is_shell_variable_name(name) && role_name(name))
+            .map(|(name, _)| name.to_string())
+    };
+    for words in shell_statement_words(command) {
+        // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
+        let mut index = 0;
+        while let Some(word) = words.get(index) {
+            let Some((name, _)) = word.split_once('=') else { break };
+            if !is_shell_variable_name(name) {
+                break;
+            }
+            if role_name(name) {
+                return Some(role_env_denial(&format!("this command assigns {name}")));
+            }
+            index += 1;
+        }
+        let Some(program) = words.get(index) else { continue };
+        let args = &words[index + 1..];
+        match shell_word_basename(program) {
+            "env" => {
+                let mut clears_all = false;
+                let mut position = 0;
+                while let Some(arg) = args.get(position) {
+                    let unset = if arg == "-u" || arg == "--unset" {
+                        position += 1;
+                        args.get(position).map(String::as_str)
+                    } else if let Some(name) = arg.strip_prefix("--unset=") {
+                        Some(name)
+                    } else if let Some(name) = arg.strip_prefix("-u").filter(|name| !name.is_empty()) {
+                        Some(name)
+                    } else {
+                        None
+                    };
+                    if let Some(name) = unset {
+                        if role_name(name) {
+                            return Some(role_env_denial(&format!("this command unsets {name}")));
+                        }
+                        position += 1;
+                        continue;
+                    }
+                    if arg == "-i" || arg == "--ignore-environment" || arg == "-" {
+                        clears_all = true;
+                    } else if ENV_VALUE_OPTIONS.contains(&arg.as_str()) {
+                        position += 1;
+                    } else if let Some(name) = assigned_role(arg) {
+                        return Some(role_env_denial(&format!("this command assigns {name}")));
+                    } else if !arg.starts_with('-') && !arg.contains('=') {
+                        if clears_all && shell_word_basename(arg) == "cas" {
+                            return Some(role_env_denial(
+                                "`env -i` runs cas without this agent's role environment",
+                            ));
+                        }
+                        break;
+                    }
+                    position += 1;
+                }
+            }
+            "export" | "declare" | "typeset" | "local" | "readonly" => {
+                if let Some(name) = args.iter().find_map(|arg| assigned_role(arg)) {
+                    return Some(role_env_denial(&format!("this command assigns {name}")));
+                }
+            }
+            "unset" => {
+                if let Some(name) = args.iter().find(|arg| role_name(arg)) {
+                    return Some(role_env_denial(&format!("this command unsets {name}")));
+                }
+            }
+            // Wrappers whose option value is itself a shell command.
+            "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
+                for (position, arg) in args.iter().enumerate() {
+                    let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                    if (flags_c || arg == "--command")
+                        && let Some(payload) = args.get(position + 1)
+                        && let Some(denial) = role_env_tampering_at_depth(payload, depth + 1)
+                    {
+                        return Some(denial);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     None
 }
 

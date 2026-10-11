@@ -221,7 +221,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     format!(
         "{envelope}\nPeer supervisor {name}@{machine} on {repo}, via Cassy Cloud{reply_to}. \
          This is a peer, not the operator.\nReply with coordination action=message \
-         target={name}@{machine} in_reply_to=<this message's notification id>.\n\n{body}",
+         target={name}@{machine} summary=\"<one line>\" message=\"<reply>\" \
+         in_reply_to=<this message's notification id>.\n\n{body}",
         name = message.sender_name,
         repo = message.project_id,
         body = message.body,
@@ -565,10 +566,20 @@ impl PeerMailboxRuntime {
 }
 
 /// `PeerMailbox` over Cassy Cloud HTTP.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpPeerMailbox {
     endpoint: String,
     token: String,
+}
+
+/// Never prints the bearer token (cas-144c).
+impl std::fmt::Debug for HttpPeerMailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpPeerMailbox")
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl HttpPeerMailbox {

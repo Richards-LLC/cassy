@@ -13,7 +13,7 @@ mod codemap_cmd;
 mod history_cmd;
 mod artifact_cmd;
 pub use artifact_cmd::render_artifact_line;
-mod hub;
+pub(crate) mod hub;
 mod hub_operator;
 mod hub_reverse_pairing;
 mod hub_service;

@@ -1904,12 +1904,103 @@ fn auth_store() -> Result<AuthStore> {
     AuthStore::open(paths.root(), machine.id)
 }
 
+/// The account's home from the passwd database, never `$HOME` (which any
+/// process can point at a scratch directory).
+fn account_home() -> Option<std::path::PathBuf> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+}
+
+/// cas-3c26: whether `hub_root` is the account's own machine hub, the one
+/// that controls the operator's real factory panes. A hub under another
+/// `HOME` (a test fixture's) controls nothing real. Unknown fails closed.
+pub(crate) fn pairing_targets_operator_hub(
+    hub_root: &std::path::Path,
+    account_home: Option<&std::path::Path>,
+) -> bool {
+    let Some(home) = account_home else {
+        return true;
+    };
+    let operator_root = HubRuntimePaths::for_home(home).root().to_path_buf();
+    let canonical =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(hub_root) == canonical(&operator_root)
+}
+
+/// cas-3c26: admit a `cas hub pair`. Minting an invitation hands a device
+/// the scopes it names (`pane:input`, `message:send` drive this machine's
+/// agents), so only the operator does it: an agent context is refused, then
+/// the operator confirms the origin and scopes. `confirm` receives the
+/// summary and answers the prompt.
+pub(crate) fn pairing_admission(
+    context: &crate::config::operator_policy::InvocationContext,
+    origin: &str,
+    scopes: &[Scope],
+    confirm: &mut dyn FnMut(&str) -> bool,
+) -> std::result::Result<(), String> {
+    if let Some(refusal) = crate::config::operator_policy::operator_action_refusal(
+        "Pairing a Commander device",
+        "run `cas hub pair` yourself from your own terminal",
+        context,
+    ) {
+        return Err(refusal);
+    }
+    let names = |control: bool| {
+        let names: Vec<&str> = scopes
+            .iter()
+            .filter(|scope| super::hub_reverse_pairing::is_control_scope(**scope) == control)
+            .map(|scope| scope.as_str())
+            .collect();
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        }
+    };
+    let summary = format!(
+        "Pair a Commander device from {origin}\nRead scopes: {}\nControl scopes: {} \
+         (control lets the device type into panes, message and interrupt this machine's agents)",
+        names(false),
+        names(true)
+    );
+    if !confirm(&summary) {
+        return Err("Pairing not confirmed by the operator; no invitation was minted.".to_string());
+    }
+    Ok(())
+}
+
 fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
-    let scopes = args
+    let scopes: Vec<Scope> = args
         .scopes
         .iter()
         .map(|scope| Scope::parse(scope))
         .collect::<Result<_>>()?;
+    // cas-3c26: only the operator mints an invitation for their own machine
+    // hub, and only after confirming the origin and scopes at their own
+    // terminal. A hub under another HOME (a journey fixture) controls nothing
+    // real and is not gated.
+    let operator_hub = pairing_targets_operator_hub(
+        HubRuntimePaths::default_for_user()?.root(),
+        account_home().as_deref(),
+    );
+    if operator_hub {
+        pairing_admission(
+            &crate::config::operator_policy::InvocationContext::from_process(),
+            &args.origin,
+            &scopes,
+            &mut |summary| {
+                eprintln!("{summary}");
+                inquire::Confirm::new("Mint this one-time pairing invitation?")
+                    .with_default(false)
+                    .prompt()
+                    .unwrap_or(false)
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+    }
+    let scopes = scopes.into_iter().collect();
     let paths = HubRuntimePaths::default_for_user()?;
     let configured_hub_url = crate::store::find_cas_root()
         .ok()
@@ -3022,6 +3113,92 @@ fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn invocation(
+        ancestors: &[&str],
+        tty: bool,
+    ) -> crate::config::operator_policy::InvocationContext {
+        crate::config::operator_policy::InvocationContext {
+            env_names: Default::default(),
+            ancestors: ancestors.iter().map(|line| line.to_string()).collect(),
+            stdin_is_terminal: tty,
+            stdout_is_terminal: tty,
+            cgroup: String::new(),
+        }
+    }
+
+    /// cas-3c26: only the account's own hub is gated; a fixture hub under a
+    /// scratch HOME is not, and an unknown account home fails closed.
+    #[test]
+    fn cas_3c26_only_the_operators_own_hub_is_gated() {
+        let account = tempfile::tempdir().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let operator_hub = HubRuntimePaths::for_home(account.path());
+        std::fs::create_dir_all(operator_hub.root()).unwrap();
+        assert!(pairing_targets_operator_hub(
+            operator_hub.root(),
+            Some(account.path())
+        ));
+        let fixture_hub = HubRuntimePaths::for_home(fixture.path());
+        assert!(!pairing_targets_operator_hub(
+            fixture_hub.root(),
+            Some(account.path())
+        ));
+        assert!(
+            pairing_targets_operator_hub(fixture_hub.root(), None),
+            "unknown fails closed"
+        );
+        // A symlink to the operator's hub is the operator's hub.
+        let link = fixture.path().join("link-home");
+        std::os::unix::fs::symlink(account.path(), &link).unwrap();
+        assert!(pairing_targets_operator_hub(
+            HubRuntimePaths::for_home(&link).root(),
+            Some(account.path())
+        ));
+    }
+
+    /// cas-3c26: an agent context is refused before any prompt, even through
+    /// a PTY wrapper; the operator must confirm the origin and scopes.
+    #[test]
+    fn cas_3c26_hub_pair_refuses_agents_and_requires_operator_confirmation() {
+        let scopes = [Scope::MachineRead, Scope::PaneInput, Scope::MessageSend];
+        let origin = "https://commander.example";
+        let mut asked = Vec::new();
+
+        let agent = invocation(&["script -qc cas hub pair", "claude"], true);
+        let refused = pairing_admission(&agent, origin, &scopes, &mut |summary| {
+            asked.push(summary.to_string());
+            true
+        })
+        .unwrap_err();
+        assert!(refused.contains("refused"), "{refused}");
+        assert!(asked.is_empty(), "an agent is never even asked");
+
+        let operator = invocation(&["-bash"], true);
+        let declined = pairing_admission(&operator, origin, &scopes, &mut |summary| {
+            asked.push(summary.to_string());
+            false
+        })
+        .unwrap_err();
+        assert!(declined.contains("not confirmed"), "{declined}");
+        let summary = asked.pop().expect("the operator was asked");
+        assert!(summary.contains(origin), "{summary}");
+        assert!(summary.contains("pane:input"), "{summary}");
+        assert!(summary.contains("message:send"), "{summary}");
+        assert!(summary.to_lowercase().contains("control"), "{summary}");
+
+        assert_eq!(
+            pairing_admission(&operator, origin, &scopes, &mut |_| true),
+            Ok(())
+        );
+        // No terminal, so no confirmation: refused.
+        assert!(
+            pairing_admission(&invocation(&["-bash"], false), origin, &scopes, &mut |_| {
+                true
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn hub_log_lines_carry_an_rfc3339_utc_timestamp() {

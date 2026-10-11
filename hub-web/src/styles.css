@@ -1709,11 +1709,11 @@ dialog form > *,
 /* P13: the lockup and the Appearance & commands icon button share the top row. */
 .conversation-list-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 /* cas-eaa3: Commander ↔ Explorer, the two Cassy Cloud apps (DESIGN.md "App switcher").
-   A segmented pair under the lockup: the current app is the open-row wash with
-   the action edge, never the Send gradient (it is a place, not an action). */
-.app-switcher { display: inline-flex; align-items: stretch; gap: 2px; margin-top: var(--space-3); padding: 3px; border-radius: var(--radius-pill); background: var(--bg-hover); box-shadow: inset 0 0 0 var(--line-width) var(--line); }
+   A segmented pair under the lockup: the current app is the active wash with
+   a 2px action outline, never the Send gradient (it is a place, not an action). */
+.app-switcher { display: inline-flex; align-items: stretch; gap: 2px; margin-top: var(--space-3); padding: 3px; border-radius: var(--radius-pill); background: var(--bg-hover); border: var(--line-width) solid var(--line-subtle); }
 .app-switcher-item { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: 34px; padding: 0 var(--space-3); border-radius: var(--radius-pill); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); color: var(--ink-mid); text-decoration: none; white-space: nowrap; }
-.app-switcher-item[aria-current="page"] { color: var(--ink); background: var(--bg-active); box-shadow: inset 0 0 0 2px var(--color-action); }
+.app-switcher-item[aria-current="page"] { color: var(--ink); background: var(--bg-active); outline: 2px solid var(--color-action); outline-offset: -2px; }
 .app-switcher a.app-switcher-item:hover { color: var(--ink); background: var(--bg-active); }
 .app-switcher a.app-switcher-item:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 .app-switcher-item[aria-disabled="true"] { opacity: 0.55; }
@@ -3028,5 +3028,5 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 /* cas-97d58 F20: no colour transition runs while the scheme flips (scheme.ts). */
 :root[data-scheme-switching], :root[data-scheme-switching] *, :root[data-scheme-switching] *::before, :root[data-scheme-switching] *::after { transition: none !important; }
 @media (forced-colors: active) {
-  .app-switcher-item[aria-current="page"] { outline: 2px solid CanvasText; outline-offset: -2px; }
+  .app-switcher-item[aria-current="page"] { outline-color: CanvasText; }
 }

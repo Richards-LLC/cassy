@@ -230,12 +230,12 @@ tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
   **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone
   reaches the project's tasks without leaving the thread.
 - **Shape.** `nav.app-switcher` (`aria-label="Cassy Cloud apps"`) holds two
-  segments in a pill track (`--bg-hover` with a hairline `--line` edge).
+  segments in a pill track (`--bg-hover` with a hairline `--line-subtle` border).
   Labels are exactly **Commander** and **Explorer**, in that order in both
   apps, 13px medium `--font-ui`. Segments are at least 34px tall on desktop
   and 40px on a phone.
 - **Current app.** A `span` with `aria-current="page"`: `--bg-active` with a
-  2px `--color-action` inset edge, the same mark as the open conversation.
+  2px `--color-action` outline drawn inside it, like the open conversation's edge.
   It is never the Send gradient, because it marks a place, not an action.
   Under forced colours it gets a `CanvasText` outline.
 - **Other app.** An `a` that opens the other app in a named tab

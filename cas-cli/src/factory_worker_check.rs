@@ -640,6 +640,14 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     #[cfg(unix)]
     if let Some(lease) = &target_lease {
         lease.inherit(&mut command);
+        // cas-4ad0: test binaries start through a runner that closes the
+        // inherited lease, so a test's leaked child cannot hold the worktree.
+        if test.is_some()
+            && let Some(variable) = crate::factory_target_cache::owner::host_runner_env()
+        {
+            let runner = crate::factory_target_cache::owner::write_release_runner(&slots)?;
+            command.env(variable, runner);
+        }
     }
     let mut child = command
         .args(&cargo_args)

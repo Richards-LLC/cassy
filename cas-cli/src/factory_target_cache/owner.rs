@@ -233,7 +233,13 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
     if !lock_meta.is_file() || file.metadata()?.ino() != lock_meta.ino() {
         return Err(io::Error::other("invalid target lease"));
     }
-    file.try_lock_exclusive()?;
+    if let Err(error) = file.try_lock_exclusive() {
+        return Err(if error.kind() == io::ErrorKind::WouldBlock {
+            held_lease_error(&lock_path)
+        } else {
+            error
+        });
+    }
     let fresh = if create {
         match fs::DirBuilder::new().mode(0o700).create(&target) {
             Ok(()) => true,
@@ -349,6 +355,8 @@ impl Lease {
     pub(crate) fn inherit(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         let fd = self.fd();
+        // cas-4ad0: name the fd, so the test runner can close it.
+        command.env(LEASE_FD_ENV, fd.to_string());
         // SAFETY: pre_exec only calls async-signal-safe fcntl; fd is held until wait.
         unsafe {
             command.pre_exec(move || {
@@ -366,27 +374,107 @@ impl Lease {
 /// test runner wrapper can close it before a test binary starts.
 pub(crate) const LEASE_FD_ENV: &str = "CAS_TARGET_LEASE_FD";
 
-/// cas-4ad0: Cargo's target-runner wrapper for test binaries. Red stub.
-pub(crate) const RELEASE_RUNNER: &str = "#!/bin/sh\nexec \"$@\"\n";
+/// cas-4ad0: Cargo's target runner for test binaries in a capped worker
+/// check. Cargo, rustc and build scripts keep the inherited output lease
+/// (cas-f96d); a test binary, and anything it leaks, must not, or a leaked
+/// fake server would lock the worktree out (EAGAIN) until killed.
+pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/sh
+# cas-4ad0: close the inherited worker target lease before a test binary runs.
+case "${CAS_TARGET_LEASE_FD:-}" in
+  ''|*[!0-9]*) ;;
+  *) eval "exec ${CAS_TARGET_LEASE_FD}>&-" ;;
+esac
+unset CAS_TARGET_LEASE_FD
+exec "$@"
+"#;
 
 /// cas-4ad0: write [`RELEASE_RUNNER`] into `dir` (0700) and return its path.
 pub(crate) fn write_release_runner(dir: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(dir)?;
     let path = dir.join("release-target-lease-runner.sh");
-    fs::write(&path, RELEASE_RUNNER)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    let temp = dir.join(format!(".release-target-lease-runner.{}.tmp", std::process::id()));
+    fs::write(&temp, RELEASE_RUNNER)?;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(0o700))?;
+    fs::rename(&temp, &path)?;
     Ok(path)
 }
 
-/// cas-4ad0: the `CARGO_TARGET_<HOST>_RUNNER` variable for this host. Red stub.
+/// cas-4ad0: the `CARGO_TARGET_<HOST>_RUNNER` variable for this host, which
+/// Cargo and nextest use to start test binaries (not build scripts).
 pub(crate) fn host_runner_env() -> Option<String> {
-    None
+    let vendor_os = if cfg!(target_os = "linux") {
+        if cfg!(target_env = "musl") {
+            "unknown-linux-musl"
+        } else {
+            "unknown-linux-gnu"
+        }
+    } else if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        return None;
+    };
+    let triple = format!("{}-{vendor_os}", std::env::consts::ARCH);
+    Some(format!(
+        "CARGO_TARGET_{}_RUNNER",
+        triple.to_uppercase().replace('-', "_")
+    ))
 }
 
-/// cas-4ad0: processes holding an open descriptor on `lock_path`. Red stub.
-pub(crate) fn lease_holders(_lock_path: &Path) -> Vec<u32> {
-    Vec::new()
+/// cas-4ad0: processes holding an open descriptor on `lock_path` (Linux
+/// `/proc`; elsewhere unknown, so empty).
+pub(crate) fn lease_holders(lock_path: &Path) -> Vec<u32> {
+    let mut holders = Vec::new();
+    let wanted = lock_path
+        .canonicalize()
+        .unwrap_or_else(|_| lock_path.to_path_buf());
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return holders;
+    };
+    for process in processes.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        if fds
+            .flatten()
+            .any(|fd| fs::read_link(fd.path()).is_ok_and(|target| target == wanted))
+        {
+            holders.push(pid);
+        }
+    }
+    holders.sort_unstable();
+    holders
+}
+
+fn held_lease_error(lock_path: &Path) -> io::Error {
+    let holders = lease_holders(lock_path);
+    let holders = if holders.is_empty() {
+        "an unidentified process".to_string()
+    } else {
+        format!(
+            "pid {}",
+            holders
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!(
+            "worker target lease {} is held by {holders}; a build or a leaked test process \
+             still uses this worktree's target. Wait for it, or kill a leaked process, then retry",
+            lock_path.display()
+        ),
+    )
 }
 
 impl Drop for Lease {

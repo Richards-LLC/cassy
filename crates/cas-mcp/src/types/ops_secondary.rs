@@ -8,7 +8,7 @@ pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::search_action_schema",
-        description = "Operation: search (BM25 full-text); history (indexed git commits by text, path or time; each response has an index_status block on freshness and gaps); retrieval_metrics (offline retrieval outcomes; optional strict session_id filter); skill_impact, alias impact_report (skill surface and session-outcome impact); code_search and code_show (indexed code symbols)."
+        description = "Operation: search (BM25 full-text); 'history' (search indexed git commits by text/path/time; each response has an index_status block on freshness and gaps); retrieval_metrics (offline retrieval outcomes; optional strict session_id filter); skill_impact, alias impact_report (skill surface and session-outcome impact); code_search and code_show (indexed code symbols)."
     )]
     pub action: String,
 

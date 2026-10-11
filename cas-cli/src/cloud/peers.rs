@@ -178,7 +178,10 @@ pub const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerDiscovery {
     /// Peers of `canonical_id` (possibly none).
-    Found { canonical_id: String, peers: Vec<Peer> },
+    Found {
+        canonical_id: String,
+        peers: Vec<Peer>,
+    },
     /// Not logged in to Cassy Cloud: cross-machine peers are unknowable.
     NotLoggedIn,
     /// The project has no canonical id to scope peers by.

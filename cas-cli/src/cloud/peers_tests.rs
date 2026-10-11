@@ -89,8 +89,20 @@ fn repo_peers_lists_same_repo_supervisors_except_self_with_liveness() {
         supervisor("stale-peer", REPO, PEER_LIVE_SECS + 60),
         supervisor("other-repo", "github.com/acme/gadgets", 5),
         supervisor("ancient", REPO, PEER_LISTING_WINDOW_SECS + 1),
-        info("shut", "shutdown", 5, &[(META_ROLE, "supervisor"), (META_CANONICAL_ID, REPO)], None),
-        info("worker", "active", 5, &[(META_ROLE, "worker"), (META_CANONICAL_ID, REPO)], None),
+        info(
+            "shut",
+            "shutdown",
+            5,
+            &[(META_ROLE, "supervisor"), (META_CANONICAL_ID, REPO)],
+            None,
+        ),
+        info(
+            "worker",
+            "active",
+            5,
+            &[(META_ROLE, "worker"), (META_CANONICAL_ID, REPO)],
+            None,
+        ),
         info("legacy", "active", 5, &[], None),
     ];
 
@@ -107,7 +119,10 @@ fn repo_peers_lists_same_repo_supervisors_except_self_with_liveness() {
     assert_eq!(live.focus.as_deref(), Some("cas-571d"));
 
     let stale = &peers[1];
-    assert!(!stale.live, "a heartbeat older than PEER_LIVE_SECS is stale");
+    assert!(
+        !stale.live,
+        "a heartbeat older than PEER_LIVE_SECS is stale"
+    );
     assert_eq!(stale.heartbeat_age_secs, PEER_LIVE_SECS + 60);
 }
 

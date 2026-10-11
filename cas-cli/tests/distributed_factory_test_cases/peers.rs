@@ -114,7 +114,9 @@ fn register_supervisor(cas_dir: &Path, id: &str, machine_id: &str, focus: &str) 
     agent.role = AgentRole::Supervisor;
     agent.machine_id = Some(machine_id.to_string());
     agent.factory_session = Some(format!("factory-{id}"));
-    coordinator.register_with_focus(&agent, Some(focus)).unwrap();
+    coordinator
+        .register_with_focus(&agent, Some(focus))
+        .unwrap();
 }
 
 fn peers_of(cas_dir: &Path, self_id: &str) -> Vec<cas::cloud::peers::Peer> {

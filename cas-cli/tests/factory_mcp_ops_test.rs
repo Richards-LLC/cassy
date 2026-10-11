@@ -11576,6 +11576,11 @@ async fn worker_status_shows_peers_but_the_summary_does_not_cas_e477() {
 
     let mut summary = factory_req("worker_status");
     summary.summary = Some(true);
-    let summary = get_text(&env.service.factory_request(Parameters(summary)).await.unwrap());
+    let summary = get_text(
+        &env.service
+            .factory_request(Parameters(summary))
+            .await
+            .unwrap(),
+    );
     assert!(!summary.contains("Peers"), "{summary}");
 }

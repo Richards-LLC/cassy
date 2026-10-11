@@ -227,33 +227,17 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
   await peer.close();
 });
 
+/** An ordinary or admin pairing link for Atlas (cas-5e53 F08). */
+const link = (token: string, scopes: string) => `pair=${token}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=${scopes}`;
+const ordinary = "machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt";
+
 // cas-5e53 independent QA F08: an ordinary admin invitation (`cas hub pair
 // --scopes …,hub:admin`) must let the operator reach and revoke ANOTHER, old
 // installation through the real pairing entry path, with hub:admin held only
 // by explicit consent.
-test("HUB-J2 an admin invitation, explicitly consented, revokes another browser installation (cas-5e53 F08)", journeyPart, async ({ page, browser, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS] });
+test("HUB-J2 an admin invitation offers hub:admin unticked, and its consent reads whole at every size (cas-5e53 F08)", journeyPart, async ({ page, journey }) => {
+  await journey.hub({ machines: [ATLAS] });
   await journey.open();
-  const link = (token: string, scopes: string) => `pair=${token}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas&scopes=${scopes}`;
-  const ordinary = "machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt";
-  // The old installation is a genuinely separate browser (its own storage and
-  // key), paired the ordinary way, never seeded into the double.
-  const elsewhere = await browser.newContext({ baseURL: new URL(page.url()).origin });
-  const old = await elsewhere.newPage();
-  await hub.install(old);
-  await old.goto(page.url());
-  let oldId = "";
-  await journey.stage("An old installation pairs from another browser", async () => {
-    await old.evaluate((hash) => { location.hash = hash; }, link("o".repeat(43), ordinary));
-    const dialog = old.locator("#pair-dialog");
-    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
-    await dialog.getByRole("textbox", { name: "Name for this browser" }).fill("Old laptop");
-    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
-    await expect(dialog).toBeHidden();
-    expect(hub.installations.size).toBe(1);
-    oldId = [...hub.installations.keys()][0]!;
-  });
-
   await journey.stage("The admin invitation offers hub:admin unticked, with what it allows", async () => {
     await page.evaluate((hash) => { location.hash = hash; }, link("a".repeat(43), `${ordinary},hub:admin`));
     const dialog = page.locator("#pair-dialog");
@@ -283,6 +267,35 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
   }
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.emulateMedia({ colorScheme: "light" });
+
+});
+
+test("HUB-J2 an admin invitation, explicitly consented, revokes another browser installation (cas-5e53 F08)", journeyPart, async ({ page, browser, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  // The old installation is a genuinely separate browser (its own storage and
+  // key), paired the ordinary way, never seeded into the double.
+  const elsewhere = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const old = await elsewhere.newPage();
+  await hub.install(old);
+  await old.goto(page.url());
+  let oldId = "";
+  await journey.stage("An old installation pairs from another browser", async () => {
+    await old.evaluate((hash) => { location.hash = hash; }, link("o".repeat(43), ordinary));
+    const dialog = old.locator("#pair-dialog");
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
+    await dialog.getByRole("textbox", { name: "Name for this browser" }).fill("Old laptop");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    expect(hub.installations.size).toBe(1);
+    oldId = [...hub.installations.keys()][0]!;
+  });
+
+  // cas-f7c5: the invitation is opened as the part above shows it; its
+  // offer and its rendering at every size are asserted there.
+  await page.evaluate((hash) => { location.hash = hash; }, link("a".repeat(43), `${ordinary},hub:admin`));
+  await expect(page.locator("#pair-dialog")).toBeVisible();
+  await page.locator("#pair-dialog").getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
 
   await journey.stage("Consent is given from the keyboard", async () => {
     const dialog = page.locator("#pair-dialog");
@@ -334,13 +347,13 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
  * cas-4634: the hub records an installation as enrolled only after verifying
  * the cloud's enrollment assertion (hub/auth/account.rs). The inventory then
  * says so in plain words, on a desktop and a phone, light and dark.
- * With QA_ARTIFACTS set, this part also writes the cas-qa-craft polish
- * evidence: a standalone snapshot of the dialog and the three a11y modes.
+ * With QA_ARTIFACTS set, the part that renders the row at every size also
+ * writes the cas-qa-craft polish evidence: a standalone snapshot of the
+ * dialog and the three a11y modes.
  */
 test("HUB-J2 an installation the hub verified reads as in the operator inbox (cas-4634)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS] });
   await journey.open();
-  const qa = process.env.QA_ARTIFACTS;
   const row = page.locator(".installation-inventory-row");
   await journey.stage("M01 a newly paired browser is not in an operator inbox", async () => {
     await pair(page, "e".repeat(43));
@@ -359,6 +372,19 @@ test("HUB-J2 an installation the hub verified reads as in the operator inbox (ca
     await expect(technical.locator("div").filter({ has: page.getByText("Account key epoch", { exact: true }) }).locator("dd")).toHaveText("4");
     await technical.locator("summary").click();
   });
+});
+
+test("HUB-J2 a verified installation's inbox row reads whole on desktop and phone, light and dark (cas-4634)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  const qa = process.env.QA_ARTIFACTS;
+  const row = page.locator(".installation-inventory-row");
+  // cas-f7c5: the enrolled row, as the part above reaches it and asserts it.
+  await pair(page, "e".repeat(43));
+  const id = [...hub.installations.keys()][0]!;
+  hub.accountEnrollments.set(id, { state: "enrolled", account_id: "acct-1", relay_device_id: "dev-relay-1", grant_generation: "2", feed_generation: "1", epoch: "4", verified_at: "2026-10-05T21:00:00Z" });
+  await inventory(page);
+  await expect(row).toContainText("AccountIn your operator inbox");
   for (const size of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
     for (const scheme of ["light", "dark"] as const) {
       await journey.stage(`M03 the enrolled row reads whole at ${size.width}px in ${scheme}`, async () => {

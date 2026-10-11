@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — a merge request is no longer suppressed by another task's branch (cas-b3ab)
+
+- A worker's merge request for a task resumed on its per-task branch
+  (`factory/<worker>-<task>`) is judged by that branch. Before, it was judged
+  by the worker's default `factory/<worker>` branch, and when an earlier task
+  had merged from there the request was refused as "Merge already landed".
+
 ### Changed — parallel hub-web lanes no longer conflict on the built bundle (cas-0c988)
 
 - `hub-web/dist` is marked `merge=cas-generated` in `.gitattributes`. A merge

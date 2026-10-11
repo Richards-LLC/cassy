@@ -999,7 +999,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed and restored) or mid-task; a live worker is always skipped and a mid-rebase one refused, even with force=true."
+        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed and restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
     )]
     #[serde(default)]
     pub force: Option<bool>,

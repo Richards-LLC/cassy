@@ -8,6 +8,106 @@ use crate::daemon::observation::process_observations;
 use crate::daemon::{DaemonConfig, DaemonRunResult};
 use crate::error::CasError;
 
+/// Most delete batches one telemetry-retention run commits (cas-e193): with
+/// [`cas_store::EVENT_PRUNE_MAX_BATCH`] rows each, a run removes at most
+/// 500,000 rows, and a larger backlog drains on the following runs.
+pub(crate) const EVENT_RETENTION_MAX_BATCHES: usize = 500;
+
+/// Pause between retention batches, with the connection lock released, so
+/// agents' event and task writes interleave with a backlog drain (cas-e193).
+pub(crate) const EVENT_RETENTION_BATCH_PAUSE: std::time::Duration =
+    std::time::Duration::from_millis(20);
+
+/// Delete telemetry events older than `factory.event_telemetry_retention_days`
+/// in bounded batches (cas-e193). Shared by the maintenance cycle and the
+/// canonical daemon's ungated retention tick; the window is re-read from
+/// config on every run, and 0 disables it.
+pub(crate) fn run_event_telemetry_retention(
+    cas_root: &std::path::Path,
+) -> Result<cas_store::EventPruneReport, String> {
+    let days = crate::config::Config::load(cas_root)
+        .map(|cas_config| cas_config.factory().event_telemetry_retention_days)
+        .unwrap_or_else(|_| crate::config::default_event_telemetry_retention_days());
+    if days == 0 {
+        return Ok(cas_store::EventPruneReport {
+            complete: true,
+            ..Default::default()
+        });
+    }
+    let store = crate::store::open_event_store(cas_root).map_err(|error| error.to_string())?;
+    cas_store::prune_telemetry_events(
+        store.as_ref(),
+        i64::from(days),
+        cas_store::EVENT_PRUNE_MAX_BATCH,
+        EVENT_RETENTION_MAX_BATCHES,
+        EVENT_RETENTION_BATCH_PAUSE,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Most batches one prompt-table retention run commits per table (cas-f207).
+pub(crate) const PROMPT_RETENTION_MAX_BATCHES: usize = 200;
+
+/// Per-table outcome of one prompt-table retention run (cas-f207).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PromptTableRetentionReport {
+    /// `prompts.messages_json` trimmed (`factory.prompt_transcript_retention_days`).
+    pub transcripts: cas_store::retention::RetentionReport,
+    /// Terminal `prompt_queue` rows deleted (`factory.prompt_retention_days`).
+    pub prompt_queue: cas_store::retention::RetentionReport,
+    /// Finished `supervisor_queue` rows deleted
+    /// (`factory.supervisor_queue_retention_days`).
+    pub supervisor_queue: cas_store::retention::RetentionReport,
+}
+
+/// Bound the prompt, prompt-queue and supervisor-queue tables (cas-f207) in
+/// transactions of at most [`cas_store::retention::RETENTION_MAX_BATCH`] rows,
+/// with the lock released between batches. Shared by the canonical daemon's
+/// retention tick; each window is re-read from config and 0 disables it.
+pub(crate) fn run_prompt_table_retention(
+    cas_root: &std::path::Path,
+) -> Result<PromptTableRetentionReport, String> {
+    let factory = crate::config::Config::load(cas_root)
+        .map(|cas_config| cas_config.factory())
+        .unwrap_or_default();
+    let window = |days: u32| i64::from(days) * 24 * 60 * 60;
+    let run = |days: u32, step: &dyn Fn(i64, usize) -> cas_store::Result<usize>| {
+        if days == 0 {
+            return Ok(Default::default());
+        }
+        cas_store::retention::run_retention_batches(
+            cas_store::retention::RETENTION_MAX_BATCH,
+            PROMPT_RETENTION_MAX_BATCHES,
+            EVENT_RETENTION_BATCH_PAUSE,
+            |batch| step(window(days), batch),
+        )
+        .map_err(|error| error.to_string())
+    };
+    let mut report = PromptTableRetentionReport::default();
+    if factory.prompt_transcript_retention_days > 0 {
+        let prompts =
+            crate::store::open_prompt_store(cas_root).map_err(|error| error.to_string())?;
+        report.transcripts = run(factory.prompt_transcript_retention_days, &|secs, batch| {
+            prompts.trim_transcripts_batch(secs, batch)
+        })?;
+    }
+    if factory.prompt_retention_days > 0 {
+        let queue =
+            crate::store::open_prompt_queue_store(cas_root).map_err(|error| error.to_string())?;
+        report.prompt_queue = run(factory.prompt_retention_days, &|secs, batch| {
+            queue.prune_terminal_batch(secs, batch)
+        })?;
+    }
+    if factory.supervisor_queue_retention_days > 0 {
+        let supervisor = crate::store::open_supervisor_queue_store(cas_root)
+            .map_err(|error| error.to_string())?;
+        report.supervisor_queue = run(factory.supervisor_queue_retention_days, &|secs, batch| {
+            supervisor.prune_finished_batch(secs, batch)
+        })?;
+    }
+    Ok(report)
+}
+
 /// A stale heartbeat is not enough to kill a factory worker.  Codex has no
 /// lifecycle hooks, so a worker may remain busy while its heartbeat path is
 /// unavailable; a process that identifies itself by argv or `CAS_AGENT_NAME`
@@ -90,6 +190,7 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
     let mut tasks_interrupted = 0;
     let mut worktrees_cleaned = 0;
     let mut events_pruned = 0;
+    let mut telemetry_events_pruned = 0;
     let mut lease_history_pruned = 0;
     let mut recordings_pruned = 0;
     let mut trace_archives_evicted = 0;
@@ -309,6 +410,13 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         }
     }
 
+    // cas-e193: telemetry retention is not an auto_prune opt-in. Its window
+    // is config-driven (0 disables) and only ever removes telemetry types.
+    match run_event_telemetry_retention(&config.cas_root) {
+        Ok(report) => telemetry_events_pruned = report.deleted,
+        Err(error) => errors.push(format!("Telemetry event retention failed: {error}")),
+    }
+
     // Archive old events (30-day live retention).  The archive is written
     // before the live rows are removed, so a failed archive leaves the rows
     // available for the next maintenance cycle.
@@ -390,6 +498,7 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
         indexing_errors,
         entity_summaries_updated,
         events_pruned,
+        telemetry_events_pruned,
         lease_history_pruned,
         recordings_pruned,
         trace_archives_evicted,

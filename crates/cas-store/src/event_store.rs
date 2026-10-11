@@ -7,16 +7,11 @@ use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::Result;
-use crate::error::StoreError;
 use crate::write_jsonl_archive;
 use cas_types::{Event, EventEntityType, EventType};
-
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
 
 /// Schema for events table
 pub const EVENT_SCHEMA: &str = r#"
@@ -35,6 +30,89 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id);
 "#;
+
+/// Upper bound on rows removed by one retention delete transaction (cas-e193).
+///
+/// The events table is shared by every agent's writes. A retention pass that
+/// deletes hundreds of thousands of rows in one transaction holds the write
+/// lock for seconds; capping each transaction keeps every hold short, and the
+/// pause between batches lets queued writers in.
+pub const EVENT_PRUNE_MAX_BATCH: usize = 1_000;
+
+/// Event types that are operational telemetry, kept only for the
+/// `factory.event_telemetry_retention_days` window (cas-e193).
+///
+/// Every reader of these types looks at a recent window: injection acks scan
+/// the newest 25 `supervisor_injected` rows, worker status and the activity
+/// feed read minutes to hours, and the director reads the newest 50 rows.
+/// Every other type is lifecycle history. Commit provenance
+/// (`history_store`, `worker_git_commit`) and task-ownership inference
+/// (`foreign_rows`, `migration`, first task event per task) read those
+/// unbounded, so telemetry retention never touches them.
+pub const TELEMETRY_EVENT_TYPES: &[EventType] = &[
+    EventType::SupervisorInjected,
+    EventType::SupervisorNotified,
+    EventType::AgentHeartbeat,
+    EventType::WorkerFileEdited,
+    EventType::WorkerSubagentSpawned,
+    EventType::WorkerSubagentCompleted,
+];
+
+/// Outcome of one bounded telemetry-retention run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventPruneReport {
+    /// Rows deleted across all batches.
+    pub deleted: usize,
+    /// Delete transactions committed.
+    pub batches: usize,
+    /// Largest single delete transaction (never above [`EVENT_PRUNE_MAX_BATCH`]).
+    pub largest_batch: usize,
+    /// False when the run stopped at its batch budget with aged rows left.
+    pub complete: bool,
+}
+
+/// Delete aged telemetry events in bounded batches (cas-e193).
+///
+/// Each batch is its own short IMMEDIATE transaction of at most
+/// [`EVENT_PRUNE_MAX_BATCH`] rows; the store's connection lock is released and
+/// the thread sleeps `pause` between batches. At most `max_batches` batches run,
+/// so one call is bounded in both rows and wall time; a backlog is reported as
+/// `complete == false` and drains on later runs. `days <= 0` disables retention.
+pub fn prune_telemetry_events(
+    store: &dyn EventStore,
+    days: i64,
+    batch_size: usize,
+    max_batches: usize,
+    pause: Duration,
+) -> Result<EventPruneReport> {
+    let mut report = EventPruneReport {
+        complete: true,
+        ..Default::default()
+    };
+    if days <= 0 {
+        return Ok(report);
+    }
+    let batch = batch_size.clamp(1, EVENT_PRUNE_MAX_BATCH);
+    loop {
+        if report.batches >= max_batches {
+            report.complete = false;
+            return Ok(report);
+        }
+        let deleted = store.prune_telemetry_batch(days, batch)?;
+        if deleted == 0 {
+            return Ok(report);
+        }
+        report.deleted += deleted;
+        report.batches += 1;
+        report.largest_batch = report.largest_batch.max(deleted);
+        if deleted < batch {
+            return Ok(report);
+        }
+        if !pause.is_zero() {
+            std::thread::sleep(pause);
+        }
+    }
+}
 
 /// Trait for event storage operations
 pub trait EventStore: Send + Sync {
@@ -80,8 +158,13 @@ pub trait EventStore: Send + Sync {
     fn prune(&self, days: i64) -> Result<usize>;
 
     /// Archive old events to immutable compressed JSONL, then remove them from
-    /// the live table.
+    /// the live table, in batches of at most [`EVENT_PRUNE_MAX_BATCH`] rows.
     fn archive_old(&self, archive_dir: &Path, days: i64) -> Result<usize>;
+
+    /// Delete at most `batch_size` (clamped to [`EVENT_PRUNE_MAX_BATCH`])
+    /// [`TELEMETRY_EVENT_TYPES`] rows older than `days`, oldest first, in one
+    /// IMMEDIATE transaction. Returns the rows deleted; 0 means none are due.
+    fn prune_telemetry_batch(&self, days: i64, batch_size: usize) -> Result<usize>;
 
     /// Close the store
     fn close(&self) -> Result<()>;
@@ -93,6 +176,13 @@ pub struct SqliteEventStore {
 }
 
 impl SqliteEventStore {
+
+    /// A store on an existing connection, e.g. a
+    /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
+    /// schema setup; this never runs DDL.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
     /// Open or create an event store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -125,13 +215,13 @@ impl SqliteEventStore {
 
 impl EventStore for SqliteEventStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(EVENT_SCHEMA)?;
         Ok(())
     }
 
     fn record(&self, event: &Event) -> Result<i64> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let metadata_json = event.metadata.as_ref().map(|m| m.to_string());
 
@@ -154,7 +244,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -179,7 +269,7 @@ impl EventStore for SqliteEventStore {
         entity_id: &str,
         limit: usize,
     ) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -203,7 +293,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_by_type(&self, event_type: EventType, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -227,7 +317,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -251,7 +341,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<Event>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn
             .prepare_cached(
@@ -288,7 +378,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn count_by_type(&self) -> Result<Vec<(EventType, i64)>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT event_type, COUNT(*) as count
@@ -311,7 +401,7 @@ impl EventStore for SqliteEventStore {
     }
 
     fn prune(&self, days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days);
 
@@ -324,37 +414,101 @@ impl EventStore for SqliteEventStore {
     }
 
     fn archive_old(&self, archive_dir: &Path, days: i64) -> Result<usize> {
-        let cutoff = Utc::now() - chrono::Duration::days(days);
-        let events = {
-            let conn = self.conn.lock().map_err(lock_error)?;
-            let mut stmt = conn.prepare_cached(
-                "SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
-                 FROM events WHERE created_at < ?1 ORDER BY id",
-            )?;
-            stmt.query_map(params![cutoff.to_rfc3339()], Self::row_to_event)?
+        let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let mut archived = 0usize;
+        // Rows are taken in id order above a moving watermark, so each batch
+        // reads a fresh slice and a row is never archived twice.
+        let mut after_id = 0i64;
+        loop {
+            let events = {
+                let conn = crate::shared_db::lock_connection(&self.conn)?;
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
+                     FROM events WHERE created_at < ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+                )?;
+                stmt.query_map(
+                    params![cutoff, after_id, EVENT_PRUNE_MAX_BATCH as i64],
+                    Self::row_to_event,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+            };
+            let Some(last) = events.last() else {
+                return Ok(archived);
+            };
+            after_id = last.id;
 
-        if events.is_empty() {
+            // The archive is written before the rows go, so a failed write
+            // leaves them live for the next maintenance cycle.
+            write_jsonl_archive(archive_dir, "events", &events)?;
+            let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
+            {
+                let conn = crate::shared_db::lock_connection(&self.conn)?;
+                crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+                    delete_ids(tx, &ids)?;
+                    Ok(())
+                })?;
+            }
+            archived += events.len();
+            if events.len() < EVENT_PRUNE_MAX_BATCH {
+                return Ok(archived);
+            }
+        }
+    }
+
+    fn prune_telemetry_batch(&self, days: i64, batch_size: usize) -> Result<usize> {
+        if days <= 0 {
             return Ok(0);
         }
+        let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let limit = batch_size.clamp(1, EVENT_PRUNE_MAX_BATCH);
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
-        let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
-        write_jsonl_archive(archive_dir, "events", &events)?;
-
-        let conn = self.conn.lock().map_err(lock_error)?;
-        let tx = conn.unchecked_transaction()?;
-        for id in ids {
-            tx.execute("DELETE FROM events WHERE id = ?1", params![id])?;
+        // Choose the victims with a plain read first: a pass with nothing due
+        // never takes the write lock. One type at a time keeps the read on
+        // `idx_events_type` in rowid order (oldest first, no sort).
+        let mut ids: Vec<i64> = Vec::with_capacity(limit);
+        {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id FROM events WHERE event_type = ?1 AND created_at < ?2
+                 ORDER BY id LIMIT ?3",
+            )?;
+            for event_type in TELEMETRY_EVENT_TYPES {
+                let remaining = limit - ids.len();
+                if remaining == 0 {
+                    break;
+                }
+                let found = stmt
+                    .query_map(
+                        params![event_type.to_string(), cutoff, remaining as i64],
+                        |row| row.get::<_, i64>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ids.extend(found);
+            }
         }
-        tx.commit()?;
-        Ok(events.len())
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let deleted = crate::shared_db::with_immediate_write_txn(&conn, |tx| delete_ids(tx, &ids))?;
+        Ok(deleted)
     }
 
     fn close(&self) -> Result<()> {
         // Connection will be closed when dropped
         Ok(())
     }
+}
+
+/// Delete the given event ids (at most [`EVENT_PRUNE_MAX_BATCH`]) with one
+/// statement inside the caller's transaction.
+fn delete_ids(conn: &Connection, ids: &[i64]) -> Result<usize> {
+    debug_assert!(ids.len() <= EVENT_PRUNE_MAX_BATCH);
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("DELETE FROM events WHERE id IN ({placeholders})");
+    Ok(conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))?)
 }
 
 /// Parse a datetime string, with fallback to current time
@@ -554,6 +708,123 @@ mod tests {
 
         let events = store.list_recent(10).unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    fn record_aged(store: &SqliteEventStore, event_type: EventType, days_old: i64, entity: &str) {
+        let mut event = Event::new(event_type, EventEntityType::Agent, entity, entity);
+        event.created_at = Utc::now() - chrono::Duration::days(days_old);
+        store.record(&event).unwrap();
+    }
+
+    fn count_type(store: &SqliteEventStore, event_type: EventType) -> i64 {
+        store
+            .count_by_type()
+            .unwrap()
+            .into_iter()
+            .find(|(t, _)| *t == event_type)
+            .map(|(_, c)| c)
+            .unwrap_or(0)
+    }
+
+    /// cas-e193: telemetry retention deletes only aged telemetry types; every
+    /// lifecycle type (task, commit, verification, ...) survives at any age
+    /// because provenance and task-ownership readers scan them unbounded.
+    #[test]
+    fn telemetry_retention_prunes_only_aged_telemetry_types_cas_e193() {
+        let (store, _dir) = setup_store();
+        record_aged(&store, EventType::SupervisorInjected, 20, "old-inject");
+        record_aged(&store, EventType::SupervisorInjected, 2, "new-inject");
+        record_aged(&store, EventType::WorkerFileEdited, 20, "old-edit");
+        record_aged(&store, EventType::AgentHeartbeat, 20, "old-heartbeat");
+        record_aged(&store, EventType::WorkerGitCommit, 400, "old-commit");
+        record_aged(&store, EventType::TaskCreated, 400, "old-task");
+
+        let report =
+            prune_telemetry_events(&store, 14, EVENT_PRUNE_MAX_BATCH, 10, Duration::ZERO).unwrap();
+        assert_eq!(report.deleted, 3);
+        assert!(report.complete, "{report:?}");
+        assert_eq!(count_type(&store, EventType::SupervisorInjected), 1);
+        assert_eq!(count_type(&store, EventType::WorkerFileEdited), 0);
+        assert_eq!(count_type(&store, EventType::AgentHeartbeat), 0);
+        assert_eq!(count_type(&store, EventType::WorkerGitCommit), 1);
+        assert_eq!(count_type(&store, EventType::TaskCreated), 1);
+
+        // days = 0 disables retention outright.
+        record_aged(&store, EventType::SupervisorInjected, 90, "ancient");
+        let report =
+            prune_telemetry_events(&store, 0, EVENT_PRUNE_MAX_BATCH, 10, Duration::ZERO).unwrap();
+        assert_eq!(report.deleted, 0);
+        assert_eq!(count_type(&store, EventType::SupervisorInjected), 2);
+    }
+
+    /// cas-e193: one delete transaction never removes more than
+    /// EVENT_PRUNE_MAX_BATCH rows, whatever batch size the caller asks for,
+    /// and a run stops at its batch budget with the backlog reported.
+    #[test]
+    fn telemetry_retention_batches_never_exceed_the_bound_cas_e193() {
+        let (store, _dir) = setup_store();
+        let aged = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            for i in 0..2_500 {
+                tx.execute(
+                    "INSERT INTO events (event_type, entity_type, entity_id, summary, created_at)
+                     VALUES ('supervisor_injected', 'agent', ?1, 's', ?2)",
+                    params![format!("w{i}"), aged],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // An oversized request is clamped to the bound.
+        let first = store.prune_telemetry_batch(14, 50_000).unwrap();
+        assert_eq!(first, EVENT_PRUNE_MAX_BATCH);
+
+        // A run with a one-batch budget stops early and says so.
+        let partial = prune_telemetry_events(&store, 14, 50_000, 1, Duration::ZERO).unwrap();
+        assert_eq!(partial.deleted, EVENT_PRUNE_MAX_BATCH);
+        assert_eq!(partial.batches, 1);
+        assert!(!partial.complete);
+
+        let rest = prune_telemetry_events(&store, 14, 50_000, 10, Duration::ZERO).unwrap();
+        assert_eq!(rest.deleted, 500);
+        assert!(rest.largest_batch <= EVENT_PRUNE_MAX_BATCH);
+        assert!(rest.complete);
+        assert_eq!(count_type(&store, EventType::SupervisorInjected), 0);
+    }
+
+    /// cas-e193: archive_old works in bounded batches — each batch is archived
+    /// before its rows are deleted, and the run still drains the backlog.
+    #[test]
+    fn archive_old_archives_and_deletes_in_bounded_batches_cas_e193() {
+        let (store, dir) = setup_store();
+        let aged = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            for i in 0..2_100 {
+                tx.execute(
+                    "INSERT INTO events (event_type, entity_type, entity_id, summary, created_at)
+                     VALUES ('task_created', 'task', ?1, 's', ?2)",
+                    params![format!("t{i}"), aged],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        record_aged(&store, EventType::TaskCreated, 1, "recent");
+
+        let archive_dir = dir.path().join("archive");
+        let archived = store.archive_old(&archive_dir, 30).unwrap();
+        assert_eq!(archived, 2_100);
+        let files = std::fs::read_dir(&archive_dir).unwrap().count();
+        assert_eq!(
+            files, 3,
+            "2,100 rows archive as three batches of at most 1,000"
+        );
+        assert_eq!(count_type(&store, EventType::TaskCreated), 1);
     }
 
     #[test]

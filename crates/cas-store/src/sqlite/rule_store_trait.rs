@@ -126,8 +126,7 @@ impl SqliteRuleStore {
         // with bounded retry (as cas-d5c8 did for task writes), and the prior
         // snapshot is read inside it, so the history row is never stale.
         let result = (|| -> Result<()> {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+            let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
             let previous = Self::get_on(&tx, &rule.id)?;
             let snapshot_json = serde_json::to_string(&previous).map_err(|error| {
                 StoreError::Parse(format!("failed to serialize rule history: {error}"))
@@ -354,9 +353,8 @@ impl RuleStore for SqliteRuleStore {
         let result = snapshot_json.and_then(|snapshot_json| {
             let changed_by = default_changed_by();
             let changed_at = Utc::now().to_rfc3339();
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
             // cas-1502: same write-lock-first discipline as update_recorded.
-            let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+            let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
             tx.execute(
                 "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
                  tags, paths, content, status, last_accessed, review_after,

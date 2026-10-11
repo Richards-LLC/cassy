@@ -682,6 +682,10 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Codex MCP key for the Cassy server: one key across user config, project
+/// config and factory spawn overrides, so Codex starts one `cas serve`.
+pub(crate) const CODEX_CAS_SERVER_KEY: &str = "cs";
+
 /// Configure Cassy for Codex via `.codex/config.toml` and `.codex/hooks.json`.
 ///
 /// Registers the MCP server and installs native Codex `PreToolUse` and
@@ -733,22 +737,40 @@ fn configure_codex_dir(codex_dir: &Path) -> anyhow::Result<bool> {
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
 
-    let mut target_key = None;
-    if mcp_servers.contains_key("cas") {
-        target_key = Some("cas".to_string());
-    } else {
-        for (key, value) in mcp_servers.iter() {
-            if let Some(entry) = value.as_table() {
-                if entry.get("command") == Some(&toml::Value::String("cas".to_string())) {
-                    target_key = Some(key.clone());
-                    break;
-                }
-            }
-        }
-    }
-
-    let key = target_key.unwrap_or_else(|| "cas".to_string());
+    // cas-8a20: Codex merges `[mcp_servers.*]` across the user config, each
+    // project layer and the factory's spawn-injected `cs` overrides, and
+    // starts one `cas serve` per distinct key. Converge every Cassy entry onto
+    // the canonical `cs` key (tool prefix `mcp__cs__`) so all layers merge
+    // into a single server. The surviving entry is `cs` when present, else
+    // the legacy `cas` key, else the first entry whose command is `cas`.
+    let key = CODEX_CAS_SERVER_KEY.to_string();
+    let cassy_keys: Vec<String> = mcp_servers
+        .iter()
+        .filter(|(name, value)| {
+            name.as_str() == CODEX_CAS_SERVER_KEY
+                || name.as_str() == "cas"
+                || value.get("command") == Some(&toml::Value::String("cas".to_string()))
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let source_key = [CODEX_CAS_SERVER_KEY, "cas"]
+        .into_iter()
+        .find(|preferred| cassy_keys.iter().any(|name| name == preferred))
+        .map(str::to_string)
+        .or_else(|| cassy_keys.first().cloned());
     let mut changed = false;
+    if let Some((source_key, survivor)) =
+        source_key.and_then(|source| mcp_servers.remove_entry(&source))
+    {
+        for duplicate in cassy_keys.iter().filter(|name| **name != source_key) {
+            mcp_servers.remove(duplicate);
+            changed = true;
+        }
+        if source_key != key {
+            changed = true;
+        }
+        mcp_servers.insert(key.clone(), survivor);
+    }
 
     match mcp_servers.get_mut(&key) {
         Some(entry) => {

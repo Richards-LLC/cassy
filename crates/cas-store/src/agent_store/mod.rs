@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::Result;
-use crate::error::StoreError;
 use cas_types::{
     Agent, AgentRole, AgentStatus, AgentType, ClaimResult, LeaseStatus, TaskLease,
     WorktreeClaimResult, WorktreeLease,
@@ -378,6 +377,13 @@ pub struct SqliteAgentStore {
 }
 
 impl SqliteAgentStore {
+
+    /// A store on an existing connection, e.g. a
+    /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). The caller owns
+    /// schema setup; this never runs DDL.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
     /// Open or create a SQLite agent store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -396,10 +402,13 @@ impl SqliteAgentStore {
         None
     }
 
+    /// Lock the connection under this thread's store wait budget (cas-ee9ab).
+    ///
+    /// A plain `lock()` made a budgeted caller, the factory daemon loop, wait
+    /// for whatever another thread was doing on the process-wide connection:
+    /// 5 s waits in the loop's agent reads under the cas-98b24 load.
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|e| StoreError::Other(format!("agent store lock poisoned: {e}")))
+        crate::shared_db::lock_connection(&self.conn)
     }
 
     fn agent_from_row(row: &rusqlite::Row) -> rusqlite::Result<Agent> {

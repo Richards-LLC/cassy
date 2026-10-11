@@ -65,6 +65,37 @@ pub struct DaemonLoopStatus {
     /// Outcome of the most recent spawn-queue reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reset: Option<String>,
+    /// Pass latency since the previous snapshot (GH #1165), measured from the
+    /// top of a pass to its end, excluding the idle sleep. `None` when no
+    /// pass completed in the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pass_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_pass_ms: Option<u64>,
+    /// Passes in the window, and how many took 100 ms or longer.
+    #[serde(default)]
+    pub window_passes: u64,
+    #[serde(default)]
+    pub passes_over_100ms: u64,
+    /// Per-phase latency since the previous snapshot (cas-ee9ab), keyed by
+    /// phase name. A slow pass is attributed to the phase that spent it;
+    /// the single `phase` field above only says where the loop is now.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_latency: std::collections::BTreeMap<String, PhaseLatency>,
+}
+
+/// Latency of one loop phase over a status window (cas-ee9ab).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseLatency {
+    /// Times the phase ran in the window.
+    #[serde(default)]
+    pub entries: u64,
+    /// Longest single run of the phase, in milliseconds.
+    #[serde(default)]
+    pub max_ms: u64,
+    /// Runs that took 100 ms or longer.
+    #[serde(default)]
+    pub over_100ms: u64,
 }
 
 /// A supervisor's request to restart the spawn queue.
@@ -292,6 +323,11 @@ mod tests {
             loop_thread_wait: None,
             helpers_killed: Vec::new(),
             last_reset: None,
+            max_pass_ms: None,
+            p99_pass_ms: None,
+            window_passes: 0,
+            passes_over_100ms: 0,
+            phase_latency: Default::default(),
         }
     }
 

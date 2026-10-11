@@ -27,7 +27,9 @@ mod tests;
 mod types;
 mod unauthored;
 
-pub(crate) use task_intents::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
+pub(crate) use task_intents::{
+    TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
+};
 
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
@@ -60,7 +62,9 @@ impl SyncQueue {
         // store opens this queue on every logged-in open, so shutdown_workers'
         // safety check and spawn_workers failed with "database is locked"
         // while the database was accepting writes.
-        conn.busy_timeout(cas_store::SQLITE_BUSY_TIMEOUT)?;
+        // GH #1165: the pool's budget-aware handler, so a thread under a
+        // store wait budget (the factory daemon loop) stops at its deadline.
+        cas_store::shared_db::install_busy_handler(&conn)?;
 
         // Enable WAL mode for better concurrency
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;

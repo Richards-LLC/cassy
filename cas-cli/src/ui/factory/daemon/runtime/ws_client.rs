@@ -24,6 +24,28 @@ pub(super) fn commander_epoch() -> u64 {
 }
 
 /// Encode a DaemonMessage as a WebSocket Binary frame (raw JSON, no length prefix).
+/// Messages that only move terminal bytes, focus or geometry. They run in the
+/// daemon loop's store-free input region (GH #1165); every other client
+/// message is an operator command allowed to touch the store.
+pub(super) fn is_terminal_io(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::Attach { .. }
+            | ClientMessage::Detach
+            | ClientMessage::RequestPaneKeyframe { .. }
+            | ClientMessage::ScrollbackRequest { .. }
+            | ClientMessage::Input { .. }
+            | ClientMessage::InputFocused { .. }
+            | ClientMessage::Focus { .. }
+            | ClientMessage::FocusNext
+            | ClientMessage::FocusPrev
+            | ClientMessage::Resize { .. }
+            | ClientMessage::ResizePane { .. }
+            | ClientMessage::GetState
+            | ClientMessage::Ping
+    )
+}
+
 pub(super) fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
     let bytes = serde_json::to_vec(msg).ok()?;
     if matches!(msg, DaemonMessage::Welcome { .. }) && bytes.len() > COMMANDER_WELCOME_WARN_BYTES {
@@ -277,6 +299,10 @@ impl FactoryDaemon {
     /// Handle a single ClientMessage from a WebSocket client.
     /// Reuses handle_gui_message logic but routes responses to the WS client.
     async fn handle_ws_message(&mut self, client_id: usize, msg: ClientMessage) {
+        // GH #1165: operator commands (replies, history, spawn, inject) may
+        // touch the store under the pass wait budget; terminal IO may not.
+        let _operator_command =
+            (!is_terminal_io(&msg)).then(cas_store::wait_budget::permit_store_access);
         if let Some(control) = commander_control_from_ws_message(&msg) {
             let error_prefix = control.error_prefix();
             let client_ref = control.client_ref().map(str::to_owned);

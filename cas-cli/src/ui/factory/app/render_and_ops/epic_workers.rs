@@ -1,4 +1,4 @@
-use crate::store::{open_agent_store, open_task_store};
+use crate::store::{open_agent_store, open_task_store_cached};
 use crate::ui::factory::app::imports::*;
 use crate::worktree::RemoveOutcome;
 
@@ -524,7 +524,7 @@ pub(crate) fn task_epic_base(
     repo_root: &std::path::Path,
     task_id: &str,
 ) -> TaskBase {
-    let store = match open_task_store(cas_dir) {
+    let store = match open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(error) => {
             tracing::warn!(
@@ -1197,7 +1197,7 @@ fn recorded_epic_parent_branch(
     cas_dir: &std::path::Path,
     epic_id: &str,
 ) -> Option<(String, String)> {
-    let store = open_task_store(cas_dir).ok()?;
+    let store = open_task_store_cached(cas_dir).ok()?;
     let epic = store.get(epic_id).ok()?;
     let epic_branch = epic
         .branch
@@ -1221,7 +1221,7 @@ fn recorded_epic_parent_branch_for_resolved_base(
     cas_dir: &std::path::Path,
     resolved_base: &str,
 ) -> Option<(String, String)> {
-    let store = open_task_store(cas_dir).ok()?;
+    let store = open_task_store_cached(cas_dir).ok()?;
     store
         .list(None)
         .ok()?
@@ -1294,7 +1294,7 @@ fn flag_agent_dirty_on_shutdown(
 /// graceful shutdown can reclaim the worktree. On lookup failure we err on the
 /// side of caution and treat the worker as still-busy so we never destroy work.
 fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
-    match open_task_store(cas_dir) {
+    match open_task_store_cached(cas_dir) {
         Ok(store) => match store.list(None) {
             Ok(tasks) => tasks
                 .iter()
@@ -1307,7 +1307,7 @@ fn worker_has_open_tasks(cas_dir: &std::path::Path, agent_id: &str) -> bool {
             }
         },
         Err(e) => {
-            tracing::warn!("worker_has_open_tasks: open_task_store failed: {e} — assuming busy");
+            tracing::warn!("worker_has_open_tasks: open_task_store_cached failed: {e} — assuming busy");
             true
         }
     }
@@ -1333,7 +1333,7 @@ pub(crate) fn assign_task_to_new_worker(
     task_id: &str,
     worker_name: &str,
 ) -> bool {
-    let store = match open_task_store(cas_dir) {
+    let store = match open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(e) => {
             tracing::error!(
@@ -1451,7 +1451,7 @@ fn reset_stale_preassign_holder(
         .release_lease_for_task(&task.id, "Stale pre-assignment force-release")
         .map_err(|e| format!("could not release stale holder '{holder}' lease: {e}"))?;
 
-    let store = open_task_store(cas_dir)
+    let store = open_task_store_cached(cas_dir)
         .map_err(|e| format!("could not open task store for stale-holder reset: {e}"))?;
     let mut reset = store
         .get(&task.id)
@@ -1546,7 +1546,7 @@ pub(crate) fn settle_retired_worker_bindings(
 /// The brief a recycled worker receives so its fresh conversation resumes its
 /// assigned work (cas-a622). `None` when it holds no nonterminal task.
 pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
-    let task_store = open_task_store(cas_dir).ok()?;
+    let task_store = open_task_store_cached(cas_dir).ok()?;
     let mut held: Vec<cas_types::Task> = task_store
         .list(None)
         .ok()?
@@ -1634,7 +1634,7 @@ pub(crate) fn enqueue_recycle_resume_brief(
 ///
 /// Best-effort: store failures are logged; returns the number of tasks cleared.
 pub(crate) fn release_worker_task_bindings(cas_dir: &std::path::Path, worker_name: &str) -> usize {
-    let task_store = match open_task_store(cas_dir) {
+    let task_store = match open_task_store_cached(cas_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
@@ -1736,7 +1736,7 @@ pub(crate) fn release_preassign_if_bound(
     task_id: &str,
     worker_name: &str,
 ) {
-    let store = match open_task_store(cas_dir) {
+    let store = match open_task_store_cached(cas_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
@@ -3019,7 +3019,7 @@ mod spawn_base_tests {
     }
 
     fn seed_epic(cas_dir: &std::path::Path, epic_id: &str, title: &str, branch: Option<&str>) {
-        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(cas_dir).unwrap();
         let mut epic = cas_types::Task::new(epic_id.to_string(), title.to_string());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = branch.map(str::to_string);
@@ -3027,7 +3027,7 @@ mod spawn_base_tests {
     }
 
     fn seed_child(cas_dir: &std::path::Path, task_id: &str, epic_id: &str) {
-        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(cas_dir).unwrap();
         let child = cas_types::Task::new(task_id.to_string(), format!("child {task_id}"));
         store.add(&child).unwrap();
         store
@@ -3453,7 +3453,7 @@ mod spawn_base_tests {
         branch_at(&repo, "staging", "main");
         branch_at(&repo, "epic/staging-target", "staging");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-staging".into(), "Staging epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/staging-target".into());
@@ -3485,7 +3485,7 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "epic/live-delivery", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-d22d-epic".into(), "delivery epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/live-delivery".into());
@@ -3536,7 +3536,7 @@ mod spawn_base_tests {
         branch_at(&repo, "epic/live-delivery", "main");
         branch_at(&repo, "release/operator-selected", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic =
             cas_types::Task::new("cas-d22d-explicit-epic".into(), "delivery epic".into());
         epic.task_type = cas_types::TaskType::Epic;
@@ -3587,7 +3587,7 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "staging", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-missing-epic".into(), "missing branch".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/not-created".into());
@@ -3625,7 +3625,7 @@ mod spawn_base_tests {
         branch_at(&repo, legacy_slug, "main");
         branch_at(&repo, declared_target, "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new(
             "cas-shockwave".into(),
             "Shockwave migrate AI stack home onto the new 4TB E".into(),
@@ -3704,7 +3704,7 @@ mod spawn_base_tests {
             .unwrap();
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-ad05-epic".into(), "Staging epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/staging-based".into());
@@ -3849,7 +3849,7 @@ mod spawn_base_tests {
         commit_file(&repo, "main-only.txt", "main moved on");
 
         // A standalone task with no parent epic at all.
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&cas_types::Task::new(
                 "cas-loner".to_string(),
@@ -3921,7 +3921,7 @@ mod spawn_base_tests {
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
         branch_at(&repo, "staging", "main");
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-targeted".into(), "staging fix".into());
         task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:test".into(),
@@ -5074,7 +5074,7 @@ mod spawn_base_tests {
         let parent_tip = head_sha(&origin, "main");
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut outer_epic = cas_types::Task::new("cas-outer".into(), "outer epic".into());
         outer_epic.task_type = cas_types::TaskType::Epic;
         outer_epic.branch = Some("epic/outer".into());
@@ -5210,7 +5210,7 @@ mod spawn_base_tests {
         commit(&repo, "parent-only.txt", "current support playbook parent");
 
         let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut epic = cas_types::Task::new("cas-support-epic".into(), "support epic".into());
         epic.task_type = cas_types::TaskType::Epic;
         epic.branch = Some("epic/diverged-support".into());
@@ -5503,7 +5503,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_true_when_assigned_and_not_closed() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("t-open", Some("agent-a"), TaskStatus::Open))
             .unwrap();
@@ -5514,7 +5514,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_true_for_in_progress() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "t-inprog",
@@ -5529,7 +5529,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_false_when_only_closed_tasks() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("t-done", Some("agent-c"), TaskStatus::Closed))
             .unwrap();
@@ -5540,7 +5540,7 @@ mod tests {
     #[test]
     fn worker_has_open_tasks_false_when_open_task_belongs_to_other_agent() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("t-other", Some("agent-other"), TaskStatus::Open))
             .unwrap();
@@ -5549,7 +5549,7 @@ mod tests {
     }
 
     fn claimed_qa_fixture(cas_dir: &std::path::Path) -> cas_types::QaPass {
-        let store = open_task_store(cas_dir).unwrap();
+        let store = open_task_store_cached(cas_dir).unwrap();
         let mut task = task_with("cas-qa3172", Some("dead-reviewer"), TaskStatus::InProgress);
         task.labels.push("qa-pass".to_string());
         task.notes = "prior review evidence".into();
@@ -5630,7 +5630,7 @@ mod tests {
         // early registration and finish_worker_spawn call with the queued id.
         assert!(assign_task_to_new_worker(&cas_dir, queued[0].task_id.as_deref().unwrap(), "replacement-reviewer"));
         assert_pending_qa(&cas_dir, &before);
-        let task = open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap();
+        let task = open_task_store_cached(&cas_dir).unwrap().get("cas-qa3172").unwrap();
         assert_eq!(task.status, TaskStatus::Open);
         assert_eq!(task.assignee.as_deref(), Some("replacement-reviewer"));
         assert!(task.notes.contains("prior review evidence"));
@@ -5666,7 +5666,7 @@ mod tests {
             if aborted { release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"); }
             else { assert_eq!(release_worker_task_bindings(&cas_dir, "dead-reviewer"), 1); }
             assert_pending_qa(&cas_dir, &before);
-            assert_eq!(open_task_store(&cas_dir).unwrap().get("cas-qa3172").unwrap().assignee, None);
+            assert_eq!(open_task_store_cached(&cas_dir).unwrap().get("cas-qa3172").unwrap().assignee, None);
         }
     }
 
@@ -5717,7 +5717,7 @@ mod tests {
                 _ => release_preassign_if_bound(&cas_dir, "cas-qa3172", "dead-reviewer"),
             };
             recover();
-            let task = open_task_store(&cas_dir)
+            let task = open_task_store_cached(&cas_dir)
                 .unwrap()
                 .get("cas-qa3172")
                 .unwrap();
@@ -5737,7 +5737,7 @@ mod tests {
                 .unwrap();
             recover();
             assert_pending_qa(&cas_dir, &before);
-            let task = open_task_store(&cas_dir)
+            let task = open_task_store_cached(&cas_dir)
                 .unwrap()
                 .get("cas-qa3172")
                 .unwrap();
@@ -5753,7 +5753,7 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_sets_assignee() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("cas-abc1", None, TaskStatus::Open))
             .unwrap();
@@ -5786,7 +5786,7 @@ mod tests {
         agent.role = cas_types::AgentRole::Worker;
         agents.register(&agent).unwrap();
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("cas-abc1", Some(holder), TaskStatus::Open))
             .unwrap();
@@ -5821,7 +5821,7 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_idempotent_for_same_worker() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with("cas-abc1", None, TaskStatus::Open))
             .unwrap();
@@ -5846,7 +5846,7 @@ mod tests {
     #[test]
     fn assign_task_to_new_worker_refuses_terminal_tasks() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, status) in [
             ("cas-closed", TaskStatus::Closed),
             ("cas-cancelled", TaskStatus::Cancelled),
@@ -5866,7 +5866,7 @@ mod tests {
 
     /// The binding set wise-raven-87 held when its refresh was refused.
     fn seed_wise_raven_tasks(cas_dir: &std::path::Path) -> Vec<(&'static str, TaskStatus)> {
-        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(cas_dir).unwrap();
         let held = vec![
             ("cas-e0be", TaskStatus::InProgress),
             ("cas-7cb3", TaskStatus::AwaitingMerge),
@@ -5916,7 +5916,7 @@ mod tests {
         );
 
         assert_eq!(released, 0, "a recycle releases nothing");
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, status) in held {
             let task = store.get(id).unwrap();
             assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
@@ -5930,7 +5930,7 @@ mod tests {
         seed_wise_raven_tasks(&cas_dir);
         let agent = retired_worker(&cas_dir);
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         // The task was held when recycling began, then reassigned before
         // retirement/death cleanup observed that old snapshot.
         let snapshot = vec!["cas-e0be".to_string()];
@@ -5965,7 +5965,7 @@ mod tests {
             WorkerRetirement::Shutdown,
         );
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         assert_eq!(store.get("cas-ed87").unwrap().assignee, None, "Open pre-assign released");
         assert_eq!(
             store.get("cas-7cb3").unwrap().assignee.as_deref(),
@@ -6032,7 +6032,7 @@ mod tests {
     #[test]
     fn release_worker_task_bindings_clears_open_preassign() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-7f61",
@@ -6054,7 +6054,7 @@ mod tests {
     #[test]
     fn release_worker_task_bindings_resets_in_progress_ghost() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-3d23",
@@ -6075,7 +6075,7 @@ mod tests {
     #[test]
     fn release_preassign_if_bound_only_clears_matching_worker() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-abc1",
@@ -6108,7 +6108,7 @@ mod tests {
         agent.role = cas_types::AgentRole::Worker;
         agents.register(&agent).unwrap();
 
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-live-holder",
@@ -6130,7 +6130,7 @@ mod tests {
     #[test]
     fn release_worker_task_bindings_skips_closed() {
         let (_temp, cas_dir) = seeded_cas_dir();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&task_with(
                 "cas-done",

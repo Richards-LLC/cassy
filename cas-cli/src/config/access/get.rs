@@ -119,6 +119,11 @@ impl Config {
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
             "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),
             "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),
+            "factory.event_telemetry_retention_days" => {
+                Some(factory.event_telemetry_retention_days.to_string())
+            }
+            "factory.prompt_transcript_retention_days" => Some(factory.prompt_transcript_retention_days.to_string()),
+            "factory.supervisor_queue_retention_days" => Some(factory.supervisor_queue_retention_days.to_string()),
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 Some(factory.cargo_build_jobs.clone())
             }

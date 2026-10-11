@@ -199,6 +199,16 @@ pub struct SqliteTaskStore {
 }
 
 impl SqliteTaskStore {
+    /// A task store on an existing connection, e.g. a
+    /// [`crate::shared_db::dedicated_connection`] (cas-ee9ab). Never runs DDL
+    /// and stamps no origin project.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self {
+            conn,
+            origin_project: None,
+        }
+    }
+
     /// Open or create a SQLite task store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         Self::open_with_origin_project(cas_dir, None)
@@ -1149,8 +1159,7 @@ impl TaskStore for SqliteTaskStore {
         formatted_note: &str,
         receipt_id: &str,
     ) -> Result<DateTime<Utc>> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
             let now = Utc::now();
             let rows = tx.execute(
                 "UPDATE tasks

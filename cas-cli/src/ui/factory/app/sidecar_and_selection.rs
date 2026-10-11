@@ -735,6 +735,10 @@ impl FactoryApp {
     /// Open the task detail dialog for the selected task
     pub fn open_task_dialog(&mut self) {
         if let Some(task_id) = self.get_selected_task_id() {
+            self.task_dialog_load = super::task_dialog_load::TaskDialogLoad::start(
+                self.cas_dir.clone(),
+                task_id.clone(),
+            );
             self.task_dialog_id = Some(task_id);
             self.task_dialog_scroll = 0;
             self.show_task_dialog = true;
@@ -745,6 +749,7 @@ impl FactoryApp {
     pub fn close_task_dialog(&mut self) {
         self.show_task_dialog = false;
         self.task_dialog_id = None;
+        self.task_dialog_load = Default::default();
         self.task_dialog_scroll = 0;
     }
 

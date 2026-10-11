@@ -141,6 +141,7 @@ pub use cas_store::{
 };
 
 // Local modules (not in cas-store)
+mod cached_task;
 pub mod detect;
 pub mod foreign_project_guard;
 pub mod known_repos;
@@ -160,6 +161,7 @@ mod syncing_skill;
 mod syncing_task;
 
 // Re-export local wrappers
+pub use cached_task::{open_task_store_cached, reconcile_task_sync};
 pub use detect::{
     StoreType, detect_store_type, find_cas_root, find_cas_root_from, find_git_toplevel,
     has_project_cas, init_cas_dir,

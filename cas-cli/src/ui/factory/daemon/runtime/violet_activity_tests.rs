@@ -510,6 +510,33 @@ fn three_read_failures_stop_the_watch() {
     assert_eq!(wake.book().watches[0].stop_reason.as_deref(), Some("read_error"));
 }
 
+/// cas-2dfa: a watch stopped by read failures (the October 2026 cut: the
+/// project's Violet credential was unset) must not leave `cas doctor`'s
+/// violet wake row OK. It names the channel, the read error and the fix.
+#[test]
+fn doctor_warns_when_a_watch_stopped_on_read_errors_cas_2dfa() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    relay.publish(mention("C1", 0));
+    let mut wake = fx.wake(SESSION, t0());
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+    let error = "violet is absent: VIOLET_SLACK_TOKEN_CASSY_PROXY is unset";
+    for secs in [310, 610, 910] {
+        wake.apply_sweep(&fx.queue, "C1", Err(error.into()), at(secs));
+    }
+    let status = watch_status(&cas_dir(&fx), at(970)).unwrap();
+    assert_eq!(status.stopped_recent[0].reason, "read_error");
+    let (severity, message) = status.doctor(at(970));
+    assert_eq!(severity, WatchHealth::Warning, "{message}");
+    assert!(message.contains("#violet-internal"), "{message}");
+    assert!(message.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY"), "{message}");
+    assert!(message.contains("cas integrate violet"), "{message}");
+
+    // A day later the stop is history, not a live finding.
+    let status = watch_status(&cas_dir(&fx), at(970 + 86_400)).unwrap();
+    assert_eq!(status.doctor(at(970 + 86_400)).0, WatchHealth::Ok);
+}
+
 /// A partial scan never advances the cursor.
 #[test]
 fn incomplete_sweep_keeps_the_cursor() {

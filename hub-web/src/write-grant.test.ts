@@ -68,8 +68,9 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
     const send = vi.fn<WriteGrantSend>().mockResolvedValue({
       grant: { task: "cas-1169", path: "/home/u/soundwave-config/docs/requests", modes: ["create", "edit"], granted_by: "commander-device:dev-1" },
     });
+    const body = state.grantBody();
     await sendWriteGrant(state, send, "grant");
-    expect(send).toHaveBeenCalledWith(state.grantBody());
+    expect(send).toHaveBeenCalledWith(body);
     expect(state.stage).toBe("editing");
     expect(state.result).toEqual({
       tone: "ok",

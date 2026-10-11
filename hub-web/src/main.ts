@@ -4249,12 +4249,16 @@ function syncConversationAttention(count: number): void {
   applyAttentionSheet();
 }
 /** The phone Tasks sheet names whose tasks it holds, while it covers the header that does (cas-d043 G01). */
+/** The open conversation and its machine, in words ("cas-src on Atlas"). */
+function conversationWhere(): string {
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
+  return contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label });
+}
 function syncProgressSheetWhere(): void {
   const heading = document.querySelector<HTMLElement>("#context-progress-heading");
   let line = document.querySelector<HTMLElement>(".conversation-context .context-sheet-where");
-  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
-  const where = progressSheetOpen() ? contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label }) : "";
+  const where = progressSheetOpen() ? conversationWhere() : "";
   if (!where || !heading) { line?.remove(); return; }
   if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; heading.after(line); }
   if (line.textContent !== where) line.textContent = where;
@@ -4564,6 +4568,8 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     writeAccess: {
       state: writeGrant,
       tasks,
+      // cas-4cf2: the phone sheet covers the header that names the conversation.
+      where: phoneLayout() ? conversationWhere() || undefined : undefined,
       on: {
         // Typing keeps the field and its caret; only stage changes redraw.
         changed: () => {},

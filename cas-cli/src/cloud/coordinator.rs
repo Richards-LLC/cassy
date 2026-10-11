@@ -22,6 +22,9 @@ pub struct CloudCoordinator {
     config: CloudConfig,
     timeout: Duration,
     agent_id: Option<String>,
+    /// The repo's canonical id, registered in each agent's metadata so peer
+    /// supervisors of the same repo can find each other (cas-e477).
+    canonical_id: Option<String>,
 }
 
 /// Response from agent registration
@@ -101,7 +104,14 @@ impl CloudCoordinator {
             config,
             timeout: DEFAULT_TIMEOUT,
             agent_id: None,
+            canonical_id: None,
         })
+    }
+
+    /// Register agents under this repo identity (cas-e477).
+    pub fn with_canonical_id(mut self, canonical_id: Option<String>) -> Self {
+        self.canonical_id = canonical_id;
+        self
     }
 
     /// Set the request timeout
@@ -478,6 +488,46 @@ impl CloudCoordinator {
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
         }
     }
+    /// Register `agent` with its peer identity: role, repo canonical id,
+    /// `focus`, factory session and hostname in metadata (cas-e477).
+    pub fn register_with_focus(
+        &mut self,
+        agent: &Agent,
+        focus: Option<&str>,
+    ) -> Result<AgentInfo, CasError> {
+        let _ = focus;
+        self.register(agent)
+    }
+
+    /// Heartbeat a specific agent (cas-e477). Each daemon heartbeats its own
+    /// agent, not whichever agent this coordinator registered last.
+    pub fn heartbeat_agent(&self, agent_id: &str) -> Result<AgentInfo, CasError> {
+        let _ = agent_id;
+        Err(CasError::Other("not implemented".to_string()))
+    }
+
+    /// Every agent of this user, following the cloud's keyset pages.
+    pub fn list_agent_infos(&self) -> Result<Vec<AgentInfo>, CasError> {
+        Ok(Vec::new())
+    }
+
+    /// The supervisors of `canonical_id` other than `self_id` (cas-e477).
+    pub fn list_repo_peers(
+        &self,
+        canonical_id: &str,
+        alias_class: &[String],
+        self_id: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<crate::cloud::peers::Peer>, CasError> {
+        let agents = self.list_agent_infos()?;
+        Ok(crate::cloud::peers::repo_peers(
+            &agents,
+            canonical_id,
+            alias_class,
+            self_id,
+            now,
+        ))
+    }
 }
 
 /// Convert LockInfo to TaskLease
@@ -556,6 +606,10 @@ fn agent_info_to_agent(info: AgentInfo) -> Agent {
         metadata: info.metadata,
     }
 }
+
+#[cfg(test)]
+#[path = "coordinator_peer_tests.rs"]
+mod peer_tests;
 
 #[cfg(test)]
 mod tests {

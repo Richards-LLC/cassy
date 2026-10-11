@@ -305,6 +305,34 @@ else
     bad "cas-be3a: the scratch blocker did not print the fix: $be3a_output"
 fi
 
+# cas-52de: a release worktree on another filesystem than its main checkout
+# and the configured scratch base also gets the worktree-placement fix.
+be3a_main="$tmp/be3a-main"
+git init -q -b main "$be3a_main"
+git -C "$be3a_main" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false \
+    commit -q --allow-empty -m base
+be3a_linked="$be3a_mount/scratch/release-linked"
+git -C "$be3a_main" worktree add -q -b release/v9.99.0 "$be3a_linked"
+be3a_output="$( (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_linked"
+    run_dir="$tmp/be3a-run"
+    artifacts_root="$tmp/artifacts"
+    CAS_RELEASE_ENV_FILE="$be3a_env"
+    CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
+    unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_scratch
+) 2>&1 )" && bad 'cas-52de: a cross-filesystem release worktree passed preflight'
+be3a_main_real="$(cd "$be3a_main" && pwd -P)"
+if [[ "$be3a_output" == *"filesystem boundary"* ]] \
+    && [[ "$be3a_output" == *"worktree add $be3a_main_real/.cas/release-v9.99.0 release/v9.99.0"* ]]; then
+    ok 'cas-52de: the scratch blocker also names a release worktree path on the scratch filesystem'
+else
+    bad "cas-52de: the scratch blocker did not name the worktree fix: $be3a_output"
+fi
+
 # cas-be3a: preflight refuses before any publish step when the report
 # renderer's browser is missing, and names the install command. The probe is
 # stubbed: the real one installs Playwright into a disposable workspace.
@@ -1495,6 +1523,9 @@ chmod +x "$post_publication_published"
 post_publication_latency="$repo_root/scripts/release-latency-receipt.sh"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
+# cas-52de: the draft's {{RELEASE_PR}} is filled here from the pipeline's PR.
+printf '\nRelease PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+printf '4242\n' >"$post_publication_run/pr-number.txt"
 post_publication_stderr="$tmp/post-publication.stderr"
 if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
@@ -1516,11 +1547,38 @@ if (
     && [[ -s "$post_publication_run/release-latency.receipt" ]] \
     && grep -qx 'WITHIN_BUDGET=false' "$post_publication_run/release-latency.receipt" \
     && grep -q '908s; over budget (600s)' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    && grep -qx 'Release PR #4242' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    && ! grep -qF '{{RELEASE_PR}}' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && ! grep -q 'command not found' "$post_publication_stderr"; then
-    ok 'gap 7: post-publication records an overrun and Dev trailer without blocking'
+    ok 'gap 7: post-publication records an overrun and Dev trailer, and fills the release PR, without blocking'
 else
     bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
 fi
+# Without the pipeline's PR number the token cannot be filled: a named error.
+printf '\nAgain PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+rm -f "$post_publication_run/pr-number.txt"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    cut_has_external_stage() { return 1; }
+    version=9.99.8
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
+    worktree="$stage_wt"
+    run_dir="$post_publication_run"
+    script_dir="$repo_root/scripts"
+    export POST_PUBLICATION_LANDED="$post_publication_run/landed-main.sha"
+    CAS_RELEASE_TRAIN_GH="$post_publication_gh" CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES=1 \
+    CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD="$post_publication_published" \
+    CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD="$post_publication_latency" \
+        release_train_post_publication
+) 2>"$post_publication_stderr"; then
+    bad 'post-publication filled {{RELEASE_PR}} without a PR number'
+elif grep -q 'pr-number.txt has no PR number' "$post_publication_stderr"; then
+    ok 'post-publication names the missing PR number instead of leaving {{RELEASE_PR}}'
+else
+    bad "missing PR number was not named: $(cat "$post_publication_stderr")"
+fi
+sed -i '/Again PR #{{RELEASE_PR}}/d' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 
 # Plant old evidence even when the preceding red run emitted no latency.
 [[ -s "$post_publication_run/release-latency.receipt" ]] || \

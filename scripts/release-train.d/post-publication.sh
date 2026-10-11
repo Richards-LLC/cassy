@@ -82,6 +82,23 @@ release_train_post_publication() {
     else
         draft="$worktree/docs/release-notes/$(release_train_date_stamp)-v${version}-slack.md"
     fi
+    # cas-52de: the release PR number exists only once the pipeline opened
+    # the PR, so post-publication fills {{RELEASE_PR}} with the digests.
+    if [[ -f "$draft" ]] && grep -qF '{{RELEASE_PR}}' "$draft"; then
+        local pr_number=''
+        [[ -r "$run_dir/pr-number.txt" ]] && pr_number="$(tr -d '[:space:]' <"$run_dir/pr-number.txt")"
+        if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+            printf 'ERROR post-publication: the draft names {{RELEASE_PR}} but %s/pr-number.txt has no PR number\n' \
+                "$run_dir" >&2
+            return 1
+        fi
+        tmp="$(mktemp "$worktree/.release-draft-pr.XXXXXX")"
+        sed "s/{{RELEASE_PR}}/$pr_number/g" "$draft" >"$tmp" && mv "$tmp" "$draft" || {
+            rm -f "$tmp"
+            printf 'ERROR post-publication: could not fill {{RELEASE_PR}} in %s\n' "$draft" >&2
+            return 1
+        }
+    fi
     draft_args=("$tag")
     if [[ -f "$draft" ]] && grep -qE '\{\{(LINUX|MACOS)_SHA256\}\}' "$draft"; then
         draft_args+=(--write-draft "$draft")

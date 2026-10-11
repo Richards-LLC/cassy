@@ -101,7 +101,7 @@ class Announce(unittest.TestCase):
         # still placeholders there, and every other token must still fail.
         bodies = list(BODIES)
         bodies[1] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`."
-        bodies[3] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`."
+        bodies[3] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`. PR #{{RELEASE_PR}}."
         self.write_draft(bodies)
         command = [sys.executable, str(SCRIPT), "--validate", str(self.draft), str(self.body_dir)]
         allowed = subprocess.run(command + ["--pre-publication"], capture_output=True, text=True)
@@ -109,6 +109,15 @@ class Announce(unittest.TestCase):
         strict = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(strict.returncode, 1)
         self.assertIn("{{LINUX_SHA256}}", strict.stderr)
+        # cas-52de: the PR number is filled at post-publication too.
+        bodies[1] = bodies[1].replace(" Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`.", "")
+        bodies[3] = bodies[3].replace(" Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`.", "")
+        self.write_draft(bodies)
+        pr_only = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(pr_only.returncode, 1)
+        self.assertIn("{{RELEASE_PR}}", pr_only.stderr)
+        self.assertEqual(subprocess.run(command + ["--pre-publication"], capture_output=True,
+                                        text=True).returncode, 0)
         bodies[3] += " {{INTERVENTIONS}}"
         self.write_draft(bodies)
         other = subprocess.run(command + ["--pre-publication"], capture_output=True, text=True)

@@ -281,6 +281,41 @@ PY
         self.assertEqual(self.git("config", "--local", "cas.integrationBranch"), "integration/project")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
 
+    def test_multiple_legacy_branches_adopt_the_one_at_the_receipt_tip(self):
+        # cas-52de: several integration/ branches and no config refused assembly.
+        self.git("branch", "integration/old-release", self.base)
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Adopted integration/project", result.stderr)
+        self.assertEqual(self.git("config", "--local", "cas.integrationBranch"), "integration/project")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+
+    def test_multiple_legacy_branches_without_a_unique_receipt_match_still_refuse(self):
+        self.git("branch", "integration/twin", self.tip)
+        self.refused("Multiple legacy integration branches")
+
+    def test_release_docs_already_on_the_integration_tip_are_treated_as_applied(self):
+        # cas-52de: docs copied onto the release branch in steps conflicted
+        # with the integration tip, which already carried their final content.
+        self.git("checkout", "epic/one")
+        (self.root / "CHANGELOG.md").write_text("# Changelog\n\n## [0.0.0] - final\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "final changelog on the epic")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+        for step in ("## [0.0.0] - draft\n", "## [0.0.0] - final\n"):
+            (self.root / "CHANGELOG.md").write_text("# Changelog\n\n" + step)
+            self.git("add", "CHANGELOG.md")
+            self.git("commit", "-m", "copy changelog step")
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already on the integration tip", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_from_main_assembles_without_sweep_and_records_reason(self):
         self.git("update-ref", "refs/remotes/origin/main", self.tip)
         self.receipt_path.unlink()

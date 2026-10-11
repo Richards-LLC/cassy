@@ -27,14 +27,34 @@ def integration_branch(root):
         branches = git(root, "for-each-ref", "--format=%(refname:short)",
                        "refs/heads/integration/").splitlines()
         if len(branches) > 1:
-            raise RuntimeError("Multiple legacy integration branches; set git config --local "
-                               "cas.integrationBranch <branch> after reviewing the sweep receipt")
-        branch = branches[0] if branches else "integration/project"
+            # cas-52de: the sweep receipt's tip names the branch the daemon
+            # integrates; adopt the one branch whose head is that tip.
+            branch = receipt_integration_branch(root, branches)
+            if branch is None:
+                raise RuntimeError("Multiple legacy integration branches; set git config --local "
+                                   "cas.integrationBranch <branch> after reviewing the sweep receipt")
+            print(f"Adopted {branch}: its head is the sweep receipt tip", file=sys.stderr)
+        else:
+            branch = branches[0] if branches else "integration/project"
         git(root, "config", "--local", "cas.integrationBranch", branch)
     if not branch.startswith("integration/"):
         raise RuntimeError("cas.integrationBranch must name an integration/ branch")
     git(root, "check-ref-format", "refs/heads/" + branch)
     return branch
+
+
+def receipt_integration_branch(root, branches):
+    """The one integration branch whose head is the sweep receipt's tip."""
+    try:
+        common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+        tip = json.loads((common.parent / ".cas/merge-sweeps/integration.json").read_text()).get("tip")
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if not isinstance(tip, str) or len(tip) != 40:
+        return None
+    heads = [branch for branch in branches
+             if git(root, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}") == tip]
+    return heads[0] if len(heads) == 1 else None
 
 
 def main_input(root):
@@ -250,9 +270,30 @@ def is_ancestor(root, older, newer):
     return result.returncode == 0
 
 
+def metadata_already_applied(root, old_tip, integration_tip):
+    """True when every path the release commits change already has its final
+    content on the integration tip (cas-52de: docs copied onto the release
+    branch in steps conflicted while the tip carried the same final bytes)."""
+    changed = [path for path in git(root, "diff", "--name-only", "-z", "--no-renames",
+                                   f"{old_tip}..HEAD").split("\0") if path]
+    if not changed:
+        return False
+
+    def blob(rev, path):
+        found = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                                f"{rev}:{path}"], capture_output=True, text=True)
+        return found.stdout.strip() if found.returncode == 0 else None
+
+    return all(blob("HEAD", path) == blob(integration_tip, path) for path in changed)
+
+
 def rebase_release_metadata(root, old_tip, integration_tip):
     """Replay metadata with diagnostics and restore the checkout on conflicts."""
     original = git(root, "rev-parse", "HEAD")
+    if not git(root, "status", "--porcelain") and metadata_already_applied(root, old_tip, integration_tip):
+        git(root, "reset", "--hard", integration_tip)
+        print("Release metadata already on the integration tip; nothing to replay", file=sys.stderr)
+        return False
     try:
         git(root, "-c", "core.hooksPath=/dev/null", "rebase", "--onto", integration_tip, old_tip)
     except RuntimeError as failure:
@@ -264,7 +305,10 @@ def rebase_release_metadata(root, old_tip, integration_tip):
         raise RuntimeError(
             "BLOCKER integration-release-metadata: rebase failed; " + state
             + ". Recovery:\n" + resume_rebase_command(root, old_tip, integration_tip)
+            + "\nOr copy the release docs as one commit from the integration tip: "
+            + "git checkout " + integration_tip + " -- CHANGELOG.md docs/release-notes, commit, rerun --cut"
             + "\n" + str(failure) + abort_detail) from failure
+    return True
 
 
 def rebase_docs_only_release(root, main_tip, integration_tip):
@@ -276,8 +320,8 @@ def rebase_docs_only_release(root, main_tip, integration_tip):
     if previous and previous["tip"] != integration_tip:
         old_tip = previous["tip"]
         validate_release_metadata(root, old_tip, integration_tip)
-        rebase_release_metadata(root, old_tip, integration_tip)
-        print("Rebased release metadata onto updated integration tip", file=sys.stderr)
+        if rebase_release_metadata(root, old_tip, integration_tip):
+            print("Rebased release metadata onto updated integration tip", file=sys.stderr)
         return
     branch = git(root, "branch", "--show-current")
     if not branch.startswith("release/") or not is_ancestor(root, main_tip, current):
@@ -296,8 +340,8 @@ def rebase_docs_only_release(root, main_tip, integration_tip):
             "prep carries the prior receipts commit after assemble.")
     if not changed:
         return
-    rebase_release_metadata(root, main_tip, integration_tip)
-    print("Rebased docs-only release commits onto integration tip", file=sys.stderr)
+    if rebase_release_metadata(root, main_tip, integration_tip):
+        print("Rebased docs-only release commits onto integration tip", file=sys.stderr)
 
 
 def recovery_timeout_secs():

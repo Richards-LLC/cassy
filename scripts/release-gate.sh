@@ -778,24 +778,50 @@ check_version_literals() {
 # compiled test binary (cas-1f6e: a builtins unit test read docs/design copies
 # that way; the archive row could not catch it because the producer path still
 # existed here). The Rust guard below scans the embedded integration-test
-# sources; this scan covers the src-side test modules the guard cannot embed.
-# Compile-time `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), ...))` and
-# `include_bytes!` are shard-safe and are not matched.
-readonly src_runtime_manifest_dir_pattern='Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)|PathBuf::from\(env!\("CARGO_MANIFEST_DIR"\)\)|env!\("CARGO_MANIFEST_DIR"\)\)\.(join|parent)\('
+# sources; this scan covers the src-side test modules the guard cannot embed,
+# and the workspace crates' src and tests (cas-462b: 3.50.0's merge queue failed
+# on a cas-store src guard that read_dir'ed its own src at runtime).
+# Matched: a manifest-relative Path/PathBuf, `.join`/`.parent` on one, a
+# std::fs call or File::open on the env! value, a runtime `format!` of it, and
+# binding it to a variable. Compile-time `include_str!(concat!(env!(
+# "CARGO_MANIFEST_DIR"), ...))` and `include_bytes!` are shard-safe and are
+# not matched.
+readonly src_runtime_manifest_dir_pattern='Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)|PathBuf::from\(env!\("CARGO_MANIFEST_DIR"\)\)|env!\("CARGO_MANIFEST_DIR"\)\)\.(join|parent)\(|(fs::[a-z_]+|File::open)\(\s*&?\s*(concat!\(\s*)?env!\("CARGO_MANIFEST_DIR"\)|format!\([^;]*env!\("CARGO_MANIFEST_DIR"\)|=\s*env!\("CARGO_MANIFEST_DIR"\)\s*;'
+readonly -a src_runtime_manifest_dir_roots=(cas-cli/src crates/*/src crates/*/tests)
 # cas::test_paths::workspace_root() is the one sanctioned runtime probe; its
-# callers guard it with an explicit SKIP when the checkout is absent.
-readonly src_runtime_manifest_dir_allowlist='cas-cli/src/test_paths.rs'
+# callers guard it with an explicit SKIP when the checkout is absent. The two
+# crate tests are reviewed: an #[ignore]d live-traffic contract test, and a
+# fallback reached only when no test_tui binary sits beside the test binary.
+readonly -a src_runtime_manifest_dir_reviewed=(
+    cas-cli/src/test_paths.rs
+    crates/cas-mux/tests/claude_factory_contract_runtime.rs
+    crates/cas-tui-test/tests/tui_e2e_test.rs
+)
+
+# Runtime manifest-dir reads in the given files, minus the reviewed ones.
+src_runtime_manifest_dir_hits() {
+    local -a files=() path reviewed
+    for path in "$@"; do
+        for reviewed in "${src_runtime_manifest_dir_reviewed[@]}"; do
+            [[ "$path" == "$reviewed" ]] && continue 2
+        done
+        files+=("$path")
+    done
+    [[ "${#files[@]}" -gt 0 ]] || return 0
+    grep -nHE "$src_runtime_manifest_dir_pattern" "${files[@]}" 2>/dev/null || true
+}
 
 check_src_runtime_manifest_dir_reads() {
     local hits
-    hits="$(grep -rnE --include='*.rs' "$src_runtime_manifest_dir_pattern" cas-cli/src 2>/dev/null \
-        | grep -vF "$src_runtime_manifest_dir_allowlist:" || true)"
+    local -a files=()
+    mapfile -t files < <(find "${src_runtime_manifest_dir_roots[@]}" -name '*.rs' -type f 2>/dev/null | sort)
+    hits="$(src_runtime_manifest_dir_hits "${files[@]}")"
     if [[ -n "$hits" ]]; then
-        printf 'fixture-paths: cas-cli/src test modules read the producer checkout at runtime; embed the file with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) instead:\n%s\n' "$hits"
+        printf 'fixture-paths: test code reads the producer checkout at runtime; embed the file with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or use cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
         return 1
     fi
-    printf 'fixture-paths: no runtime CARGO_MANIFEST_DIR reads under cas-cli/src (allowlist: %s)\n' \
-        "$src_runtime_manifest_dir_allowlist"
+    printf 'fixture-paths: no runtime CARGO_MANIFEST_DIR reads under %s (reviewed: %s)\n' \
+        "${src_runtime_manifest_dir_roots[*]}" "${src_runtime_manifest_dir_reviewed[*]}"
 }
 
 check_fixture_paths() {
@@ -1531,13 +1557,14 @@ check_fixture_paths_src() {
     local -a changed=()
     local path hits=''
     while IFS= read -r path; do
-        [[ "$path" == *.rs && -f "$path" && "$path" != "$src_runtime_manifest_dir_allowlist" ]] && changed+=("$path")
-    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- cas-cli/src)
+        [[ "$path" == *.rs && -f "$path" ]] && changed+=("$path")
+    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- \
+        cas-cli/src ':(glob)crates/*/src/**' ':(glob)crates/*/tests/**')
     if [[ "${#changed[@]}" -eq 0 ]]; then
-        printf 'fixture-paths-src: no cas-cli/src Rust change\n'
+        printf 'fixture-paths-src: no cas-cli/src or crate src/tests Rust change\n'
         return 0
     fi
-    hits="$(grep -nHE "$src_runtime_manifest_dir_pattern" "${changed[@]}" || true)"
+    hits="$(src_runtime_manifest_dir_hits "${changed[@]}")"
     if [[ -n "$hits" ]]; then
         printf 'fixture-paths-src: cas-cli/src test modules read the producer checkout at runtime; use include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
         return 1
@@ -1644,7 +1671,7 @@ if row_selected release-binary-isa && [[ "${failures[*]}" == *release-binary-isa
     exit 1
 fi
 run_check fixture-paths \
-    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src" \
+    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src, crates/*/src or crates/*/tests" \
     check_fixture_paths
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \

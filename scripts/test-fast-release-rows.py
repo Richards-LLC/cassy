@@ -304,6 +304,12 @@ sleep 2
              "pub const MIGRATION: Migration = Migration {\n    id: 2,\n};\n"),
             ("fixture-paths-src", "cas-cli/src/example_tests.rs",
              '#[test] fn reads() { let _ = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("x"); }\n'),
+            # The 3.50.0 merge-queue failure: a crate src guard walking its own
+            # src at runtime (absent on archive shards).
+            ("fixture-paths-src", "crates/cas-store/src/guard.rs",
+             '#[test] fn guard() { for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() { let _ = entry; } }\n'),
+            ("fixture-paths-src", "crates/cas-core/tests/reads.rs",
+             '#[test] fn reads() { let dir = env!("CARGO_MANIFEST_DIR"); let _ = std::fs::read_to_string(format!("{dir}/x")); }\n'),
         ]
         for row, path, body in cases:
             with self.subTest(row=row):

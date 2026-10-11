@@ -678,6 +678,11 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
             "application/manifest+json",
             &b"{"[..],
         ),
+        (
+            "/commander/cassy-tokens.css",
+            "text/css; charset=utf-8",
+            &b"/* Cassy Cloud design tokens"[..],
+        ),
     ] {
         let asset = app
             .clone()

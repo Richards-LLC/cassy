@@ -286,7 +286,8 @@ async fn commander_favicon() -> Response {
     )
 }
 
-/// cas-8951: Cassy Cloud's PNG favicons, home-screen icons and web manifest.
+/// cas-8951: Cassy Cloud's PNG favicons, home-screen icons and web manifest;
+/// cas-eaa3: the shared token stylesheet Explorer vendors (cassy-tokens.css).
 /// `hub-web/scripts/render-brand-icons.mjs` renders the PNGs from favicon.svg.
 const COMMANDER_BRAND_ASSETS: &[(&str, &[u8], &str)] = &[
     (
@@ -323,6 +324,11 @@ const COMMANDER_BRAND_ASSETS: &[(&str, &[u8], &str)] = &[
         "/commander/icon-maskable-512.png",
         include_bytes!("../../../hub-web/dist/icon-maskable-512.png"),
         "image/png",
+    ),
+    (
+        "/commander/cassy-tokens.css",
+        include_bytes!("../../../hub-web/dist/cassy-tokens.css"),
+        "text/css; charset=utf-8",
     ),
     (
         "/commander/manifest.webmanifest",

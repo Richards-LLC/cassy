@@ -1494,6 +1494,13 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
     (summary, failures)
 }
 
+/// cas-ca55: a failed run with no named test whose log shows a compile
+/// infrastructure fault (sccache, linker, disk) is an environment blocker.
+fn environment_blocker(log: &str, failures: &[String]) -> Option<String> {
+    let _ = (log, failures);
+    None
+}
+
 fn append_epic_note(cas_dir: &Path, result: &SweepResult) {
     let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
         tracing::warn!(epic = %result.request.epic_id, "cannot open task store for merge sweep note");
@@ -1855,6 +1862,32 @@ mod tests {
         let (summary, failures) = summarize_log(temp.path());
         assert_eq!(summary, "Summary: 1 failed");
         assert_eq!(failures, vec!["FAIL [ 0.1s] crate::broken"]);
+    }
+
+    /// cas-ca55: a compile-infrastructure failure with no test name is an
+    /// environment blocker with its fix, never a test failure.
+    #[test]
+    fn compile_infra_failure_is_an_environment_blocker_cas_ca55() {
+        let sccache = "   Compiling cas v3.50.0\nerror: failed to execute compile\n\
+                       sccache: error: Server startup failed: cache storage failed to read\n\
+                       error: could not compile `cas` (lib)\n";
+        let (_, failures) = (String::new(), vec!["error: could not compile `cas` (lib) FAILED".to_owned()]);
+        let blocker = environment_blocker(sccache, &failures).expect("sccache is infra");
+        assert!(blocker.starts_with("environment blocker (sccache)"), "{blocker}");
+        assert!(blocker.contains("fix:"), "{blocker}");
+        assert!(!blocker.contains("nextest FAIL"), "{blocker}");
+
+        let linker = "error: linking with `cc` failed: exit status: 1\n  = note: collect2: error: ld returned 1 exit status\n";
+        assert!(environment_blocker(linker, &[]).unwrap().starts_with("environment blocker (linker)"));
+        let disk = "error: failed to write target/debug/deps/x.rlib: No space left on device (os error 28)\n";
+        assert!(environment_blocker(disk, &[]).unwrap().starts_with("environment blocker (disk)"));
+
+        // A named test failure is a test failure even when the log mentions infra.
+        let named = format!("{sccache}        FAIL [   0.2s] cas tests::broken\n");
+        let failures = vec!["FAIL [   0.2s] cas tests::broken".to_owned()];
+        assert_eq!(environment_blocker(&named, &failures), None);
+        // An ordinary compile error is not infrastructure.
+        assert_eq!(environment_blocker("error[E0308]: mismatched types\n", &[]), None);
     }
 
     #[test]

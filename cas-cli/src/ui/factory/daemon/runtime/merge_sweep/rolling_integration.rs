@@ -244,6 +244,30 @@ fn assemble(
     })
 }
 
+/// cas-ca55: the release an epic is targeted at, from its `release:<v>` label.
+fn epic_release(task: &Task) -> Option<&str> {
+    let _ = task;
+    None
+}
+
+/// cas-ca55: split out epics targeted at another release than `target`.
+fn hold_other_releases(tasks: Vec<Task>, target: Option<&str>) -> (Vec<Task>, Vec<(String, String)>) {
+    let _ = target;
+    (tasks, Vec::new())
+}
+
+/// cas-ca55: a supervisor-recorded resolution that already contains `base`
+/// and every epic tip.
+fn recorded_resolution(
+    root: &Path,
+    base: &str,
+    epics: &[EpicTip],
+    candidates: &[(String, String)],
+) -> Option<(String, String)> {
+    let _ = (root, base, epics, candidates);
+    None
+}
+
 fn open_epics(mut tasks: Vec<Task>) -> Vec<Task> {
     tasks.retain(|task| {
         task.task_type == TaskType::Epic
@@ -1846,6 +1870,71 @@ exit "$failed"
         assert_eq!(git(repo.path(), &["rev-parse", &second.branch]), second.tip);
         assert!(!repo.path().join(".git/MERGE_HEAD").exists());
     }
+    fn release_epic(id: &str, label: Option<&str>) -> Task {
+        let mut task = Task::new(id.to_owned(), id.to_owned());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(format!("epic/{id}"));
+        if let Some(label) = label {
+            task.labels = vec!["other".to_owned(), label.to_owned()];
+        }
+        task
+    }
+
+    /// cas-ca55: an epic targeted at the next release stays out of the union
+    /// while open, with no branch rename; unlabelled epics and those targeted
+    /// at the current release go in.
+    #[test]
+    fn next_release_epic_stays_out_of_the_sweep_cas_ca55() {
+        let tasks = vec![
+            release_epic("unlabelled", None),
+            release_epic("current", Some("release:3.51")),
+            release_epic("next", Some("release:3.52")),
+        ];
+        assert_eq!(epic_release(&tasks[2]), Some("3.52"));
+        let (included, held) = hold_other_releases(tasks.clone(), Some("3.51"));
+        let ids: Vec<_> = included.iter().map(|task| task.id.as_str()).collect();
+        assert_eq!(ids, ["unlabelled", "current"]);
+        assert_eq!(held, [("next".to_owned(), "3.52".to_owned())]);
+        // With no release being assembled, only `release:next` is held.
+        let mut tasks = tasks;
+        tasks.push(release_epic("later", Some("release:next")));
+        let (included, held) = hold_other_releases(tasks, None);
+        assert_eq!(included.len(), 3);
+        assert_eq!(held, [("later".to_owned(), "next".to_owned())]);
+    }
+
+    /// cas-ca55: a hand-resolved integration commit that contains main and
+    /// every epic is reused when the epics conflict.
+    #[test]
+    fn superset_resolution_branch_is_reused_cas_ca55() {
+        let repo = fixture();
+        let first = epic(repo.path(), "a", "shared", "first\n");
+        let second = epic(repo.path(), "b", "shared", "second\n");
+        git(repo.path(), &["checkout", "-b", "integration/resolved", &first.branch]);
+        let _ = Command::new("git")
+            .current_dir(repo.path())
+            .args(["merge", "--no-edit", &second.tip])
+            .output()
+            .unwrap();
+        fs::write(repo.path().join("shared"), "resolved\n").unwrap();
+        git(repo.path(), &["add", "shared"]);
+        git(repo.path(), &["-c", "core.hooksPath=/dev/null", "commit", "--no-edit"]);
+        let resolved = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let epics = [first.clone(), second.clone()];
+        let candidates = vec![
+            ("main".to_owned(), git(repo.path(), &["rev-parse", "main"])),
+            ("integration/resolved".to_owned(), resolved.clone()),
+        ];
+        assert_eq!(
+            recorded_resolution(repo.path(), "main", &epics, &candidates),
+            Some(("integration/resolved".to_owned(), resolved))
+        );
+        // A candidate missing one epic is not a resolution.
+        let partial = vec![("epic/a".to_owned(), first.tip.clone())];
+        assert_eq!(recorded_resolution(repo.path(), "main", &epics, &partial), None);
+    }
+
     #[test]
     fn clean_union_contains_both_epics_and_main() {
         let repo = fixture();

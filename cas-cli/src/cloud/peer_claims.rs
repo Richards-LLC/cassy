@@ -87,6 +87,11 @@ pub struct PeerHold {
     pub agent_id: String,
     pub holder: Option<ClaimHolder>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Whether Cassy Cloud lists the holder as a live agent: `Some(false)`
+    /// when it is missing from the user's agents or its last heartbeat is
+    /// older than [`crate::cloud::peers::PEER_LIVE_SECS`]; `None` when the
+    /// agent list could not be read.
+    pub live: Option<bool>,
 }
 
 impl PeerHold {
@@ -114,6 +119,25 @@ impl PeerHold {
 
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|at| at <= now)
+    }
+
+    /// A claim nobody is keeping: it ran out, or its holder is not a live
+    /// agent. Until petra-stella-cloud#150 lands the cloud still reports it
+    /// held, so the client treats it as stale (a warning, never a refusal).
+    pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
+        self.is_expired(now) || self.live == Some(false)
+    }
+
+    /// Why a stale claim is stale, for the warning.
+    pub fn stale_reason(&self, now: DateTime<Utc>) -> String {
+        if self.is_expired(now) {
+            format!("expired at {} without being released", self.until())
+        } else {
+            format!(
+                "belongs to an agent Cassy Cloud has not seen alive in the last {} minutes",
+                crate::cloud::peers::PEER_LIVE_SECS / 60
+            )
+        }
     }
 
     /// Advisory when this peer also works `epic_id`. `prefix` is the
@@ -162,7 +186,10 @@ impl PeerClaims {
     /// logged in to Cassy Cloud or has no canonical repository id. Then there
     /// is no peer to see, and nothing is said.
     pub fn for_project(cas_root: &Path) -> Option<Self> {
-        let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).ok()?;
+        // The project's own cloud config, as peer discovery (cas-e477) and the
+        // daemon's coordinator load it: a project that does not sync never
+        // reaches the cloud through the machine-wide login.
+        let config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
         if !config.is_logged_in() {
             return None;
         }
@@ -223,11 +250,43 @@ impl PeerClaims {
             };
         }
         let hold = self.hold(&key, &held_by);
-        if hold.is_expired(Utc::now()) {
+        if hold.is_stale(Utc::now()) {
             Acquire::StalePeer(hold)
         } else {
             Acquire::PeerHolds(hold)
         }
+    }
+
+    /// The holder as Cassy Cloud lists it: whether it is live, and its
+    /// name and machine from registration. `None` when the list is unreadable.
+    fn listed_holder(&self, held_by: &str) -> Option<(bool, Option<ClaimHolder>)> {
+        let agents = self.coordinator(held_by).ok()?.list_agent_infos().ok()?;
+        let Some(agent) = agents.into_iter().find(|agent| agent.id == held_by) else {
+            return Some((false, None));
+        };
+        let age = DateTime::parse_from_rfc3339(&agent.last_heartbeat)
+            .map(|at| (Utc::now() - at.with_timezone(&Utc)).num_seconds())
+            .unwrap_or(i64::MAX);
+        let live = !matches!(agent.status.as_str(), "stale" | "shutdown")
+            && age <= crate::cloud::peers::PEER_LIVE_SECS;
+        let machine = agent
+            .metadata
+            .get(crate::cloud::peers::META_HOSTNAME)
+            .cloned()
+            .or(agent.machine_id)
+            .unwrap_or_else(|| "an unknown machine".to_string());
+        let holder = ClaimHolder {
+            v: 1,
+            kind: String::new(),
+            name: agent.name,
+            machine,
+            project: agent
+                .metadata
+                .get(crate::cloud::peers::META_CANONICAL_ID)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        Some((live, Some(holder)))
     }
 
     /// Who holds `key`, read from the lock itself.
@@ -237,15 +296,19 @@ impl PeerClaims {
             .and_then(|coordinator| coordinator.get_lock(key))
             .ok()
             .flatten();
+        let agent_id = lock
+            .as_ref()
+            .map(|lock| lock.agent_id.clone())
+            .unwrap_or_else(|| held_by.to_string());
+        let listed = self.listed_holder(&agent_id);
         PeerHold {
-            agent_id: lock
-                .as_ref()
-                .map(|lock| lock.agent_id.clone())
-                .unwrap_or_else(|| held_by.to_string()),
             holder: lock
                 .as_ref()
-                .and_then(|lock| ClaimHolder::from_reason(lock.claim_reason.as_deref())),
+                .and_then(|lock| ClaimHolder::from_reason(lock.claim_reason.as_deref()))
+                .or_else(|| listed.as_ref().and_then(|(_, holder)| holder.clone())),
+            live: listed.map(|(live, _)| live),
             expires_at: lock.map(|lock| lock.expires_at),
+            agent_id,
         }
     }
 
@@ -260,12 +323,8 @@ impl PeerClaims {
         let lock = self.coordinator("peer-claims-reader")?.get_lock(&key)?;
         Ok(lock
             .filter(|lock| !is_local(&lock.agent_id))
-            .map(|lock| PeerHold {
-                holder: ClaimHolder::from_reason(lock.claim_reason.as_deref()),
-                agent_id: lock.agent_id,
-                expires_at: Some(lock.expires_at),
-            })
-            .filter(|hold| !hold.is_expired(Utc::now())))
+            .map(|lock| self.hold(&key, &lock.agent_id))
+            .filter(|hold| !hold.is_stale(Utc::now())))
     }
 
     /// Release the cloud claim on `task_id` when an agent of this database
@@ -431,19 +490,29 @@ mod tests {
         assert_eq!(holder.kind, "epic");
         assert_eq!(ClaimHolder::from_reason(Some(&holder.reason())), Some(holder.clone()));
         assert_eq!(ClaimHolder::from_reason(Some("Task started")), None);
-        let hold = PeerHold { agent_id: "a1".into(), holder: Some(holder), expires_at: None };
+        let hold = PeerHold { agent_id: "a1".into(), holder: Some(holder), expires_at: None, live: Some(true) };
         assert_eq!(hold.describe(), format!("alpha-sup on {}", hold.holder.as_ref().unwrap().machine));
-        let anonymous = PeerHold { agent_id: "a1".into(), holder: None, expires_at: None };
+        let anonymous = PeerHold { agent_id: "a1".into(), holder: None, expires_at: None, live: None };
         assert_eq!(anonymous.describe(), "agent a1");
         assert_eq!(anonymous.name(), "a1");
     }
 
     #[test]
-    fn a_hold_is_expired_only_past_its_expiry() {
+    fn a_hold_is_stale_when_it_ran_out_or_its_holder_is_not_live() {
         let now = Utc::now();
-        let hold = |at| PeerHold { agent_id: "a".into(), holder: None, expires_at: at };
-        assert!(hold(Some(now - chrono::Duration::seconds(1))).is_expired(now));
-        assert!(!hold(Some(now + chrono::Duration::seconds(60))).is_expired(now));
-        assert!(!hold(None).is_expired(now));
+        let hold = |at, live| PeerHold { agent_id: "a".into(), holder: None, expires_at: at, live };
+        let past = Some(now - chrono::Duration::seconds(1));
+        let future = Some(now + chrono::Duration::seconds(60));
+        assert!(hold(past, Some(true)).is_expired(now));
+        assert!(!hold(future, Some(true)).is_expired(now));
+        assert!(!hold(None, Some(true)).is_expired(now));
+        // Stale: ran out, or the holder is not a live agent; unknown liveness
+        // never makes a live claim stale.
+        assert!(hold(past, Some(true)).is_stale(now));
+        assert!(hold(future, Some(false)).is_stale(now));
+        assert!(!hold(future, None).is_stale(now));
+        assert!(!hold(future, Some(true)).is_stale(now));
+        assert!(hold(past, None).stale_reason(now).starts_with("expired at"));
+        assert!(hold(future, Some(false)).stale_reason(now).contains("not seen alive"));
     }
 }

@@ -34,6 +34,8 @@ struct FakeLock {
 #[derive(Default)]
 struct FakeState {
     locks: HashMap<String, FakeLock>,
+    /// Registered agents: id -> (name, hostname, last heartbeat).
+    agents: HashMap<String, (String, String, DateTime<Utc>)>,
     requests: Vec<String>,
 }
 
@@ -97,6 +99,19 @@ impl FakeCloud {
         let mut state = state.lock().unwrap();
         state.requests.push(format!("{method} {url}"));
         let body: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+        if method == "GET" && (url == "/api/agents" || url.starts_with("/api/agents?")) {
+            let agents: Vec<_> = state
+                .agents
+                .iter()
+                .map(|(id, (name, host, seen))| {
+                    serde_json::json!({"id": id, "name": name, "agent_type": "primary",
+                        "status": "active", "pid": null, "session_id": null, "machine_id": host,
+                        "last_heartbeat": seen.to_rfc3339(), "active_tasks": 0,
+                        "metadata": {"hostname": host, "canonical_id": PROJECT}})
+                })
+                .collect();
+            return (200, serde_json::json!({"status": "success", "agents": agents}));
+        }
         let Some(rest) = url.strip_prefix("/api/agents/tasks/") else {
             // Registration, heartbeats, sync: accepted and ignored.
             return (404, serde_json::json!({"error": "not found"}));
@@ -174,7 +189,16 @@ impl FakeCloud {
             .map(|(key, lock)| (key.clone(), lock.clone()))
     }
 
-    fn keys(&self) -> Vec<String> {
+    /// The daemon registered `machine`'s agent and it heartbeats now.
+    fn live(&self, machine: &Machine, name: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .agents
+            .insert(machine.agent_id.clone(), (name.to_string(), hostname(), Utc::now()));
+    }
+
+        fn keys(&self) -> Vec<String> {
         self.state.lock().unwrap().locks.keys().cloned().collect()
     }
 
@@ -295,6 +319,7 @@ async fn peer_start_is_refused_with_the_holders_identity_until_it_releases() {
         m.put_task("cas-p001", TaskType::Task);
     }
 
+    cloud.live(&alpha, "alpha-sup");
     let started = start(&alpha.core, "cas-p001", false).await.expect("alpha starts");
     let (key, lock) = cloud.active_lock("cas-p001").expect("alpha's start claims in the cloud");
     assert_eq!(lock.agent_id, alpha.agent_id, "{started}");
@@ -329,6 +354,7 @@ async fn force_overrides_a_peer_claim_with_a_visible_note() {
     for m in [&alpha, &bravo] {
         m.put_task("cas-p002", TaskType::Task);
     }
+    cloud.live(&alpha, "alpha-sup");
     start(&alpha.core, "cas-p002", false).await.unwrap();
     let forced = start(&bravo.core, "cas-p002", true).await.expect("force starts");
     assert!(forced.contains("alpha-sup"), "{forced}");
@@ -389,6 +415,7 @@ async fn claims_renew_while_working_and_a_dead_holders_claim_goes_stale() {
     for m in [&alpha, &bravo] {
         m.put_task("cas-p004", TaskType::Task);
     }
+    cloud.live(&alpha, "alpha-sup");
     start(&alpha.core, "cas-p004", false).await.unwrap();
     let before = cloud.active_lock("cas-p004").unwrap().1;
     let renewed = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
@@ -419,6 +446,7 @@ async fn epic_focus_overlap_warns_without_refusing() {
         m.child_of("cas-p005", "cas-pe01");
         m.child_of("cas-p006", "cas-pe01");
     }
+    cloud.live(&alpha, "alpha-sup");
     start(&alpha.core, "cas-p005", false).await.unwrap();
     assert!(cloud.active_lock("cas-pe01").is_some(), "the epic focus is claimed too");
     let shared = start(&bravo.core, "cas-p006", false)
@@ -488,3 +516,25 @@ async fn in_progress_elsewhere_names_the_remote_assignee() {
     assert!(started.to_lowercase().contains("another machine"), "{started}");
 }
 
+/// Until the cloud expires claims itself (petra-stella-cloud#150), a claim
+/// whose holder Cassy Cloud does not list as a live agent is stale: the peer
+/// starts with a warning instead of being refused.
+#[tokio::test]
+async fn a_claim_whose_holder_is_not_a_live_agent_is_stale() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
+    for m in [&alpha, &bravo] {
+        m.put_task("cas-p010", TaskType::Task);
+    }
+    // alpha claims, but its daemon never registered (or long stopped).
+    start(&alpha.core, "cas-p010", false).await.unwrap();
+    let taken = start(&bravo.core, "cas-p010", false)
+        .await
+        .expect("a claim nobody keeps alive does not block");
+    assert!(taken.contains("alpha-sup"), "{taken}");
+    assert!(taken.contains("STALE PEER CLAIM"), "{taken}");
+    assert!(taken.contains("not seen alive"), "{taken}");
+}

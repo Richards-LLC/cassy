@@ -232,10 +232,10 @@ impl CasCore {
                     }
                     Acquire::PeerHolds(hold) => hold.shared_epic_note(&req.task_id, &prefix),
                     Acquire::StalePeer(hold) => format!(
-                        "\n⚠️  STALE PEER CLAIM — {}'s claim on {} expired at {} without being released; claimed here on the local lease.",
+                        "\n⚠️  STALE PEER CLAIM — {}'s claim on {} {}; claimed here on the local lease.",
                         hold.describe(),
                         req.task_id,
-                        hold.until(),
+                        hold.stale_reason(chrono::Utc::now()),
                     ),
                     Acquire::Unavailable(reason) => format!(
                         "\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}); other machines' claims on {} could not be checked.",

@@ -2037,10 +2037,10 @@ impl CasCore {
                 }
                 Acquire::StalePeer(hold) => {
                     peer_notes.push_str(&format!(
-                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} expired at {} without being released (their machine stopped renewing it). Started here on the local lease. Cassy Cloud still lists them as the holder until it expires the claim (petra-stella-cloud#150).",
+                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} {} (their machine stopped renewing it). Started here on the local lease. Cassy Cloud still lists them as the holder until it expires the claim (petra-stella-cloud#150).",
                         hold.describe(),
                         req.id,
-                        hold.until(),
+                        hold.stale_reason(chrono::Utc::now()),
                     ));
                 }
                 Acquire::Unavailable(reason) => {

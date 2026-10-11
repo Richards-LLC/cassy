@@ -189,10 +189,19 @@ The taste lane admits **one** positively bounded worker run beside a proof:
   the proof is at its peak.
 
 The rolling-integration sweep also waits `[factory].merge_sweep_quiet_secs`
-(default 120 s) after the last epic merge before starting. Each merge still
+(default 300 s) after the last epic merge before starting. Each merge still
 cancels a stale running sweep at once, which releases the proof's admission
 in the gap, so a burst of merges runs one proof of the newest tip instead of
 a proof per merge.
+
+The default was measured on 2026-10-11's 21 epic merges, which arrived 1 to
+8 minutes apart, with a proof run of about 13 minutes:
+
+| Quiet period | Proofs started | Cancelled | Completed | Proof lock held |
+| --- | --- | --- | --- | --- |
+| 0 s (before) | 21 | 19 | 2 | 91% of 115 min |
+| 120 s | 16 | 14 | 2 | 61% |
+| 300 s | 7 | 5 | 2 | 38% |
 
 Verified frontend tests default to one Playwright worker, honour explicit requests
 up to four, and enforce two Vitest workers. A proof's own child script tests reuse

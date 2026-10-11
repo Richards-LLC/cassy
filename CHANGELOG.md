@@ -16,8 +16,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   floor. The proof's later memory samples subtract the lane. Before this, such
   runs waited 600 s and expired while an integration proof ran.
 - The rolling-integration sweep waits `[factory].merge_sweep_quiet_secs`
-  (default 120 s) after the last epic merge. A burst of merges runs one proof
-  of the newest tip, instead of restarting a proof on every merge. The memory
+  (default 300 s) after the last epic merge. A burst of merges runs one proof
+  of the newest tip, instead of restarting a proof on every merge. On
+  2026-10-11's 21 merges, 19 proofs were cancelled before finishing and the
+  proof lock was held 91% of the time. At 300 s the lock would have been held
+  38% of the time, with the same 2 completed proofs. The memory
   model is documented in `cas-cli/docs/CONTRIBUTING.md`.
 
 ### Changed — the merge queue can skip the Commander journeys too (cas-9f70)

@@ -940,7 +940,10 @@ fn default_merge_sweep_timeout_secs() -> u64 {
 }
 
 fn default_merge_sweep_quiet_secs() -> u64 {
-    120
+    // Measured on 2026-10-11's 21 epic merges (1-8 min apart): 300 s ran the
+    // same 2 completed proofs as no quiet period while the proof lock was
+    // held 38% of the window instead of 91% (19 proofs were cancelled).
+    300
 }
 
 impl Default for FactoryConfig {

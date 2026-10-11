@@ -280,7 +280,7 @@ detached merged-tip worktree. The sweep is asynchronous and capped by
 `<cas-root>/merge-sweeps/` log before accepting another merge when it reports
 `FAILED`, `TIMED OUT`, or `SETUP FAILED`. Set `[factory].merge_sweep = false`
 only when the host cannot absorb this additional validation load.
-The sweep starts `[factory].merge_sweep_quiet_secs` (default 120 s) after the
+The sweep starts `[factory].merge_sweep_quiet_secs` (default 300 s) after the
 last epic merge. A burst of merges runs one sweep of the newest tip, and each
 merge cancels a stale running sweep at once. Set it to 0 to start immediately.
 A project whose suites need their own script or environment sets

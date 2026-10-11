@@ -2151,7 +2151,7 @@ mod tests {
     #[test]
     fn cas_833e_quiet_period_comes_from_factory_config() {
         let mut config = FactoryConfig::default();
-        assert_eq!(SweepSettings::from(&config).quiet, Duration::from_secs(120));
+        assert_eq!(SweepSettings::from(&config).quiet, Duration::from_secs(300));
         config.merge_sweep_quiet_secs = 0;
         assert_eq!(SweepSettings::from(&config).quiet, Duration::ZERO);
     }

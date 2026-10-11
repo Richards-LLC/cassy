@@ -285,7 +285,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         name: "Post-Merge Sweep Quiet Period",
         description: "Seconds with no further epic merge before the rolling integration sweep starts. A burst of merges runs one sweep of the newest tip; each merge still cancels a stale running sweep. 0 starts immediately.",
         value_type: ConfigType::Int,
-        default: "120",
+        default: "300",
         constraint: Constraint::Range(0, 3_600),
         advanced: true,
         requires_feature: None,

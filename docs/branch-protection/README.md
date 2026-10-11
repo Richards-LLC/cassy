@@ -107,3 +107,95 @@ The two context strings in the JSON are exact matches for job `name:` values in
 without updating this file silently makes the required check un-reportable, and every affected
 ref becomes unmergeable until it is fixed. GH #138 already renamed these jobs once. See the
 "CI check names are pinned" section in [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md).
+
+## 3. Merge-queue full-gate reuse (cas-4cb8)
+
+Release 3.47.0's queue entry spent 15.5 of its 19.4 minutes in the preflight
+job (`docs/ci/merge-queue-time.md`). Commander web took 587 s of that, the
+release publication guards 260 s, and the compile checks 72 s. The suite
+shards ran in parallel. All of it re-proved tree `f1bab7758`, which the
+release train's full gate had already proven, except for one thing: the
+full gate runs no Commander journeys. This section records the review behind
+the reuse, which skips only what the full gate proved.
+
+### Required contexts and how each is satisfied
+
+| Required context | On a queue tree with a matching full-gate receipt | Otherwise |
+| --- | --- | --- |
+| `Fast Validation` | Reports success only if the preflight job succeeds. The rollup's "Report the full-gate receipt reused by this merge-queue run" step requires `PREFLIGHT == success`. The suite build, shards, fan-in and doctest jobs are skipped (`run-fast-validation == 'false'`). The preflight runs, minus the steps the full gate proved. | All lanes run, and the rollup requires each to succeed (unchanged). |
+| `macOS Check` | Runs in full on the queue tree. The local gate runs on Linux and cannot prove Darwin: `macos-check` runs when `reuse-source == 'full-gate'`. | Runs in full (unchanged). |
+
+The ruleset is unchanged: the same two contexts are required, and both still
+report on the `merge_group` SHA. Every required context still starts at
+enqueue, so the 15-minute `check_response_timeout_minutes` is unaffected.
+
+### What the preflight still runs on reuse
+
+| Preflight step | On reuse | Why |
+| --- | --- | --- |
+| Commander web: typecheck, unit tests, build, visual QA, dist drift | skipped | Full-gate rows `hub-web-tests`, `hub-web-visual-qa`, `hub-web-dist-drift` |
+| Commander journeys (`npm run journeys -- --workers=4`) | **runs** | The full gate has no journeys row |
+| Release publication guards (`make -C cas-cli test-ci-tiers`) | skipped | Full-gate row `ci-script-tests` runs the same target (it includes `test-cas-install.sh`) |
+| `cargo check -p cas`, portable ISA audit test, `cargo build -p cas --no-default-features` | **run** | Cheap (72 s on 3.47.0); the no-MCP-proxy build has no full-gate row |
+| Installer fixtures, trust-boundary checks, toolchain setup | run | Unchanged, seconds |
+
+The suite shards and doctests are skipped. The full gate's `nextest`,
+`workspace-tests` and `doctests` rows proved them on this tree.
+
+The expected saving on a release like 3.47.0 is the 260 s of publication
+guards, plus the Commander non-journey work, off the preflight critical path.
+The queue then waits on the longer of the journeys and `macOS Check`.
+Measuring the real saving takes one live queue run, recorded under the next
+release's `release-latency.receipt`. A follow-up can also skip the journeys
+once the train's receipt carries a full-journeys proof for the same tree.
+
+### What counts as a receipt
+
+`scripts/check-ci-merge-queue-validation.sh` (the
+`fast-validation-main-push-dedupe` job) sets `reuse-source=full-gate` on
+`merge_group` only when every one of these holds. If anything is missing or
+ambiguous, it runs the full validation:
+
+1. The queue ref is `gh-readonly-queue/<base>/pr-<N>-<sha>`, and PR `<N>`
+   resolves to a head SHA.
+2. That head's tree is the queue tree (`HEAD^{tree}`), so the PR was up to date
+   with `main` and the queue merge changed nothing. A batched or rebased entry
+   has a different tree and runs in full.
+3. The newest `cas/full-gate` status on that head is `success`, with the
+   description exactly `PASS tree=<queue tree>`. A later failing status
+   supersedes an earlier pass.
+
+The release train posts that status in `--pipeline`
+(`post_full_gate_tree_receipt`). It does so right after pushing the commit
+that `gate.full.sha` proved: a full `release-gate.sh` run, not `--only`, on
+that exact SHA. The pipeline already refuses a stale or partial gate, so the
+status is only ever posted for a tree the full gate passed.
+
+### Trust
+
+A `cas/full-gate` status can be posted by anyone with write access to the
+repository: the same people who can push to `main`'s queue in the first place.
+The status is a claim about one tree, checked against the queue tree byte for
+byte, so a stale or mistyped claim cannot cover different code.
+
+### Proof
+
+- Fixture proof: `scripts/ci_tiers/executable-contracts.sh` drives the guard
+  with a fake `gh`. A matching receipt sets `reuse-source=full-gate`. A tree
+  mismatch, a receipt naming another tree, a failed or superseded status,
+  another context, no status, an API error, or a queue ref without a PR
+  number all run the full validation.
+- `scripts/ci_tiers/test-policy.py` pins the workflow on reuse:
+  - only the suite and doctests are skipped;
+  - the preflight still runs the journeys and compile checks;
+  - only the publication guards and the gate-covered Commander steps are
+    skipped;
+  - the rollup requires the preflight;
+  - `macOS Check` runs.
+- Dry run against the live API: the guard was pointed at 3.47.0's PR #1134
+  (head `f084dd7b5`, tree `f1bab7758`, the queue tree). It resolved the head
+  and matched the tree, found no `cas/full-gate` status (none was posted
+  then), and kept the full validation. Record:
+  `~/.cas/artifacts/<project>/cas-4cb8/dry-run.{log,output}`.
+- `scripts/test-release-train.sh` checks that `--pipeline` posts the status for
+  the proven SHA and its tree.

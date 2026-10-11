@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — the merge queue reuses the release train's full gate (cas-4cb8)
+
+- When `--pipeline` pushes a release commit that the full gate proved, it
+  posts a `cas/full-gate` status naming that commit's tree. On a merge-queue
+  entry whose tree is exactly that tree, Fast Validation skips the nextest
+  suite, the doctests and the preflight steps the full gate already ran
+  (Commander typecheck, unit tests, build, visual QA, dist drift, and the
+  release publication guards). The Commander journeys, the compile checks and
+  `macOS Check` still run. Any other tree runs the full validation.
+- `docs/branch-protection/README.md` section 3 records the required-context
+  review. The ruleset itself is unchanged.
+
 ### Fixed — the close gate names a missing qa-bundle citation (cas-147e)
 
 - When a user-facing task's notes cite no `qa-bundle:` and its

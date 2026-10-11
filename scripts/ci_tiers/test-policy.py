@@ -224,6 +224,38 @@ fi
             mutate(changed)
             self.assertFalse(valid(changed))
 
+    def test_queue_full_gate_reuse_skips_linux_lanes_but_never_macos_cas_4cb8(self):
+        jobs = self.ci()['jobs']
+        dedupe = jobs['fast-validation-main-push-dedupe']
+        self.assertEqual(dedupe['outputs']['reuse-source'], '${{ steps.tree-dedupe.outputs.reuse-source }}')
+        reuse = "needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'"
+        run = "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'"
+        def macos_runs_on_reuse(job):
+            return reuse in job['if'] and run in job['if']
+        self.assertTrue(macos_runs_on_reuse(jobs['macos-check']))
+        changed = copy.deepcopy(jobs['macos-check']); changed['if'] = changed['if'].replace(reuse, "false")
+        self.assertFalse(macos_runs_on_reuse(changed))
+        # The suite and doctests are proven by the full gate and skip on reuse.
+        for name in ['fast-validation-suite-build', 'fast-validation-suite-shards',
+                     'fast-validation-suite', 'fast-validation-docs']:
+            with self.subTest(job=name):
+                self.assertIn(run, jobs[name]['if'])
+                self.assertNotIn('full-gate', jobs[name]['if'])
+        # The preflight still runs on reuse: the full gate runs no journeys.
+        preflight = jobs['fast-validation-preflight']
+        self.assertIn(reuse, preflight['if'])
+        by_name = {step.get('name', ''): step for step in preflight['steps']}
+        web = by_name['Build and test Commander web assets']
+        self.assertEqual(web['env']['FULL_GATE_REUSE'], "${{ " + reuse + " }}")
+        self.assertIn('npm run journeys -- --workers=4', web['run'].split('exit 0', 1)[0])
+        guards = by_name['Test release publication guards']
+        self.assertIn("reuse-source != 'full-gate'", guards['if'])
+        for kept in ['Check', 'Test portable x86_64 ISA audit', 'Build (without MCP proxy)']:
+            self.assertNotIn('full-gate', by_name[kept].get('if', ''), kept)
+        rollup = {step.get('name', ''): step for step in jobs['fast-validation']['steps']}
+        report = rollup['Report the full-gate receipt reused by this merge-queue run']
+        self.assertIn('test "$PREFLIGHT" = success', report['run'])
+
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']
         def counts():

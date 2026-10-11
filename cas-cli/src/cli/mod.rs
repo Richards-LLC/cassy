@@ -58,7 +58,7 @@ pub mod interactive;
 pub(crate) mod jev;
 mod limits;
 mod list;
-mod mcp_cmd;
+pub(crate) mod mcp_cmd;
 pub mod memory;
 mod open;
 mod queue;

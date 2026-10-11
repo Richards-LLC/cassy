@@ -24,6 +24,7 @@ export interface WriteAccessContext {
 }
 
 export const WRITE_ACCESS_TITLE = "Write access outside the worktree";
+const WRITE_ACCESS_TITLE_ID = "write-grant-title";
 
 function labelled(document: Document, text: string, control: HTMLElement): HTMLLabelElement {
   const label = document.createElement("label");
@@ -50,10 +51,12 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   panel.className = "fleet-ops-panel write-grant";
   panel.setAttribute("role", "group");
   // cas-4cf2: the visible title is the accessible name; a phone sheet names
-  // its close button for the panel.
-  panel.setAttribute("aria-label", WRITE_ACCESS_TITLE);
+  // its close button for the panel. cas-68d0 F01: an h3 under the rail's h2,
+  // naming the group by reference so the name is spoken once.
+  panel.setAttribute("aria-labelledby", WRITE_ACCESS_TITLE_ID);
   panel.dataset.closeLabel = "Close write access";
-  const title = document.createElement("h4");
+  const title = document.createElement("h3");
+  title.id = WRITE_ACCESS_TITLE_ID;
   title.className = "write-grant-title";
   title.textContent = WRITE_ACCESS_TITLE;
   const lead = document.createElement("p");

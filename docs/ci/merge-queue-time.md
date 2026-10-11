@@ -57,8 +57,9 @@ holds by construction for `release/<ver>`, because the cut rebases it onto
 main. So on `merge_group`, `check-ci-tree-validation.sh` could look up
 `pr-validated-tree-<HEAD^{tree}>`. Given a completed, successful
 `pull_request` run for that tree, the required contexts could report success
-without re-running the preflight and suite shards. On 3.47.0 that saves about
-17 of the queue's 19.4 minutes.
+without re-running the preflight and suite shards. That was the upper bound, about 17 of
+the queue's 19.4 minutes on 3.47.0. The full gate runs no Commander journeys, so
+the implementation below keeps them, and the real saving is smaller.
 
 Constraints for the implementation:
 
@@ -73,9 +74,12 @@ Constraints for the implementation:
 - The ISA audit and other publish-time checks stay where they are. 3.47.0's
   real delay was a publish blocker, and no CI receipt removes that.
 
-This is not implemented in cas-12ab. It changes which required contexts
-actually run on `merge_group`, and that needs its own task, one queue run as
-a proof, and the branch-protection review in `docs/branch-protection/`.
+cas-4cb8 implements this with the release train's own full-gate receipt rather
+than the PR run's: a `cas/full-gate` status on the proven SHA, naming its tree.
+On a matching queue tree, the suite, doctests and gate-covered preflight
+steps are skipped. The Commander journeys (no full-gate row), the compile
+checks and `macOS Check` still run. The branch-protection review is section 3 of
+`docs/branch-protection/README.md`.
 
 ## What cas-12ab changed for factory lanes
 

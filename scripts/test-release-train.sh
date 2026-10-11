@@ -1697,6 +1697,10 @@ new_gh_stub() {
 #!/usr/bin/env bash
 state="$GH_STUB_STATE"
 printf '%s\n' "$*" >> "$state/calls.log"
+# cas-4cb8: the full-gate tree receipt is not part of the scripted poll sequence.
+if [[ "$1 $2 $3" == 'api --method POST' && "$*" == *'/statuses/'* ]]; then
+    exit 0
+fi
 # PR-run visibility is independent of the scripted merge-queue poll sequence.
 if [[ "$1 $2" == 'run list' && "$*" == *'--event pull_request'* ]]; then
     printf '[{"headSha":"%s"}]\n' "$GH_STUB_HEAD"
@@ -2012,6 +2016,14 @@ if grep -q 'pr comment' "$state/calls.log"; then
     ok 'the gate receipt is commented on the PR'
 else
     bad 'no gate receipt comment was posted'
+fi
+# cas-4cb8: the merge queue reuses the full gate only through this receipt.
+ok_sha="$(git -C "$wt_ok" rev-parse HEAD)"
+ok_tree="$(git -C "$wt_ok" rev-parse 'HEAD^{tree}')"
+if grep -qF "api --method POST repos/Richards-LLC/cassy/statuses/$ok_sha -f state=success -f context=cas/full-gate -f description=PASS tree=$ok_tree" "$state/calls.log"; then
+    ok 'the full-gate tree receipt is posted as a cas/full-gate status on the proven sha'
+else
+    bad "no cas/full-gate status for $ok_sha tree $ok_tree: $(grep statuses "$state/calls.log" || echo none)"
 fi
 
 # Gap 5: enqueue waits for GitHub to resolve mergeability and report the

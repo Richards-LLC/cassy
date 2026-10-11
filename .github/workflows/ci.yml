@@ -267,12 +267,16 @@ jobs:
       run-fast-validation: ${{ steps.tree-dedupe.outputs.run-fast-validation }}
       validating-run-id: ${{ steps.tree-dedupe.outputs.validating-run-id }}
       prior-run-url: ${{ steps.tree-dedupe.outputs.prior-run-url }}
+      reuse-source: ${{ steps.tree-dedupe.outputs.reuse-source }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      # cas-4cb8: on merge_group this also accepts the release train's
+      # full-gate receipt for the exact queue tree (see
+      # docs/branch-protection/README.md, "Merge-queue full-gate reuse").
       - id: tree-dedupe
         name: Check for successful merge-queue validation of this tree
         env:
@@ -675,11 +679,16 @@ jobs:
   # compiling the PR head and its merge tree back-to-back. When the explicitly
   # trusted merge-queue runner is enabled, its persistent target and sccache
   # make all three compiling Linux lanes warm across synthetic queue refs.
+  # cas-4cb8: on a queue tree the release train's full gate already proved,
+  # this job still runs, but only the work the full gate does not cover: the
+  # Commander journeys, `cargo check`, the ISA audit test and the build without
+  # the MCP proxy. See docs/branch-protection/README.md section 3.
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -770,8 +779,20 @@ jobs:
         working-directory: hub-web
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+          FULL_GATE_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate' }}
         run: |
           npm ci
+          if [[ "$FULL_GATE_REUSE" == true ]]; then
+            # cas-4cb8: the full gate proved typecheck, unit tests, build,
+            # visual QA and dist drift on this tree; it does not run journeys.
+            if sudo -n true 2>/dev/null; then
+              npx playwright install --with-deps chromium
+            else
+              npx playwright install chromium
+            fi
+            npm run journeys -- --workers=4
+            exit 0
+          fi
           npm run typecheck
           npm test
           # cas-4ce5: the failure upload below really matches files in the hidden .results dir.
@@ -820,7 +841,10 @@ jobs:
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
       - name: Test release publication guards
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        # cas-4cb8: the full gate's ci-script-tests row runs this same target.
+        if: >-
+          steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-main-push-dedupe.outputs.reuse-source != 'full-gate'
         run: |
           if ! python3 -c 'import yaml' 2>/dev/null; then
             python3 -m venv "$RUNNER_TEMP/ci-tiers-venv"
@@ -1309,6 +1333,21 @@ jobs:
           echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run $VALIDATING_RUN_ID already validated this exact tree: $PRIOR_RUN_URL"
           echo "Fast Validation reused successful merge-queue run [$VALIDATING_RUN_ID]($PRIOR_RUN_URL)." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Report the full-gate receipt reused by this merge-queue run
+        if: >-
+          github.event_name == 'merge_group'
+          && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
+          && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
+        env:
+          PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
+          VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
+          PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
+        run: |
+          # The journeys and compile checks the full gate does not cover still ran.
+          test "$PREFLIGHT" = success
+          echo "::notice title=Fast Validation reused the full gate::The release train's full gate proved this exact tree ($VALIDATING_RUN_ID): $PRIOR_RUN_URL. Skipped the suite, doctests and gate-covered preflight steps; the journeys, compile checks and macOS Check ran."
+          echo "Fast Validation reused the release train's full gate ($VALIDATING_RUN_ID, $PRIOR_RUN_URL) for the suite, doctests and gate-covered preflight steps. The Commander journeys, compile checks and macOS Check ran on the queue tree." >> "$GITHUB_STEP_SUMMARY"
+
       # This artifact is published only after the merge-group Fast Validation
       # fan-in passes. A later main push may reuse it only after the workflow
       # itself concludes successfully, so it cannot turn a partial queue run
@@ -1408,7 +1447,8 @@ jobs:
     if: >-
       always() && needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'pull_request'
-      || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true')
+      || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'

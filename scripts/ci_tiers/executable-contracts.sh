@@ -501,6 +501,16 @@ case "${FAKE_GH_MODE:?}:$*" in
   merge-wrong-event:*actions/artifacts*) printf '%s\n' '{"artifacts":[{"expired":false,"workflow_run":{"id":791}}]}' ;;
   merge-wrong-event:*actions/runs/791*) printf '%s\n' '{"event":"push","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/791"}' ;;
   miss:*actions/artifacts*) printf '%s\n' '{"artifacts":[]}' ;;
+  gate-*:*pulls/1134*) printf '%s\n' '{"head":{"sha":"1111111111111111111111111111111111111111"}}' ;;
+  gate-tree-mismatch:*git/commits/1111111111111111111111111111111111111111*) printf '%s\n' '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
+  gate-*:*git/commits/1111111111111111111111111111111111111111*) printf '{"tree":{"sha":"%s"}}\n' "${FAKE_TREE:?}" ;;
+  gate-hit:*statuses*) printf '[{"context":"cas/full-gate","state":"success","description":"PASS tree=%s","target_url":"https://example.test/gate"}]\n' "$FAKE_TREE" ;;
+  gate-tree-mismatch:*statuses*) printf '[{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
+  gate-status-other-tree:*statuses*) printf '%s\n' '[{"context":"cas/full-gate","state":"success","description":"PASS tree=3333333333333333333333333333333333333333"}]' ;;
+  gate-failed:*statuses*) printf '[{"context":"cas/full-gate","state":"failure","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
+  gate-superseded:*statuses*) printf '[{"context":"cas/full-gate","state":"failure","description":"FAIL tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
+  gate-other-context:*statuses*) printf '[{"context":"ci/other","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
+  gate-missing:*statuses*) printf '%s\n' '[]' ;;
   error:*) exit 1 ;;
   *) exit 2 ;;
 esac
@@ -548,6 +558,39 @@ for mode in miss merge-in-progress merge-wrong-event error; do
     require_text "$output_path" 'run-fast-validation=true' "$mode merge-queue evidence fails closed to Fast Validation"
     require_absent "$output_path" 'run-fast-validation=false' "$mode merge-queue evidence never dedupes"
 done
+
+require_text "$merge_hit_output" 'reuse-source=merge-queue' 'main-push reuse names the merge-queue receipt'
+
+# cas-4cb8: a merge_group run reuses the release train's full-gate receipt for
+# the exact tree: the PR head carries a `cas/full-gate` success status naming
+# that tree, and the PR head's tree is the queue tree. Anything else runs the
+# full Fast Validation.
+run_queue_gate_guard() {
+    local mode="$1"
+    local output="$guard_tmp/queue-$mode.output"
+    : >"$output"
+    GITHUB_OUTPUT="$output" GITHUB_EVENT_NAME=merge_group \
+        GITHUB_REF="refs/heads/gh-readonly-queue/main/pr-1134-4444444444444444444444444444444444444444" \
+        GITHUB_REPOSITORY=example/repo FAKE_GH_MODE="$mode" FAKE_TREE="$guard_tree" \
+        FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
+    cat "$output"
+}
+gate_hit_output="$(run_queue_gate_guard gate-hit)"
+require_text "$gate_hit_output" 'run-fast-validation=false' 'a matching full-gate tree receipt skips the queue Fast Validation lanes'
+require_text "$gate_hit_output" 'reuse-source=full-gate' 'queue reuse names the full-gate receipt'
+require_text "$gate_hit_output" 'prior-run-url=https://example.test/gate' 'queue reuse exposes the gate receipt URL'
+require_text "$gate_hit_output" 'validating-run-id=full-gate:1111111111111111111111111111111111111111' 'queue reuse names the proven PR head'
+for mode in gate-tree-mismatch gate-status-other-tree gate-failed gate-superseded gate-other-context gate-missing error; do
+    output_path="$(run_queue_gate_guard "$mode")"
+    require_text "$output_path" 'run-fast-validation=true' "$mode full-gate evidence fails closed to the full queue validation"
+    require_absent "$output_path" 'run-fast-validation=false' "$mode full-gate evidence never skips the queue validation"
+done
+non_queue_output="$guard_tmp/queue-non-pr-ref.output"
+: >"$non_queue_output"
+GITHUB_OUTPUT="$non_queue_output" GITHUB_EVENT_NAME=merge_group GITHUB_REF=refs/heads/gh-readonly-queue/main/unknown \
+    GITHUB_REPOSITORY=example/repo FAKE_GH_MODE=gate-hit FAKE_TREE="$guard_tree" \
+    FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
+require_absent "$(<"$non_queue_output")" 'run-fast-validation=false' 'a queue ref without a PR number never skips'
 
 mutated_guard="$guard_tmp/check-ci-merge-queue-validation-mutated.sh"
 sed 's/\.event == "merge_group"/.event == "push"/' "$merge_queue_guard" >"$mutated_guard"

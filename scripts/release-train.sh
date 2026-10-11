@@ -480,6 +480,21 @@ mergeability_and_checks_ready() {
     ' >/dev/null 2>&1
 }
 
+# cas-4cb8: tell the merge queue that this exact tree passed the full gate. The
+# queue's Fast Validation reuses a `cas/full-gate` success status whose
+# description names the queue tree (scripts/check-ci-merge-queue-validation.sh);
+# macOS Check still runs there. Best effort: without it the queue validates in full.
+post_full_gate_tree_receipt() {
+    local repo_slug="$1" sha="$2" tree
+    tree="$(git -C "$worktree" rev-parse "$sha^{tree}" 2>/dev/null)" || return 0
+    if gh_cmd api --method POST "repos/$repo_slug/statuses/$sha" -f state=success -f context=cas/full-gate \
+        -f "description=PASS tree=$tree" >/dev/null 2>&1; then
+        pipeline_log "full-gate receipt posted: cas/full-gate PASS tree=$tree on $sha"
+    else
+        pipeline_log "full-gate receipt not posted on $sha; the merge queue will run the full Fast Validation"
+    fi
+}
+
 run_pipeline() {
     local gate_status gate_sha current_sha
     gate_status="$(cat "$run_dir/gate.done" 2>/dev/null || true)"
@@ -542,6 +557,7 @@ run_pipeline() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$branch" "${pushed_sha:-none}" "$gate_sha" "$lease" \
         >>"$run_dir/pipeline.pushes.log"
     pipeline_log "pushed $branch local=$gate_sha previous=${pushed_sha:-none} lease=$lease"
+    post_full_gate_tree_receipt "$repo_slug" "$gate_sha"
 
     local pr_number
     pr_number="$(gh_cmd pr list -R "$repo_slug" --head "$branch" --json number 2>/dev/null \

@@ -64,8 +64,18 @@ pub fn identity_metadata(
     focus: Option<&str>,
     hostname: Option<&str>,
 ) -> HashMap<String, String> {
-    let _ = (agent, canonical_id, focus, hostname);
-    HashMap::new()
+    let mut metadata = agent.metadata.clone();
+    let mut put = |key: &str, value: Option<&str>| {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            metadata.insert(key.to_string(), value.to_string());
+        }
+    };
+    put(META_ROLE, Some(&agent.role.to_string().to_lowercase()));
+    put(META_CANONICAL_ID, canonical_id);
+    put(META_FOCUS, focus);
+    put(META_FACTORY_SESSION, agent.factory_session.as_deref());
+    put(META_HOSTNAME, hostname);
+    metadata
 }
 
 /// The supervisors of `canonical_id` among `agents`, excluding `self_id`.
@@ -82,15 +92,83 @@ pub fn repo_peers(
     self_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Vec<Peer> {
-    let _ = (agents, canonical_id, alias_class, self_id, now);
-    Vec::new()
+    let meta = |agent: &AgentInfo, key: &str| {
+        agent
+            .metadata
+            .get(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let mut peers: Vec<Peer> = agents
+        .iter()
+        .filter(|agent| Some(agent.id.as_str()) != self_id)
+        .filter(|agent| agent.status != "shutdown")
+        .filter(|agent| meta(agent, META_ROLE).as_deref() == Some("supervisor"))
+        .filter(|agent| {
+            meta(agent, META_CANONICAL_ID).is_some_and(|repo| {
+                crate::cloud::project_ids_match_with_aliases(&repo, canonical_id, alias_class)
+            })
+        })
+        .filter_map(|agent| {
+            let last_heartbeat = DateTime::parse_from_rfc3339(&agent.last_heartbeat)
+                .ok()?
+                .with_timezone(&Utc);
+            let heartbeat_age_secs = (now - last_heartbeat).num_seconds().max(0);
+            (heartbeat_age_secs <= PEER_LISTING_WINDOW_SECS).then(|| Peer {
+                agent_id: agent.id.clone(),
+                name: agent.name.clone(),
+                machine: meta(agent, META_HOSTNAME)
+                    .or_else(|| agent.machine_id.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                machine_id: agent.machine_id.clone(),
+                session: meta(agent, META_FACTORY_SESSION),
+                canonical_id: meta(agent, META_CANONICAL_ID),
+                focus: meta(agent, META_FOCUS),
+                last_heartbeat,
+                heartbeat_age_secs,
+                live: heartbeat_age_secs <= PEER_LIVE_SECS,
+            })
+        })
+        .collect();
+    peers.sort_by(|a, b| {
+        b.live
+            .cmp(&a.live)
+            .then(a.heartbeat_age_secs.cmp(&b.heartbeat_age_secs))
+            .then(a.name.cmp(&b.name))
+    });
+    peers
+}
+
+/// `45s`, `15m`, `3h`, `2d`.
+fn age(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
 }
 
 /// Human-readable lines for `worker_status`, `cas status` and
 /// `coordination action=peers`.
 pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
-    let _ = (canonical_id, peers);
-    String::new()
+    let mut out = format!("Peers ({canonical_id}, via Cassy Cloud):\n");
+    if peers.is_empty() {
+        out.push_str("  no other supervisors of this repo seen in the last 24h\n");
+        return out;
+    }
+    for peer in peers {
+        let state = if peer.live { "live" } else { "stale" };
+        out.push_str(&format!(
+            "  {} [{state}] machine {} | session {} | focus {} | heartbeat {} ago\n",
+            peer.name,
+            peer.machine,
+            peer.session.as_deref().unwrap_or("-"),
+            peer.focus.as_deref().unwrap_or("-"),
+            age(peer.heartbeat_age_secs),
+        ));
+    }
+    out
 }
 
 /// Result of a peer lookup for one project.
@@ -109,8 +187,27 @@ pub fn discover_peers(
     cas_root: &Path,
     self_id: Option<&str>,
 ) -> Result<PeerDiscovery, crate::error::CasError> {
-    let _ = (cas_root, self_id);
-    Ok(PeerDiscovery::NoProjectIdentity)
+    let Some(canonical_id) = crate::cloud::resolve_canonical_id(cas_root) else {
+        return Ok(PeerDiscovery::NoProjectIdentity);
+    };
+    // The project's own cloud config, as the daemon's coordinator loads it;
+    // never the machine-wide login, so a project that is not syncing does not
+    // reach the cloud here either.
+    let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)?;
+    if !config.is_logged_in() {
+        return Ok(PeerDiscovery::NotLoggedIn);
+    }
+    let alias_class = crate::cloud::project_aliases_from_config_toml(cas_root)
+        .into_iter()
+        .chain(std::iter::once(canonical_id.clone()))
+        .collect::<Vec<_>>();
+    let peers = crate::cloud::CloudCoordinator::new(config)?
+        .with_timeout(std::time::Duration::from_secs(10))
+        .list_repo_peers(&canonical_id, &alias_class, self_id, Utc::now())?;
+    Ok(PeerDiscovery::Found {
+        canonical_id,
+        peers,
+    })
 }
 
 #[cfg(test)]

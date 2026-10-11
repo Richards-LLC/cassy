@@ -86,6 +86,21 @@ pub struct AgentsResponse {
     pub agents: Vec<AgentInfo>,
 }
 
+/// One keyset page of `GET /api/agents` (cas-e477).
+#[derive(Debug, Clone, Deserialize)]
+struct AgentsPage {
+    agents: Vec<AgentInfo>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
+    next_cursor_id: Option<String>,
+}
+
+/// Agents per page; the server caps `limit` at 500.
+const AGENT_PAGE_LIMIT: u32 = 500;
+/// Pages read before giving up on a runaway cursor.
+const MAX_AGENT_PAGES: usize = 20;
+
 /// Response containing a list of locks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocksResponse {
@@ -132,9 +147,27 @@ impl CloudCoordinator {
 
     /// Register an agent with the cloud
     pub fn register(&mut self, agent: &Agent) -> Result<AgentInfo, CasError> {
+        self.register_with_focus(agent, None)
+    }
+
+    /// Register `agent` with its peer identity: role, repo canonical id,
+    /// `focus`, factory session and hostname in metadata (cas-e477). The
+    /// cloud echoes metadata back unchanged, which is what lets supervisors
+    /// of one repo find each other through a user-scoped agent list.
+    pub fn register_with_focus(
+        &mut self,
+        agent: &Agent,
+        focus: Option<&str>,
+    ) -> Result<AgentInfo, CasError> {
         let url = format!("{}/api/agents/register", self.config.endpoint);
 
         let factory_id = std::env::var("CAS_FACTORY_ID").ok();
+        let metadata = crate::cloud::peers::identity_metadata(
+            agent,
+            self.canonical_id.as_deref(),
+            focus,
+            crate::cloud::device::DeviceConfig::hostname().as_deref(),
+        );
         let response = ureq::post(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
@@ -149,7 +182,7 @@ impl CloudCoordinator {
                 "machine_id": agent.machine_id,
                 "factory_id": factory_id,
                 "clone_path": agent.metadata.get("clone_path"),
-                "metadata": agent.metadata,
+                "metadata": metadata,
             }));
 
         match response {
@@ -176,29 +209,7 @@ impl CloudCoordinator {
             .agent_id
             .as_ref()
             .ok_or_else(|| CasError::Other("No agent registered".to_string()))?;
-
-        let url = format!("{}/api/agents/{}/heartbeat", self.config.endpoint, agent_id);
-
-        let response = ureq::post(&url)
-            .timeout(HEARTBEAT_TIMEOUT)
-            .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
-
-        match response {
-            Ok(resp) => {
-                let reg: AgentRegistration = resp
-                    .into_json()
-                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
-                Ok(reg.agent)
-            }
-            Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Err(CasError::Other(format!(
-                    "Heartbeat failed ({code}): {body}"
-                )))
-            }
-            Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
-        }
+        self.heartbeat_agent(agent_id)
     }
 
     /// Shutdown the current agent
@@ -488,27 +499,77 @@ impl CloudCoordinator {
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
         }
     }
-    /// Register `agent` with its peer identity: role, repo canonical id,
-    /// `focus`, factory session and hostname in metadata (cas-e477).
-    pub fn register_with_focus(
-        &mut self,
-        agent: &Agent,
-        focus: Option<&str>,
-    ) -> Result<AgentInfo, CasError> {
-        let _ = focus;
-        self.register(agent)
-    }
-
     /// Heartbeat a specific agent (cas-e477). Each daemon heartbeats its own
     /// agent, not whichever agent this coordinator registered last.
     pub fn heartbeat_agent(&self, agent_id: &str) -> Result<AgentInfo, CasError> {
-        let _ = agent_id;
-        Err(CasError::Other("not implemented".to_string()))
+        let url = format!("{}/api/agents/{}/heartbeat", self.config.endpoint, agent_id);
+
+        let response = ureq::post(&url)
+            .timeout(HEARTBEAT_TIMEOUT)
+            .set("Authorization", &format!("Bearer {}", self.token()))
+            .call();
+
+        match response {
+            Ok(resp) => {
+                let body: serde_json::Value = resp
+                    .into_json()
+                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
+                // The server answers with the bare agent; older servers wrapped
+                // it as {status, agent}.
+                let agent = match body.get("agent") {
+                    Some(agent) if agent.is_object() => agent.clone(),
+                    _ => body,
+                };
+                serde_json::from_value(agent)
+                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                Err(CasError::Other(format!(
+                    "Heartbeat failed ({code}): {body}"
+                )))
+            }
+            Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
+        }
     }
 
     /// Every agent of this user, following the cloud's keyset pages.
+    ///
+    /// The list is ordered by creation time, newest first, so a long-lived
+    /// supervisor can sit past the first page; every page is read, up to
+    /// [`MAX_AGENT_PAGES`].
     pub fn list_agent_infos(&self) -> Result<Vec<AgentInfo>, CasError> {
-        Ok(Vec::new())
+        let mut agents = Vec::new();
+        let mut cursor: Option<(String, String)> = None;
+        for _ in 0..MAX_AGENT_PAGES {
+            let mut request = ureq::get(&format!("{}/api/agents", self.config.endpoint))
+                .timeout(self.timeout)
+                .set("Authorization", &format!("Bearer {}", self.token()))
+                .query("limit", &AGENT_PAGE_LIMIT.to_string());
+            if let Some((at, id)) = &cursor {
+                request = request.query("cursor", at).query("cursor_id", id);
+            }
+            let page: AgentsPage = match request.call() {
+                Ok(resp) => resp
+                    .into_json()
+                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?,
+                Err(ureq::Error::Status(code, resp)) => {
+                    let body = resp.into_string().unwrap_or_default();
+                    return Err(CasError::Other(format!(
+                        "List agents failed ({code}): {body}"
+                    )));
+                }
+                Err(ureq::Error::Transport(e)) => {
+                    return Err(CasError::Other(format!("Network error: {e}")));
+                }
+            };
+            agents.extend(page.agents);
+            match (page.next_cursor, page.next_cursor_id) {
+                (Some(at), Some(id)) => cursor = Some((at, id)),
+                _ => return Ok(agents),
+            }
+        }
+        Ok(agents)
     }
 
     /// The supervisors of `canonical_id` other than `self_id` (cas-e477).

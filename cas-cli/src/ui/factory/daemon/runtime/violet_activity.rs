@@ -69,6 +69,10 @@ const SEEN_KEYS_CAP: usize = 200;
 const WAKE_LIST_CAP: usize = 10;
 /// Consecutive `violet_read` failures that stop a watch.
 const READ_ERROR_STOP: u32 = 3;
+/// How much of a read error a watch keeps for `cas doctor`.
+const READ_ERROR_DETAIL_CHARS: usize = 240;
+/// A watch stopped on read errors stays a doctor finding this long.
+const READ_ERROR_DOCTOR_SECS: i64 = 24 * 60 * 60;
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) const VIOLET_ACTIVITY_ENVELOPE_OPEN: &str = "<cas-violet-activity ";
@@ -304,6 +308,10 @@ pub(crate) struct ChannelWatch {
     pub stopped_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// The latest `violet_read` failure, kept so `cas doctor` can name why a
+    /// watch stopped (cas-2dfa). Bounded; never holds message text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_read_error: Option<String>,
 }
 
 impl ChannelWatch {
@@ -792,6 +800,7 @@ impl VioletWake {
                     read_failures: 0,
                     stopped_at: None,
                     stop_reason: None,
+                    last_read_error: None,
                 });
                 self.book.watches.len() - 1
             }
@@ -805,6 +814,7 @@ impl VioletWake {
             watch.read_failures = 0;
             watch.stopped_at = None;
             watch.stop_reason = None;
+            watch.last_read_error = None;
             watch.factory_session = session;
         }
         watch.channel_name = envelope.channel.name.clone();
@@ -893,6 +903,7 @@ impl VioletWake {
                 let watch = &mut self.book.watches[index];
                 watch.last_sweep_at = Some(now);
                 watch.read_failures += 1;
+                watch.last_read_error = Some(error.chars().take(READ_ERROR_DETAIL_CHARS).collect());
                 let stopped = watch.read_failures >= READ_ERROR_STOP;
                 let name = watch.channel_name.clone();
                 let started = watch.started_at;
@@ -1040,6 +1051,9 @@ pub(crate) struct StoppedLine {
     pub channel_name: String,
     pub reason: String,
     pub stopped_secs_ago: i64,
+    /// The read error behind a `read_error` stop, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// The watch book as `cas factory status` and `cas doctor` show it.
@@ -1084,6 +1098,7 @@ pub(crate) fn watch_status(cas_dir: &Path, now: DateTime<Utc>) -> Option<VioletW
             channel_name: watch.channel_name.clone(),
             reason: watch.stop_reason.clone().unwrap_or_else(|| "unknown".to_string()),
             stopped_secs_ago: watch.stopped_at.map(secs).unwrap_or_default(),
+            detail: watch.last_read_error.clone(),
         })
         .collect();
     Some(VioletWatchStatus { active, stopped_recent, relay: book.relay })
@@ -1173,6 +1188,23 @@ impl VioletWatchStatus {
                     self.active.len(),
                     if self.active.len() == 1 { "" } else { "es" },
                     claim_age.map(short_age).unwrap_or_else(|| "ever".to_string())
+                ),
+            );
+        }
+        // cas-2dfa: a watch that stopped because Slack could not be read (a
+        // missing or rejected Violet credential) is a finding, not history.
+        if let Some(stop) = self.stopped_recent.first().filter(|stop| {
+            stop.reason == "read_error" && stop.stopped_secs_ago < READ_ERROR_DOCTOR_SECS
+        }) {
+            return (
+                WatchHealth::Warning,
+                format!(
+                    "watch on #{} stopped {} ago: violet_read failed {READ_ERROR_STOP} times ({}); \
+                     fix the Violet credential (see the violet row; `cas integrate violet`), and the \
+                     next mention restarts the watch",
+                    stop.channel_name,
+                    short_age(stop.stopped_secs_ago),
+                    stop.detail.as_deref().unwrap_or("no detail recorded")
                 ),
             );
         }

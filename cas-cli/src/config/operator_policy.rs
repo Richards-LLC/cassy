@@ -391,26 +391,46 @@ pub fn changed_operator_config_keys(
 /// Why this process may not change the operator-only `changed` keys, or
 /// `None` when nothing operator-only changes or an operator runs it.
 pub fn operator_config_refusal(changed: &[&str], context: &InvocationContext) -> Option<String> {
-    let _ = (changed, context);
-    None
+    if changed.is_empty() {
+        return None;
+    }
+    let keys = changed.join(", ");
+    context_refusal(
+        context,
+        &format!(
+            "{keys} {} operator-only because {} a Cassy guard",
+            if changed.len() == 1 { "is" } else { "are" },
+            if changed.len() == 1 { "it relaxes" } else { "they relax" }
+        ),
+        &format!("run `cas config set {} <value>` yourself from your own terminal", changed[0]),
+    )
 }
 
 /// Why this process may not change the operator policy, or `None` when it
 /// looks like an operator at a terminal: no agent environment, no agent
 /// process among its ancestors, and an interactive terminal.
 pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
+    context_refusal(
+        context,
+        "Write roots and grants are operator-only",
+        "run the command yourself from your own terminal",
+    )
+}
+
+/// `subject` states what is operator-only; `remedy` what the operator runs.
+fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> Option<String> {
     if let Some(marker) = context.env_names.iter().find(|name| {
         AGENT_ENV_MARKERS.contains(&name.as_str())
             || AGENT_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
     }) {
         return Some(format!(
-            "refused: {marker} is set, so this runs inside an agent session. Write roots and grants are operator-only; run the command yourself from your own terminal."
+            "refused: {marker} is set, so this runs inside an agent session. {subject}; {remedy}."
         ));
     }
     if let Some(ancestor) = context.ancestors.iter().find(|line| agent_ancestor(line)) {
         let program = ancestor.split_whitespace().next().unwrap_or(ancestor);
         return Some(format!(
-            "refused: this process descends from an agent or Cassy server ({program}). Write roots and grants are operator-only; run the command yourself from your own terminal."
+            "refused: this process descends from an agent or Cassy server ({program}). {subject}; {remedy}."
         ));
     }
     if context
@@ -418,16 +438,14 @@ pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
         .split('/')
         .any(|part| part.starts_with("cas-worker-") || part.starts_with("cas-server-"))
     {
-        return Some(
-            "refused: this process runs inside a Cassy factory worker cgroup. Write roots and grants are operator-only; run the command yourself from your own terminal."
-                .to_string(),
-        );
+        return Some(format!(
+            "refused: this process runs inside a Cassy factory worker cgroup. {subject}; {remedy}."
+        ));
     }
     if !(context.stdin_is_terminal && context.stdout_is_terminal) {
-        return Some(
-            "refused: write roots and grants need an interactive terminal so the operator can confirm them."
-                .to_string(),
-        );
+        return Some(format!(
+            "refused: {subject}, and a change needs an interactive terminal so the operator can confirm it; {remedy}."
+        ));
     }
     None
 }

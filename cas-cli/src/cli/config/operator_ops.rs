@@ -55,7 +55,15 @@ pub(crate) fn guard_operator_config(
     after: &crate::config::Config,
     context: impl FnOnce() -> InvocationContext,
 ) -> anyhow::Result<()> {
-    let _ = (before, after, context);
+    let changed = crate::config::operator_policy::changed_operator_config_keys(before, after);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    if let Some(refusal) =
+        crate::config::operator_policy::operator_config_refusal(&changed, &context())
+    {
+        anyhow::bail!(refusal);
+    }
     Ok(())
 }
 

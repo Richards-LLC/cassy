@@ -114,6 +114,10 @@ fn handle_pre_tool_use_inner(
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
+    // cas-0d4f0: no agent writes a Cassy config file directly, for every role.
+    if let Some(reason) = cas_config_file_write_denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
@@ -4049,8 +4053,61 @@ fn factory_write_decision(
 /// the global `~/.config/cas/` one) directly. Agents change ordinary keys with
 /// `cas config set`; security-relevant keys are the operator's.
 fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
-    let _ = input;
-    None
+    let tool = input.tool_name.as_deref()?;
+    let tool_input = input.tool_input.as_ref()?;
+    let raw_targets: Vec<String> = match tool {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("path"))
+            .and_then(|value| value.as_str())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        "Bash" => {
+            let command = tool_input.get("command").and_then(|value| value.as_str())?;
+            bash_write_targets(command)
+                .into_iter()
+                .chain(bash_in_place_edit_targets(command))
+                .chain(bash_delete_targets(command).into_iter().map(|(path, _)| path))
+                .collect()
+        }
+        "apply_patch" => tool_input
+            .get("command")
+            .or_else(|| tool_input.get("patch"))
+            .or_else(|| tool_input.get("input"))
+            .and_then(|value| value.as_str())
+            .map(|patch| {
+                apply_patch_write_targets_with_modes(patch)
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => return None,
+    };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let global = crate::config::global_cas_dir();
+    let target = raw_targets.into_iter().find(|raw| {
+        let expanded = match (raw.strip_prefix("~/"), home.as_ref()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => std::path::PathBuf::from(raw),
+        };
+        let path = lexically_normalize_path(if expanded.is_absolute() {
+            expanded
+        } else {
+            std::path::PathBuf::from(&input.cwd).join(expanded)
+        });
+        let is_config = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "config.toml" | "config.yaml" | "config.yml"));
+        let parent = path.parent();
+        is_config
+            && (parent.and_then(|dir| dir.file_name()).is_some_and(|name| name == ".cas")
+                || parent.is_some_and(|dir| global.as_deref() == Some(dir)))
+    })?;
+    Some(format!(
+        "🚫 CASSY CONFIG (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
+    ))
 }
 
 /// cas-3147: refusal for an agent shell command that would change the
@@ -4104,6 +4161,22 @@ fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Optio
                             || (rest.first().is_some_and(|sub| sub == "set")
                                 && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
                     });
+                    // cas-0d4f0: security-relevant keys, set or reset.
+                    let guarded_key = config.and_then(|at| {
+                        let rest = &args[at + 1..];
+                        rest.first()
+                            .filter(|sub| *sub == "set" || *sub == "reset")
+                            .and_then(|_| rest.get(1))
+                            .filter(|key| {
+                                key.as_str() != "factory.write_roots"
+                                    && crate::config::operator_policy::is_operator_only_config_key(key)
+                            })
+                    });
+                    if let Some(key) = guarded_key {
+                        return Some(format!(
+                            "🚫 OPERATOR-ONLY (cas-0d4f0): {key} relaxes a Cassy guard, so only the operator changes it, from their own terminal, never an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set {key} …` themselves. Ordinary keys stay settable with `cas config set`."
+                        ));
+                    }
                     if refused {
                         return Some(
                             "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."

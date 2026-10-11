@@ -152,12 +152,16 @@ async fn fake_cloud_with_mailbox() -> (MockServer, Registry, Mailbox) {
 /// A supervisor registered both in the cloud and in the machine's own store,
 /// as a live factory session does.
 fn supervisor(machine: &TestMachine, id: &str) {
-    register_supervisor(&machine.cas_dir, id, &machine.name, "cas-571d");
+    supervisor_at(&machine.cas_dir, &machine.name, id);
+}
+
+fn supervisor_at(cas_dir: &Path, machine_name: &str, id: &str) {
+    register_supervisor(cas_dir, id, machine_name, "cas-571d");
     let mut agent = Agent::new(id.to_string(), format!("sup-{id}"));
     agent.role = AgentRole::Supervisor;
-    agent.machine_id = Some(machine.name.clone());
+    agent.machine_id = Some(machine_name.to_string());
     agent.factory_session = Some(format!("factory-{id}"));
-    open_agent_store(&machine.cas_dir)
+    open_agent_store(cas_dir)
         .unwrap()
         .register(&agent)
         .unwrap();
@@ -340,10 +344,12 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     let beta = TestMachine::new("machine-beta");
     seed_project(&alpha, &endpoint, "github.com/acme/widgets");
     seed_project(&beta, &endpoint, "github.com/acme/widgets");
+    // The machines (and their temp directories) live for the whole test.
     let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    let (a2, b2) = (a.clone(), b.clone());
     tokio::task::spawn_blocking(move || {
-        supervisor(&alpha, "a");
-        supervisor(&beta, "b");
+        supervisor_at(&a2, "machine-alpha", "a");
+        supervisor_at(&b2, "machine-beta", "b");
     })
     .await
     .unwrap();

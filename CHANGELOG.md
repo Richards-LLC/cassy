@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security — guard-relaxing config keys are operator-only (cas-0d4f0)
+
+- `verification.force_bypass_allowed`, `slack.transport`,
+  `factory.supervisor_only_mcp`, `factory.supervisor_only_env`,
+  `factory.worker_credential_env`, `qa.evidence_gate`, `qa.independent_pass`
+  and `release.claude_account_allowlist` can only be changed by the operator
+  at a terminal. `cas config set`, `reset`, `import`, `edit` and the config
+  TUI refuse a change from inside an agent session, using the same checks as
+  `factory.write_roots`. Ordinary keys stay settable.
+- The PreToolUse hook refuses agent shell commands that set or reset those
+  keys, and refuses every direct agent write, edit, copy, move or delete of
+  `.cas/config.toml` (or `config.yaml`) and the global Cassy config.
+- MCP `proxy_add` and `proxy_remove` refuse to remove, replace or alias a
+  `factory.supervisor_only_mcp` server.
+
 ### Added — a task one machine works is not started on another (cas-5f28)
 
 - When the project is logged in to Cassy Cloud, `task start` and

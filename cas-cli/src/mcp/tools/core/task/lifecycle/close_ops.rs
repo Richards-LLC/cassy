@@ -9704,7 +9704,13 @@ impl CasCore {
         // worker lane's other-task delivery. Every recorded anchor was shown
         // to be another task's, so none survives as this task's delivery
         // receipt for the epic close guard.
-        if no_code_without_own_commits
+        // cas-b38a: an evidence-only review that measured no commit of the
+        // task's own (an operations task whose work was elsewhere) retires
+        // the same lane records.
+        let evidence_without_own_commits = measured_evidence
+            .as_ref()
+            .is_some_and(|measured| measured.paths.is_empty());
+        if (no_code_without_own_commits || evidence_without_own_commits)
             && close_disposition != TaskCloseDisposition::NegativeResult
         {
             let retired: Vec<String> = task
@@ -9717,10 +9723,17 @@ impl CasCore {
                 ))
                 .chain(task.deliverables.parked_branch.take())
                 .collect();
+            // Nothing of the task's own is parked, so no conflict is either.
+            task.deliverables.merge_conflicted = false;
             if !retired.is_empty() {
                 let note = format!(
-                    "[{}] DECISION: no-code close retired lane records that are not this task's delivery: {}.",
+                    "[{}] DECISION: {} close retired lane records that are not this task's delivery: {}.",
                     now.format("%Y-%m-%d %H:%M"),
+                    if no_code_without_own_commits {
+                        "no-code"
+                    } else {
+                        "evidence-only"
+                    },
                     retired.join(", ")
                 );
                 task.notes = if task.notes.is_empty() {
@@ -13597,9 +13610,24 @@ pub(crate) fn no_code_task_without_own_commits_judged(
     receipt: Option<&str>,
     named_only: bool,
 ) -> bool {
+    task.execution_note.as_deref() == Some("no-code")
+        && task_without_own_commits_judged(repo_path, task, target, receipt, named_only)
+}
+
+/// [`no_code_task_without_own_commits_judged`] without the declared
+/// methodology: whether the task has no commit of its own, by the same
+/// explicit evidence. cas-b38a: a supervisor's evidence_only review of an
+/// operations task that never declared a methodology uses it, so a task whose
+/// work was a pull request elsewhere closes on that evidence.
+pub(crate) fn task_without_own_commits_judged(
+    repo_path: &std::path::Path,
+    task: &Task,
+    target: &str,
+    receipt: Option<&str>,
+    named_only: bool,
+) -> bool {
     let delivery = &task.deliverables;
-    if task.execution_note.as_deref() != Some("no-code")
-        || task.task_type == TaskType::Epic
+    if task.task_type == TaskType::Epic
         || receipt.is_some()
         || delivery.integration_batch.is_some()
         || !delivery.files_changed.is_empty()

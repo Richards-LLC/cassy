@@ -576,6 +576,46 @@ async fn parked_ops_task_closes_by_evidence_on_its_pull_request_cas_b38a() {
     )
     .await;
     assert_closed_without_lane(&f, id, &response);
-    let evidence = f.task(id).deliverables.evidence_only.clone().expect("evidence recorded");
+    let closed = f.task(id);
+    assert!(!closed.deliverables.merge_conflicted);
+    let evidence = closed
+        .deliverables
+        .evidence_only
+        .clone()
+        .expect("evidence recorded");
     assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
+    assert!(
+        closed
+            .notes
+            .contains("evidence-only close retired lane records"),
+        "{}",
+        closed.notes
+    );
+}
+
+/// cas-b38a: a code methodology keeps the evidence measurement. A test-first
+/// task with no commit of its own is not closed on evidence alone.
+#[tokio::test]
+async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc09";
+    let mut task = parked_ops_task(id);
+    task.execution_note = Some("test-first".into());
+    f.put(&task);
+    let proof = f.artifact(id);
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "evidence_only": true, "evidence_only_artifact_path": proof,
+            "evidence_only_reference": PR,
+        }),
+    )
+    .await;
+    assert!(
+        response.contains("EVIDENCE ONLY CLOSE REJECTED"),
+        "{response}"
+    );
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
 }

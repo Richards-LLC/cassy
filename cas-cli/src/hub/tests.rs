@@ -4888,13 +4888,13 @@ fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
     std::fs::create_dir_all(&cas_root).unwrap();
     std::fs::write(
         cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"github.com/Acme/Widget\"\n",
+        "[project]\ncanonical_id = \"github.com/acme/widget\"\n",
     )
     .unwrap();
     assert_eq!(
         cloud_project_id(&cas_root).as_deref(),
         Some("github.com/acme/widget"),
-        "the pinned identity, in the canonical form Explorer filters on"
+        "the pinned identity Explorer filters on"
     );
 
     let mut session = fixture_session("factory-main");

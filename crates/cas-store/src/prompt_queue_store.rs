@@ -7014,6 +7014,54 @@ mod tests {
         );
     }
 
+    /// cas-b5ad: a busy worker's pane is never silent, so the daemon claims a
+    /// supervisor message for its transport and then declines every wake.
+    /// The claim (`transport_claimed`) hid the row from the tool-boundary
+    /// drain, and Claude Code holds the transported copy until the turn ends,
+    /// so the worker took many tool calls without seeing it (13+ minutes,
+    /// message 4184454). A row claimed after the current turn began is
+    /// surfaced at the next tool boundary and its claim becomes the hook's
+    /// receipt; one claimed before the turn began (possibly the turn's own
+    /// prompt) is not.
+    #[test]
+    fn tool_boundary_surfaces_rows_claimed_for_transport_after_the_turn_began_cas_b5ad() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-b5ad";
+        let before = store
+            .enqueue_with_session("supervisor", "worker-1", "the turn's own prompt", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let decision = store
+            .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(decision, "worker-1").unwrap());
+
+        let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()),
+            vec![decision],
+            "the mid-turn claim reaches the worker at its next tool call"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a surfaced row is receipted and never replayed"
+        );
+        let report = store.message_delivery_report(decision).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Confirmed, "{report:?}");
+        assert!(
+            !store.claim_recipient_transport(decision, "worker-1").unwrap(),
+            "the daemon cannot reclaim a row the hook surfaced"
+        );
+    }
+
     /// cas-b5e4 (GH #989): at a tool boundary, a row handed off after the
     /// turn began is surfaced; one handed off before it (the turn's own
     /// injection, cas-9568) is not; an untransported row is; each only once.

@@ -226,6 +226,8 @@ tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
   left-aligned, `--space-3` below it, on desktop and phone. A phone shows the
   list screen as Commander's home, so the switcher is there and not in the
   56px thread header. Explorer puts it in the same place under its own lockup.
+  On a landscape phone (`max-height: 30rem`) it joins the lockup's row instead,
+  because that layout has width to spare and no height.
   An open conversation whose project has a cloud identity also offers
   **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone
   reaches the project's tasks without leaving the thread.

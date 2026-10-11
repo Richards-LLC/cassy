@@ -1711,6 +1711,13 @@ dialog form > *,
 /* cas-eaa3: Commander ↔ Explorer, the two Cassy Cloud apps (DESIGN.md "App switcher").
    A segmented pair under the lockup: the current app is the active wash with
    a 2px action outline, never the Send gradient (it is a place, not an action). */
+/* It sits in the top row's markup after the lockup; a zero-height break puts
+   it on its own row below the lockup, except on a landscape phone (below). */
+.conversation-list-top:has(> .app-switcher) { flex-wrap: wrap; row-gap: 0; }
+.conversation-list-top:has(> .app-switcher)::after { content: ""; order: 2; flex-basis: 100%; height: 0; }
+.conversation-list-top > .cloud-brand { order: 0; }
+.conversation-list-top > .conversation-list-tools { order: 1; }
+.conversation-list-top > .app-switcher { order: 3; }
 .app-switcher { display: inline-flex; align-items: stretch; gap: 2px; margin-top: var(--space-3); padding: 3px; border-radius: var(--radius-pill); background: var(--bg-hover); border: var(--line-width) solid var(--line-subtle); }
 .app-switcher-item { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: 34px; padding: 0 var(--space-3); border-radius: var(--radius-pill); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); color: var(--ink-mid); text-decoration: none; white-space: nowrap; }
 .app-switcher-item[aria-current="page"] { color: var(--ink); background: var(--bg-active); outline: 2px solid var(--color-action); outline-offset: -2px; }
@@ -1722,6 +1729,12 @@ dialog form > *,
 .context-explorer-link:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .app-switcher-item { min-height: 40px; }
+}
+/* A landscape phone has width to spare and no height: the switcher joins the
+   lockup's row instead of adding one. */
+@media (max-height: 30rem) {
+  .conversation-list-top:has(> .app-switcher)::after { display: none; }
+  .conversation-list-top > .app-switcher { order: 0; margin-top: 0; margin-inline-start: var(--space-3); }
 }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: var(--rail-item-min); min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border-radius: var(--radius-pill); color: var(--ink); background: var(--color-transparent); }
 .icon-button svg { width: 22px; height: 22px; display: block; }

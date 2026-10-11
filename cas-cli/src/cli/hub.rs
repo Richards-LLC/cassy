@@ -1925,7 +1925,7 @@ pub(crate) fn pairing_targets_operator_hub(
     };
     let operator_root = HubRuntimePaths::for_home(home).root().to_path_buf();
     let canonical =
-        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical(hub_root) == canonical(&operator_root)
 }
 

@@ -900,7 +900,11 @@ pub(crate) fn select_merge_request_task<'a>(
 ///
 /// Shared by the compose path and the queued-delivery path (cas-b17c) so the
 /// two cannot disagree about which branch to resolve.
-pub(crate) fn merge_request_branch(task: Option<&cas_types::Task>) -> Option<String> {
+pub(crate) fn merge_request_branch(
+    task: Option<&cas_types::Task>,
+    repo_root: Option<&Path>,
+) -> Option<String> {
+    let _ = repo_root;
     let task = task?;
     task.deliverables
         .parked_branch
@@ -1009,7 +1013,7 @@ pub(crate) fn queued_merge_request_decision(
     task: Option<&Task>,
     envelope: &MergeRequestEnvelope,
 ) -> MergeRequestDecision {
-    let live_branch_tip = merge_request_branch(task).and_then(|branch| {
+    let live_branch_tip = merge_request_branch(task, Some(repo_root)).and_then(|branch| {
         resolve_live_branch_tip(repo_root, &branch, Some(envelope.branch_tip.as_str()))
     });
     let judged = merge_request_judged_tip(repo_root, live_branch_tip, &envelope.branch_tip);

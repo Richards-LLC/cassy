@@ -77,7 +77,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// tools. Each names only what the parameter does for coordination's own
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
-    ("id", "Agent id (heartbeat, unregister, session_end); defaults to the caller."),
+    ("id", "Agent id (heartbeat, unregister, session_end); defaults to the caller. message_status: a peer message id returned by a message to a peer supervisor on another machine."),
     (
         "target",
         "message/interrupt recipient: agent name, 'supervisor', 'all_workers' or \

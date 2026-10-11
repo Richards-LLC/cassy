@@ -297,3 +297,101 @@ async fn a_peer_message_to_another_repo_is_refused_and_a_resend_is_one_message()
     .unwrap();
     assert_eq!(mailbox.lock().unwrap().len(), 1);
 }
+
+fn service_for(cas_dir: &Path, agent_id: &str) -> cas::mcp::CasService {
+    let core = cas::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    core.set_agent_id_for_testing(agent_id.to_string());
+    cas::mcp::CasService::new(core, None)
+}
+
+async fn coordinate(
+    service: &cas::mcp::CasService,
+    request: Value,
+) -> Result<String, String> {
+    let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(request).unwrap();
+    service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .map(|result| {
+            result
+                .content
+                .iter()
+                .filter_map(|content| match &content.raw {
+                    rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .map_err(|error| error.message.to_string())
+}
+
+/// The MCP surface: `coordination action=message` to `name@machine` goes
+/// through the mailbox, an urgent peer message is refused, the recipient
+/// replies with `in_reply_to`, and `message_status id=` reads the receipt.
+#[tokio::test]
+async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receipt() {
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    let endpoint = server.uri();
+    let alpha = TestMachine::new("machine-alpha");
+    let beta = TestMachine::new("machine-beta");
+    seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+    seed_project(&beta, &endpoint, "github.com/acme/widgets");
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+    })
+    .await
+    .unwrap();
+    let (service_a, service_b) = (service_for(&a, "a"), service_for(&b, "b"));
+
+    let urgent = coordinate(
+        &service_a,
+        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "now", "message": "stop", "urgent": true}),
+    )
+    .await
+    .unwrap_err();
+    assert!(urgent.contains("cannot be urgent"), "{urgent}");
+
+    let sent = coordinate(
+        &service_a,
+        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?"}),
+    )
+    .await
+    .unwrap();
+    assert!(sent.contains("Message sent to peer supervisor sup-b@"), "{sent}");
+    assert!(sent.contains("peer message pm_1"), "{sent}");
+
+    let bb = b.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        tick(&bb, "b");
+        inbox(&bb)
+    })
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let replied = coordinate(
+        &service_b,
+        json!({"action": "message", "target": "sup-a", "summary": "taking it", "message": "yes", "in_reply_to": rows[0].id}),
+    )
+    .await
+    .unwrap();
+    assert!(replied.contains("Reply sent to peer supervisor sup-a@machine-alpha"), "{replied}");
+
+    let status = coordinate(&service_a, json!({"action": "message_status", "id": "pm_1"}))
+        .await
+        .unwrap();
+    assert!(status.contains("Peer message pm_1: delivered"), "{status}");
+
+    let aa = a.clone();
+    let replies = tokio::task::spawn_blocking(move || {
+        tick(&aa, "a");
+        inbox(&aa)
+    })
+    .await
+    .unwrap();
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0].prompt.ends_with("yes"));
+}

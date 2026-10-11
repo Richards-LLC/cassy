@@ -141,6 +141,14 @@ pub(crate) fn queued_message_provenance_at(
         "director-generated"
     } else if message.source.starts_with("lifecycle-wake:") {
         "lifecycle-relay"
+    } else if message.origin == Some(cas_store::QueueOrigin::Daemon)
+        && let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(&message.prompt)
+    {
+        // cas-f9c7: never operator authority; named for what it is.
+        return format!(
+            "[cas #{} peer-supervisor {}@{} via-cloud {age_secs}s {delivery}]",
+            message.id, peer.sender_name, peer.machine
+        );
     } else {
         "agent-authored"
     };
@@ -815,6 +823,25 @@ impl CasService {
                     .map(|a| a.name)
             })
         };
+
+        // cas-f9c7: a supervisor addressing a peer supervisor of this repo on
+        // another machine (or replying to one) goes through the cloud peer
+        // mailbox; everything else stays on the local queue below.
+        if role == "supervisor"
+            && let Some(sender) = agent_from_store.as_ref()
+            && let Some(sent) = self
+                .peer_message_send(
+                    sender,
+                    &target,
+                    &summary,
+                    &message,
+                    req.in_reply_to,
+                    req.urgent.unwrap_or(false),
+                )
+                .await?
+        {
+            return Ok(sent);
+        }
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let addressed_operator = target.eq_ignore_ascii_case("operator") || commander_target;
@@ -3091,10 +3118,18 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::store::open_prompt_queue_store;
 
+        // cas-f9c7: `id` names a message sent to a peer supervisor on another
+        // machine; its receipt lives in the Cassy Cloud peer mailbox.
+        if req.notification_id.is_none()
+            && let Some(peer_message_id) = req.id.clone().filter(|id| !id.trim().is_empty())
+        {
+            return self.peer_message_status(peer_message_id).await;
+        }
         let notification_id = req.notification_id.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "notification_id required for message_status (the prompt queue message ID)",
+                "notification_id required for message_status (the prompt queue message ID), \
+                 or id=<peer message id> for a message sent to a peer supervisor",
             )
         })?;
 

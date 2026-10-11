@@ -1294,6 +1294,10 @@ pub enum SupervisorWakeClass {
     Lifecycle,
     /// Another registered supervisor on this clone (cas-15f2).
     PeerSupervisor,
+    /// A peer supervisor of this repo on another machine, relayed by the
+    /// Cassy Cloud peer mailbox: a Daemon-stamped row whose first line is a
+    /// CAS-written `<cas-peer-message …/>` envelope (cas-f9c7).
+    CloudPeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
     /// A registered worker's CAS-framed `<cas-blocker …>` (cas-8725). Attached
@@ -4669,6 +4673,11 @@ impl FactoryDaemon {
                 if super::violet_activity::parse_violet_activity_envelope(prompt).is_some() {
                     return Some(SupervisorWakeClass::SlackActivity);
                 }
+                // cas-f9c7: the peer mailbox puller writes this envelope; the
+                // cloud stamped the sender from its agent registry.
+                if crate::cloud::peer_mailbox::parse_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::CloudPeerSupervisor);
+                }
                 // cas-619f: CAS itself escalates a delivery whose independent
                 // QA was rejected `qa.max_rounds` times with a blocker
                 // envelope. Daemon-stamped, so the envelope is CAS's own.
@@ -4884,6 +4893,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::PeerSupervisor => {
                 "supervisor pane is quiet and the row is from an authenticated peer supervisor"
+            }
+            SupervisorWakeClass::CloudPeerSupervisor => {
+                "supervisor pane is quiet and the row is a peer supervisor's message relayed by the Cassy Cloud peer mailbox"
             }
             SupervisorWakeClass::MergeRequest => {
                 "supervisor pane is quiet and the row is a registered worker's merge request"

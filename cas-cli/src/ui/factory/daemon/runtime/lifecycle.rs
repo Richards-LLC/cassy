@@ -2112,6 +2112,19 @@ impl FactoryDaemon {
         > = None;
         let mut violet_sweep_task: Option<JoinHandle<()>> = None;
         let mut violet_error_reported = false;
+        // cas-f9c7: messages from peer supervisors of this repo on other
+        // machines, claimed from the Cassy Cloud peer mailbox every 15 s on
+        // the blocking pool.
+        let peer_mailbox = crate::cloud::peer_mailbox::PeerMailboxRuntime::start(
+            self.app.cas_dir(),
+            &self.session_name,
+        )
+        .map(std::sync::Arc::new);
+        let mut last_peer_poll = std::time::Instant::now()
+            .checked_sub(crate::cloud::peer_mailbox::POLL_INTERVAL)
+            .unwrap_or_else(std::time::Instant::now);
+        let mut peer_task: Option<JoinHandle<crate::cloud::peer_mailbox::DeliveryReport>> = None;
+        let mut peer_error_reported = false;
         let refresh_interval = Duration::from_secs(2);
         let poll_interval = Duration::from_millis(100);
 
@@ -2398,6 +2411,37 @@ impl FactoryDaemon {
                             Err(error) => {
                                 tracing::warn!(%error, "Violet activity poll task failed")
                             }
+                        }
+                    }
+                }
+
+                if let Some(peers) = peer_mailbox.as_ref() {
+                    if peer_task.is_none()
+                        && last_peer_poll.elapsed() >= crate::cloud::peer_mailbox::POLL_INTERVAL
+                    {
+                        let peers = std::sync::Arc::clone(peers);
+                        peer_task = Some(tokio::task::spawn_blocking(move || peers.tick_blocking()));
+                        last_peer_poll = std::time::Instant::now();
+                    }
+                    if peer_task.as_ref().is_some_and(JoinHandle::is_finished) {
+                        match peer_task.take().expect("checked above").await {
+                            Ok(report) => {
+                                if report.delivered > 0 {
+                                    super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                                    tracing::info!(
+                                        delivered = report.delivered,
+                                        rejected = report.rejected,
+                                        "queued peer supervisor messages from Cassy Cloud"
+                                    );
+                                }
+                                if report.errors.is_empty() {
+                                    peer_error_reported = false;
+                                } else if !peer_error_reported {
+                                    tracing::warn!(errors = ?report.errors, "peer mailbox unavailable; retrying silently on its next cadence");
+                                    peer_error_reported = true;
+                                }
+                            }
+                            Err(error) => tracing::warn!(%error, "peer mailbox poll task failed"),
                         }
                     }
                 }

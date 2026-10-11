@@ -494,6 +494,73 @@ pub fn http_mailbox(cas_root: &Path) -> Option<HttpPeerMailbox> {
     Some(HttpPeerMailbox::new(&config.endpoint, token))
 }
 
+/// The factory daemon's peer mailbox puller: one blocking claim-and-admit
+/// tick per [`POLL_INTERVAL`] for this factory session's supervisors.
+pub struct PeerMailboxRuntime {
+    cas_dir: std::path::PathBuf,
+    factory_session: String,
+    canonical_id: String,
+    alias_class: Vec<String>,
+    consumer_id: String,
+    mailbox: HttpPeerMailbox,
+}
+
+impl PeerMailboxRuntime {
+    /// `None` when the project is not logged in to Cassy Cloud or has no
+    /// canonical id. Each reason is logged once.
+    pub fn start(cas_dir: &Path, factory_session: &str) -> Option<Self> {
+        let Some(mailbox) = http_mailbox(cas_dir) else {
+            tracing::info!("peer mailbox skipped: not logged in to Cassy Cloud");
+            return None;
+        };
+        let Some(canonical_id) = crate::cloud::resolve_canonical_id(cas_dir) else {
+            tracing::info!("peer mailbox skipped: project has no canonical id");
+            return None;
+        };
+        let consumer_id: String = format!(
+            "{}:{factory_session}",
+            cas_types::Agent::get_or_generate_machine_id()
+        )
+        .chars()
+        .take(200)
+        .collect();
+        tracing::info!(project = %canonical_id, "claiming peer supervisor messages from Cassy Cloud");
+        Some(Self {
+            cas_dir: cas_dir.to_path_buf(),
+            factory_session: factory_session.to_string(),
+            alias_class: crate::cloud::project_aliases_from_config_toml(cas_dir),
+            canonical_id,
+            consumer_id,
+            mailbox,
+        })
+    }
+
+    /// One blocking tick: claim, admit and ack.
+    pub fn tick_blocking(&self) -> DeliveryReport {
+        let failed = |error: String| DeliveryReport {
+            errors: vec![error],
+            ..DeliveryReport::default()
+        };
+        let queue = match crate::store::open_prompt_queue_store(&self.cas_dir) {
+            Ok(queue) => queue,
+            Err(error) => return failed(format!("could not open the prompt queue: {error}")),
+        };
+        let agents = match crate::store::open_agent_store(&self.cas_dir) {
+            Ok(agents) => agents,
+            Err(error) => return failed(format!("could not open the agent store: {error}")),
+        };
+        deliver_claimed(
+            &self.mailbox,
+            queue.as_ref(),
+            agents.as_ref(),
+            &self.canonical_id,
+            &self.alias_class,
+            &self.factory_session,
+            &self.consumer_id,
+        )
+    }
+}
+
 /// `PeerMailbox` over Cassy Cloud HTTP.
 #[derive(Debug, Clone)]
 pub struct HttpPeerMailbox {

@@ -217,7 +217,7 @@ fn machine(endpoint: &str, project: &str, name: &str) -> Machine {
     .unwrap();
     let agent_id = format!("{name}-session-{}", std::process::id());
     agents
-        .register(&Agent::new_with_role(agent_id.clone(), name.to_string(), AgentRole::Supervisor))
+        .register(&Agent::new_with_role(agent_id.clone(), name.to_string(), AgentRole::Standard))
         .unwrap();
     let core = CasCore::with_daemon(cas_dir.clone(), None, None);
     core.set_agent_id_for_testing(agent_id.clone());
@@ -249,7 +249,7 @@ impl Machine {
         let id = format!("{name}-session-{}", std::process::id());
         open_agent_store(&self.cas_dir)
             .unwrap()
-            .register(&Agent::new_with_role(id.clone(), name.to_string(), AgentRole::Worker))
+            .register(&Agent::new_with_role(id.clone(), name.to_string(), AgentRole::Standard))
             .unwrap();
         let core = CasCore::with_daemon(self.cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(id);

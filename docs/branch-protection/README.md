@@ -175,12 +175,11 @@ status is only ever posted for a tree the full gate passed.
 ### Full-journeys receipt (cas-9f70)
 
 The Commander step skips the journeys only when the guard also sets
-`journeys-reuse=true`. That requires the full-gate receipt above, and also:
-
-4. The newest `cas/full-journeys` status on the same head is `success`, with
-   the description exactly `PASS tree=<queue tree>`. A missing, failed,
-   superseded or other-tree status leaves `journeys-reuse=false`, and the
-   journeys run. A journeys status without a full-gate receipt skips nothing.
+`journeys-reuse=true`. That requires the full-gate receipt above. It also
+requires the newest `cas/full-journeys` status on the same head to be
+`success`, with the description exactly `PASS tree=<queue tree>`. A missing,
+failed, superseded or other-tree status leaves `journeys-reuse=false`, and the
+journeys run. A journeys status without a full-gate receipt skips nothing.
 
 The train posts it in `--pipeline` (`post_full_journeys_tree_receipt`), right
 after the full-gate status. It needs a receipt from

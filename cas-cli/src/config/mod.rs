@@ -12,6 +12,7 @@ use crate::ui::theme::ThemeConfig;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod hooks;
+pub mod operator_policy;
 mod runtime;
 mod settings;
 

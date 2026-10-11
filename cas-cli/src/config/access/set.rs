@@ -114,6 +114,30 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.event_telemetry_retention_days" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.event_telemetry_retention_days = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.event_telemetry_retention_days: {value}"
+                    ))
+                })?;
+            }
+            "factory.prompt_transcript_retention_days" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.prompt_transcript_retention_days = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.prompt_transcript_retention_days: {value}"
+                    ))
+                })?;
+            }
+            "factory.supervisor_queue_retention_days" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.supervisor_queue_retention_days = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.supervisor_queue_retention_days: {value}"
+                    ))
+                })?;
+            }
             "factory.message_max_chars" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.message_max_chars = value.parse().map_err(|_| {
@@ -1248,6 +1272,14 @@ impl Config {
                 } else {
                     Some(value.to_string())
                 };
+            }
+            // cas-3147: operator-only, kept outside config.toml entirely.
+            "factory.write_roots" => {
+                return Err(MemError::Other(
+                    "factory.write_roots is operator-only and is not stored in config.toml. \
+                     Run `cas config set factory.write_roots <paths>` yourself from your own terminal."
+                        .to_string(),
+                ));
             }
             _ => {
                 return Err(MemError::Other(format!("Unknown config key: {key}")));

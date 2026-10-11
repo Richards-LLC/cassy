@@ -144,7 +144,7 @@ impl SqliteArtifactStore {
     }
 
     pub fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.execute_batch(ARTIFACT_SCHEMA)?;
         Ok(())
     }
@@ -180,7 +180,7 @@ impl SqliteArtifactStore {
         }
 
         let created_at = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.execute(
             "INSERT INTO artifacts
                  (id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id,
@@ -220,7 +220,7 @@ impl SqliteArtifactStore {
                 "an uploaded artifact requires the cloud artifact id".to_string(),
             ));
         }
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let changed = conn.execute(
             "UPDATE artifacts SET cloud_artifact_id = ?2, status = 'uploaded'
              WHERE id = ?1 AND status = 'local'",
@@ -244,7 +244,7 @@ impl SqliteArtifactStore {
                 "refusing to persist a signed upload URL as an artifact location".to_string(),
             ));
         }
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let changed = conn.execute(
             "UPDATE artifacts SET status = 'committed', cloud_url = ?2
              WHERE id = ?1 AND status IN ('local', 'uploaded')",
@@ -260,7 +260,7 @@ impl SqliteArtifactStore {
 
     /// Attach the Slack permalink a later relay produced.
     pub fn set_slack_permalink(&self, id: &str, permalink: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let changed = conn.execute(
             "UPDATE artifacts SET slack_permalink = ?2 WHERE id = ?1",
             params![id, permalink],
@@ -272,7 +272,7 @@ impl SqliteArtifactStore {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<PublishedArtifact>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id,
                     status, cloud_url, slack_permalink, created_at
@@ -284,7 +284,7 @@ impl SqliteArtifactStore {
 
     /// Newest first, so `cas artifact list` leads with what was just published.
     pub fn list_for_task(&self, task_id: &str) -> Result<Vec<PublishedArtifact>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id,
                     status, cloud_url, slack_permalink, created_at

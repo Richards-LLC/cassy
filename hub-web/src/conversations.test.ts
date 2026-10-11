@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { applyHistoryCursor, ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking, type HistoryCursor } from "./conversation-history";
-import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow, conversationRowSpokenName } from "./conversation-list";
+import { ConversationList, ROW_TAP_CLICK_WAIT_MS, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow, conversationRowSpokenName } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
@@ -49,6 +49,23 @@ describe('conversation evidence', () => {
       .toEqual(['from Pixel 10', 'from Desktop', 'from Terminal']);
     expect(history.events.map(event => event.kind === 'send' && event.value.text))
       .toEqual(['Phone message', 'Computer message', 'Terminal message']);
+  });
+  it('threads the supervisor answer under a terminal-typed question, once (cas-5c89)', () => {
+    const history = new ConversationHistory();
+    history.hydrateSend({ notification_id: 3, target: 'supervisor', text: 'What changed in Violet today?', state: 'acknowledged', stamped: false, device_id: 'terminal', operator_label: 'Terminal', at: '2026-10-10T13:34:00Z' });
+    const answer = { notification_id: 4, reply_to: 3, message: 'Two fixes landed.', summary: 'Two fixes landed.', device_id: '*', kind: 'answer' as const, at: '2026-10-10T13:34:20Z' };
+    history.hydrateReply(answer);
+    history.hydrateReply(answer);
+    const view = new ConversationView(document, history, 'supervisor');
+    document.body.replaceChildren(view.element);
+    view.update();
+    expect(history.events.map(event => event.kind === 'send' ? `send:${event.value.text}` : `reply:${event.value.message}`))
+      .toEqual(['send:What changed in Violet today?', 'reply:Two fixes landed.']);
+    expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent)).toEqual(['from Terminal']);
+    const send = history.events.find(event => event.kind === 'send')!;
+    if (send.kind !== 'send') throw new Error('Missing send');
+    expect(send.value.state).toBe('replied');
+    expect(view.element.textContent).toContain('Two fixes landed.');
   });
   it('shows the other device send live before its reply and labels the sender receipt', () => {
     const history = new ConversationHistory();
@@ -247,6 +264,100 @@ describe('conversation evidence', () => {
     const node = container.firstElementChild as HTMLButtonElement; node.focus();
     list.render(container, [{ ...row, freshness: 'Catalog checked 1m ago' }, { ...row, key: 'b:same', machineId: 'b' }], vi.fn());
     expect(document.activeElement).toBe(node); expect(container.children).toHaveLength(2);
+  });
+  describe('a tap opens the row it pressed while the list changes under it (cas-4646)', () => {
+    const pointer = (type: string, target: Element, init: { pointerType?: string; x?: number; y?: number } = {}) => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: init.x ?? 10, clientY: init.y ?? 10 });
+      Object.defineProperties(event, { pointerId: { value: 1 }, isPrimary: { value: true }, pointerType: { value: init.pointerType ?? 'mouse' } });
+      target.dispatchEvent(event);
+    };
+    const click = (target: Element, detail = 1) => target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail }));
+    const base = { session: 's', supervisor: 'sup', host: 'prowl', freshness: 'now', connection: 'Live', attention: 0, selected: false };
+    const a: ConversationRow = { ...base, key: 'prowl:a', machineId: 'prowl', session: 'a' };
+    const b: ConversationRow = { ...base, key: 'prowl:b', machineId: 'prowl', session: 'b' };
+    const row = (container: Element, key: string) => container.querySelector(`[data-thread-key="${key}"]`)!;
+
+    it('opens the pressed row when a re-sort moves another row under the finger', () => {
+      const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
+      const open = vi.fn();
+      list.render(container, [a, b], open);
+      pointer('pointerdown', row(container, 'prowl:a'));
+      list.render(container, [b, a], open);
+      // The release and its click land where the press began, now on b.
+      pointer('pointerup', container.children[0]!);
+      click(container.children[0]!);
+      expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:a']);
+    });
+
+    it('opens the pressed row when a rebuild replaces it and no click arrives', () => {
+      vi.useFakeTimers();
+      try {
+        const list = new ConversationList(); const first = document.createElement('nav'); document.body.replaceChildren(first);
+        const open = vi.fn();
+        list.render(first, [a, b], open);
+        const pressed = row(first, 'prowl:b');
+        pointer('pointerdown', pressed);
+        const rebuilt = document.createElement('nav'); document.body.replaceChildren(rebuilt);
+        list.render(rebuilt, [a, b], open);
+        expect(pressed.isConnected).toBe(false);
+        pointer('pointerup', rebuilt);
+        vi.advanceTimersByTime(0);
+        expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:b']);
+        expect((open.mock.calls[0]![1] as MouseEvent).detail).toBe(1);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('absorbs a touch click that arrives after the pressed row already opened', () => {
+      vi.useFakeTimers();
+      try {
+        const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
+        const open = vi.fn();
+        list.render(container, [a, b], open);
+        pointer('pointerdown', row(container, 'prowl:b'), { pointerType: 'touch' });
+        list.render(container, [b, a], open);
+        pointer('pointerup', container.children[1]!, { pointerType: 'touch' });
+        vi.advanceTimersByTime(ROW_TAP_CLICK_WAIT_MS.touch);
+        expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:b']);
+        expect((open.mock.calls[0]![1] as MouseEvent).detail).toBe(1);
+        // The late click lands on a, now where b was pressed.
+        click(container.children[1]!);
+        expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:b']);
+        // Once the window passes, a click is an ordinary click again.
+        vi.advanceTimersByTime(ROW_TAP_CLICK_WAIT_MS.absorb);
+        click(row(container, 'prowl:a'));
+        expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:b', 'prowl:a']);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('opens a touched row once, from its own click, when nothing moved', () => {
+      vi.useFakeTimers();
+      try {
+        const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
+        const open = vi.fn();
+        list.render(container, [a, b], open);
+        pointer('pointerdown', row(container, 'prowl:b'), { pointerType: 'touch' });
+        pointer('pointerup', row(container, 'prowl:b'), { pointerType: 'touch' });
+        click(row(container, 'prowl:b'));
+        vi.advanceTimersByTime(1_000);
+        expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:b']);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('leaves a drag, a keyboard activation and a click without a press alone', () => {
+      vi.useFakeTimers();
+      try {
+        const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
+        const open = vi.fn();
+        list.render(container, [a, b], open);
+        pointer('pointerdown', row(container, 'prowl:a'));
+        pointer('pointermove', row(container, 'prowl:a'), { y: 60 });
+        pointer('pointerup', row(container, 'prowl:b'), { y: 60 });
+        vi.advanceTimersByTime(1_000);
+        expect(open).not.toHaveBeenCalled();
+        click(row(container, 'prowl:b'), 0);
+        expect(open.mock.calls.map(([opened]) => opened.key)).toEqual(['prowl:b']);
+      } finally { vi.useRealTimers(); }
+    });
   });
   it('renders the Pebble row: machine accent on every row of a machine, waiting and unread as distinct affordances', () => {
     const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);

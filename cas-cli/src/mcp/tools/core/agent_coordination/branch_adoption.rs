@@ -23,7 +23,13 @@ struct Git<'a> {
 impl Git<'_> {
     fn output(&self, args: &[&str]) -> Result<Output, String> {
         run_command(
-            Command::new("git").arg("-C").arg(self.root).args(args),
+            // cas-39f3: run_command SIGKILLs at the deadline; without
+            // optional locks a killed `status` cannot strand index.lock.
+            Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .arg("-C")
+                .arg(self.root)
+                .args(args),
             self.deadline,
             Duration::from_secs(5),
         )

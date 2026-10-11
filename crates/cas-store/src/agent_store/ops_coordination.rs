@@ -21,8 +21,7 @@ impl SqliteAgentStore {
         Ok(agents)
     }
     pub(crate) fn coord_graceful_shutdown(&self, agent_id: &str) -> Result<Vec<String>> {
-        let conn = self.lock_conn()?;
-        let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+        let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
 
         // Get all active task leases for this agent
         let mut stmt = tx.prepare_cached(

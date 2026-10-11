@@ -12,11 +12,6 @@ use crate::Result;
 use crate::error::StoreError;
 use cas_types::{CommitLink, Scope};
 
-/// Helper to convert mutex poison error to StoreError
-fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Other("lock poisoned".to_string())
-}
-
 /// `(files_changed, prompt_ids)` as JSON, shared by every writer so the two
 /// insert paths cannot disagree about the encoding.
 fn serialize_arrays(link: &CommitLink) -> Result<(String, String)> {
@@ -150,7 +145,7 @@ impl SqliteCommitLinkStore {
 
 impl CommitLinkStore for SqliteCommitLinkStore {
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(COMMIT_LINK_SCHEMA)?;
         // `CREATE TABLE IF NOT EXISTS` is a no-op on a database whose
         // commit_links predates M5, so the new column would be missing on every
@@ -169,7 +164,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn add(&self, link: &CommitLink) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let (files_changed_json, prompt_ids_json) = serialize_arrays(link)?;
 
         conn.execute(
@@ -195,7 +190,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn add_reconstructed(&self, link: &CommitLink) -> Result<bool> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let (files_changed_json, prompt_ids_json) = serialize_arrays(link)?;
 
         let written = conn.execute(
@@ -222,7 +217,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn get(&self, commit_hash: &str) -> Result<Option<CommitLink>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             &format!(
@@ -239,7 +234,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<CommitLink>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             &format!(
@@ -258,7 +253,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn list_by_branch(&self, branch: &str, limit: usize) -> Result<Vec<CommitLink>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             &format!(
@@ -277,7 +272,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<CommitLink>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             &format!(
@@ -295,7 +290,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn find_by_file(&self, file_path: &str, limit: usize) -> Result<Vec<CommitLink>> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             &format!(
@@ -318,7 +313,7 @@ impl CommitLinkStore for SqliteCommitLinkStore {
     }
 
     fn prune(&self, days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_error)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let cutoff = Utc::now() - chrono::Duration::days(days);
 

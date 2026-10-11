@@ -2,16 +2,16 @@
 source: cas-cli/tests/component_output_test.rs
 expression: redacted
 ---
-[WARN] 3 warnings · 29 ok · [PROJECT] · [VERSION]
+[WARN] 3 warnings · 30 ok · [PROJECT] · [VERSION]
 ────────────────────────────────────────────────────────────────────────────────
 Host          [OK] registered project roots
   [WARN] host  host: [N] finding(s) — see `cas doctor --host`
 Store         [OK] cas directory  [OK] prompt hook  [OK] database  [OK] schema  [OK] tables  [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules  [OK] tasks  [OK] cloud team-only
-Indexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain  [OK] embeddings
+Indexes       [OK] legacy search index  [OK] symbol index  [OK] code index copies  [OK] embedding drain  [OK] embeddings
   [WARN] search index        Index not found at [CAS_PATH] Will be created on first search; Run a search to build it
   [WARN] code history index  cannot check code history index: not a git repository: [TEMP_PATH] ([GIT_NOT_REPOSITORY])
 Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows
 Config        [OK] SessionStart budget  [OK] configuration  [OK] issue repositories  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target  [OK] mcp config
 Integrations  [OK] integrations
 
-29 ok · 3 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages
+30 ok · 3 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages

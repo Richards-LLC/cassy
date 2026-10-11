@@ -224,8 +224,12 @@ command = "cas-f7ac-intentionally-missing-upstream"
         }),
     );
     let admitted_message = admitted["error"]["message"].as_str().unwrap();
+    // The allowlisted call passes policy and reaches the upstream, which is
+    // absent. The fixture's command does not exist, so since GH #1168 the
+    // proxy names that state ("its executable is missing") instead of the
+    // generic "configured but not connected".
     assert!(
-        admitted_message.contains("MCP upstream 'github' is absent: it is configured but not connected"),
+        admitted_message.contains("MCP upstream 'github' is absent: its executable is missing"),
         "unexpected admitted response: {admitted}"
     );
     assert!(!admitted_message.contains("proxy policy denied"));

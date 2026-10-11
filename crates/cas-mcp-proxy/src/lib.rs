@@ -454,6 +454,18 @@ pub struct UpstreamHealth {
     pub last_error: Option<String>,
     pub last_attempt_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
+    /// Whether the execute path holds a live connection right now (cas-53ce).
+    #[serde(default)]
+    pub connected: bool,
+    /// Last successful connect or tool call on the execute path (cas-53ce).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at_ms: Option<u64>,
+    /// Most recent failure code, kept after a recovery so health still shows
+    /// why the connection last dropped (cas-53ce).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_at_ms: Option<u64>,
 }
 
 /// Coarse state intentionally excludes URLs, credentials, and response content.
@@ -501,6 +513,10 @@ impl ProxyHealthSnapshot {
                 .as_deref()
                 .map(safe_error_code);
             server.last_error = server.last_error.as_deref().map(safe_error_detail_text);
+            server.last_failure_code = server
+                .last_failure_code
+                .as_deref()
+                .map(safe_error_code);
         }
         self
     }
@@ -521,7 +537,19 @@ pub struct ProxyEngine {
     policy: RwLock<Arc<dyn ProxyPolicy>>,
     observer: RwLock<Option<Arc<dyn ProxyCallObserver>>>,
     policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
+    /// Client-side bound on one upstream tool call (cas-53ce).
+    call_timeout: std::sync::RwLock<Duration>,
+    /// Serializes on-demand reconnects so concurrent calls to a dropped
+    /// upstream start one connection, not one each (cas-53ce).
+    reconnect_gate: tokio::sync::Mutex<()>,
+    /// Bumped on every health transition (connect, failure, drop), so a
+    /// caller can republish the project snapshot only when it changed.
+    health_epoch: AtomicU64,
 }
+
+/// Default client-side bound on one upstream tool call (cas-53ce). Hub
+/// functions time out at 60 s, so a healthy call finishes well inside it.
+pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 90;
 
 fn validate_configs(configs: &HashMap<String, ServerConfig>) -> Result<()> {
     if configs.values().any(
@@ -559,6 +587,9 @@ impl ProxyEngine {
             policy: RwLock::new(Arc::new(AllowAllProxyPolicy)),
             observer: RwLock::new(None),
             policy_audit: Mutex::new(VecDeque::new()),
+            call_timeout: std::sync::RwLock::new(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
+            reconnect_gate: tokio::sync::Mutex::new(()),
+            health_epoch: AtomicU64::new(0),
         };
 
         let mut names: Vec<_> = configs.keys().cloned().collect();
@@ -571,6 +602,85 @@ impl ProxyEngine {
         .await;
 
         Ok(engine)
+    }
+
+    /// Bound every subsequent upstream tool call by `timeout` (cas-53ce).
+    pub fn set_call_timeout(&self, timeout: Duration) {
+        if let Ok(mut current) = self.call_timeout.write() {
+            *current = timeout.max(Duration::from_millis(1));
+        }
+    }
+
+    /// Monotonic counter of health transitions in this engine (cas-53ce).
+    /// Compare before and after a call to learn whether the published
+    /// health snapshot is now stale.
+    pub fn health_epoch(&self) -> u64 {
+        self.health_epoch.load(Ordering::Acquire)
+    }
+
+    fn call_timeout(&self) -> Duration {
+        self.call_timeout
+            .read()
+            .map(|timeout| *timeout)
+            .unwrap_or(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS))
+    }
+
+    /// Reconnect a dropped upstream on demand once its backoff is due
+    /// (cas-53ce, GH #1168). Without this an upstream dropped by a transport
+    /// error stayed absent for the rest of the session unless a separate
+    /// retry tick happened to run in this process.
+    async fn reconnect_if_due(&self, name: &str) {
+        let _gate = self.reconnect_gate.lock().await;
+        if self.servers.read().await.contains_key(name) {
+            return;
+        }
+        let now = now_ms();
+        let due = self.health.read().await.get(name).is_some_and(|record| {
+            record.state == UpstreamState::Backoff
+                && record.next_retry_at_ms.is_some_and(|retry| retry <= now)
+        });
+        if !due {
+            return;
+        }
+        let Some(config) = self.configs.read().await.get(name).cloned() else {
+            return;
+        };
+        self.connect_and_record(name, &config, now).await;
+    }
+
+    /// The operator's next step for a configured upstream that is not
+    /// connected, from its recorded failure (cas-53ce).
+    async fn absent_message(&self, routing_name: &str, public: &str) -> String {
+        let record = self.health.read().await.get(routing_name).cloned();
+        let code = record
+            .as_ref()
+            .and_then(|record| record.last_error_code.clone())
+            .map(|code| safe_error_code(&code));
+        match (record, code) {
+            (_, Some(code))
+                if code.starts_with(MISSING_CREDENTIAL_ENV_PREFIX)
+                    || code == "authentication_required" =>
+            {
+                format!(
+                    "MCP upstream '{public}' is absent: its credential is unavailable or was rejected ({code}); restore its credential, then retry"
+                )
+            }
+            (_, Some(code)) if code == "executable_missing" => format!(
+                "MCP upstream '{public}' is absent: its executable is missing; install it and reload proxy.toml (inspect proxy_health)"
+            ),
+            (Some(record), Some(code)) if record.state == UpstreamState::Backoff => {
+                let wait = record
+                    .next_retry_at_ms
+                    .map(|retry| retry.saturating_sub(now_ms()).div_ceil(1000))
+                    .unwrap_or(0);
+                format!(
+                    "MCP upstream '{public}' is absent: its connection dropped ({code}); Cassy reconnects with backoff on the next call after {wait}s. Retry then; if it stays absent, restart the session (inspect proxy_health)"
+                )
+            }
+            _ => format!(
+                "MCP upstream '{public}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying"
+            ),
+        }
     }
 
     /// Install the policy used for subsequent upstream calls.
@@ -698,6 +808,7 @@ impl ProxyEngine {
                     .entry(name.to_string())
                     .or_insert_with(|| initial_health(name, config));
                 record_success(record, tool_count, now);
+                self.health_epoch.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     upstream = %public_name,
                     tool_count,
@@ -719,6 +830,7 @@ impl ProxyEngine {
                     }
                     record_failure_with_detail(record, &code, Some(&error), now)
                 };
+                self.health_epoch.fetch_add(1, Ordering::AcqRel);
                 match visibility {
                     FailureVisibility::Error if code == "executable_missing" => tracing::error!(
                         upstream = %public_name,
@@ -780,9 +892,8 @@ impl ProxyEngine {
                     .get(name)
                     .cloned()
                     .unwrap_or_else(|| public_upstream_id(name));
-                anyhow::bail!(
-                    "MCP upstream '{public}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying"
-                );
+                let message = self.absent_message(name, &public).await;
+                anyhow::bail!(message);
             }
         }
 
@@ -1289,6 +1400,14 @@ impl ProxyEngine {
             .cloned()
             .unwrap_or_else(|| public_upstream_id(&resolved_server));
         drop(configs);
+        if !self.servers.read().await.contains_key(&resolved_server) {
+            self.reconnect_if_due(&resolved_server).await;
+        }
+        let absent = if self.servers.read().await.contains_key(&resolved_server) {
+            None
+        } else {
+            Some(self.absent_message(&resolved_server, &requested_public).await)
+        };
         let servers = self.servers.read().await;
         let server = servers.get(&resolved_server).with_context(|| {
             let mut available: Vec<String> = servers
@@ -1302,8 +1421,10 @@ impl ProxyEngine {
                 .collect();
             available.sort();
             format!(
-                "MCP upstream '{}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying. Available: {}",
-                requested_public,
+                "{}. Available: {}",
+                absent.unwrap_or_else(|| format!(
+                    "MCP upstream '{requested_public}' is absent: it is configured but not connected; inspect proxy_health"
+                )),
                 if available.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -1320,13 +1441,24 @@ impl ProxyEngine {
             .unwrap_or_else(|| public_tool_id(&resolved_tool));
         request.name = resolved_tool.into();
         let generation = server.generation;
-        let result = server.service.call_tool(request).await;
+        // cas-53ce (GH #1168): bound the call on the client side. A hung
+        // upstream held mcp_execute for ~1000 s; past the bound the stuck
+        // connection is dropped like any other live failure and reconnects.
+        let timeout = self.call_timeout();
+        let result = match tokio::time::timeout(timeout, server.service.call_tool(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(rmcp::service::ServiceError::Timeout { timeout }),
+        };
         let completion = CALL_COMPLETION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         match result {
             Ok(result) => {
                 server
                     .last_successful_call
                     .fetch_max(completion, Ordering::Release);
+                drop(servers);
+                if let Some(record) = self.health.write().await.get_mut(&resolved_server) {
+                    record.last_success_at_ms = Some(now_ms());
+                }
                 Ok(result)
             }
             Err(error) => {
@@ -1335,9 +1467,19 @@ impl ProxyEngine {
                     self.record_live_failure(&resolved_server, generation, completion, code)
                         .await;
                 }
-                Err(anyhow::Error::from(error).context(format!(
-                    "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
-                )))
+                let timed_out = matches!(error, rmcp::service::ServiceError::Timeout { .. });
+                let error = anyhow::Error::from(error);
+                let error = if timed_out {
+                    error.context(format!(
+                        "tool call '{resolved_public_tool}' on '{resolved_public}' timed out after {}s (client timeout); the connection was dropped and reconnects with backoff",
+                        timeout.as_secs_f64()
+                    ))
+                } else {
+                    error.context(format!(
+                        "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
+                    ))
+                };
+                Err(error)
             }
         }
     }
@@ -1378,6 +1520,7 @@ impl ProxyEngine {
             };
             record_failure(record, code, now_ms())
         };
+        self.health_epoch.fetch_add(1, Ordering::AcqRel);
         drop(servers);
         let _ = removed.service.cancel().await;
         match visibility {
@@ -1449,6 +1592,10 @@ fn initial_health(name: &str, config: &ServerConfig) -> UpstreamHealth {
         last_error: None,
         last_attempt_at_ms: None,
         next_retry_at_ms: None,
+        connected: false,
+        last_success_at_ms: None,
+        last_failure_code: None,
+        last_failure_at_ms: None,
     }
 }
 
@@ -1470,6 +1617,8 @@ fn record_success(record: &mut UpstreamHealth, tool_count: usize, now: u64) {
     record.last_error = None;
     record.last_attempt_at_ms = Some(now);
     record.next_retry_at_ms = None;
+    record.connected = true;
+    record.last_success_at_ms = Some(now);
 }
 
 fn record_failure(record: &mut UpstreamHealth, error_code: &str, now: u64) -> FailureVisibility {
@@ -1488,6 +1637,9 @@ fn record_failure_with_detail(
     record.last_error_code = Some(error_code.to_string());
     record.last_error = error.map(safe_error_detail);
     record.last_attempt_at_ms = Some(now);
+    record.connected = false;
+    record.last_failure_code = Some(error_code.to_string());
+    record.last_failure_at_ms = Some(now);
     if error_code == "executable_missing" {
         record.state = UpstreamState::ExecutableMissing;
         record.next_retry_at_ms = None;
@@ -2806,6 +2958,188 @@ mod tests {
         assert!(!engine.upstream_connected("viktor").await);
     }
 
+    /// cas-53ce: a stdio MCP upstream speaking newline-delimited JSON-RPC.
+    /// `echo` answers, `drop` exits the process mid-call (a transport error)
+    /// and `hang` never answers. Every tool call is appended to `calls.log`.
+    fn fake_upstream(dir: &Path) -> ServerConfig {
+        let script = dir.join("fake_mcp.py");
+        std::fs::write(
+            &script,
+            r#"import json, os, sys, time
+log = sys.argv[1]
+def send(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    message = json.loads(line)
+    ident = message.get("id")
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": ident, "result": {
+            "protocolVersion": message["params"].get("protocolVersion", "2025-03-26"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fake", "version": "1"}}})
+    elif method == "tools/list":
+        tools = [{"name": name, "description": name, "inputSchema": {"type": "object"}}
+                 for name in ("echo", "drop", "hang")]
+        send({"jsonrpc": "2.0", "id": ident, "result": {"tools": tools}})
+    elif method == "tools/call":
+        name = message["params"]["name"]
+        with open(log, "a") as handle:
+            handle.write(name + "\n")
+        if name == "drop":
+            os._exit(0)
+        if name == "hang":
+            time.sleep(30)
+        send({"jsonrpc": "2.0", "id": ident, "result": {
+            "content": [{"type": "text", "text": "ok"}], "isError": False}})
+    elif ident is not None:
+        send({"jsonrpc": "2.0", "id": ident, "result": {}})
+"#,
+        )
+        .unwrap();
+        ServerConfig::Stdio {
+            command: "python3".to_string(),
+            args: vec![
+                "-I".to_string(),
+                script.display().to_string(),
+                dir.join("calls.log").display().to_string(),
+            ],
+            env: HashMap::new(),
+        }
+    }
+
+    async fn call_fake(engine: &ProxyEngine, tool: &str) -> Result<String> {
+        engine
+            .execute(
+                &registered_worker_caller(),
+                &format!(r#"{{"server":"fake","tool":"{tool}","args":{{}}}}"#),
+                None,
+            )
+            .await
+            .map(|result| result.text)
+    }
+
+    async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {
+        engine.health.read().await.get("fake").cloned().expect("fake health")
+    }
+
+    /// cas-53ce (GH #1168): a transport error drops the upstream, health
+    /// shows it disconnected with the error, the absent message names the
+    /// reconnect (not a credential), and once the backoff is due the next
+    /// call reconnects and succeeds with health showing the recovery and the
+    /// last failure.
+    #[tokio::test]
+    async fn cas_53ce_transport_error_reconnects_with_backoff_and_reports_live_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "fake".to_string(),
+            fake_upstream(dir.path()),
+        )]))
+        .await
+        .unwrap();
+        assert!(call_fake(&engine, "echo").await.is_ok(), "{:?}", fake_health(&engine).await);
+        let healthy = fake_health(&engine).await;
+        assert!(healthy.connected);
+        assert!(healthy.last_success_at_ms.is_some());
+
+        let epoch = engine.health_epoch();
+        let dropped = call_fake(&engine, "drop").await;
+        assert!(engine.health_epoch() > epoch, "a dropped upstream changes health");
+        assert!(dropped.is_err(), "a dropped transport fails the call");
+        let down = fake_health(&engine).await;
+        assert_eq!(down.state, UpstreamState::Backoff, "{down:?}");
+        assert!(!down.connected, "{down:?}");
+        assert_eq!(down.last_failure_code.as_deref(), Some("connection_failed"), "{down:?}");
+        assert!(down.last_failure_at_ms.is_some(), "{down:?}");
+        let snapshot = engine.health_snapshot().await;
+        assert_eq!(snapshot.healthy, 0, "proxy_health must not report the dropped upstream healthy");
+
+        let absent = call_fake(&engine, "echo").await.unwrap_err().to_string();
+        assert!(absent.contains("is absent"), "{absent}");
+        assert!(absent.contains("reconnect"), "a dropped connection names the reconnect: {absent}");
+        assert!(!absent.contains("credential"), "the credential is fine: {absent}");
+
+        engine.health.write().await.get_mut("fake").unwrap().next_retry_at_ms = Some(0);
+        let epoch = engine.health_epoch();
+        let recovered = call_fake(&engine, "echo").await;
+        assert!(engine.health_epoch() > epoch, "a reconnect changes health");
+        assert!(recovered.is_ok(), "a due backoff reconnects on the next call: {recovered:?}");
+        let up = fake_health(&engine).await;
+        assert_eq!(up.state, UpstreamState::Healthy, "{up:?}");
+        assert!(up.connected, "{up:?}");
+        assert_eq!(up.last_failure_code.as_deref(), Some("connection_failed"), "{up:?}");
+        assert!(up.last_success_at_ms >= down.last_failure_at_ms, "{up:?}");
+        engine.shutdown().await;
+    }
+
+    /// cas-53ce (GH #1168): a call to an upstream that never answers fails
+    /// at the client timeout instead of hanging for the hub's ~1000 s, and
+    /// the stuck connection is dropped for reconnect.
+    #[tokio::test]
+    async fn cas_53ce_hanging_upstream_call_fails_at_the_client_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "fake".to_string(),
+            fake_upstream(dir.path()),
+        )]))
+        .await
+        .unwrap();
+        engine.set_call_timeout(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), call_fake(&engine, "hang"))
+            .await
+            .expect("the proxy itself must bound the call");
+        let error = outcome.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+        let health = fake_health(&engine).await;
+        assert!(!health.connected, "{health:?}");
+        assert_eq!(health.last_failure_code.as_deref(), Some("timeout"), "{health:?}");
+        engine.shutdown().await;
+    }
+
+    /// cas-53ce: the absent message names the real next step: a missing
+    /// credential says to restore it; a dropped connection does not.
+    #[tokio::test]
+    async fn cas_53ce_absent_message_distinguishes_credential_from_dropped_connection() {
+        let missing = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some("env:CAS_TEST_MISSING_53CE_KEY".to_string()),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine = ProxyEngine::from_configs(HashMap::from([("violet".to_string(), missing)]))
+            .await
+            .unwrap();
+        let error = engine
+            .execute(
+                &registered_worker_caller(),
+                r#"{"server":"violet","tool":"violet_read","args":{}}"#,
+                None,
+            )
+            .await
+            .map(|result| result.text)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is absent"), "{error}");
+        assert!(error.contains("credential"), "{error}");
+        assert!(!error.contains("reconnect"), "{error}");
+    }
+
+    #[test]
+    fn cas_53ce_call_timeout_is_configurable_with_a_90s_default() {
+        let config: crate::config::Config = toml::from_str("").unwrap();
+        assert_eq!(config.call_timeout(), Duration::from_secs(90));
+        let config: crate::config::Config = toml::from_str("call_timeout_secs = 45\n").unwrap();
+        assert_eq!(config.call_timeout(), Duration::from_secs(45));
+        let config: crate::config::Config = toml::from_str("call_timeout_secs = 0\n").unwrap();
+        assert_eq!(config.call_timeout(), Duration::from_secs(1), "zero is clamped up");
+    }
+
     fn hanging_http_upstream(hold: Duration) -> (ServerConfig, std::thread::JoinHandle<()>) {
         install_test_crypto_provider();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3311,6 +3645,10 @@ mod tests {
                     last_error: Some("token=private\ncontrol".to_string()),
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: Some(5_001),
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 UpstreamHealth {
                     name: second_raw.to_string(),
@@ -3324,6 +3662,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: Some(5_001),
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
             ],
         }
@@ -3393,6 +3735,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 })
                 .collect(),
         }
@@ -3473,6 +3819,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 UpstreamHealth {
                     name: "forged-http".to_string(),
@@ -3486,6 +3836,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
                 UpstreamHealth {
                     name: "healthy-stdio".to_string(),
@@ -3499,6 +3853,10 @@ mod tests {
                     last_error: None,
                     last_attempt_at_ms: Some(1),
                     next_retry_at_ms: None,
+                    connected: false,
+                    last_success_at_ms: None,
+                    last_failure_code: None,
+                    last_failure_at_ms: None,
                 },
             ],
         }
@@ -3624,6 +3982,10 @@ mod tests {
                 last_error: None,
                 last_attempt_at_ms: Some(1),
                 next_retry_at_ms: Some(5_001),
+                connected: false,
+                last_success_at_ms: None,
+                last_failure_code: None,
+                last_failure_at_ms: None,
             }],
         };
         let json = serde_json::to_value(snapshot).unwrap();

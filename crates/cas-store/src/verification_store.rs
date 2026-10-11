@@ -48,10 +48,6 @@ pub enum ParentDependencyUpdate {
 }
 
 // Helper to convert lock errors
-fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
-    StoreError::Parse("Failed to acquire lock".to_string())
-}
-
 fn sanitized_verification_for_write(verification: &Verification) -> Verification {
     let mut sanitized = verification.clone();
     if matches!(
@@ -493,7 +489,7 @@ pub fn get_verification_for_dispatch(
     dispatch_id: &str,
 ) -> Result<Option<Verification>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let verification = conn
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -567,7 +563,7 @@ pub fn add_system_verification(cas_dir: &Path, verification: &Verification) -> R
         ));
     }
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     insert_verification_with_conn(&conn, verification)
 }
 
@@ -579,7 +575,7 @@ pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -
         ));
     }
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let existing = conn
         .query_row(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -723,7 +719,7 @@ fn capability_id_from_token(token: &str) -> Result<&str> {
 /// before beginning the verdict transaction. The raw token is never returned.
 pub fn inspect_verifier_capability(cas_dir: &Path, token: &str) -> Result<VerifierCapability> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let id = capability_id_from_token(token)?;
     let capability = load_capability_with_conn(&conn, id)?;
     if !constant_time_eq(&capability.token_hash, &capability_token_hash(token)) {
@@ -888,7 +884,7 @@ pub fn get_latest_verification_dispatch(
     task_id: &str,
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     get_latest_verification_dispatch_with_conn(&conn, task_id)
 }
 
@@ -918,7 +914,7 @@ pub fn get_verification_dispatch(
     dispatch_id: &str,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     get_verification_dispatch_with_conn(&conn, dispatch_id)
 }
 
@@ -970,7 +966,7 @@ pub fn resolve_verification_dispatch_for_add(
     dispatch_id: &str,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     resolve_verification_dispatch_for_add_with_conn(&conn, dispatch_id)
 }
 
@@ -986,16 +982,20 @@ pub fn create_verification_dispatch_bound(
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    create_verification_dispatch_bound_with_conn(
-        &conn,
+    // Pooled connection: take the write lock without holding the process
+    // mutex across the wait (cas-3f65e), then run the in-transaction body.
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = create_verification_dispatch_bound_in_transaction(
+        &tx,
         task_id,
         requester_agent_id,
         owner_agent_id,
         boundary,
         deadline_at,
         supervisor_recovery,
-    )
+    )?;
+    tx.commit()?;
+    Ok(dispatch)
 }
 
 /// Create an exact dispatch on a caller-owned SQLite transaction.
@@ -1152,7 +1152,7 @@ pub fn claim_verification_dispatch_bound(
     capability_id: &str,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let now = Utc::now();
     let changed = conn.execute(
         "UPDATE verification_dispatches
@@ -1253,8 +1253,7 @@ pub fn timeout_verification_dispatch(
     now: DateTime<Utc>,
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let dispatch_id: Option<String> = tx
         .query_row(
             "SELECT id FROM verification_dispatches
@@ -1293,8 +1292,7 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
     task_id: &str,
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let Some(dispatch) = get_latest_verification_dispatch_with_conn(&tx, task_id)? else {
         tx.commit()?;
         return Ok(None);
@@ -1313,8 +1311,7 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
     dispatch_id: &str,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
         .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
@@ -1444,8 +1441,7 @@ pub fn reopen_terminal_task_atomic(
         supervisor_queue.init()?;
     }
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
 
     let dispatch = match get_latest_verification_dispatch_with_conn(&tx, &task.id)? {
         Some(dispatch)
@@ -1558,8 +1554,7 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
     expected_status: TaskStatus,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let selected = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     if selected.task_id != task.id
         || selected.receipt_id.is_some()
@@ -1745,9 +1740,9 @@ fn correct_parked_delivery_proof_scope_inner(
     SqliteTaskStore::open(cas_dir)?.init()?;
     SqliteEventStore::open(cas_dir)?;
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    crate::shared_db::lock_connection(&store.conn)?
+        .execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
 
     let dispatch = get_latest_verification_dispatch_with_conn(&tx, &corrected_task.id)?
         .filter(|dispatch| dispatch.task_id == corrected_task.id);
@@ -1972,9 +1967,9 @@ pub fn request_changes_for_parked_delivery(
     SqliteTaskStore::open(cas_dir)?.init()?;
     SqliteEventStore::open(cas_dir)?;
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
-    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
+    crate::shared_db::lock_connection(&store.conn)?
+        .execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
 
     let dispatch = get_latest_verification_dispatch_with_conn(&tx, task_id)?
         .filter(|dispatch| dispatch.task_id == task_id);
@@ -2226,7 +2221,7 @@ pub fn issue_verifier_capability(
     issuer_agent_id: &str,
 ) -> Result<IssuedVerifierCapability> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let dispatch = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         .filter(|dispatch| {
             dispatch.state == VerificationDispatchState::Pending
@@ -2322,7 +2317,7 @@ pub fn issue_server_verifier_handoff_with_secret(
     }
 
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = Utc::now();
     let now_value = now.to_rfc3339();
@@ -2440,7 +2435,7 @@ pub fn bind_server_verifier_handoff(
 ) -> Result<VerifierCapability> {
     validate_distinct_verifier_child(issuer_agent_id, verifier_agent_id)?;
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let bound = bind_server_verifier_handoff_with_conn(&tx, issuer_agent_id, verifier_agent_id)?;
     tx.commit()?;
@@ -2468,7 +2463,7 @@ pub fn bind_server_verifier_handoff_and_register_child(
     }
 
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     let issuer_status: Option<String> = tx
@@ -2636,7 +2631,7 @@ pub fn cancel_unbound_server_verifier_handoff(
         return Ok(false);
     }
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let mut conn = crate::shared_db::lock_connection(&store.conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let tool_use_id_hash = verifier_handoff_tool_hash(tool_use_id);
     let mut stmt = tx.prepare(
@@ -2693,7 +2688,7 @@ pub fn inspect_bound_server_verifier_handoff(
     dispatch_id: Option<&str>,
 ) -> Result<VerifierCapability> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let mut stmt = conn.prepare(
         "SELECT h.capability_id
          FROM verification_handoffs h
@@ -2800,7 +2795,7 @@ pub fn bind_verifier_capability(
     verifier_agent_id: &str,
 ) -> Result<VerifierCapability> {
     let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
     let id = capability_id_from_token(token)?;
     let capability = load_capability_with_conn(&conn, id)?;
     let dispatch_id = capability.dispatch_id.as_deref().ok_or_else(|| {
@@ -2893,7 +2888,7 @@ impl VerificationStore for SqliteVerificationStore {
         // detection query succeed and records it. `ensure_column` makes
         // concurrent openers idempotent and race-safe.
         crate::shared_db::with_write_retry(|| {
-            let conn = self.conn.lock().map_err(lock_err)?;
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(VERIFICATION_SCHEMA)?;
             crate::shared_db::ensure_column(
                 &conn,
@@ -2962,14 +2957,14 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn add(&self, verification: &Verification) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let verification = sanitized_verification_for_write(verification);
         validate_verification_authority_with_conn(&conn, &verification, false)?;
         insert_verification_with_conn(&conn, &verification)
     }
 
     fn get(&self, id: &str) -> Result<Verification> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut verification = conn
             .query_row(
@@ -2991,7 +2986,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn update(&self, verification: &Verification) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let verification = sanitized_verification_for_write(verification);
 
         let existing = conn
@@ -3058,7 +3053,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Issues deleted via CASCADE
         let rows = conn.execute("DELETE FROM verifications WHERE id = ?1", params![id])?;
@@ -3071,7 +3066,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn get_for_task(&self, task_id: &str) -> Result<Vec<Verification>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -3092,7 +3087,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn get_latest_for_task(&self, task_id: &str) -> Result<Option<Verification>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let verification = conn
             .query_row(
@@ -3121,7 +3116,7 @@ impl VerificationStore for SqliteVerificationStore {
         task_id: &str,
         verification_type: VerificationType,
     ) -> Result<Option<Verification>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let verification = conn
             .query_row(
@@ -3146,7 +3141,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn list_recent(&self, limit: usize) -> Result<Vec<Verification>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -3166,7 +3161,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn list_by_status(&self, status: VerificationStatus) -> Result<Vec<Verification>> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
@@ -3187,7 +3182,7 @@ impl VerificationStore for SqliteVerificationStore {
     }
 
     fn prune(&self, older_than_days: i64) -> Result<usize> {
-        let conn = self.conn.lock().map_err(lock_err)?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
 
         // Issues are deleted via CASCADE

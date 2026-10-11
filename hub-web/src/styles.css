@@ -828,6 +828,18 @@ main {
 .fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
+/* cas-ab04: Write access — task, folder, modes and reason; then confirm. */
+.write-grant { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); align-items: stretch; }
+.write-grant-field { display: grid; gap: var(--space-1); font-size: var(--fs-meta); color: var(--text-mid); }
+.write-grant-field select, .write-grant-field input { min-height: var(--rail-item-min); width: 100%; min-width: 0; box-sizing: border-box; padding: 0 var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-regular) var(--fs-base)/1.3 var(--font-ui); }
+.write-grant-path { font-family: var(--font-mono); }
+.write-grant-modes { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: 0; padding: 0; border: 0; font-size: var(--fs-meta); color: var(--text-hi); }
+.write-grant-modes legend { padding: 0; margin-bottom: var(--space-1); color: var(--text-mid); }
+.write-grant-modes label { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--rail-item-min); }
+.write-grant-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.write-grant-confirm p { margin: 0; color: var(--text-hi); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.write-grant-result { margin: 0; overflow-wrap: anywhere; }
+.fleet-ops-note--ok { color: var(--state-ok); }
 .fleet-ops-undo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); }
 /* cas-97d58 F12: a destructive action's result, where the Undo would be. */
 .fleet-ops-result { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); scroll-margin-block: var(--space-4); }
@@ -1675,7 +1687,7 @@ dialog form > *,
 
 /* Cassy Cloud: project-first conversations. */
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
-.cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
+.cloud-brand-mark { display: block; width: var(--space-8); height: var(--space-8); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
 /* The context rail (P10) folds to the 48px context track until it has
  * something the header does not; .context-open gives it its 240px back. */
@@ -1693,7 +1705,7 @@ dialog form > *,
    the machine's --accent-soft and --lift. The machine accent is set by the
    machine-accent-N class on each row (hub-web/src/machine-accent.ts). */
 .conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; z-index: 1; background: var(--panel); box-shadow: var(--lift-edge); }
-.conversation-list-heading { padding: 22px 18px 18px; }
+.conversation-list-heading { padding: calc(22px + env(safe-area-inset-top)) 18px 18px; }
 /* P13: the lockup and the Appearance & commands icon button share the top row. */
 .conversation-list-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: var(--rail-item-min); min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border-radius: var(--radius-pill); color: var(--ink); background: var(--color-transparent); }
@@ -1797,7 +1809,7 @@ dialog form > *,
 .compose-fab svg { width: 20px; height: 20px; display: block; flex: none; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 /* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
-.conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
+.conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
 /* Journey F17: where the list is on screen beside the thread, "‹ Conversations"
    is a step that goes nowhere; the phone layout below shows it again. */
@@ -2324,7 +2336,7 @@ button.chip:disabled { cursor: default; }
   /* Phone: the list is the page — full width, no rail edge, and the compose
      bar sits between the list and the footer while the list is showing. */
   .conversation-sidebar { height: 100%; box-shadow: none; }
-  .conversation-list-heading { padding: 20px 12px 14px; }
+  .conversation-list-heading { padding: calc(20px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 14px calc(12px + env(safe-area-inset-left)); }
   #conversation-list { padding: 0 12px var(--space-4); }
   .conversation-sidebar footer { padding: var(--space-3) 12px; }
   /* P13: the phone footer folds to one 32px line — the paired-machines toggle
@@ -2371,7 +2383,7 @@ button.chip:disabled { cursor: default; }
      Interrupt with its word). The lockup stays on the list screen only
      (DESIGN.md §Brand). The topline dissolves into the heading grid so its
      buttons flank the identity on the same row. */
-  .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: 6px var(--space-2) 6px var(--space-1); }
+  .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: calc(6px + env(safe-area-inset-top)) calc(var(--space-2) + env(safe-area-inset-right)) 6px calc(var(--space-1) + env(safe-area-inset-left)); }
   .conversation-topline { display: contents; }
   .conversation-topline .cloud-brand { display: none; }
   #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
@@ -2402,7 +2414,7 @@ button.chip:disabled { cursor: default; }
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
   /* The rail, laid over the thread as a sheet holding only Attention. */
-  .conversation-shell.thread-open.attention-sheet-open > .conversation-context { display: block; position: fixed; inset: 0; z-index: 20; padding: var(--space-4) var(--space-4) max(var(--space-6), env(safe-area-inset-bottom)); border: 0; background: var(--bg-root); overflow-y: auto; }
+  .conversation-shell.thread-open.attention-sheet-open > .conversation-context { display: block; position: fixed; inset: 0; z-index: 20; padding: calc(var(--space-4) + env(safe-area-inset-top)) calc(var(--space-4) + env(safe-area-inset-right)) max(var(--space-6), env(safe-area-inset-bottom)) calc(var(--space-4) + env(safe-area-inset-left)); border: 0; background: var(--bg-root); overflow-y: auto; }
   .attention-sheet-open > .conversation-context .context-section:not([data-section="attention"]) { display: none; }
   .attention-sheet-open > .conversation-context .context-sheet-close { display: flex; align-items: center; justify-content: center; margin: 0 0 var(--space-2) auto; width: 44px; height: 44px; padding: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-regular) 26px/1 var(--font-ui); }
   #conversation-back:hover:not(:disabled) { background: var(--bg-hover); }
@@ -2441,7 +2453,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity .conversation-host { font-size: 11.5px; line-height: 1.5; }
 }
 @media (max-height: 30rem) {
-  .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }
+  .conversation-heading { padding-top: calc(var(--space-1) + env(safe-area-inset-top)); padding-bottom: var(--space-1); gap: var(--space-1); }
   /* cas-8526: off the short landscape header, not out of its spoken name or
      its connection status. */
   .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
@@ -2507,7 +2519,7 @@ button.chip:disabled { cursor: default; }
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }
 .conversation-sidebar > footer { flex-shrink: 0; padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
 @media (max-height: 30rem) {
-  .conversation-list-heading { padding: var(--space-3) var(--space-6); }
+  .conversation-list-heading { padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--space-6) + env(safe-area-inset-right)) var(--space-3) calc(var(--space-6) + env(safe-area-inset-left)); }
   .conversation-list-title { margin-top: var(--space-2); }
   .conversation-list-heading p { display: none; }
   .conversation-sidebar > footer { padding-top: var(--space-2); padding-bottom: var(--space-2); }
@@ -2659,7 +2671,7 @@ button.chip:disabled { cursor: default; }
 .launch-error-detail pre { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-hi); background: var(--panel); border-radius: var(--radius-card); font-size: var(--fs-xs); }
 .launch-sheet .dialog-actions { background: var(--bg-raised); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); border-radius: 0; }
+  .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: calc(var(--space-4) + env(safe-area-inset-top)) calc(var(--space-4) + env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom)) calc(var(--space-4) + env(safe-area-inset-left)); border-radius: 0; }
   .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
@@ -2694,7 +2706,7 @@ button.chip:disabled { cursor: default; }
   .launch-workers input { max-width: 9.5rem; }
 }
 @media (max-height: 30rem) and (min-width: 40rem) {
-  .launch-sheet { padding-block: var(--space-2) max(var(--space-2), env(safe-area-inset-bottom)); }
+  .launch-sheet { padding-block: calc(var(--space-2) + env(safe-area-inset-top)) max(var(--space-2), env(safe-area-inset-bottom)); }
   .launch-flow { gap: var(--space-2); }
   .launch-head h2 { font-size: var(--fs-md); }
   .launch-machine { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-3); }
@@ -2889,7 +2901,7 @@ button.chip:disabled { cursor: default; }
    The supervisor's terminal, as read-only text: a side sheet on a desktop, a
    bottom sheet on a phone. The chrome follows the scheme; the output keeps
    the terminal's own dark well, where its colours were chosen to read. */
-.raw-output-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(640px, 100vw); max-width: none; height: 100dvh; max-height: none; box-sizing: border-box; flex-direction: column; padding: 0; border: 0; border-left: var(--line-width) solid var(--line-strong); border-radius: 0; background: var(--sheet-bg); color: var(--ink); box-shadow: var(--lift-strong); }
+.raw-output-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(640px, 100vw); max-width: none; height: 100dvh; max-height: none; box-sizing: border-box; flex-direction: column; padding: env(safe-area-inset-top) 0 0; border: 0; border-left: var(--line-width) solid var(--line-strong); border-radius: 0; background: var(--sheet-bg); color: var(--ink); box-shadow: var(--lift-strong); }
 .raw-output-drawer:not([open]) { display: none; }
 .raw-output-drawer[open] { display: flex; }
 .raw-output-drawer::backdrop { background: var(--overlay-backdrop); }
@@ -2904,7 +2916,7 @@ button.chip:disabled { cursor: default; }
 .raw-output-drawer .raw-output-empty { margin: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--text-mid); font: var(--weight-regular) var(--fs-meta)/1.4 var(--font-ui); }
 .raw-output-drawer .raw-output-empty[hidden] { display: none; }
 @media (max-width: 53rem) {
-  .raw-output-drawer { inset: auto 0 0 0; width: 100vw; height: min(85dvh, var(--keyboard-viewport-height, 100dvh)); border-left: 0; border-top: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane) var(--radius-pane) 0 0; padding-bottom: env(safe-area-inset-bottom); }
+  .raw-output-drawer { inset: auto 0 0 0; padding-top: 0; width: 100vw; height: min(85dvh, var(--keyboard-viewport-height, 100dvh)); border-left: 0; border-top: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane) var(--radius-pane) 0 0; padding-bottom: env(safe-area-inset-bottom); }
 }
 @media (prefers-reduced-motion: no-preference) {
   .raw-output-drawer[open] { animation: raw-output-in 160ms ease-out; }

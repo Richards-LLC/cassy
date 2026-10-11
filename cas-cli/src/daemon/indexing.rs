@@ -153,13 +153,16 @@ pub fn resolve_repository(file_path: &Path) -> (Option<PathBuf>, String) {
     (None, fallback)
 }
 
-/// The checkout whose code this process should scan. Shared store location
-/// is not checkout identity: accept cwd only when Git's common directory
-/// matches the store's repository, otherwise retain the explicit store root.
+/// The checkout whose code this project indexes: the store's own checkout,
+/// whatever directory the calling process runs in (cas-8256). Workers and
+/// linked worktrees read this index; they never index their own copy.
 pub(crate) fn code_project_root(cas_root: &Path) -> PathBuf {
-    code_project_root_from(cas_root, &std::env::current_dir().unwrap_or_default())
+    crate::daemon::canonical_code_index::canonical_code_root(cas_root)
 }
 
+/// The checkout `start` belongs to when it shares the store's repository,
+/// otherwise the store's own checkout. Used to recognize a linked worktree
+/// of the store's repository (see `canonical_code_index::code_index_role`).
 pub(crate) fn code_project_root_from(cas_root: &Path, start: &Path) -> PathBuf {
     let fallback = cas_root.parent().unwrap_or(cas_root);
     let Some(checkout) = resolve_repository(start).0 else {
@@ -175,7 +178,7 @@ pub(crate) fn code_project_root_from(cas_root: &Path, start: &Path) -> PathBuf {
 
 /// Canonicalize an existing ancestor as well as its missing suffix, so a
 /// deleted source or directory keeps its checkout/path ownership under aliases.
-fn canonical_source_path(path: &Path) -> PathBuf {
+pub(crate) fn canonical_source_path(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -445,7 +448,7 @@ pub(crate) fn publish_code_symbols(
 /// `failed to retire deleted source file: … LockBusy` and was counted as a
 /// permanent file failure, which is how one cas-src project accumulated 592 of
 /// them for files that had been deleted months earlier.
-fn is_index_lock_busy(error: &str) -> bool {
+pub(crate) fn is_index_lock_busy(error: &str) -> bool {
     let error = error.to_lowercase();
     error.contains("lockbusy")
         || error.contains("failed to acquire index lock")
@@ -453,7 +456,7 @@ fn is_index_lock_busy(error: &str) -> bool {
 }
 
 /// How long one indexing run may spend, in total, waiting for the BM25 writer.
-const WRITER_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const WRITER_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A wait budget for BM25 writer-lock contention, shared by every retirement in
 /// one indexing run.
@@ -495,7 +498,10 @@ impl WriterLockBudget {
 /// Indexing runs while logged out, so retirement may only open a cache that
 /// already exists. This keeps delete/rename cleanup local and guarantees the
 /// capability-absent path never materializes `index/code-vectors`.
-fn retire_cached_code_vectors(cas_root: &Path, symbol_ids: &[String]) -> Result<(), String> {
+pub(crate) fn retire_cached_code_vectors(
+    cas_root: &Path,
+    symbol_ids: &[String],
+) -> Result<(), String> {
     if symbol_ids.is_empty() {
         return Ok(());
     }
@@ -803,7 +809,16 @@ pub fn reconcile_code_vector_queue(cas_root: &Path, force: bool, result: &mut Co
             return;
         }
     };
-    let outcome = match store.reconcile(force) {
+    // cas-8256: bounded transactions, scoped to the canonical repositories,
+    // instead of one write transaction over every symbol in the store.
+    let keep = crate::daemon::canonical_code_index::canonical_code_repositories(cas_root);
+    let mut writes = cas_store::BatchedWrites::default();
+    let outcome = match store.reconcile_scoped(
+        force,
+        keep.as_deref(),
+        cas_store::WriteBatching::background(),
+        &mut writes,
+    ) {
         Ok(outcome) => outcome,
         Err(error) => {
             result

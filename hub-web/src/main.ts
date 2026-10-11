@@ -58,7 +58,8 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
+import { WriteGrantState, sendWriteGrant } from "./write-grant";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -1613,6 +1614,9 @@ async function attachSelectedSession(machineId: string, session: string): Promis
   render();
   renderTerminalConnecting(machineId, session);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
+  // cas-4646: a newer tap has moved on while these loaded; this open is stale
+  // and must not attach over the conversation now showing.
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
   await connections.get(machineId)?.attach(session);
 }
 
@@ -4447,7 +4451,10 @@ function fleetAskedFor(machineId: string | undefined, session: string | undefine
   }
   return asked;
 }
-let fleetHeaderPanel: "add" | "focus" | undefined;
+let fleetHeaderPanel: FleetHeaderPanel | undefined;
+/** cas-ab04: the Write access panel's form, kept across rail rebuilds. */
+const writeGrant = new WriteGrantState();
+let writeGrantSession: string | undefined;
 let fleetFocusNext: string | undefined;
 let fleetUndoTimer: number | undefined;
 
@@ -4517,6 +4524,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
   const rerender = (focus?: string) => { fleetFocusNext = focus; renderStatus(status); };
   const epics = ((status.epics as any[]) ?? []).map((epic) => String(epic?.id ?? epic)).filter(Boolean);
   const currentEpic = typeof status.focused_epic === "string" ? status.focused_epic : (((status.epics as any[]) ?? []).find((epic) => epic?.focused)?.id ?? null);
+  const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[];
   return {
     state: fleetOps,
     phone: phoneLayout(),
@@ -4524,7 +4532,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     origin: location.origin,
     now: Date.now(),
     agents: ((status.agents as any[]) ?? []) as FleetAgent[],
-    tasks: [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[],
+    tasks,
     epics,
     currentEpic,
     asked: fleetAskedFor(selectedMachineId, selectedSession),
@@ -4543,11 +4551,47 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
       sendMerge: (rowKey, task) => { fleetOps.closeMenus(); void runFleetAction(rowKey, fleetMergeAction(task)); },
       closePanels: () => { if (phoneLayout()) { dismissFleetPanel(); return; } const rowKey = fleetOps.preview?.rowKey ?? fleetOps.assignFor; fleetOps.closeMenus(); fleetHeaderPanel = undefined; rerender(rowKey ? `${rowKey}:ask` : undefined); },
       toggleAssign: (rowKey) => { const opening = fleetOps.assignFor !== rowKey; fleetOps.closeMenus(); fleetOps.assignFor = opening ? rowKey : undefined; rerender(opening ? phoneLayout() ? `${rowKey}:search` : `${rowKey}:first-item` : `${rowKey}:assign`); },
-      toggleHeader: (panel) => { fleetOps.closeMenus(); fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel; rerender(fleetHeaderPanel === "focus" ? phoneLayout() ? "header:search" : "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : `header:${panel}`); },
+      toggleHeader: (panel) => {
+        fleetOps.closeMenus();
+        fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel;
+        const grantKey = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+        if (fleetHeaderPanel === "grant" && writeGrantSession !== grantKey) { writeGrant.reset(tasks); writeGrantSession = grantKey; }
+        rerender(fleetHeaderPanel === "focus" ? phoneLayout() ? "header:search" : "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : fleetHeaderPanel === "grant" ? "header:grant-task" : `header:${panel}`);
+      },
       undo: () => { const run = fleetOps.takeUndo(Date.now()); if (run) void runFleetAction(run.request.op.kind === "assign_task" ? `task:${String(run.request.op.task_id)}` : run.request.op.kind === "focus_epic" ? "header" : `agent:${String(run.request.op.worker)}`, run); },
       dismissNotice: () => rerender(progressSheetOpen() ? "header:add" : "phone-notice-dismiss"),
     },
+    writeAccess: {
+      state: writeGrant,
+      tasks,
+      on: {
+        // Typing keeps the field and its caret; only stage changes redraw.
+        changed: () => {},
+        review: () => { writeGrant.review(); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : "header:grant-result"); },
+        revoke: () => { writeGrant.askRevoke(); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : "header:grant-result"); },
+        cancel: () => { writeGrant.cancel(); rerender("header:grant-review"); },
+        confirm: () => { void runWriteGrant(); },
+      },
+    },
   };
+}
+
+/** cas-ab04: send the confirmed grant or revoke from this paired device. */
+async function runWriteGrant(): Promise<void> {
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  const connection = machineId ? connections.get(machineId) : undefined;
+  if (!machineId || !session || !connection) return;
+  const kind = writeGrant.stage === "confirm-revoke" ? "revoke" : "grant";
+  const sending = sendWriteGrant(writeGrant, (body) => connection.writeGrant(session, body), kind);
+  fleetFocusNext = "header:grant-go";
+  renderStatus(statuses.get(sessionKey(machineId, session)));
+  await sending;
+  if (writeGrant.result) fleetAnnounce(writeGrant.result.text);
+  if (selectedMachineId !== machineId || selectedSession !== session) return;
+  fleetFocusNext = "header:grant-result";
+  renderStatus(statuses.get(sessionKey(machineId, session)));
+  void loadStatus(machineId, session);
 }
 
 function placeFleetUndo(): void {
@@ -4578,7 +4622,7 @@ function fleetMergeAction(task: FleetTask): FleetAction {
 
 /** What the rail shows, for skipping a rebuild that would change nothing. */
 function fleetOpsSignature(): string {
-  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, [...fleetAskedFor(selectedMachineId, selectedSession)].map(([id, at]) => [id, relativeTimestamp(at)])]);
+  return JSON.stringify([fleetOps.menuFor, fleetOps.confirm?.action.id, fleetOps.confirm?.rowKey, fleetOps.preview?.rowKey, fleetOps.assignFor, [...fleetOps.pending].map(([key, action]) => [key, action.id]), [...fleetOps.notes], fleetOps.currentUndo(Date.now())?.label, fleetHeaderPanel, writeGrant.stage, writeGrant.result?.text, [...fleetAskedFor(selectedMachineId, selectedSession)].map(([id, at]) => [id, relativeTimestamp(at)])]);
 }
 
 function renderStatus(status?: Record<string, unknown>): void {

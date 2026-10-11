@@ -11,7 +11,7 @@ import { runVisualQa } from "../../scripts/visual-qa.mjs";
 
 export const FIXTURE_NAMES = [
   "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-machine-label-overlong", "conversations-list", "conversation", "conversation-replied", "conversation-error",
-  "conversation-thread", "conversation-evidence",
+  "conversation-thread", "conversation-evidence", "conversation-terminal",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
   "conversation-attachment", "conversation-empty", "conversation-empty-long-machine", "conversation-composer", "conversation-keyboard",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
@@ -24,6 +24,8 @@ export const FIXTURE_NAMES = [
   "fleet-ops-menu",
   "fleet-ops-confirm",
   "fleet-ops-undo",
+  "fleet-ops-write-access",
+  "fleet-ops-write-access-confirm",
   "connection-failed-retry",
   "connection-fatal-browser",
   "pairing-step-1",

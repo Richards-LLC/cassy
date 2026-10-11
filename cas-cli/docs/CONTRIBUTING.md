@@ -50,6 +50,15 @@ personal rows with that exact structured rejection, keeps local entities and
 team queue rows, and makes no cloud calls. `--json` reports the purged count,
 scope and reason. This cleanup does not backfill or delete remote cloud data.
 
+`duplicate_of_other_project` means the same row already lives under another
+Cloud project identity. The rejection names that owning project. If both
+identities represent the same project, ask the Cloud owner to register and fold
+the alias first, then run `cas cloud project --adopt-aliases`,
+`cas cloud queue --retry --retry-reason duplicate_of_other_project`, and
+`cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
+repair remote ownership; alias adoption rewrites local task provenance and
+does not move Cloud rows.
+
 ## Canonical install path
 
 Cassy must be installed to **one** location: `~/.local/bin/cas`. Any other
@@ -1178,8 +1187,12 @@ task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and
 `reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit
-must strictly descend from the delivery anchor, be reachable on the authoritative
-target, and touch a dropped path. Together they must cover every dropped path.
+must differ from the delivery anchor, be reachable on the authoritative target,
+and change a dropped path in its first-parent diff. Together they must cover
+every dropped path's final target state: a path counts only when its state at
+the named commit matches the target, including deletion and file mode. The
+superseding commits may predate the anchor, as when migration renames or a
+deliberate revert landed before the delivery was re-anchored (GH #1160).
 Cassy records the full resolved commit IDs, anchor, measured target, paths and
 review. A narrative without commit receipts cannot waive the content gate.
 
@@ -1276,6 +1289,63 @@ change; existing short-line literal approvals remain valid.
 The close gate checks the task-attributed Git diff, even after merge, and names
 the exact `task action=notes` command when approval is missing. Approval for a
 different file or a line absent from that diff does not satisfy the gate.
+
+## Operator write roots (GH #1169)
+
+The factory workspace contract normally lets agents write only to their
+worktree, `factory.artifacts_root/<project-key>/<task-id>/`, the configured
+scratch root and the harness scratchpad. An operator can add directories
+outside these:
+
+- **Project write roots.** Run `cas config set factory.write_roots "~/soundwave-config/docs/requests,~/.config/autostart:create+edit+delete"`.
+  Each entry is `path[:modes]`. The default mode is `create+edit`; `delete` is
+  off unless named. An empty value clears the roots. `cas config get
+  factory.write_roots` shows them.
+- **One-off task grants.** Run `cas config grant-write --task <id> --path <dir>
+  --mode create+edit --reason "<why>"`. The grant applies to the worker
+  holding the task and to the supervisor until the task closes. It is
+  recorded as a DECISION note on the task. `cas config revoke-write --task
+  <id> [--path <dir>]` removes it.
+
+Both are stored in `.cas/operator/write-policy.toml`, never in `config.toml`.
+Paths are resolved to canonical absolute directories when set, so `..` and
+symlinks are resolved rather than trusted. `/`, `$HOME` itself, and anything
+that contains or lies inside `.cas/operator/` are refused.
+
+Each root admits only its modes:
+
+- **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or
+  `touch` destination;
+- **edit**: an existing file, or, once a policy file exists, `sed -i` /
+  `perl -i` operands and `mv` sources (without a policy file these keep their
+  previous, unjudged behaviour);
+- **delete**: `rm` or an `apply_patch` delete.
+
+Every write admitted this way is logged as a `workspace_write_root_used`
+event (tool, path, mode, root, task, agent) in the factory session log. A
+refusal lists the roots in effect.
+
+**Operator-only, guardrail-grade (not security-grade).** The operator and the
+agents share a Unix user. The PreToolUse hook is the actual gate against
+agents; the CLI checks are defence in depth. With no policy file, the default
+contract is unchanged. The layers are:
+
+- the commands refuse to run when they detect any agent environment variable
+  (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_*`, `CAS_CLONE_PATH`,
+  `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`, `CODEX_THREAD_ID`);
+- they refuse when an agent or Cassy server (claude, codex, `cas serve`,
+  `cas factory`) is among the process's ancestors, or when the process runs
+  inside a factory worker or server cgroup;
+- they refuse without an interactive terminal, and need a typed confirmation;
+- `Config::set` refuses the key, so the config TUI, import and every agent path
+  that reaches it cannot set roots;
+- PreToolUse refuses any agent Bash call of these commands, even when wrapped
+  by `env`, `sudo`, `setsid`, `sh -c` or `script -c`, and any agent write,
+  edit, delete or rename under `.cas/operator/`. This applies to workers and
+  the supervisor alike.
+
+A process that deliberately hides a same-user write from these checks is out
+of reach. A hard boundary needs agents running as a separate Unix user.
 
 ## Durable task artifacts
 

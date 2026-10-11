@@ -265,7 +265,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** two paired machines, a conversation open on one of them
 - **Goal:** I work on the other machine, and my draft on the first is still there when I return
-- **Touches:** `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/machine-accent.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/composer-markup.ts`, `hub-web/src/worker-visibility.ts`
+- **Touches:** `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/machine-accent.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/composer-markup.ts`, `hub-web/src/worker-visibility.ts`
 - **Suite:** `hub-web/e2e/journeys/switch-machines.journey.ts`
 - **Gaps:** none
 
@@ -280,6 +280,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. Know each conversation and machine by name — the conversation header leads with the project, then "Atlas · Linux · patient-pelican-9", its avatar the machine's own initial; every list row's name and every palette "Jump to" row lead with the project, the codename first in the line beneath
 8. A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in the conversation list and the palette's Jump rows, which count the same; a stale or supervisor-less session is hidden from both
 9. Hear the open conversation as the page heading — the goal state's level-1 heading is the open conversation's project, and the tab title names it with its codename
+10. Every tap opens the conversation it pressed, while the list is changing — fifty taps across two machines (two projects on one, a group of two sessions on the other), each pressed while the group re-sorts and a session starts or ends; every tap highlights its row within a frame and opens its conversation within about 100 ms, at 1280 px with a mouse and at 390 px by touch, and the last tap wins (cas-4646)
 
 #### Expected experience
 
@@ -619,3 +620,29 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A revoked or expired device returns to signed-out and its stored inbox is wiped (unit-tested in `src/inbox/controller.test.ts`).
 - An account reset warns once and continues on the new inbox.
 - Expired history shows "Older history has expired. Messages are kept for 90 days." instead of an empty success.
+
+### HUB-J20 · Grant a task write access outside its worktree from my phone
+
+- **Entry:** `/commander/` at 390 (dark) and 1280 (light), an open conversation whose session has a task in progress, on a device paired with factory:manage
+- **Goal:** grant the agents on a task create and edit access to a folder outside their worktree until the task closes, see the receipt, and revoke it; a pairing without factory:manage cannot
+- **Touches:** `hub-web/src/write-grant.ts`, `hub-web/src/write-grant-view.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Suite:** `hub-web/e2e/journeys/write-grant.journey.ts`
+- **Gaps:** the hub double answers `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml` with the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub tests (cas-ab04)
+
+#### Steps
+
+1. Open Write access on the current task — "Write access…" opens a panel on the first task in progress, with create and edit allowed and delete not
+2. An incomplete grant says what is missing — Review grant with no folder says to enter one, and nothing is sent
+3. Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder, is shown and announced
+4. Revoke it after confirming — Revoke… asks to revoke every grant for the task; confirming says how many were removed
+5. A pairing without factory:manage — Write access… is disabled, saying it is not allowed on this pairing
+
+#### Expected experience
+
+- A grant is never sent without a confirmation that names the task, the modes and the folder.
+- The receipt and every refusal are in words, in the panel and the live region.
+
+#### Edge paths
+
+- A closed task or a folder that does not resolve is refused by the hub, and the panel shows the hub's reason.
+

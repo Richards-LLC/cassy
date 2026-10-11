@@ -1,5 +1,16 @@
 use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
+
+/// What a delivery probe learned about recipient-authored activity (GH #1163).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecipientActivity {
+    /// A reply or attributed task note after delivery.
+    Found,
+    /// The store answered: none yet.
+    Absent,
+    /// The store could not answer this pass (busy or out of wait budget).
+    Unknown,
+}
 use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -480,7 +491,7 @@ fn ensure_worker_preassignment(
             "cas-28a4: pre-assignment reported no write but the binding is already correct"
         );
     }
-    let store = crate::store::open_task_store(cas_dir)
+    let store = crate::store::open_task_store_cached(cas_dir)
         .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))?;
     store
         .get(task_id)
@@ -560,7 +571,7 @@ fn append_workspace_contract_brief(
         task_artifacts.display()
     ));
 
-    let Some(task) = crate::store::open_task_store(cas_dir)
+    let Some(task) = crate::store::open_task_store_cached(cas_dir)
         .ok()
         .and_then(|store| store.get(task_id).ok())
     else {
@@ -657,7 +668,7 @@ fn preassign_failure_reason(
     task_id: &str,
     worker_name: &str,
 ) -> Option<String> {
-    let store = match crate::store::open_task_store(cas_dir) {
+    let store = match crate::store::open_task_store_cached(cas_dir) {
         Ok(store) => store,
         Err(e) => {
             return Some(format!(
@@ -1449,6 +1460,28 @@ pub(super) fn lifecycle_redelivery_decision(
             LifecycleRedelivery::Deliver
         }
         Some(_) => LifecycleRedelivery::Cooldown,
+    }
+}
+
+/// cas-366b: the `supervisor_injected` status for a pass whose transport
+/// reported `Delivered`.
+///
+/// A pending teams-inbox row is re-offered on its cadence while the recipient
+/// is busy. If our copy was still unread (`prior_copy_unread`, so the write was
+/// a content-dedup no-op), or the pass only nudged (`nudge_only`), and no PTY
+/// wake fired, then nothing reached the recipient on this pass. Recording `ok`
+/// there made one message look delivered ~20 times on 2026-10-05. Such a pass
+/// is `reoffered`. `ok` still marks the pass that wrote the copy or typed into
+/// the pane, which is the row ack waiters look for.
+pub(super) fn injection_event_status(
+    prior_copy_unread: bool,
+    nudge_only: bool,
+    wake: cas_store::WakeAttempt,
+) -> &'static str {
+    if (prior_copy_unread || nudge_only) && wake != cas_store::WakeAttempt::Fired {
+        "reoffered"
+    } else {
+        "ok"
     }
 }
 
@@ -2937,6 +2970,68 @@ impl FactoryDaemon {
         self.normal_delivery_probes.remove(&row_id);
     }
 
+    /// GH #1163: replies and attributed task notes prove the recipient is
+    /// handling work even when a mid-turn message starts no new harness turn.
+    /// Retire only the health probe: leave per-message read/ack receipts alone.
+    ///
+    /// GH #1165: this runs on the daemon loop thread under its store wait
+    /// budget. The worker's agent id comes from the director snapshot (a store
+    /// read only when the snapshot lacks it), and a store read that fails or
+    /// runs out of budget is `Unknown`: the probe waits for a later pass
+    /// instead of being judged on missing evidence.
+    fn recipient_authored_activity_after(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        worker: &str,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> RecipientActivity {
+        match queue.has_message_from_since(worker, &self.session_name, after) {
+            Ok(true) => return RecipientActivity::Found,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(%error, worker, "recipient reply evidence unavailable this pass");
+                return RecipientActivity::Unknown;
+            }
+        }
+        let snapshot = self
+            .app
+            .director_data()
+            .agents
+            .iter()
+            .filter(|agent| agent.name == worker)
+            .max_by_key(|agent| agent.registered_at)
+            .map(|agent| agent.id.clone());
+        let agent_id = match snapshot {
+            Some(id) => id,
+            None => match open_agent_store(self.app.cas_dir()).and_then(|store| {
+                store.list(None).map_err(crate::error::CasError::from)
+            }) {
+                Ok(agents) => match agents
+                    .into_iter()
+                    .filter(|agent| agent.name == worker)
+                    .max_by_key(|agent| agent.registered_at)
+                {
+                    Some(agent) => agent.id,
+                    None => return RecipientActivity::Absent,
+                },
+                Err(error) => {
+                    tracing::debug!(%error, worker, "recipient agent unavailable this pass");
+                    return RecipientActivity::Unknown;
+                }
+            },
+        };
+        match crate::store::open_event_store(self.app.cas_dir()).and_then(|store| {
+            Ok(store.has_event_since(cas_types::EventType::TaskNoteAdded, &agent_id, after)?)
+        }) {
+            Ok(true) => RecipientActivity::Found,
+            Ok(false) => RecipientActivity::Absent,
+            Err(error) => {
+                tracing::debug!(%error, worker, "recipient note evidence unavailable this pass");
+                RecipientActivity::Unknown
+            }
+        }
+    }
+
     /// Retry a normal message whose PTY write never yielded any pane output,
     /// then surface the residual failure to the supervisor.  The retry uses
     /// `Mux::inject`, never `interrupt_and_inject`: this watchdog is evidence
@@ -2956,6 +3051,15 @@ impl FactoryDaemon {
             .collect();
         let mut actions = Vec::with_capacity(due.len());
         for (row_id, probe) in due {
+            match self.recipient_authored_activity_after(queue, &probe.pane, probe.delivered_at_utc) {
+                RecipientActivity::Found => {
+                    self.normal_delivery_probes.remove(&row_id);
+                    continue;
+                }
+                // GH #1165: the store was busy; judge this probe on a later pass.
+                RecipientActivity::Unknown => continue,
+                RecipientActivity::Absent => {}
+            }
             let pane_output_grew = self
                 .app
                 .mux
@@ -2967,6 +3071,22 @@ impl FactoryDaemon {
                 &probe.prompt,
                 pane_output_grew,
             );
+            // GH #1163: a long turn can push its start out of the bounded tail.
+            // Share worker_status's execution evidence (including tool activity)
+            // rather than interpreting a missing start as an idle recipient.
+            let evidence = if evidence != NormalDeliveryTurnEvidence::TurnStarted
+                && crate::ui::factory::director::idle_worker_liveness(
+                    self.app.cas_dir(),
+                    &probe.pane,
+                )
+                .is_some_and(|observation| {
+                    observation.state
+                        == crate::mcp::tools::service::worker_liveness::Liveness::Executing
+                }) {
+                NormalDeliveryTurnEvidence::RecipientBusy
+            } else {
+                evidence
+            };
             let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
             tracing::debug!(
                 target: "cas::coordination",
@@ -3042,9 +3162,11 @@ impl FactoryDaemon {
                     // narrative names the failed wake. Recorded before the
                     // relay so the row is truthful even while the relay retries.
                     let detail = normal_delivery_watchdog_flag_detail(evidence);
-                    if let Err(error) =
-                        queue.record_wake_attempt(row_id, cas_store::WakeAttempt::Failed, Some(&detail))
-                    {
+                    if let Err(error) = queue.record_wake_attempt(
+                        row_id,
+                        cas_store::WakeAttempt::Failed,
+                        Some(&detail),
+                    ) {
                         tracing::warn!(
                             target: "cas::coordination",
                             message_id = row_id,
@@ -3062,6 +3184,7 @@ impl FactoryDaemon {
                         self.app.cas_dir(),
                         &pane,
                         row_id,
+                        chrono::Utc::now(),
                     );
                     if !matches!(
                         relay,
@@ -3077,20 +3200,8 @@ impl FactoryDaemon {
                         continue;
                     }
                     self.normal_delivery_probes.remove(&row_id);
-                    let notice = format!(
-                        "<system-notice>Normal message {row_id} to '{target}' was transport-delivered, then started no harness turn across two watchdog windows ({}). A single normal nudge was attempted; a durable worker-attention relay was sent to the supervisor; no urgent escalation was sent. Use `coordination action=interrupt` or recycle the worker if it stays idle.</system-notice>",
-                        normal_delivery_evidence_phrase(evidence)
-                    );
-                    if let Err(error) = queue.enqueue_with_session(
-                        "delivery-watchdog",
-                        self.app.supervisor_name(),
-                        &notice,
-                        &self.session_name,
-                    ) {
-                        tracing::error!(%error, message_id = row_id, "failed to queue normal delivery watchdog flag");
-                    } else {
-                        super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
-                    }
+                    // The durable attention outbox already contains the incident.
+                    // A second per-message system notice would bypass its coalescing.
                     tracing::warn!(
                         target: "cas::coordination",
                         stage = "normal_delivery_watchdog_flagged",
@@ -3489,6 +3600,7 @@ impl FactoryDaemon {
         recipient: &str,
     ) {
         Self::record_surfacing_receipt(
+            None,
             queue,
             prompt_id,
             recipient,
@@ -3505,6 +3617,7 @@ impl FactoryDaemon {
         recipient: &str,
     ) {
         Self::record_surfacing_receipt(
+            None,
             queue,
             prompt_id,
             recipient,
@@ -3512,7 +3625,43 @@ impl FactoryDaemon {
         );
     }
 
+    /// [`Self::record_transport_receipt`] for the delivery path: a busy store
+    /// defers the receipt to the store worker instead of dropping it (GH #1165).
+    fn record_transport_receipt_durable(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            Some(self.app.cas_dir()),
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::TransportClaimed,
+        );
+    }
+
+    /// [`Self::record_observed_wake_receipt`], deferred when the store is busy.
+    fn record_observed_wake_receipt_durable(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        Self::record_surfacing_receipt(
+            Some(self.app.cas_dir()),
+            queue,
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
+    }
+
+    /// With `cas_dir`, a failed write is deferred to the store worker so a
+    /// busy store never drops the receipt (GH #1165).
     fn record_surfacing_receipt(
+        cas_dir: Option<&std::path::Path>,
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
         recipient: &str,
@@ -3523,6 +3672,23 @@ impl FactoryDaemon {
             recipient,
             source,
         ) {
+            if let Some(cas_dir) = cas_dir {
+                let cas_dir = cas_dir.to_path_buf();
+                let deferred_recipient = recipient.to_string();
+                let deferred = super::store_worker::defer(
+                    "record surfacing receipt",
+                    &error.to_string(),
+                    move || {
+                        crate::store::open_prompt_queue_store(&cas_dir)
+                            .map_err(|error| error.to_string())?
+                            .record_recipient_surfaced(prompt_id, &deferred_recipient, source)
+                            .map_err(|error| error.to_string())
+                    },
+                );
+                if deferred != super::store_worker::Persisted::Dropped {
+                    return;
+                }
+            }
             tracing::debug!(
                 target: "cas::coordination",
                 message_id = prompt_id,
@@ -3681,7 +3847,13 @@ impl FactoryDaemon {
         row_id: i64,
         recipient: &str,
     ) -> anyhow::Result<()> {
-        Self::record_observed_wake_receipt(queue, row_id, recipient);
+        Self::record_surfacing_receipt(
+            None,
+            queue,
+            row_id,
+            recipient,
+            cas_store::SurfacingSource::ObservedWake,
+        );
         queue.mark_transport_delivered(row_id)?;
         Ok(())
     }
@@ -4929,7 +5101,7 @@ impl FactoryDaemon {
             observation.state
                 == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
         });
-        let task_blocked = crate::store::open_task_store(cas_dir)
+        let task_blocked = crate::store::open_task_store_cached(cas_dir)
             .ok()
             .and_then(|store| store.list(Some(cas_types::TaskStatus::Blocked)).ok())
             .is_some_and(|tasks| {
@@ -5485,6 +5657,8 @@ impl FactoryDaemon {
 
         // Best-effort event recording (for external tooling acks, activity feed, playback).
         let event_store = SqliteEventStore::open(self.app.cas_dir()).ok();
+        // cas-e193: injection-event dedupe is scoped to the store it writes.
+        let injection_scope = self.app.cas_dir().to_path_buf();
 
         // cas-f02b (GH #101): one supervisor wake per drain pass — see the
         // wake-slot comment at the decision site.
@@ -5521,10 +5695,13 @@ impl FactoryDaemon {
                 let target = target.clone();
                 match self.deliver_context_reset(&target).await {
                     super::delivery::ContextResetDelivery::Injected => {
-                        if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                        if super::store_worker::mark_transport_delivered(
+                            self.app.cas_dir(),
+                            queued.id,
+                        ) == super::store_worker::Persisted::Dropped
+                        {
                             tracing::warn!(
                                 prompt_id = queued.id,
-                                error = %e,
                                 "cas-dffe: failed to stamp a delivered context-reset command"
                             );
                         }
@@ -5905,6 +6082,9 @@ impl FactoryDaemon {
             // is neither re-written nor consumed: it stays pending and retries a
             // PTY-nudge-only wake on the cadence below.
             let mut nudge_only = false;
+            // cas-366b: our earlier copy is still unread, so this pass's
+            // inbox write is a content-dedup no-op.
+            let mut prior_copy_unread = false;
             // cas-5c50 (GH #166): set when this pass observed the row as
             // drained-but-unsurfaced; the log line is emitted only if the
             // re-nudge cadence gate then actually grants a re-offer, so the
@@ -5956,11 +6136,14 @@ impl FactoryDaemon {
                     // harness took our inbox copy AND the pane then produced
                     // output. Record the strong observed-wake receipt so the
                     // consumed row does not reappear in inbox_poll.
-                    Self::record_observed_wake_receipt(&*queue, queued.id, &queued.target);
-                    if let Err(error) = queue.mark_transport_delivered(queued.id) {
+                    self.record_observed_wake_receipt_durable(&*queue, queued.id, &queued.target);
+                    if super::store_worker::mark_transport_delivered(
+                        self.app.cas_dir(),
+                        queued.id,
+                    ) == super::store_worker::Persisted::Dropped
+                    {
                         tracing::error!(
                             prompt_id = queued.id,
-                            %error,
                             "cas-ceae: failed to consume a row the harness already drained"
                         );
                     } else {
@@ -5978,6 +6161,7 @@ impl FactoryDaemon {
                     continue;
                 }
                 DeferredInboxOutcome::StillPending => {
+                    prior_copy_unread = true;
                     // Our copy is unread in the inbox: the repeat write below
                     // is a content-dedup no-op, so this pass costs nothing and
                     // still lets the pane wake fire if the recipient has since
@@ -6430,6 +6614,7 @@ impl FactoryDaemon {
 
             tracing::info!("Injecting prompt to '{}': {}", target, preview);
 
+            let injection_cas_dir = self.app.cas_dir().to_path_buf();
             let record_injection = |store: &SqliteEventStore,
                                     prompt_id: i64,
                                     queue_source: &str,
@@ -6437,6 +6622,17 @@ impl FactoryDaemon {
                                     actual_target: &str,
                                     status: &str,
                                     error: Option<String>| {
+                // cas-e193: an identical retry of an outcome already recorded
+                // adds nothing for the ack waiters or the feed.
+                if !super::injection_events::should_record_injection(
+                    &injection_scope,
+                    prompt_id,
+                    actual_target,
+                    status,
+                    error.as_deref(),
+                ) {
+                    return;
+                }
                 let mut meta = serde_json::json!({
                     "prompt_id": prompt_id,
                     "queue_source": queue_source,
@@ -6456,7 +6652,17 @@ impl FactoryDaemon {
                     summary,
                 )
                 .with_metadata(meta);
-                let _ = store.record(&ev);
+                // GH #1165: a busy store defers the audit row, never drops it.
+                if let Err(error) = store.record(&ev) {
+                    let cas_dir = injection_cas_dir.clone();
+                    super::store_worker::defer("record injection", &error.to_string(), move || {
+                        crate::store::open_event_store(&cas_dir)
+                            .map_err(|error| error.to_string())?
+                            .record(&ev)
+                            .map(drop)
+                            .map_err(|error| error.to_string())
+                    });
+                }
             };
 
             let mut success = false;
@@ -6569,7 +6775,7 @@ impl FactoryDaemon {
                             // that already received it. Without this write, one
                             // broadcast is re-served to every worker on every
                             // `inbox_poll`, forever.
-                            Self::record_transport_receipt(&*queue, queued.id, name);
+                            self.record_transport_receipt_durable(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -6628,6 +6834,8 @@ impl FactoryDaemon {
                 } else {
                     Some(fail_notes.join("; "))
                 };
+                // GH #1165: the broadcast already reached its panes; a busy
+                // store defers the outcome stamp rather than losing it.
                 if let Err(e) = queue.mark_broadcast_outcome(
                     queued.id,
                     attempted,
@@ -6635,11 +6843,32 @@ impl FactoryDaemon {
                     failed,
                     detail.as_deref(),
                 ) {
-                    tracing::error!(
-                        "Failed to stamp broadcast outcome for prompt {}: {}",
-                        queued.id,
-                        e
-                    );
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    let prompt_id = queued.id;
+                    let deferred_detail = detail.clone();
+                    if super::store_worker::defer(
+                        "mark broadcast outcome",
+                        &e.to_string(),
+                        move || {
+                            crate::store::open_prompt_queue_store(&cas_dir)
+                                .map_err(|error| error.to_string())?
+                                .mark_broadcast_outcome(
+                                    prompt_id,
+                                    attempted,
+                                    succeeded,
+                                    failed,
+                                    deferred_detail.as_deref(),
+                                )
+                                .map_err(|error| error.to_string())
+                        },
+                    ) == super::store_worker::Persisted::Dropped
+                    {
+                        tracing::error!(
+                            "Failed to stamp broadcast outcome for prompt {}: {}",
+                            queued.id,
+                            e
+                        );
+                    }
                 }
                 if succeeded == 0 {
                     let _ = queue.record_retry(
@@ -6937,6 +7166,10 @@ impl FactoryDaemon {
                         );
                     }
                 }
+                let pass_wake = inject_result
+                    .as_ref()
+                    .map(|report| report.wake)
+                    .unwrap_or_default();
                 let inject_result = inject_result.map(|report| report.outcome);
                 if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
                     queue.release_recipient_transport(queued.id, &queued.target)?;
@@ -6992,7 +7225,7 @@ impl FactoryDaemon {
                                 &queued.source,
                                 &queued.target,
                                 &pane_target,
-                                "ok",
+                                injection_event_status(prior_copy_unread, nudge_only, pass_wake),
                                 None,
                             );
                         }
@@ -7312,13 +7545,16 @@ impl FactoryDaemon {
                 // plus the re-nudge cadence still cover the deferred path. The
                 // recipient's unread view was never the right place to hide a
                 // delivery failure.
-                Self::record_transport_receipt(&*queue, queued.id, &queued.target);
+                self.record_transport_receipt_durable(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
-                if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                // GH #1165: the bytes are already in the pane, so a busy store
+                // defers this stamp to the store worker instead of losing it.
+                if super::store_worker::mark_transport_delivered(self.app.cas_dir(), queued.id)
+                    == super::store_worker::Persisted::Dropped
+                {
                     tracing::error!(
-                        "Failed to mark prompt {} as transport-delivered: {}",
-                        queued.id,
-                        e
+                        "Failed to mark prompt {} as transport-delivered",
+                        queued.id
                     );
                 }
             }
@@ -9261,7 +9497,7 @@ fn fire_reminder(
         // parses exactly what is written here.
         let event_context = triggering_event.map(|event| event.description.clone());
         let task_status = reminder.task_id.as_deref().and_then(|task_id| {
-            crate::store::open_task_store(cas_dir)
+            crate::store::open_task_store_cached(cas_dir)
                 .ok()
                 .and_then(|store| store.get(task_id).ok())
                 .map(|task| task.status.to_string())
@@ -9889,7 +10125,7 @@ mod tests {
         use cas_store::{EnqueueIdempotentResult, PromptQueueStore, TaskStore};
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for (id, status) in [
             ("cas-a894", TaskStatus::AwaitingMerge),
             ("cas-b894", TaskStatus::InProgress),
@@ -10049,7 +10285,7 @@ mod tests {
         .unwrap();
         let mut task = cas_types::Task::new("cas-cite2".into(), "Fix uploads".into());
         task.description = "See https://github.com/acme/widgets/issues/77.".into();
-        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+        crate::store::open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
 
         deliver_worker_task_brief(
             &cas_dir,
@@ -13215,7 +13451,7 @@ mod tests {
         let task_id = "cas-preassigned";
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(task_id.to_string(), "preassigned task".to_string());
         task.assignee = Some(worker.to_string());
         store.add(&task).unwrap();
@@ -13596,7 +13832,7 @@ mod tests {
     fn preassign_that_did_not_stick_is_reported_with_a_reason() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
 
         let mut mine = Task::new("cas-2702".to_string(), "assigned to me".to_string());
         mine.assignee = Some("cosmic-crow-41".to_string());
@@ -13638,7 +13874,7 @@ mod tests {
     fn registration_preassignment_binds_a_free_task() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         store
             .add(&Task::new(
                 "cas-aee6".to_string(),
@@ -13663,7 +13899,7 @@ mod tests {
     fn registration_preassignment_is_idempotent() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-2702".to_string(), "spawn queue".to_string());
         task.assignee = Some("cosmic-crow-41".to_string());
         store.add(&task).unwrap();
@@ -13684,7 +13920,7 @@ mod tests {
         let mut holder = cas_types::Agent::new("holder-agent-id".into(), "happy-owl-73".into());
         holder.role = cas_types::AgentRole::Worker;
         agents.register(&holder).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-e74c".to_string(), "merge guard".to_string());
         task.assignee = Some("happy-owl-73".to_string());
         store.add(&task).unwrap();
@@ -13711,7 +13947,7 @@ mod tests {
     fn registration_preassignment_refuses_terminal_task_without_briefing_worker() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-closed".to_string(), "already done".to_string());
         task.status = TaskStatus::Closed;
         task.assignee = Some("cosmic-crow-41".to_string());
@@ -13737,7 +13973,7 @@ mod tests {
     fn registration_preassignment_resets_stale_holder_and_preserves_audit_history() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-stale".to_string(), "orphaned delivery".to_string());
         task.status = TaskStatus::InProgress;
         task.assignee = Some("dead-session-worker".to_string());
@@ -13904,7 +14140,7 @@ mod tests {
     fn registration_preassignment_brief_includes_demo_statement() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-demo-brief".to_string(), "demo brief".to_string());
         task.demo_statement = "As a reader, I open the page and see the result.".to_string();
         store.add(&task).unwrap();
@@ -13993,7 +14229,7 @@ mod tests {
             .register(&worker)
             .unwrap();
 
-        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut stale = Task::new("cas-stale-path".into(), "stale artifact path".into());
         stale.description = "Write the receipt to /mnt/datacube/staging/proof.json".into();
         task_store.add(&stale).unwrap();
@@ -15417,7 +15653,7 @@ mod wake_recipient_regressions_gh1101 {
         use cas_store::{EnqueueIdempotentResult, PromptQueueStore};
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-gh1101".into(), "reassigned QA".into());
         task.assignee = Some("old-worker".into());
         tasks.add(&task).unwrap();
@@ -15716,8 +15952,14 @@ mod gh_1153_idle_pty_delivery_tests {
             },
         });
         let mut body = format!("{meta}\n");
-        body.push_str(&turn_event("task_started", now - chrono::Duration::seconds(60)));
-        body.push_str(&turn_event("task_complete", now - chrono::Duration::seconds(50)));
+        body.push_str(&turn_event(
+            "task_started",
+            now - chrono::Duration::seconds(60),
+        ));
+        body.push_str(&turn_event(
+            "task_complete",
+            now - chrono::Duration::seconds(50),
+        ));
         std::fs::write(&rollout, body).unwrap();
         rollout
     }
@@ -15732,19 +15974,22 @@ mod gh_1153_idle_pty_delivery_tests {
         worker
             .metadata
             .insert("worker_cli".to_string(), "codex".to_string());
-        worker
-            .metadata
-            .insert("clone_path".to_string(), clone.to_str().unwrap().to_string());
+        worker.metadata.insert(
+            "clone_path".to_string(),
+            clone.to_str().unwrap().to_string(),
+        );
         worker.metadata.insert(
             "worker_account_dir".to_string(),
             account.to_str().unwrap().to_string(),
         );
+        worker.factory_session = Some("provision-test".into());
         store.register(&worker).unwrap();
-        let supervisor = Agent::new_with_role(
+        let mut supervisor = Agent::new_with_role(
             "gh1153-supervisor-id".to_string(),
             "test-supervisor".to_string(),
             AgentRole::Supervisor,
         );
+        supervisor.factory_session = Some("provision-test".into());
         store.register(&supervisor).unwrap();
     }
 
@@ -15800,7 +16045,8 @@ mod gh_1153_idle_pty_delivery_tests {
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         daemon.app.mux.add_pane(idle_echo_pane());
         let banner = Instant::now() + Duration::from_secs(5);
-        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0 && Instant::now() < banner
+        while daemon.app.mux.pane_bytes_received(WORKER).unwrap_or(0) == 0
+            && Instant::now() < banner
         {
             drain_for(&mut daemon, Duration::from_millis(50)).await;
         }
@@ -15849,7 +16095,227 @@ mod gh_1153_idle_pty_delivery_tests {
     }
 
     #[tokio::test]
+    async fn gh_1163_executing_long_turn_waits_without_a_nudge_or_relay() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            rollout,
+            row,
+        } = deliver_to_idle_worker().await;
+        let delivery = daemon.normal_delivery_probes[&row].delivered_at_utc;
+        let mut body = std::fs::read_to_string(&rollout).unwrap();
+        body.push_str(&turn_event(
+            "task_started",
+            delivery - chrono::Duration::seconds(1),
+        ));
+        // The turn start falls outside the bounded transcript tail during a long turn.
+        body.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"padding": "x".repeat(300_000)})
+        ));
+        body.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": rfc3339(chrono::Utc::now()),
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "phase": "analysis",
+                    "content": [{"type": "output_text", "text": "Working on the task"}]}
+            })
+        ));
+        std::fs::write(&rollout, body).unwrap();
+        assert_eq!(
+            crate::ui::factory::director::idle_worker_liveness(daemon.app.cas_dir(), WORKER)
+                .unwrap()
+                .state,
+            crate::mcp::tools::service::worker_liveness::Liveness::Executing
+        );
+
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert_ne!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "executing workers must not be nudged"
+        );
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .next_check_at = Some(Instant::now());
+        // Also cover a probe whose retry was sent before the worker became busy.
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .nudge_sent_at = Some(Instant::now());
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        let report = queue.message_delivery_report(row).unwrap().unwrap();
+        assert_ne!(
+            report.wake_attempt,
+            cas_store::WakeAttempt::Failed,
+            "executing workers must never be reported as stalled"
+        );
+        assert!(
+            daemon.normal_delivery_probes.contains_key(&row),
+            "wait for the busy turn boundary"
+        );
+        assert!(
+            queue
+                .peek_all(20)
+                .unwrap()
+                .iter()
+                .all(|queued| !queued.prompt.contains("worker_delivery_stalled"))
+        );
+    }
+
+    #[tokio::test]
+    async fn gh_1163_outbound_reply_after_delivery_retires_the_watchdog() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
+        // Activity is worker-level evidence even when addressed to a different peer,
+        // and remains evidence after the transport drains it.
+        let reply = queue
+            .enqueue_with_session(WORKER, "reviewer", "Interim findings", "provision-test")
+            .unwrap();
+        queue.mark_processed(reply).unwrap();
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(!daemon.normal_delivery_probes.contains_key(&row));
+        assert_ne!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "recipient activity must not trigger a nudge"
+        );
+        assert_eq!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .confirmation_source,
+            cas_store::ConfirmationSource::Unconfirmed,
+            "activity is watchdog evidence, not an explicit message acknowledgement"
+        );
+    }
+
+    fn record_note(cas_dir: &Path, author: &str, at: chrono::DateTime<chrono::Utc>) {
+        let mut event = cas_types::Event::new(
+            cas_types::EventType::TaskNoteAdded,
+            cas_types::EventEntityType::Task,
+            "cas-1153",
+            "Interim findings",
+        )
+        .with_session(author);
+        event.created_at = at;
+        crate::store::open_event_store(cas_dir)
+            .unwrap()
+            .record(&event)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gh_1163_recipient_note_after_delivery_retires_the_watchdog() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
+        record_note(daemon.app.cas_dir(), "gh1153-worker-id", chrono::Utc::now());
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(!daemon.normal_delivery_probes.contains_key(&row));
+        assert_ne!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired
+        );
+        assert_eq!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .confirmation_source,
+            cas_store::ConfirmationSource::Unconfirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn gh_1163_prior_foreign_and_unattributed_activity_does_not_clear_stall() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let Fixture {
+            _tmp,
+            mut daemon,
+            queue,
+            row,
+            ..
+        } = deliver_to_idle_worker().await;
+        queue
+            .enqueue_with_session(WORKER, "reviewer", "Old reply", "provision-test")
+            .unwrap();
+        let floor = chrono::Utc::now();
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .delivered_at_utc = floor;
+        record_note(
+            daemon.app.cas_dir(),
+            "gh1153-worker-id",
+            floor - chrono::Duration::seconds(1),
+        );
+        record_note(
+            daemon.app.cas_dir(),
+            "other-worker-id",
+            floor + chrono::Duration::seconds(1),
+        );
+        queue
+            .enqueue_with_session(WORKER, "reviewer", "Foreign session", "other-factory")
+            .unwrap();
+        queue
+            .enqueue_with_session("other-worker", "reviewer", "Other reply", "provision-test")
+            .unwrap();
+        let task_store = crate::store::open_task_store(daemon.app.cas_dir()).unwrap();
+        let mut task = cas_types::Task::new("cas-1153".into(), "Assigned task".into());
+        task.assignee = Some(WORKER.into());
+        task.notes = "A supervisor note without worker attribution".into();
+        task_store.add(&task).unwrap();
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        assert!(daemon.normal_delivery_probes.contains_key(&row));
+        assert_eq!(
+            queue
+                .message_delivery_report(row)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
+            cas_store::WakeAttempt::Fired,
+            "only this recipient's activity after delivery clears a probe"
+        );
+    }
+
+    #[tokio::test]
     async fn idle_pty_recipient_without_a_turn_is_nudged_then_reported_not_delivered() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
         let Fixture {
             _tmp,
             mut daemon,
@@ -15883,8 +16349,11 @@ mod gh_1153_idle_pty_delivery_tests {
 
         // The nudge also lands only as echo; the second window elapses.
         drain_for(&mut daemon, Duration::from_millis(800)).await;
-        daemon.normal_delivery_probes.get_mut(&row).unwrap().next_check_at =
-            Instant::now().checked_sub(Duration::from_secs(1));
+        daemon
+            .normal_delivery_probes
+            .get_mut(&row)
+            .unwrap()
+            .next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
 
         let report = queue.message_delivery_report(row).unwrap().unwrap();
@@ -15903,12 +16372,30 @@ mod gh_1153_idle_pty_delivery_tests {
             narrative.contains("NOT delivered to a turn"),
             "message_status must not report success for a turn that never started: {narrative}"
         );
-        // Whether the supervisor relay persisted depends on the ambient
-        // factory session; the row's own record above is the contract.
+        assert!(!daemon.normal_delivery_probes.contains_key(&row));
+        let relays = queue.peek_all(20).unwrap();
+        assert_eq!(
+            relays
+                .iter()
+                .filter(|queued| queued.prompt.contains("worker_delivery_stalled"))
+                .count(),
+            1,
+            "a genuinely idle worker still reaches the supervisor"
+        );
+        assert!(
+            relays
+                .iter()
+                .all(|queued| queued.source != "delivery-watchdog"),
+            "the durable incident must not create a redundant system notice"
+        );
     }
 
     #[tokio::test]
     async fn idle_pty_recipient_that_takes_the_turn_retires_the_watchdog_silently() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
         let Fixture {
             _tmp,
             mut daemon,
@@ -15931,6 +16418,161 @@ mod gh_1153_idle_pty_delivery_tests {
             report.wake_attempt,
             cas_store::WakeAttempt::Fired,
             "a worker that took the turn must not be nudged"
+        );
+    }
+}
+
+/// cas-366b: the `supervisor_injected` storms, replayed against today's
+/// delivery decisions.
+///
+/// Storm 1 (2026-08-06 12:49–18:59 UTC): 704,169 `ok` rows across 105
+/// prompt/recipient pairs, about 28,000 per pair, all to Claude teams-inbox
+/// recipients. That was the GH #124 drain-then-re-append loop cas-ceae fixed
+/// (`a_pending_worker_inbox_row_is_injected_exactly_once_cas_ceae`). Storm 2
+/// (2026-10-05): about 20 `ok` rows per row over about 11 minutes. The copy was
+/// written once (`deferred_inbox_at`), every wake was declined by policy
+/// (`nudge_not_attempted`) and `wake_gate_declines` stayed 0. So the cadence
+/// granted a re-offer every 30 s, each re-offer was an inbox-dedup no-op, and
+/// it was still recorded as `ok`.
+#[cfg(test)]
+mod injection_storm_regressions_cas_366b {
+    use super::{ClaudeRedelivery, claude_redelivery_decision_after_turn, injection_event_status};
+    use cas_store::WakeAttempt;
+
+    #[derive(Debug, Default)]
+    struct Replay {
+        /// Copies appended to the recipient's inbox (dedup guard honoured).
+        copies: usize,
+        /// PTY nudges typed into the recipient's pane.
+        pty_nudges: usize,
+        /// Passes the cadence let through to the delivery path.
+        passes: usize,
+        /// `supervisor_injected` statuses those passes would record.
+        statuses: Vec<&'static str>,
+        /// Whether the acknowledgement stopped redelivery.
+        stopped_by_ack: bool,
+    }
+
+    /// Replay one Claude teams-inbox row at `poll_ms` for `window_s` while the
+    /// recipient stays busy: its copy stays unread, the wake gate declines
+    /// every nudge, and the decline is a policy veto that does not spend the
+    /// redelivery budget (cas-5129). The row is acknowledged at `ack_at_s`.
+    fn replay_busy_claude_recipient(poll_ms: i64, window_s: i64, ack_at_s: i64) -> Replay {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-05T20:01:21Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut replay = Replay::default();
+        let mut last_attempt = None;
+        let mut copy_unread = false;
+        let mut elapsed_ms = 0i64;
+        while elapsed_ms <= window_s * 1_000 {
+            let now = start + chrono::Duration::milliseconds(elapsed_ms);
+            let acked = elapsed_ms >= ack_at_s * 1_000;
+            match claude_redelivery_decision_after_turn(acked, 0, last_attempt, now, false) {
+                ClaudeRedelivery::Deliver => {
+                    replay.passes += 1;
+                    let prior_copy_unread = copy_unread;
+                    if !copy_unread {
+                        replay.copies += 1;
+                        copy_unread = true;
+                    }
+                    // The wake gate declined: no PTY bytes this pass.
+                    let wake = WakeAttempt::NotAttempted;
+                    if wake == WakeAttempt::Fired {
+                        replay.pty_nudges += 1;
+                    }
+                    replay
+                        .statuses
+                        .push(injection_event_status(prior_copy_unread, false, wake));
+                    last_attempt = Some(now);
+                }
+                ClaudeRedelivery::Cooldown => {}
+                ClaudeRedelivery::StopAcknowledged => {
+                    replay.stopped_by_ack = true;
+                    break;
+                }
+                ClaudeRedelivery::StopUndelivered => break,
+            }
+            elapsed_ms += poll_ms;
+        }
+        replay
+    }
+
+    /// An injected prompt is never injected again on later passes: across the
+    /// Oct 5 shape (100 ms polls, 11 minutes, recipient busy throughout) the
+    /// recipient receives one inbox copy and no PTY bytes, re-offers are
+    /// spaced by the 30 s cadence, and the acknowledgement ends them.
+    #[test]
+    fn a_busy_claude_recipient_gets_one_copy_and_no_pty_reinjection_cas_366b() {
+        let replay = replay_busy_claude_recipient(100, 12 * 60, 11 * 60 + 13);
+        assert_eq!(replay.copies, 1, "{replay:?}");
+        assert_eq!(replay.pty_nudges, 0, "{replay:?}");
+        assert!(replay.stopped_by_ack, "{replay:?}");
+        // 11 min 13 s at one pass per 30 s: 23 passes, the production count.
+        assert_eq!(replay.passes, 23, "{replay:?}");
+        assert!(
+            replay.passes < 11 * 60 * 10 / 100,
+            "the cadence, not the 100 ms poll, paces re-offers: {replay:?}"
+        );
+    }
+
+    /// Only the pass that delivered something records `ok`; a re-offer that
+    /// appended nothing and typed nothing records `reoffered`, so the event
+    /// log no longer reports 23 deliveries of one message.
+    #[test]
+    fn only_the_delivering_pass_records_ok_cas_366b() {
+        let replay = replay_busy_claude_recipient(100, 12 * 60, 11 * 60 + 13);
+        assert_eq!(replay.statuses.first(), Some(&"ok"));
+        assert_eq!(
+            replay
+                .statuses
+                .iter()
+                .filter(|status| **status == "ok")
+                .count(),
+            1,
+            "{:?}",
+            replay.statuses
+        );
+        assert!(
+            replay.statuses[1..]
+                .iter()
+                .all(|status| *status == "reoffered")
+        );
+    }
+
+    #[test]
+    fn injection_event_status_names_what_the_pass_did_cas_366b() {
+        // A first write, or a re-append after the harness took the copy.
+        assert_eq!(
+            injection_event_status(false, false, WakeAttempt::NotAttempted),
+            "ok"
+        );
+        // A PTY nudge fired: bytes reached the pane.
+        assert_eq!(
+            injection_event_status(true, false, WakeAttempt::Fired),
+            "ok"
+        );
+        assert_eq!(
+            injection_event_status(false, true, WakeAttempt::Fired),
+            "ok"
+        );
+        // Dedup no-op write and no wake; or a nudge-only pass whose nudge
+        // was vetoed or failed.
+        assert_eq!(
+            injection_event_status(true, false, WakeAttempt::NotAttempted),
+            "reoffered"
+        );
+        assert_eq!(
+            injection_event_status(true, false, WakeAttempt::Failed),
+            "reoffered"
+        );
+        assert_eq!(
+            injection_event_status(false, true, WakeAttempt::NotAttempted),
+            "reoffered"
+        );
+        assert_eq!(
+            injection_event_status(false, true, WakeAttempt::Failed),
+            "reoffered"
         );
     }
 }

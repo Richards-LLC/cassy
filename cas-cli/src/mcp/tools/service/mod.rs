@@ -1110,7 +1110,15 @@ impl CasService {
             })?;
             let caller = self.proxy_caller()?;
 
-            match proxy.execute(&caller, &req.code, req.max_length).await {
+            // cas-53ce (GH #1168): proxy_health reads the published project
+            // snapshot. Republish it when this call dropped or reconnected an
+            // upstream, so health shows the execute path's live state.
+            let health_epoch = proxy.health_epoch();
+            let outcome = proxy.execute(&caller, &req.code, req.max_length).await;
+            if proxy.health_epoch() != health_epoch {
+                crate::mcp::write_proxy_health_cache(&self.inner.cas_root, proxy).await;
+            }
+            match outcome {
                 Ok(result) => {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", true);
                     let mut content = vec![Content::text(result.text)];

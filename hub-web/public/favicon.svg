@@ -1,10 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="210 240 270 290">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <title>Cassy</title>
-  <!-- Three interlocking ribbons traced from docs/assets/cassy-logo.png. -->
-  <style>svg{color:#2E3A9F}@media(prefers-color-scheme:dark){svg{color:#A9B3FF}}</style>
-  <g fill="currentColor">
-    <path d="M335 255C295 239 259 258 237 291C216 321 218 353 232 384C247 419 278 452 306 475C326 474 344 461 358 448C332 454 306 437 284 411C263 387 250 362 254 338C258 312 273 293 296 284Z"/>
-    <path d="M266 338C292 307 324 276 353 259C387 241 421 251 444 274C465 293 475 317 465 337C455 359 431 362 411 355C391 347 379 319 350 321L338 323C351 309 369 299 390 294C407 301 416 324 427 326C438 326 438 314 432 306C419 284 400 278 383 285C350 298 323 325 302 351C289 368 287 382 293 400C276 381 267 358 266 338Z"/>
-    <path d="M226 401C213 435 224 475 248 499C272 523 306 523 335 513C365 503 391 477 416 449C425 439 434 442 436 451C439 461 421 477 399 485L361 514C389 525 422 517 443 498C468 478 476 455 463 431C453 409 427 405 411 415C394 424 383 447 362 464C343 480 321 491 299 485C270 476 253 449 247 430Z"/>
+  <!-- Three interlocking ribbons traced from docs/assets/cassy-logo.png: white, pale aurora blue and aurora teal on the violet Send tile (look-send). One asset for every scheme. -->
+  <defs>
+    <linearGradient id="cassy-tile" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7656FA"/>
+      <stop offset=".55" stop-color="#5B3FE0"/>
+      <stop offset="1" stop-color="#3E5BEA"/>
+    </linearGradient>
+    <radialGradient id="cassy-sheen" cx="140" cy="60" r="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cassy-blue" x1="300" y1="250" x2="470" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E6ECFF"/>
+      <stop offset="1" stop-color="#A9C2FF"/>
+    </linearGradient>
+    <linearGradient id="cassy-teal" x1="226" y1="400" x2="470" y2="520" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B8F5EA"/>
+      <stop offset="1" stop-color="#6FE0D0"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="114" fill="url(#cassy-tile)"/>
+  <rect width="512" height="512" rx="114" fill="url(#cassy-sheen)"/>
+  <g transform="translate(256 258) scale(1.2) translate(-345 -385)">
+    <path fill="#FFFFFF" d="M335 255C295 239 259 258 237 291C216 321 218 353 232 384C247 419 278 452 306 475C326 474 344 461 358 448C332 454 306 437 284 411C263 387 250 362 254 338C258 312 273 293 296 284Z"/>
+    <path fill="url(#cassy-blue)" d="M266 338C292 307 324 276 353 259C387 241 421 251 444 274C465 293 475 317 465 337C455 359 431 362 411 355C391 347 379 319 350 321L338 323C351 309 369 299 390 294C407 301 416 324 427 326C438 326 438 314 432 306C419 284 400 278 383 285C350 298 323 325 302 351C289 368 287 382 293 400C276 381 267 358 266 338Z"/>
+    <path fill="url(#cassy-teal)" d="M226 401C213 435 224 475 248 499C272 523 306 523 335 513C365 503 391 477 416 449C425 439 434 442 436 451C439 461 421 477 399 485L361 514C389 525 422 517 443 498C468 478 476 455 463 431C453 409 427 405 411 415C394 424 383 447 362 464C343 480 321 491 299 485C270 476 253 449 247 430Z"/>
   </g>
 </svg>

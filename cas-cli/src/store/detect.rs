@@ -501,8 +501,12 @@ pub fn open_task_store(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
             // A prior local task write may have committed immediately before
             // its outbox transaction failed or the process exited. A logged-in
             // store never falls back to an unsynced writer when this repair
-            // path itself is unavailable.
-            store.reconcile_pending_task_sync()?;
+            // path itself is unavailable (the queue open/init above). The
+            // repair pass runs once per process and then on a bounded
+            // schedule, never waits on a lock, and bounds its SQLite write
+            // wait: opens are read paths (GH #1165). Until the next pass,
+            // an open re-reports the last pass's failure.
+            store.reconcile_if_due()?;
             return Ok(Arc::new(store));
         }
     }
@@ -971,6 +975,15 @@ mod tests {
         }
         assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 1);
         assert!(queue.pending(10, 5).unwrap().is_empty());
+        // GH #1165: the next open does not repeat the pass before it is due,
+        // but still re-reports the retained failure.
+        match open_task_store(&cas_dir) {
+            Err(CasError::StoreErr(StoreError::SyncDegradedAfterCommit { entity_id, .. })) => {
+                assert_eq!(entity_id, task.id)
+            }
+            Err(other) => panic!("expected the retained degraded-sync error, got {other}"),
+            Ok(_) => panic!("a still-broken intent must keep being reported"),
+        }
     }
 
     #[test]

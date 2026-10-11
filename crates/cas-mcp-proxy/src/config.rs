@@ -84,6 +84,10 @@ pub struct Config {
     /// upstream does not annotate them as read-only (cas-ff74).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worker_read_routes: Vec<ExternalToolConfig>,
+    /// Client-side bound on one upstream tool call, in seconds (cas-53ce,
+    /// GH #1168). Unset uses [`crate::DEFAULT_CALL_TIMEOUT_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u64>,
 }
 
 /// How a factory worker may use one upstream server (cas-ff74).
@@ -358,6 +362,16 @@ fn dirs_config_dir() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// The client-side upstream call timeout (cas-53ce): the configured
+    /// `call_timeout_secs` (at least one second), else 90 s.
+    pub fn call_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.call_timeout_secs
+                .unwrap_or(crate::DEFAULT_CALL_TIMEOUT_SECS)
+                .max(1),
+        )
+    }
+
     /// Load config from a specific TOML file. Returns empty Config if file is missing.
     pub fn load_from(path: &Path) -> Result<Config> {
         let content = match std::fs::read_to_string(path) {

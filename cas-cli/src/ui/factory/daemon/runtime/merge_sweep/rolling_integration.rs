@@ -465,11 +465,8 @@ fn integrate(
     // Use the shared root, not the caller's linked worktree, for lock identity
     // and receipt placement. Every factory session contends on the same key.
     let shared_cas = main_root.join(".cas");
-    let project = main_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("project name missing")?;
-    let branch = format!("integration/{}", sanitize_component(project));
+    let branch = crate::worktree::integration_branch::resolve(project_root)?;
+    let project = branch.trim_start_matches("integration/");
     let waiting = Instant::now();
     let _lock = loop {
         if cancel.load(Ordering::Relaxed) {
@@ -551,7 +548,8 @@ fn integrate(
     let base_label = format!("origin/{trunk}");
     receipt.base = base.clone();
     receipt.trunk = trunk.clone();
-    let store = crate::store::open_task_store(&shared_cas).map_err(|error| error.to_string())?;
+    let store =
+        crate::store::open_task_store_cached(&shared_cas).map_err(|error| error.to_string())?;
     let mut tasks = store.list(None).map_err(|error| error.to_string())?;
     if let Some(focused_id) = focused_epic_id_for_project(main_root) {
         if !tasks.iter().any(|task| task.id == focused_id) {
@@ -559,6 +557,17 @@ fn integrate(
                 tasks.push(task);
             }
         }
+    }
+    if let Some(selected) = &settings.recovery_epics {
+        for id in selected {
+            if !tasks
+                .iter()
+                .any(|task| &task.id == id && task.task_type == TaskType::Epic)
+            {
+                return Err(format!("Release epic {id} is missing or is not an epic"));
+            }
+        }
+        tasks.retain(|task| selected.contains(&task.id));
     }
     let (epics, already_integrated) = live_open_epics(project_root, &base, tasks)?;
     receipt.epics = epics;
@@ -868,7 +877,7 @@ pub(super) fn recovery_request_for_focus(
     session_name: &str,
     epic_id: &str,
 ) -> Result<SweepRequest, String> {
-    let tasks = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
+    let tasks = crate::store::open_task_store_cached(cas_dir).map_err(|error| error.to_string())?;
     let task = tasks
         .get(epic_id)
         .map_err(|error| format!("recovery focus {epic_id} is not a known task: {error}"))?;
@@ -953,7 +962,7 @@ pub(super) fn recovery_request_for_any_open_epic(
     cas_dir: &Path,
     session_name: &str,
 ) -> Result<SweepRequest, String> {
-    let tasks = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
+    let tasks = crate::store::open_task_store_cached(cas_dir).map_err(|error| error.to_string())?;
     let open_epics = open_epics(tasks.list(None).map_err(|error| error.to_string())?)
         .into_iter()
         .filter_map(|task| {
@@ -1318,7 +1327,7 @@ pub(super) fn record_result(cas_dir: &Path, result: &SweepResult) {
     if result.status == SweepStatus::Superseded {
         return;
     }
-    let Ok(tasks) = crate::store::open_task_store(cas_dir) else {
+    let Ok(tasks) = crate::store::open_task_store_cached(cas_dir) else {
         return;
     };
     let mut owners = std::collections::BTreeSet::new();
@@ -1592,7 +1601,7 @@ exit "$failed"
         let _env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(only.id.clone(), only.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(only.branch.clone());
@@ -1698,7 +1707,7 @@ exit "$failed"
         owner.role = cas_types::AgentRole::Supervisor;
         owner.factory_session = Some("session-fab3".to_owned());
         agents.register(&owner).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(only.id.clone(), only.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(only.branch.clone());
@@ -1898,7 +1907,7 @@ exit "$failed"
         let temp = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for id in ["a", "b"] {
             let mut agent = cas_types::Agent::new(format!("owner-{id}"), format!("lead-{id}"));
             agent.role = cas_types::AgentRole::Supervisor;
@@ -2073,7 +2082,7 @@ exit "$failed"
         let temp = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut agent = cas_types::Agent::new("owner".to_owned(), "lead".to_owned());
         agent.role = cas_types::AgentRole::Supervisor;
         agent.factory_session = Some("session".to_owned());
@@ -2193,7 +2202,7 @@ exit "$failed"
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(added.id.clone(), added.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(added.branch.clone());
@@ -2258,7 +2267,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         for epic in [&first, &second] {
             let mut task = Task::new(epic.id.clone(), epic.id.clone());
             task.task_type = TaskType::Epic;
@@ -2363,7 +2372,7 @@ echo 'Summary: 1 passed'
         owner.role = cas_types::AgentRole::Supervisor;
         owner.factory_session = Some("session-45de".to_owned());
         agents.register(&owner).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(only.id.clone(), only.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(only.branch.clone());
@@ -2505,7 +2514,7 @@ echo 'Summary: 1 passed'
         let current = git(repo.path(), &["rev-parse", "HEAD"]);
         git(repo.path(), &["checkout", "--detach", "main"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(initial.id.clone(), initial.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(initial.branch.clone());
@@ -2556,17 +2565,10 @@ echo 'Summary: 1 passed'
             "prior-receipt-must-remain-byte-identical"
         );
         assert_eq!(git(repo.path(), &["rev-parse", &initial.branch]), current);
-        let common = PathBuf::from(git(
-            repo.path(),
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        ));
-        let project = common
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy();
-        let integration_ref = format!("refs/heads/integration/{}", sanitize_component(&project));
+        let integration_ref = format!(
+            "refs/heads/{}",
+            crate::worktree::integration_branch::resolve(repo.path()).unwrap()
+        );
         assert!(git_output(repo.path(), &["rev-parse", "--verify", &integration_ref]).is_err());
     }
 
@@ -2591,7 +2593,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(initial.id.clone(), initial.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(initial.branch.clone());
@@ -2637,7 +2639,7 @@ echo 'Summary: 1 passed'
             &["remote", "add", "origin", repo.path().to_str().unwrap()],
         );
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new("cas-recov1".to_owned(), "recovery epic".to_owned());
         task.task_type = TaskType::Epic;
         task.branch = Some("epic/cas-recov1".to_owned());
@@ -2692,7 +2694,7 @@ echo 'Summary: 1 passed'
         let epic = epic(repo.path(), "cas-ambig1", "feature", "merged\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = Task::new(epic.id.clone(), epic.id.clone());
         task.task_type = TaskType::Epic;
         task.branch = Some(epic.branch.clone());
@@ -2739,7 +2741,7 @@ echo 'Summary: 1 passed'
         let open_delivery = epic(repo.path(), "cas-open-delivery", "open", "open\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut closed_task = Task::new(closed_focus.id.clone(), closed_focus.id.clone());
         closed_task.task_type = TaskType::Epic;
         closed_task.status = TaskStatus::Closed;
@@ -2842,7 +2844,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut open_task = Task::new("cas-master-open".to_owned(), "cas-master-open".to_owned());
         open_task.task_type = TaskType::Epic;
         open_task.branch = Some("epic/cas-master-open".to_owned());
@@ -2861,6 +2863,7 @@ echo 'Summary: 1 passed'
             "master-trunk-session",
             None,
             true,
+            None,
             &FactoryConfig::default(),
         )
         .unwrap();
@@ -2907,7 +2910,7 @@ echo 'Summary: 1 passed'
             ("CAS_FACTORY_BUILD_GUARD", "off"),
         ]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
-        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut open_task = Task::new(open.id.clone(), open.id.clone());
         open_task.task_type = TaskType::Epic;
         open_task.branch = Some(open.branch.clone());
@@ -2924,6 +2927,7 @@ echo 'Summary: 1 passed'
             "base-only-session",
             None,
             true,
+            None,
             &FactoryConfig::default(),
         )
         .unwrap();
@@ -2942,6 +2946,88 @@ echo 'Summary: 1 passed'
             [open.id.as_str()]
         );
         assert!(!receipt.epics.iter().any(|epic| epic.id == closed.id));
+        assert_eq!(
+            receipt.test_process_env_scrubbed,
+            scrubbed_test_process_identity_names()
+        );
+    }
+
+    #[test]
+    fn release_recovery_selects_only_named_epics_and_allows_empty_selection() {
+        let repo = fixture();
+        let open = epic(repo.path(), "cas-base-open", "open", "open\n");
+        let unrelated = epic(repo.path(), "cas-unreleased", "unreleased", "unreleased\n");
+        let closed = epic(repo.path(), "cas-base-closed", "closed", "closed\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n");
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut open_task = Task::new(open.id.clone(), open.id.clone());
+        open_task.task_type = TaskType::Epic;
+        open_task.branch = Some(open.branch.clone());
+        tasks.add(&open_task).unwrap();
+        let mut unrelated_task = Task::new(unrelated.id.clone(), unrelated.id.clone());
+        unrelated_task.task_type = TaskType::Epic;
+        unrelated_task.branch = Some(unrelated.branch.clone());
+        tasks.add(&unrelated_task).unwrap();
+        let mut closed_task = Task::new(closed.id.clone(), closed.id.clone());
+        closed_task.task_type = TaskType::Epic;
+        closed_task.status = TaskStatus::Closed;
+        closed_task.branch = Some(closed.branch.clone());
+        tasks.add(&closed_task).unwrap();
+
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
+            repo.path(),
+            &cas_dir,
+            "base-only-session",
+            None,
+            true,
+            Some(std::slice::from_ref(&open.id)),
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(
+            receipt
+                .epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>(),
+            [open.id.as_str()]
+        );
+        assert!(!receipt.epics.iter().any(|epic| epic.id == closed.id));
+        assert!(!receipt.epics.iter().any(|epic| epic.id == unrelated.id));
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
+            repo.path(),
+            &cas_dir,
+            "base-only-session",
+            None,
+            true,
+            Some(&[]),
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(receipt.epics.is_empty());
+        assert_eq!(receipt.tip.as_deref(), Some(receipt.base.as_str()));
         assert_eq!(
             receipt.test_process_env_scrubbed,
             scrubbed_test_process_identity_names()
@@ -3008,13 +3094,7 @@ echo 'Summary: 1 passed'
             repo.path(),
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         ));
-        let project = common
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy();
-        let lock_branch = format!("integration/{}", sanitize_component(&project));
+        let lock_branch = crate::worktree::integration_branch::resolve(repo.path()).unwrap();
         let held =
             crate::worktree::target_lock::try_lock_delivery_target(&cas_dir, &common, &lock_branch)
                 .unwrap()

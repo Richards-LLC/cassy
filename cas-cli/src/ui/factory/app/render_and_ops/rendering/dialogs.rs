@@ -374,11 +374,14 @@ impl FactoryApp {
     }
 
     pub(crate) fn render_task_dialog(&mut self, frame: &mut Frame) {
-        use crate::store::open_task_store;
         use ratatui::layout::Alignment;
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+
+        // GH #1165: the task is read once per open on a helper thread; the
+        // renderer only takes a finished result and never touches the store.
+        self.task_dialog_load.poll();
 
         let area = frame.area();
         let palette = &self.theme().palette;
@@ -414,31 +417,24 @@ impl FactoryApp {
             }
         };
 
-        // Load full task from store (not just summary)
-        let task = match open_task_store(&self.cas_dir) {
-            Ok(store) => match store.get(task_id) {
-                Ok(t) => t,
-                Err(_) => {
-                    let not_found = Paragraph::new(format!("Task {task_id} not found")).block(
-                        Block::default()
-                            .title(" Task Detail ")
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .style(styles.bg_elevated),
-                    );
-                    frame.render_widget(not_found, dialog_area);
-                    return;
-                }
-            },
-            Err(_) => {
-                let error = Paragraph::new("Failed to open task store").block(
-                    Block::default()
-                        .title(" Task Detail ")
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .style(styles.bg_elevated),
-                );
-                frame.render_widget(error, dialog_area);
+        let placeholder = |text: String| {
+            Paragraph::new(text).block(
+                Block::default()
+                    .title(" Task Detail ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .style(styles.bg_elevated),
+            )
+        };
+        let task = match self.task_dialog_load.task_for(task_id) {
+            Some(task) => task.clone(),
+            None => {
+                let text = self
+                    .task_dialog_load
+                    .error_for(task_id)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Loading task {task_id}…"));
+                frame.render_widget(placeholder(text), dialog_area);
                 return;
             }
         };

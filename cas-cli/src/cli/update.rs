@@ -309,12 +309,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // `--sync` used to rewrite the supervisor's main checkout, and the
     // host-wide modes walk every registered project.
     let worker_scope = {
-        // cas-3c26: a process in a factory worker's cgroup is a worker,
-        // whatever CAS_AGENT_ROLE says or whether it was unset.
-        let role = crate::harness_policy::effective_role(
-            std::env::var("CAS_AGENT_ROLE").ok().as_deref(),
-            crate::config::operator_policy::process_in_factory_worker_cgroup(),
-        );
+        let role = std::env::var("CAS_AGENT_ROLE").ok();
         let clone_path = std::env::var_os("CAS_CLONE_PATH").map(PathBuf::from);
         worker_update_plan(role.as_deref(), clone_path.as_deref(), UpdateMode::of(args))
     };

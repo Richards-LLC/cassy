@@ -1534,6 +1534,7 @@ impl CasCore {
         self.cas_task_start_with_options(Parameters(TaskStartRequest {
             id: req.id,
             brief: None,
+            force: None,
         }))
         .await
     }
@@ -3724,6 +3725,7 @@ mod preassigned_start_message_order_tests {
             .cas_task_start_with_options(Parameters(TaskStartRequest {
                 id: task.id.clone(),
                 brief: Some(true),
+                force: None,
             }))
             .await
             .expect_err("the correction must win the race with start");
@@ -3760,6 +3762,7 @@ mod preassigned_start_message_order_tests {
         core.cas_task_start_with_options(Parameters(TaskStartRequest {
             id: task.id.clone(),
             brief: Some(true),
+            force: None,
         }))
         .await
         .expect("the retry starts immediately once corrections are drained");
@@ -3906,6 +3909,7 @@ mod amendment_reassignment_tests {
         core.cas_task_start_with_options(Parameters(TaskStartRequest {
             id: task.id.clone(),
             brief: None,
+            force: None,
         }))
         .await
         .expect("replacement worker starts amended task");

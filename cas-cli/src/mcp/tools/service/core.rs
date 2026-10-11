@@ -454,6 +454,7 @@ impl CasService {
         let inner_req = TaskStartRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "start"))?,
             brief: req.brief,
+            force: req.force,
         };
         self.inner
             .cas_task_start_with_options(Parameters(inner_req))

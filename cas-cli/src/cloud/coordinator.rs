@@ -135,6 +135,14 @@ impl CloudCoordinator {
         self
     }
 
+    /// Act as an agent already registered under `agent_id`. Cloud agent ids
+    /// are the local agent ids (`register` upserts the id it is given), so a
+    /// task-claim call needs no second registration (cas-5f28).
+    pub fn with_agent_id(mut self, agent_id: &str) -> Self {
+        self.agent_id = Some(agent_id.to_string());
+        self
+    }
+
     /// Get the current agent ID
     pub fn agent_id(&self) -> Option<&str> {
         self.agent_id.as_deref()

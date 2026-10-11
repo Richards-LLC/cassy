@@ -38,7 +38,7 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
 
-**Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`.
+**Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`, `peers` (read-only: live supervisors of this repo on any machine, from Cassy Cloud, with machine, session, epic focus and heartbeat age).
 
 **Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
 

@@ -65,6 +65,13 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     if !is_safe_git_refname(lane) || !is_safe_git_refname(target) {
         return None;
     }
+    // GH #1167: a checkout may track the target only on origin. Measure
+    // against whichever exists; neither is unknowable (None).
+    let origin_target = format!("origin/{target}");
+    let local_target = git_ref_exists(repo, target);
+    if !local_target && !git_ref_exists(repo, &origin_target) {
+        return None;
+    }
     let limit = (LIMIT + 1).to_string();
     let mut args = vec![
         "log".to_string(),
@@ -73,9 +80,10 @@ pub(super) fn lane_commits_all_claim_other_tasks(
         limit,
         "--format=%H%x1f%B%x1e".to_string(),
         lane.to_string(),
-        format!("^{target}"),
     ];
-    let origin_target = format!("origin/{target}");
+    if local_target {
+        args.push(format!("^{target}"));
+    }
     if git_ref_exists(repo, &origin_target) {
         args.push(format!("^{origin_target}"));
     }

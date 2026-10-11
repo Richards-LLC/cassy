@@ -266,7 +266,7 @@ impl CheckGroup {
             | "models"
             | "sessionstart budget" => Self::Config,
             "issue repositories" => Self::Config,
-            "integrations" | "violet" | "github origin" => Self::Integrations,
+            "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -1283,6 +1283,20 @@ fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check
         _ => CheckStatus::Ok,
     };
     Check::new("hub audit log", status, report.message)
+}
+
+/// cas-a897: the push-wake watch book, when push-wake ever ran in this project.
+fn violet_wake_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Option<Check> {
+    use crate::ui::factory::daemon::runtime::violet_activity::{WatchHealth, watch_status};
+    let (health, message) = watch_status(cas_root, now)?.doctor(now);
+    Some(Check::new(
+        "violet wake",
+        match health {
+            WatchHealth::Ok => CheckStatus::Ok,
+            WatchHealth::Warning => CheckStatus::Warning,
+        },
+        message,
+    ))
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -2675,6 +2689,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             }, row.message));
         }
     }
+    // cas-a897: Violet push-wake watches and the Cloud relay claim loop.
+    checks.extend(violet_wake_check(&cas_root, chrono::Utc::now()));
     recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
@@ -8104,6 +8120,38 @@ mod tests {
                 check.message
             );
         });
+    }
+
+    #[test]
+    fn violet_wake_check_reads_the_watch_book_cas_a897() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        assert!(violet_wake_check(dir.path(), now).is_none(), "no book, no row");
+
+        let book = dir.path().join("violet").join("watches.json");
+        std::fs::create_dir_all(book.parent().unwrap()).unwrap();
+        let claim = (now - chrono::Duration::seconds(30)).to_rfc3339();
+        std::fs::write(
+            &book,
+            format!(r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#),
+        )
+        .unwrap();
+        let check = violet_wake_check(dir.path(), now).unwrap();
+        assert_eq!(check.name, "violet wake");
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(check.message.contains("last claim 30s ago"), "{}", check.message);
+        assert!(matches!(check.group(), CheckGroup::Integrations));
+
+        std::fs::write(
+            &book,
+            format!(
+                r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
+            ),
+        )
+        .unwrap();
+        let check = violet_wake_check(dir.path(), now).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("HTTP 503"), "{}", check.message);
     }
 
     #[cfg(feature = "mcp-proxy")]

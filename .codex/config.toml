@@ -69,12 +69,3 @@ env_vars = [
     "DISPLAY",
     "PLAYWRIGHT_MCP_USER_DATA_DIR",
 ]
-
-# =============================================================================
-# vercel — HTTP, Bearer auth via VERCEL_TOKEN.
-# bearer_token_env_var sends `Authorization: Bearer ${VERCEL_TOKEN}`.
-# Requires: VERCEL_TOKEN set in the environment.
-# =============================================================================
-[mcp_servers.vercel]
-url = "https://mcp.vercel.com"
-bearer_token_env_var = "VERCEL_TOKEN"

@@ -147,6 +147,69 @@ const CONTRAST_LIMIT = 4.5;
 const LARGE_TEXT_LIMIT = 3;
 const BOX_TOLERANCE = 1;
 
+// A rendered document and a screenshot do not prove the application rendered.
+// Keep this separate from visual findings: an allowlist cannot waive readiness.
+const PAGE_READINESS = ({ readySelector }) => {
+  const visible = (element) => {
+    const box = element.getBoundingClientRect();
+    return box.width > 1 && box.height > 1 && element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  };
+  const loaderSelector = '[role="progressbar"], .spinner, [class*="spinner-" i], [class*="-spinner" i], .animate-spin, [data-loading="true"]';
+  const indicators = [...document.querySelectorAll(`[aria-busy="true"], ${loaderSelector}`)].filter(visible);
+  // aria-busy can mark a partly populated region (for example prices still
+  // loading on rendered plan cards). Its visible content still counts.
+  const inLoader = (element) => indicators.some((indicator) => indicator.matches(loaderSelector) && (indicator === element || indicator.contains(element)));
+  const loadingText = (text) => /^(?:loading|please wait|fetching)(?:\b.*)?$/i.test(text);
+  const large = (element) => {
+    const box = element.getBoundingClientRect();
+    const width = Math.max(0, Math.min(innerWidth, box.right) - Math.max(0, box.left));
+    const height = Math.max(0, Math.min(innerHeight, box.bottom) - Math.max(0, box.top));
+    return width * height >= innerWidth * innerHeight * 0.5;
+  };
+  const dominantLoadingSurface = indicators.some((indicator) => {
+    const ownText = indicator.innerText?.trim() ?? '';
+    if (large(indicator) && (indicator.matches(loaderSelector) || !ownText || loadingText(ownText))) return true;
+    // A tiny spinner often occupies an otherwise empty full-screen wrapper.
+    for (let parent = indicator.parentElement; parent; parent = parent.parentElement) {
+      const text = parent.innerText?.trim() ?? '';
+      if (large(parent) && (!text || loadingText(text)) && !parent.querySelector('img[src], canvas, video, iframe, input, button, select, textarea')) return true;
+    }
+    return false;
+  });
+  let textNodes = 0, textCharacters = 0, contentTextNodes = 0;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const element = node.parentElement;
+    const text = node.textContent.replace(/\s+/g, ' ').trim();
+    if (!text || !element || element.closest('script, style, template, noscript') || !visible(element)) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    if (![...range.getClientRects()].some((box) => box.width > 1 && box.height > 1)) continue;
+    textNodes++;
+    textCharacters += text.length;
+    if (!inLoader(element) && !loadingText(text)) contentTextNodes++;
+  }
+  // Image/canvas applications can have real content without text or a main.
+  const contentElements = [...document.querySelectorAll('img[src], svg, canvas, video, iframe, input, button, select, textarea, [role="img"]')]
+    .filter((element) => visible(element) && !inLoader(element)).length;
+  const mainLandmarks = [...document.querySelectorAll('main, [role="main"]')].filter(visible).length;
+  const targetVisible = !readySelector || [...document.querySelectorAll(readySelector)].some(visible);
+  const hasContent = contentTextNodes > 0 || contentElements > 0;
+  const reason = !targetVisible ? 'ready-selector-not-visible'
+    : dominantLoadingSurface || !hasContent ? (indicators.length ? 'loading-or-placeholder-surface' : 'empty-surface') : null;
+  return { ready: !reason, reason, textNodes, textCharacters, mainLandmarks, contentElements, loadingIndicators: indicators.length, dominantLoadingSurface };
+};
+
+async function waitForPageReadiness(page, { readySelector, readyTimeoutMs }) {
+  const deadline = Date.now() + readyTimeoutMs;
+  for (;;) {
+    const measured = await page.evaluate(PAGE_READINESS, { readySelector });
+    if (measured.ready || Date.now() >= deadline) return measured;
+    await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+  }
+}
+
 const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolerance, allowlistEntries = [] }) => {
     const fallback = colorScheme === 'dark' ? [17, 24, 39, 1] : [255, 255, 255, 1];
     const body = document.body;
@@ -868,6 +931,9 @@ function markdownReport(result) {
     `Schemes: ${result.schemes.join(', ')}  `,
     `Viewports: ${result.viewports.map((viewport) => `${viewport.name} (${viewport.width}×${viewport.height})`).join(', ')}`,
     '',
+    '## Surface readiness', '',
+    ...result.readiness.map((page) => `- ${page.url} · ${page.scheme} · ${page.viewport.name}: ${page.ready ? 'ready' : page.reason}; text nodes: ${page.textNodes}, characters: ${page.textCharacters}, main landmarks: ${page.mainLandmarks}, content elements: ${page.contentElements}, loading indicators: ${page.loadingIndicators}`),
+    '',
     ...(result.pageDeclarations.length ? [
       '## Page declarations', '',
       ...result.pageDeclarations.map((page) => `- ${page.url}: JavaScript required — ${page.reason}`),
@@ -1046,27 +1112,55 @@ async function runStep(page, context, step, timeout) {
  * frame. Repeats until no finite animation is left, then waits two frames so
  * the settled styles are painted.
  */
+/**
+ * Quiet window settlePage waits for: no DOM mutation and no running animation
+ * for this long. GH #1158: Quasar inserted a field message 212-407 ms after
+ * load and faded it in over ~600 ms. A settle that only finished animations
+ * already running when it started measured that message at opacity 0.
+ */
+const SETTLE_QUIET_MS = 500;
+/** Upper bound on settling, for pages that never stop mutating or animating. */
+const SETTLE_MAX_MS = 3000;
+
+/**
+ * Bring the page to rest before it is measured. Every frame, finite
+ * animations and transitions are finished (infinite ones are paused at their
+ * start). Settling ends once the DOM has not mutated and no animation has run
+ * for SETTLE_QUIET_MS, so content a framework inserts after load, and the
+ * enter transition it starts, are finished before measurement. Settling is
+ * bounded by SETTLE_MAX_MS.
+ */
 async function settlePage(page) {
-  await page.evaluate(async () => {
+  await page.evaluate(async ({ quietMs, maxMs }) => {
     const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    for (let round = 0; round < 10; round += 1) {
-      await frame();
-      let running = 0;
-      for (const animation of document.getAnimations()) {
-        if (animation.playState === 'finished') continue;
-        try {
-          animation.finish();
-          running += 1;
-        } catch {
-          if (animation.playState !== 'paused') animation.pause();
-          animation.currentTime = 0;
+    const started = performance.now();
+    let lastActivity = started;
+    const observer = new MutationObserver(() => { lastActivity = performance.now(); });
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    try {
+      for (;;) {
+        await frame();
+        let running = 0;
+        for (const animation of document.getAnimations()) {
+          if (animation.playState === 'finished') continue;
+          try {
+            animation.finish();
+            running += 1;
+          } catch {
+            if (animation.playState !== 'paused') animation.pause();
+            animation.currentTime = 0;
+          }
         }
+        const now = performance.now();
+        if (running) lastActivity = now;
+        if (now - lastActivity >= quietMs || now - started >= maxMs) break;
       }
-      if (!running) break;
+    } finally {
+      observer.disconnect();
     }
     await frame();
     await frame();
-  });
+  }, { quietMs: SETTLE_QUIET_MS, maxMs: SETTLE_MAX_MS });
 }
 
 /**
@@ -1075,7 +1169,10 @@ async function settlePage(page) {
  * declared states are rendered and inspected after the resting pages.
  * Authenticated callers pass storageState (seeded before tracing), optional
  * extraHTTPHeaders, and secrets for any opaque credential values.
- * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object}} options
+ * readySelector optionally identifies the real shell; readyTimeoutMs bounds
+ * the wait (default 5000 ms). A loader/empty resting page always fails readiness.
+ * Declared journey states may intentionally exercise loading after startup.
+ * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object, readySelector?: string, readyTimeoutMs?: number}} options
  */
 export async function runVisualQa(options) {
   try { return await inspectVisualQa(options); }
@@ -1094,16 +1191,20 @@ async function inspectVisualQa(options) {
   const schemes = options.schemes || DEFAULT_SCHEMES;
   const viewports = (options.viewports || DEFAULT_VIEWPORTS).map(normalizeViewport);
   if (!schemes.length || !viewports.length) throw new Error('No captures requested: at least one color scheme and viewport are required.');
+  const readyTimeoutMs = options.readyTimeoutMs ?? 5000;
+  if (!Number.isFinite(readyTimeoutMs) || readyTimeoutMs <= 0) throw new Error('readyTimeoutMs must be a positive finite number.');
+  if (options.readySelector !== undefined && (typeof options.readySelector !== 'string' || !options.readySelector.trim())) throw new Error('readySelector must be a nonempty CSS selector.');
+  const readinessOptions = { readySelector: options.readySelector, readyTimeoutMs };
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
   const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
-  console.log(redactQaText(`Playwright ${playwrightVersion} (${playwrightSource})`, options.secrets));
   const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
   const findings = [];
   const infoFindings = [];
   const suppressed = [];
   const screenshots = [];
   const pageDeclarations = [];
+  const readiness = [];
   const journeyRuns = [];
   const seen = new Set();
   let warnedUnownedTrace = false;
@@ -1116,7 +1217,13 @@ async function inspectVisualQa(options) {
           const page = await context.newPage();
           try {
             await page.goto(url, { waitUntil: 'load' });
+            let measured = await waitForPageReadiness(page, readinessOptions);
             await settlePage(page);
+            // Settling can finish an animation whose callback replaces the shell.
+            measured = measured.ready ? await page.evaluate(PAGE_READINESS, readinessOptions) : measured;
+            readiness.push({ ...measured, url: source, scheme, viewport, readySelector: options.readySelector, timeoutMs: readyTimeoutMs });
+            if (!measured.ready) findings.push({ type: 'page-not-ready', selector: options.readySelector || 'body', elementPath: options.readySelector || 'body',
+              reason: `${measured.reason}; readiness was not reached within ${readyTimeoutMs} ms`, url: source, scheme, viewport });
             const recordFinding = (finding, informational = false) => {
               const enriched = { ...finding, url: source, scheme, viewport };
               const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
@@ -1226,6 +1333,12 @@ async function inspectVisualQa(options) {
             try {
               for (const route of state.routes) await installRoute(page, route, holds);
               await page.goto(url, { waitUntil: 'load' });
+              // Verify an explicitly requested startup shell before interaction;
+              // a declared post-interaction loading state remains inspectable.
+              if (options.readySelector) {
+                const measured = await waitForPageReadiness(page, readinessOptions);
+                if (!measured.ready) throw new Error(`${measured.reason}; readiness was not reached within ${readyTimeoutMs} ms`);
+              }
               if (state.offline) await context.setOffline(true);
               let failed = false;
               for (const [index, step] of state.steps.entries()) {
@@ -1284,10 +1397,12 @@ async function inspectVisualQa(options) {
     strict: Boolean(options.strict),
     generatedAt: new Date().toISOString(),
     playwrightVersion,
+    playwrightSource,
     schemes,
     viewports,
     urls: inputUrls,
     pageDeclarations,
+    readiness,
     ...(journey ? { journey: { name: journey.name, url: journey.url, states: journey.states.map((state) => state.name) }, journeyRuns } : {}),
     findings,
     infoFindings,
@@ -1311,6 +1426,8 @@ function parseArgs(argv) {
     else if (arg === '--artifact-dir') options.artifactDir = argv[++index];
     else if (arg === '--allowlist') options.allowlistPath = argv[++index];
     else if (arg === '--journey') options.journey = argv[++index];
+    else if (arg === '--ready-selector') options.readySelector = argv[++index] ?? '';
+    else if (arg === '--ready-timeout-ms') options.readyTimeoutMs = Number(argv[++index]);
     else if (arg === '--scheme') options.schemes = [argv[++index]];
     else if (arg === '--viewport') options.viewports = [argv[++index]];
     else if (arg === '--scrub-trace') options.scrubTrace = [argv[++index], argv[++index]];
@@ -1336,16 +1453,22 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
     }
   } else if (options.help || (!options.urls.length && !options.journey)) {
     if (!options.help) console.error('No captures requested: at least one URL or journey is required.');
-    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]\n       node scripts/visual-qa.mjs --scrub-trace RAW.zip trace.zip   (extra literal secrets: QA_TRACE_SECRETS, newline-separated)');
+    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--ready-selector CSS] [--ready-timeout-ms MS] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]\n       Readiness: waits up to 5000 ms for a visible shell and content; loading/empty resting pages fail. Declared journey states may exercise loading.\n       node scripts/visual-qa.mjs --scrub-trace RAW.zip trace.zip   (extra literal secrets: QA_TRACE_SECRETS, newline-separated)');
     process.exitCode = options.help ? 0 : 2;
   } else {
     try {
       const result = await runVisualQa(options);
       if (result.status === 'PASS') console.log('PASS');
       else for (const finding of result.findings) {
+        if (finding.type === 'page-not-ready') {
+          console.log(redactQaText(`FAIL page-not-ready ${finding.elementPath}\n  ${finding.reason}\n  Retry: node scripts/visual-qa.mjs --strict --ready-selector CSS URL`));
+          continue;
+        }
         const colors = finding.foreground && finding.background ? ` foreground=${finding.foreground.join(',')} background=${finding.background.join(',')} ratio=${finding.ratio ?? 'n/a'}` : '';
         console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`));
       }
+      for (const page of result.readiness) console.log(redactQaText(`CONTENT ${page.scheme}/${page.viewport.name}: text nodes=${page.textNodes} characters=${page.textCharacters}\n  main landmarks=${page.mainLandmarks} content elements=${page.contentElements} loading indicators=${page.loadingIndicators}`));
+      console.log(`Playwright ${result.playwrightVersion}`);
       process.exitCode = result.exitCode;
     } catch (error) {
       console.error(redactQaText(error));

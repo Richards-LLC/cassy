@@ -163,10 +163,10 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 
 - **Managed files:** sources live in `cas-cli/src/builtins/`; sync renders the `.claude/` and `.codex/` mirrors (`.grok/` and `.opencode/` are rendered locally, not checked in).
 - **Docs:** `cas-cli/docs/` holds architecture/contributing/migration/proxy/TUI/worktree material; `docs/` holds durable project records.
-- **CI/release:** `.github/`, `scripts/` (incl. `release-train.d/`, `release-{completion,interventions,learning,integration-gates}.py`, `assembly-proof.py`, `check-changelog-lint.sh`), `CHANGELOG.md`, `docs/release-notes/`, and `docs/release-reports/` hold gates and receipts.
+- **CI/release:** `.github/`, `scripts/` (incl. `release-train.d/`, `release-{completion,interventions,learning,integration-gates}.py`, `assembly-proof.py`, `check-changelog-lint.sh`), `CHANGELOG.md`, `docs/release-notes/` (`<date>-<topic>-slack.md` Slack drafts), and `docs/release-reports/` (per-version `v<X.Y.Z>.{md,html,pdf}` reports) hold gates and receipts.
 - **CI tiers and guards:** `scripts/ci_tiers/` + `scripts/ci-test-impact.py` route test lanes; `scripts/check-{test-shape,test-env,builtin-contract-phrases,violet-references}.py` are repo-policy checks with `scripts/test-*.py` self-tests.
 - **Visual QA:** `scripts/visual-qa-fixtures/` and `scripts/visual-qa-*.test.mjs` cover the `cas-ui-craft` scanner; `scripts/violet-credentials.sh` loads Violet tokens.
-- **Journey QA:** `docs/qa/{journeys,journey-evaluation,evidence-close-gate,independent-qa-pass}.md` define journeys and QA gates; `scripts/{journeys-for-diff.py,journey-eval.sh,check-journey-evaluation.sh,test-journeys.sh}` select and evaluate them; receipts in `docs/qa/journey-evaluations/`.
+- **Journey QA:** `docs/qa/{journeys,journey-evaluation,evidence-close-gate,independent-qa-pass}.md` define journeys and QA gates; `scripts/{journeys-for-diff.py,journey-eval.sh,check-journey-evaluation.sh,test-journeys.sh}` select and evaluate them; receipts in `docs/qa/journey-evaluations/` (`<date>-<surface>-<sha>.md`).
 - **Design/reports:** `docs/design/` (incl. `hub-messaging/round-*` concept rounds, `cli/`), `docs/factory/` model-lane rubrics + `data/`, `docs/reports/` harness-diary reports.
 - **Operations:** `migration/`, `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`, and `docs/factory/` hold host/runbook material.
 - **Tests:** colocated Rust tests, crate `tests/`, `cas-cli/tests/`, Vitest suites under `hub-web/src/`, and Playwright under `hub-web/e2e/`.

@@ -779,7 +779,7 @@ check_version_literals() {
 # that way; the archive row could not catch it because the producer path still
 # existed here). The Rust guard below scans the embedded integration-test
 # sources; this scan covers the src-side test modules the guard cannot embed,
-# and the workspace crates' src and tests (cas-462b: 3.50.0's merge queue failed
+# and the workspace crates' src and tests (cas-ae01: the merge queue failed
 # on a cas-store src guard that read_dir'ed its own src at runtime).
 # Matched: a manifest-relative Path/PathBuf, `.join`/`.parent` on one, a
 # std::fs call or File::open on the env! value, a runtime `format!` of it, and
@@ -1547,7 +1547,7 @@ check_migration_registry() {
     python3 scripts/check-migration-registry.py .
 }
 
-# The no-build half of fixture-paths (3.50.0 failed it at assembly). Fast mode
+# The no-build half of fixture-paths (cas-cc4d: it failed at assembly). Fast mode
 # scans the lane's changed cas-cli/src Rust files; the full gate scans all.
 check_fixture_paths_src() {
     if [[ "$fast_rows" != true ]]; then

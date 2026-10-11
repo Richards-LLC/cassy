@@ -3,7 +3,7 @@
 
 The doctor snapshot (cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap)
 is only compared when the component-output test runs in the full suite, so a
-new doctor row reached the 3.50.0 cut before failing there. Two checks run
+new doctor row reached the release cut before failing there (cas-415c). Two checks run
 without a build:
 
 1. Grouping: every row in the snapshot sits under the group that

@@ -288,7 +288,7 @@ sleep 2
             ("procedure-guardrails", "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md", "missing procedure\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "Repository Richards-LLC/private-project\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "removed contract\n"),
-            # cas-462b: rows that failed only at the 3.50.0 cut.
+            # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
@@ -304,7 +304,7 @@ sleep 2
              "pub const MIGRATION: Migration = Migration {\n    id: 2,\n};\n"),
             ("fixture-paths-src", "cas-cli/src/example_tests.rs",
              '#[test] fn reads() { let _ = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("x"); }\n'),
-            # The 3.50.0 merge-queue failure: a crate src guard walking its own
+            # cas-ae01, the merge-queue failure: a crate src guard walking its own
             # src at runtime (absent on archive shards).
             ("fixture-paths-src", "crates/cas-store/src/guard.rs",
              '#[test] fn guard() { for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() { let _ = entry; } }\n'),
@@ -323,7 +323,7 @@ sleep 2
 
     def test_contract_phrase_and_oversize_skill_are_refused_at_merge_with_the_row_named(self):
         # The lane check worktree_merge runs: a detached merge preview, then the
-        # fast rows. Each 3.50.0 cut failure is refused here with its row.
+        # fast rows. Each cut-time failure class is refused here with its row.
         cases = [
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md",
              EXAMPLE_SKILL.replace("fixture contract", "drifted wording")),

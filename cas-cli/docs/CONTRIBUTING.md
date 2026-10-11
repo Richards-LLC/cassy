@@ -541,7 +541,8 @@ or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
 row.
 
-The fast rows also run the no-build checks that 3.50.0 found only at the cut.
+The fast rows also run the no-build checks that the October 2026 release cut
+found only at assembly.
 Each runs when the lane changes its inputs, and the full gate always runs it:
 
 - `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
@@ -555,7 +556,7 @@ Each runs when the lane changes its inputs, and the full gate always runs it:
   listed in id order.
 
 Contract phrases were already part of `builtin-doc-hygiene`. On this host a
-lane spanning all three 3.50.0 epics ran every fast row in about 25 seconds.
+lane spanning that release's three epics ran every fast row in about 25 seconds.
 
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date

@@ -4,7 +4,7 @@
 The embedded catalogs in cas-cli/src/builtins.rs are `include_str!` copies of
 source files, so these limits are checked on the exact bytes Cassy ships
 without compiling. Each limit mirrors a Rust test that otherwise fails only
-in the full suite at the release cut (3.50.0: the violet SKILL.md grew past
+in the full suite at the release cut (cas-fa22: the violet SKILL.md grew past
 12 KiB after merge admission). The Rust tests stay authoritative; keep this
 table in step with them:
 

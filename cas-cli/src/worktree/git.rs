@@ -146,14 +146,13 @@ pub enum GitError {
 /// Result type for git operations
 pub type Result<T> = std::result::Result<T, GitError>;
 
-/// Status of a worktree's uncommitted/unmerged state
-#[derive(Debug, Clone)]
-
 /// cas-0c988: the `.gitattributes` value marking committed build output.
 pub const GENERATED_MERGE_ATTRIBUTE: &str = "merge=cas-generated";
 /// cas-0c988: the repository script that rebuilds generated output after a merge.
 pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-artifacts.sh";
 
+/// Status of a worktree's uncommitted/unmerged state
+#[derive(Debug, Clone)]
 pub struct WorktreeDirtyStatus {
     /// Number of modified/staged files
     pub modified_count: usize,

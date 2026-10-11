@@ -896,7 +896,14 @@ pub(crate) fn select_merge_request_task<'a>(
 }
 
 /// The branch a task's merge request is about: the parked branch it was
-/// delivered on, else the worker's own `factory/<assignee>`.
+/// delivered on; else, with a repository to look in, the branch the close
+/// gate measures for this task (cas-b3ab): its per-task
+/// `factory/<assignee>-<task>` when that exists, never a default branch whose
+/// commits claim another task; else the worker's own `factory/<assignee>`.
+///
+/// A resumed task has no parked branch. Judging it by `factory/<assignee>`,
+/// which may hold an earlier task's merged delivery, suppressed a live merge
+/// request as "already landed" (cas-f530).
 ///
 /// Shared by the compose path and the queued-delivery path (cas-b17c) so the
 /// two cannot disagree about which branch to resolve.
@@ -904,12 +911,19 @@ pub(crate) fn merge_request_branch(
     task: Option<&cas_types::Task>,
     repo_root: Option<&Path>,
 ) -> Option<String> {
-    let _ = repo_root;
     let task = task?;
-    task.deliverables
-        .parked_branch
-        .clone()
-        .or_else(|| task.assignee.as_ref().map(|name| format!("factory/{name}")))
+    if let Some(parked) = task.deliverables.parked_branch.clone() {
+        return Some(parked);
+    }
+    let assignee = task.assignee.as_deref()?;
+    let Some(repo_root) = repo_root else {
+        return Some(format!("factory/{assignee}"));
+    };
+    let branch = crate::mcp::tools::core::task::lifecycle::close_ops::close_measured_factory_branch(
+        repo_root, task, assignee,
+    );
+    // The live-tip resolver reads both the local and the origin ref itself.
+    Some(branch.strip_prefix("origin/").map(str::to_string).unwrap_or(branch))
 }
 
 /// Resolve the tip a merge request must actually be judged against

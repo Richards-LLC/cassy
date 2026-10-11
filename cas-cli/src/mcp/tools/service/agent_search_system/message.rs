@@ -1602,8 +1602,10 @@ impl CasService {
                     &repo.repo_root,
                     &repo.target_branch,
                 );
-                let branch =
-                    crate::prompt_revalidation::merge_request_branch(Some(&task), Some(&repo.repo_root));
+                let branch = crate::prompt_revalidation::merge_request_branch(
+                    Some(&task),
+                    Some(&repo.repo_root),
+                );
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its
                 // delivery lands or the worker starts another task on this
@@ -4362,7 +4364,16 @@ mod cas_89e1_post_merge_message_type_tests {
         git(repo, &["add", "earlier.txt"]);
         git(repo, &["commit", "-qm", "cas-0001 earlier task"]);
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["merge", "--no-ff", "factory/worker-a", "-m", "merge earlier"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "factory/worker-a",
+                "-m",
+                "merge earlier",
+            ],
+        );
         // This task lives on its own, unmerged, per-task branch.
         git(repo, &["checkout", "-qb", "factory/worker-a-cas-b3ab"]);
         std::fs::write(repo.join("delivery.txt"), "this task\n").unwrap();
@@ -4434,7 +4445,10 @@ mod cas_89e1_post_merge_message_type_tests {
             "another task's merged branch must not suppress this request: {response}"
         );
         assert!(response.contains("Message queued"), "{response}");
-        let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .unwrap()
+            .poll_all(10)
+            .unwrap();
         let envelope = rows
             .iter()
             .find_map(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt))

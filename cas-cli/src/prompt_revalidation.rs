@@ -923,7 +923,12 @@ pub(crate) fn merge_request_branch(
         repo_root, task, assignee,
     );
     // The live-tip resolver reads both the local and the origin ref itself.
-    Some(branch.strip_prefix("origin/").map(str::to_string).unwrap_or(branch))
+    Some(
+        branch
+            .strip_prefix("origin/")
+            .map(str::to_string)
+            .unwrap_or(branch),
+    )
 }
 
 /// Resolve the tip a merge request must actually be judged against

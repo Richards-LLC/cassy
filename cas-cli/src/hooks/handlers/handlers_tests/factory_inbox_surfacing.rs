@@ -910,3 +910,49 @@ fn a_never_silent_worker_sees_a_claimed_message_at_its_next_tool_boundary_cas_b5
     let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
     assert!(again.hook_specific_output.is_none(), "a surfaced message is delivered once");
 }
+
+/// cas-7ce4: after cas-b5ad a busy Claude worker sees a claimed message at a
+/// tool boundary, and Claude Code then renders the teams copy it held as the
+/// next turn's teammate message. That turn must say the message was already
+/// shown, by its `[cas #N …]` id, so the worker does not treat it as new; a
+/// teams copy of a message never shown gets no such note.
+#[test]
+fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_shown_cas_7ce4() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+
+    let shown = store
+        .enqueue_with_session("supervisor", WORKER, "Take (B), but keep the flag operator-only.", SESSION)
+        .unwrap();
+    assert!(store.claim_recipient_transport(shown, WORKER).unwrap());
+    // The tool boundary surfaced it mid-turn (cas-b5ad).
+    let surfaced = store
+        .surface_unseen_for_recipient_delivered_after(
+            WORKER,
+            Some(SESSION),
+            10,
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+        )
+        .unwrap();
+    assert_eq!(surfaced.len(), 1);
+    let unseen = store
+        .enqueue_with_session("supervisor", WORKER, "Also rebase onto the new tip.", SESSION)
+        .unwrap();
+
+    worker.teams_inbox.push_back(format!(
+        "[cas #{shown} supervisor-authored 40s first]\n\nTake (B), but keep the flag operator-only."
+    ));
+    let repeat = worker.next_teammate_turn().unwrap();
+    assert!(repeat.contains(&format!("#{shown}")), "{repeat}");
+    assert!(repeat.contains("already shown"), "{repeat}");
+    assert_eq!(repeat.matches("Take (B), but keep the flag operator-only.").count(), 1, "{repeat}");
+
+    worker.teams_inbox.push_back(format!(
+        "[cas #{unseen} supervisor-authored 5s first]\n\nAlso rebase onto the new tip."
+    ));
+    let fresh = worker.next_teammate_turn().unwrap();
+    assert!(!fresh.contains("already shown"), "{fresh}");
+}

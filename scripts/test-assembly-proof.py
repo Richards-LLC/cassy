@@ -247,12 +247,16 @@ class ReceiptTests(unittest.TestCase):
             self.assertIn("GITHUB_TOKEN", found[0]["environment_policy"]["excluded"])
 
         # Prep: member versions, lock versions and the ledger are masked.
+        # Real prep bumps member manifests and their lock entries together.
         for name in ("member-one", "member-two"):
             manifest = self.root / name / "Cargo.toml"
-            manifest.write_text(manifest.read_text().replace('version = "1.0.0" #', 'version = "1.0.1" #'))
+            manifest.write_text(manifest.read_text().replace('version = "1.0.0"', 'version = "1.0.1"'))
+        lock = self.root / "Cargo.lock"
+        lock.write_text(lock.read_text().replace('version = "1.0.0"', 'version = "1.0.1"', 2))
         (self.root / "cas-cli/src/builtins/reference-history.json").write_text('{"prep": []}\n')
         self.commit()
-        self.assertIsNotNone(check(cut)[0], "prep keeps the row proof")
+        found, miss = check(cut)
+        self.assertIsNotNone(found, "prep keeps the row proof: " + miss)
 
         found, miss = check(dict(cut, CAS_FUTURE_TEST_INPUT="1"))
         self.assertIsNone(found)

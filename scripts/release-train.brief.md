@@ -11,6 +11,7 @@
 ## Critique
 
 terminal-qa: PASS release-train-status · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-09eb/terminal-qa/report.json
+
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Hierarchy | 4 | Publication state and green-to-published evidence precede the intervention and hand-off rows. |

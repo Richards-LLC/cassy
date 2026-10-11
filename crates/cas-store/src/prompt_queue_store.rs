@@ -3822,9 +3822,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND q.delivery_stalled_notified_at IS NULL
                AND q.acked_at IS NULL
                AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+               -- cas-b5ad: the daemon's transport claim is a reservation,
+               -- not a read; a claimed row whose wake keeps being declined is
+               -- still unread, and its sender must hear that it stalled.
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                       AND seen.source <> 'transport_claimed'
                )
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
                     OR (q.urgent = 0 AND q.priority > 1 AND q.created_at <= ?))
@@ -3884,6 +3888,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                        AND NOT EXISTS (
                            SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                              AND seen.source <> 'transport_claimed'
                        )",
                     params![prompt_id, factory_session, stale_cutoff],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),

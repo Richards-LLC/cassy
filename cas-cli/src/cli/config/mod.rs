@@ -24,6 +24,11 @@ pub enum ConfigCommands {
     /// Set a config value. `factory.write_roots` is operator-only and
     /// guardrail-grade, not security-grade: it is written to
     /// .cas/operator/write-policy.toml and refused inside agent sessions.
+    /// Keys that relax a Cassy guard (slack.transport,
+    /// verification.force_bypass_allowed, factory.supervisor_only_mcp and
+    /// _env, factory.worker_credential_env, qa.evidence_gate,
+    /// qa.independent_pass, release.claude_account_allowlist) are
+    /// operator-only too: they need an interactive terminal outside any agent.
     Set(ConfigSetArgs),
 
     /// List all config options

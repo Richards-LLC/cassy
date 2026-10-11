@@ -1906,7 +1906,7 @@ fn auth_store() -> Result<AuthStore> {
 
 /// The account's home from the passwd database, never `$HOME` (which any
 /// process can point at a scratch directory).
-fn account_home() -> Option<PathBuf> {
+fn account_home() -> Option<std::path::PathBuf> {
     nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()
         .flatten()
@@ -1916,7 +1916,10 @@ fn account_home() -> Option<PathBuf> {
 /// cas-3c26: whether `hub_root` is the account's own machine hub, the one
 /// that controls the operator's real factory panes. A hub under another
 /// `HOME` (a test fixture's) controls nothing real. Unknown fails closed.
-pub(crate) fn pairing_targets_operator_hub(hub_root: &Path, account_home: Option<&Path>) -> bool {
+pub(crate) fn pairing_targets_operator_hub(
+    hub_root: &std::path::Path,
+    account_home: Option<&std::path::Path>,
+) -> bool {
     let Some(home) = account_home else {
         return true;
     };

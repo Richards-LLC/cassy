@@ -21380,14 +21380,21 @@ pub(crate) fn parked_anchor_advance_is_attributable(
         .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch))
         .filter(|branch| !branch.is_empty() && is_safe_git_refname(branch))
         .map(|branch| {
-            [format!("refs/remotes/origin/{branch}"), format!("refs/heads/{branch}")]
-                .into_iter()
-                .filter(|refname| git_ref_exists(repo_path, refname))
-                .collect()
+            [
+                format!("refs/remotes/origin/{branch}"),
+                format!("refs/heads/{branch}"),
+            ]
+            .into_iter()
+            .filter(|refname| git_ref_exists(repo_path, refname))
+            .collect()
         })
         .unwrap_or_default();
     let range = format!("{recorded}..{candidate}");
-    let mut args = vec!["log".to_string(), "--format=%ct%x1f%P%x1f%B%x1e".to_string(), range];
+    let mut args = vec![
+        "log".to_string(),
+        "--format=%ct%x1f%P%x1f%B%x1e".to_string(),
+        range,
+    ];
     args.extend(upstream_refs.iter().map(|refname| format!("^{refname}")));
     let Ok(output) = std::process::Command::new("git")
         .args(&args)
@@ -28834,12 +28841,33 @@ mod merge_state_gate_tests {
         let p = dir.path();
         let parked = commit_local(p, "a.rs", "feat(cas-a0a0): task A delivery");
         git(p, &["checkout", "-q", "main"]);
-        commit_local(p, "epic.rs", "feat(cas-b0b0): sibling delivery merged to the epic");
+        commit_local(
+            p,
+            "epic.rs",
+            "feat(cas-b0b0): sibling delivery merged to the epic",
+        );
         git(p, &["checkout", "-q", "factory/worker"]);
-        git(p, &["merge", "-q", "--no-ff", "-m", "Merge branch 'epic/rel-cas-ab12' into HEAD", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "Merge branch 'epic/rel-cas-ab12' into HEAD",
+                "main",
+            ],
+        );
         let merged = rev_parse_local(p, "HEAD");
         assert!(
-            parked_anchor_advance_is_attributable(p, &parked, &merged, "cas-a0a0", None, Some("main")),
+            parked_anchor_advance_is_attributable(
+                p,
+                &parked,
+                &merged,
+                "cas-a0a0",
+                None,
+                Some("main")
+            ),
             "the epic merge on top of the task's commits is the task's delivery tip"
         );
         assert!(
@@ -28850,10 +28878,27 @@ mod merge_state_gate_tests {
         git(p, &["checkout", "-q", "-b", "factory/sibling", "main"]);
         commit_local(p, "sib.rs", "feat(cas-c0c0): a sibling's unmerged work");
         git(p, &["checkout", "-q", "factory/worker"]);
-        git(p, &["merge", "-q", "--no-ff", "-m", "Merge branch 'factory/sibling'", "factory/sibling"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "Merge branch 'factory/sibling'",
+                "factory/sibling",
+            ],
+        );
         let foreign = rev_parse_local(p, "HEAD");
         assert!(
-            !parked_anchor_advance_is_attributable(p, &parked, &foreign, "cas-a0a0", None, Some("main")),
+            !parked_anchor_advance_is_attributable(
+                p,
+                &parked,
+                &foreign,
+                "cas-a0a0",
+                None,
+                Some("main")
+            ),
             "merging a sibling branch that is not on the upstream brings in its work"
         );
     }

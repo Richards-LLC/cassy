@@ -2749,9 +2749,27 @@ mod stale_anchor_rebind_tests_cas_00eb {
         git(repo, &["checkout", "-q", "main"]);
         std::fs::write(repo.join("sibling.rs"), "// sibling\n").unwrap();
         git(repo, &["add", "sibling.rs"]);
-        git(repo, &["commit", "-q", "-m", "feat(cas-0f0f): sibling delivery on the epic"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat(cas-0f0f): sibling delivery on the epic",
+            ],
+        );
         git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
-        git(repo, &["merge", "-q", "--no-ff", "-m", "Merge branch 'epic/rel-cas-ab12' into HEAD", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "Merge branch 'epic/rel-cas-ab12' into HEAD",
+                "main",
+            ],
+        );
         let merged = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
         merged
@@ -2774,7 +2792,10 @@ mod stale_anchor_rebind_tests_cas_00eb {
             Some(WORKER_TASK_BRANCH),
             Some(&merged),
         );
-        assert_eq!(parking.deliverables.factory_branch_anchor.as_deref(), Some(merged.as_str()));
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(merged.as_str())
+        );
     }
 
     /// cas-9668: qa_request on a task re-parked after an epic merge retires
@@ -2810,7 +2831,10 @@ mod stale_anchor_rebind_tests_cas_00eb {
             .expect("a pending round");
         assert_eq!(open.bound_head, merged, "the round binds the merge tip");
         let stored = open_task_store(&cas_dir).unwrap().get(&f.task.id).unwrap();
-        assert_eq!(stored.deliverables.factory_branch_anchor.as_deref(), Some(merged.as_str()));
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(merged.as_str())
+        );
     }
 
     /// cas-9668: qa_request head_sha=<the pushed epic-merge tip> is accepted
@@ -2831,8 +2855,9 @@ mod stale_anchor_rebind_tests_cas_00eb {
             git_common_dir: repo.join(".git"),
             target_branch: "main".into(),
         };
-        let (branch, tip) = super::super::close_ops::validate_pushed_task_receipt(&f.task, &context, &merged)
-            .expect("the pushed epic-merge tip is the task's delivery");
+        let (branch, tip) =
+            super::super::close_ops::validate_pushed_task_receipt(&f.task, &context, &merged)
+                .expect("the pushed epic-merge tip is the task's delivery");
         assert_eq!(branch, WORKER_TASK_BRANCH);
         assert_eq!(tip, merged);
     }

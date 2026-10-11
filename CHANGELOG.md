@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA binds the merge tip after a worker merges the epic (cas-9668)
+
+- When a worker merges the epic into the task branch on top of their own
+  commits and re-parks, the QA round, the merge request and `qa_request` now
+  bind that merge commit, and `qa_record` accepts a bundle there. Before, the
+  round stayed on the first parked tip, and `qa_request head_sha=<merge tip>`
+  was refused as "not attributable to task".
+- Commits already on the task's target branch no longer count as another
+  task's work. Merging a sibling branch that is not on the target is still
+  refused.
+
 ### Security — guard-relaxing config keys are operator-only (cas-0d4f0)
 
 - `verification.enabled`, `verification.force_bypass_allowed`, `slack.transport`,

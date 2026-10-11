@@ -356,6 +356,32 @@ fn test_receipt_path(cas_root: &Path, repo: &Path, head: &str, test: &TargetedTe
 }
 
 pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
+    let mut receipts = passing_test_records(cas_root, repo, head)
+        .into_iter()
+        .map(|(package, test)| {
+            format!("test: PASS {head} {package} {} {}", test.filter, test.count)
+        })
+        .collect::<Vec<_>>();
+    receipts.sort();
+    receipts.dedup();
+    receipts
+}
+
+/// cas-b38a: the packages with at least one passing targeted test at `head`
+/// in this worktree, sorted and once each. The close gate counts a delivered
+/// crate as tested when its package is listed here.
+pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
+    let mut packages = passing_test_records(cas_root, repo, head)
+        .into_iter()
+        .map(|(package, _)| package)
+        .collect::<Vec<_>>();
+    packages.sort();
+    packages.dedup();
+    packages
+}
+
+/// Every valid passing targeted-test receipt for `head` in this worktree.
+fn passing_test_records(cas_root: &Path, repo: &Path, head: &str) -> Vec<(String, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
     };
@@ -366,7 +392,7 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
-    let mut receipts = Vec::new();
+    let mut records = Vec::new();
     for entry in entries.flatten() {
         if !entry
             .file_name()
@@ -378,10 +404,10 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
         let record = std::fs::read(entry.path())
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok());
-        let Some(record) = record else {
+        let Some(mut record) = record else {
             continue;
         };
-        let Some(test) = record.test else {
+        let Some(test) = record.test.take() else {
             continue;
         };
         if record.repo == repo
@@ -395,15 +421,46 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
                 .as_ref()
                 .is_none_or(|harness| valid_package(harness))
         {
-            receipts.push(format!(
-                "test: PASS {head} {} {} {}",
-                record.packages[0], test.filter, test.count
-            ));
+            records.push((record.packages.remove(0), test));
         }
     }
-    receipts.sort();
-    receipts.dedup();
-    receipts
+    records
+}
+
+/// Write the receipt a passing targeted run leaves, for tests of the gates
+/// that read it (cas-b38a).
+#[cfg(test)]
+pub(crate) fn record_passing_test_for_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    package: &str,
+    filter: &str,
+) {
+    let repo = repo.canonicalize().expect("canonical repo");
+    let test = TargetedTest {
+        package: package.to_string(),
+        harness: None,
+        filter: filter.to_string(),
+    };
+    let path = test_receipt_path(cas_root, &repo, head, &test);
+    std::fs::create_dir_all(path.parent().expect("receipt directory"))
+        .expect("create receipt directory");
+    let record = CheckReceipt {
+        head: head.to_string(),
+        repo,
+        packages: vec![package.to_string()],
+        test: Some(TestReceipt {
+            filter: filter.to_string(),
+            harness: None,
+            count: 1,
+        }),
+    };
+    std::fs::write(
+        path,
+        serde_json::to_vec(&record).expect("serialize receipt"),
+    )
+    .expect("write receipt");
 }
 
 // Shared with parked-cache eviction: a cache cannot be evicted while its
@@ -1277,6 +1334,9 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         other[5] = "test(other)".into();
         execute_at(&root, &other, &repo, &fake).unwrap();
         assert_eq!(passing_test_receipts(&root, &repo, &head).len(), 2);
+        // cas-b38a: the close gate reads the tested packages, once each.
+        assert_eq!(passing_test_packages(&root, &repo, &head), ["cas"]);
+        assert!(passing_test_packages(&root, &repo, &"b".repeat(40)).is_empty());
         fake_cargo(
             &fake,
             "printf '     Summary [ 0.01s] 0 tests run: 0 passed, 2 skipped\\n'",

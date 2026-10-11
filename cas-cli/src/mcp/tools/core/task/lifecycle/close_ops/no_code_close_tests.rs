@@ -520,3 +520,102 @@ async fn unnamed_lane_commit_still_gates_code_and_worker_no_code_closes_gh1167()
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{id}");
     }
 }
+
+/// What an operations task looks like after its first close parked it
+/// (cas-3507): no execution_note, no commit of its own, a parked task branch
+/// that was never pushed, and the conflict preflight flag that came with it.
+fn parked_ops_task(id: &str) -> Task {
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some(format!("{LANE}-{id}"));
+    task.deliverables.merge_conflicted = true;
+    task
+}
+
+const PR: &str = "https://github.com/example/cloud/pull/149";
+
+/// cas-b38a: a parked operations task with no commit of its own closes when
+/// the supervisor declares it no-code on the merged pull request that did
+/// the work. Nothing of the lane is attributed to it.
+#[tokio::test]
+async fn parked_ops_task_closes_no_code_on_its_pull_request_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc07";
+    f.put(&parked_ops_task(id));
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "execution_note": "no-code", "external_ref": PR,
+        }),
+    )
+    .await;
+    assert_closed_without_lane(&f, id, &response);
+    let task = f.task(id);
+    assert_eq!(task.execution_note.as_deref(), Some("no-code"));
+    assert_eq!(task.external_ref.as_deref(), Some(PR));
+}
+
+/// cas-b38a: the same parked operations task closes by the supervisor's
+/// evidence_only review, citing the pull request, with no paths measured.
+#[tokio::test]
+async fn parked_ops_task_closes_by_evidence_on_its_pull_request_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc08";
+    f.put(&parked_ops_task(id));
+    let proof = f.artifact(id);
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "evidence_only": true, "evidence_only_artifact_path": proof,
+            "evidence_only_reference": PR,
+        }),
+    )
+    .await;
+    assert_closed_without_lane(&f, id, &response);
+    let closed = f.task(id);
+    assert!(!closed.deliverables.merge_conflicted);
+    let evidence = closed
+        .deliverables
+        .evidence_only
+        .clone()
+        .expect("evidence recorded");
+    assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
+    assert!(
+        closed
+            .notes
+            .contains("evidence-only close retired lane records"),
+        "{}",
+        closed.notes
+    );
+}
+
+/// cas-b38a: a code methodology keeps the evidence measurement. A test-first
+/// task with no commit of its own is not closed on evidence alone.
+#[tokio::test]
+async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc09";
+    let mut task = parked_ops_task(id);
+    task.execution_note = Some("test-first".into());
+    f.put(&task);
+    let proof = f.artifact(id);
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "evidence_only": true, "evidence_only_artifact_path": proof,
+            "evidence_only_reference": PR,
+        }),
+    )
+    .await;
+    assert!(
+        response.contains("EVIDENCE ONLY CLOSE REJECTED"),
+        "{response}"
+    );
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
+}

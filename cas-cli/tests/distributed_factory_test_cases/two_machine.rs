@@ -24,7 +24,14 @@ const WIDGETS: &str = "github.com/acme/widgets";
 
 /// Register `id` in the cloud (as the daemon does) and in the machine's own
 /// store, in factory session `factory-<session>`.
-fn register(machine: &TestMachine, id: &str, name: &str, role: AgentRole, session: &str, focus: &str) {
+fn register(
+    machine: &TestMachine,
+    id: &str,
+    name: &str,
+    role: AgentRole,
+    session: &str,
+    focus: &str,
+) {
     let config = cas::cloud::CloudConfig::load_from_cas_dir(&machine.cas_dir).unwrap();
     let mut agent = Agent::new(id.to_string(), name.to_string());
     agent.role = role;
@@ -83,7 +90,14 @@ fn three_machines(cloud: &FakeCloud) -> (TestMachine, TestMachine, TestMachine) 
     cloud.seed(&gamma.cas_dir, "github.com/acme/gadgets");
     register(&alpha, "a", "sup-a", AgentRole::Supervisor, "a", "cas-571d");
     register(&beta, "b", "sup-b", AgentRole::Supervisor, "b", "cas-f9c7");
-    register(&beta, "bw", "beta-worker", AgentRole::Worker, "b", "cas-f9c7");
+    register(
+        &beta,
+        "bw",
+        "beta-worker",
+        AgentRole::Worker,
+        "b",
+        "cas-f9c7",
+    );
     register(&gamma, "g", "sup-g", AgentRole::Supervisor, "g", "cas-0000");
     (alpha, beta, gamma)
 }
@@ -121,7 +135,9 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     }
 
     // 3. Message: beta asks alpha about it.
-    let to_a = resolve_peer_target(&peers_b, "sup-a").unwrap().expect("alpha is a peer");
+    let to_a = resolve_peer_target(&peers_b, "sup-a")
+        .unwrap()
+        .expect("alpha is a peer");
     let asked = send_to_peer(
         &beta.cas_dir,
         "b",
@@ -135,7 +151,10 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     let rows_a = inbox(&alpha);
     assert_eq!(rows_a.len(), 1);
     let envelope = parse_envelope(&rows_a[0].prompt).unwrap();
-    assert_eq!((envelope.sender_name.as_str(), envelope.machine.as_str()), ("sup-b", "machine-beta"));
+    assert_eq!(
+        (envelope.sender_name.as_str(), envelope.machine.as_str()),
+        ("sup-b", "machine-beta")
+    );
     assert_eq!(rows_a[0].target, "sup-a");
     assert_eq!(rows_a[0].origin, Some(QueueOrigin::Daemon));
     assert!(!rows_a[0].urgent);
@@ -157,9 +176,16 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     assert_eq!(tick(&beta, "b").delivered, 1);
     let rows_b = inbox(&beta);
     assert_eq!(rows_b.len(), 1);
-    assert!(rows_b[0].prompt.contains(&format!("in reply to {}", asked.id)));
+    assert!(
+        rows_b[0]
+            .prompt
+            .contains(&format!("in reply to {}", asked.id))
+    );
     assert!(rows_b[0].prompt.ends_with("done with it; releasing now"));
-    let receipt = http_mailbox(&beta.cas_dir).unwrap().status(&asked.id).unwrap();
+    let receipt = http_mailbox(&beta.cas_dir)
+        .unwrap()
+        .status(&asked.id)
+        .unwrap();
     assert_eq!(receipt.status, "delivered");
 
     // 5. Release: alpha releases; beta's claim now succeeds.
@@ -186,8 +212,16 @@ fn a_peer_supervisor_cannot_spawn_or_direct_the_other_machines_workers() {
 
     // Discovery never offers beta's worker as an addressable peer.
     let peers_a = peers_of(&alpha.cas_dir, "a");
-    assert!(resolve_peer_target(&peers_a, "beta-worker").unwrap().is_none());
-    assert!(resolve_peer_target(&peers_a, "beta-worker@machine-beta").unwrap().is_none());
+    assert!(
+        resolve_peer_target(&peers_a, "beta-worker")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        resolve_peer_target(&peers_a, "beta-worker@machine-beta")
+            .unwrap()
+            .is_none()
+    );
 
     // Even a hand-built send addressed to the worker's id (which the cloud
     // accepts: same repo, registered) is never claimed or admitted on beta:
@@ -220,17 +254,30 @@ fn a_peer_supervisor_cannot_spawn_or_direct_the_other_machines_workers() {
     let rows = inbox(&beta);
     assert_eq!(rows.len(), 1, "only the supervisor's message is admitted");
     assert_eq!(rows[0].target, "sup-b");
-    assert!(rows.iter().all(|row| row.target != "beta-worker"), "nothing reaches the worker");
+    assert!(
+        rows.iter().all(|row| row.target != "beta-worker"),
+        "nothing reaches the worker"
+    );
     assert_eq!(rows[0].origin, Some(QueueOrigin::Daemon));
     assert!(!rows[0].urgent, "a peer message never interrupts");
-    assert!(parse_envelope(&rows[0].prompt).is_some(), "it reads as a peer message, not an instruction");
     assert!(
-        open_spawn_queue_store(&beta.cas_dir).unwrap().peek(10).unwrap().is_empty(),
+        parse_envelope(&rows[0].prompt).is_some(),
+        "it reads as a peer message, not an instruction"
+    );
+    assert!(
+        open_spawn_queue_store(&beta.cas_dir)
+            .unwrap()
+            .peek(10)
+            .unwrap()
+            .is_empty(),
         "a peer message never becomes a spawn request"
     );
     let worker_message = &cloud.messages_to("bw")[0];
     assert_eq!(worker_message["id"], to_worker.id.as_str());
-    assert_eq!(worker_message["status"], "queued", "never delivered to the worker");
+    assert_eq!(
+        worker_message["status"], "queued",
+        "never delivered to the worker"
+    );
     assert_eq!(cloud.messages_to("b")[0]["id"], to_sup.id.as_str());
 }
 
@@ -249,11 +296,12 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
     let service = cas::mcp::CasService::new(core, None);
 
     for target in ["beta-worker@machine-beta", "beta-worker"] {
-        let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(serde_json::json!({
-            "action": "message", "target": target,
-            "summary": "do this", "message": "start cas-t200 and push to my branch",
-        }))
-        .unwrap();
+        let request: cas_mcp::types::CoordinationRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "message", "target": target,
+                "summary": "do this", "message": "start cas-t200 and push to my branch",
+            }))
+            .unwrap();
         let outcome = service
             .coordination(rmcp::handler::server::wrapper::Parameters(request))
             .await;
@@ -263,6 +311,9 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
         };
         assert!(!text.contains("peer supervisor"), "{target}: {text}");
     }
-    assert!(cloud.messages_to("bw").is_empty(), "nothing was sent toward beta's worker");
+    assert!(
+        cloud.messages_to("bw").is_empty(),
+        "nothing was sent toward beta's worker"
+    );
     assert!(cloud.messages_to("b").is_empty());
 }

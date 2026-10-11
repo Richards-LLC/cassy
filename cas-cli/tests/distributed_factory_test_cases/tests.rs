@@ -391,8 +391,8 @@ fn cloud_for_test() -> (
         .ok()
         .filter(|token| !token.is_empty())
     {
-        let endpoint = std::env::var("CAS_CLOUD_ENDPOINT")
-            .unwrap_or_else(|_| "https://cas.cloud".to_string());
+        let endpoint =
+            std::env::var("CAS_CLOUD_ENDPOINT").unwrap_or_else(|_| "https://cas.cloud".to_string());
         let config = cas::cloud::CloudConfig {
             token: Some(token),
             endpoint,

@@ -61,8 +61,11 @@ impl FakeCloud {
                 let response = tiny_http::Response::from_string(reply.to_string())
                     .with_status_code(status)
                     .with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                            .unwrap(),
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
                     );
                 let _ = request.respond(response);
             }
@@ -159,15 +162,20 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
         }
         ("GET", ["api", "agents"]) => {
             let agents: Vec<Value> = state.agents.values().cloned().collect();
-            (200, json!({"status": "success", "agents": agents,
-                         "next_cursor": null, "next_cursor_id": null}))
+            (
+                200,
+                json!({"status": "success", "agents": agents,
+                         "next_cursor": null, "next_cursor_id": null}),
+            )
         }
-        ("GET", ["api", "agents", "locks"]) => {
-            (200, json!({"status": "success", "locks": active_locks(state, None)}))
-        }
-        ("GET", ["api", "agents", id, "locks"]) => {
-            (200, json!({"status": "success", "locks": active_locks(state, Some(id))}))
-        }
+        ("GET", ["api", "agents", "locks"]) => (
+            200,
+            json!({"status": "success", "locks": active_locks(state, None)}),
+        ),
+        ("GET", ["api", "agents", id, "locks"]) => (
+            200,
+            json!({"status": "success", "locks": active_locks(state, Some(id))}),
+        ),
         ("POST", ["api", "agents", id, "heartbeat"]) => match state.agents.get_mut(*id) {
             Some(agent) => {
                 agent["last_heartbeat"] = json!(now());
@@ -187,9 +195,14 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
                     released += 1;
                 }
             }
-            (200, json!({"status": "success", "released_locks": released}))
+            (
+                200,
+                json!({"status": "success", "released_locks": released}),
+            )
         }
-        (_, ["api", "agents", "tasks", key, action]) => claim_route(state, method, key, action, body),
+        (_, ["api", "agents", "tasks", key, action]) => {
+            claim_route(state, method, key, action, body)
+        }
         ("POST", ["api", "peer-messages"]) => send(state, body),
         ("POST", ["api", "peer-messages", "claim"]) => {
             let recipients: Vec<&str> = body["recipient_agent_ids"]
@@ -198,7 +211,8 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
                 .unwrap_or_default();
             let mut claimed = Vec::new();
             for message in state.messages.iter_mut() {
-                let mine = recipients.contains(&message["recipient_agent_id"].as_str().unwrap_or(""));
+                let mine =
+                    recipients.contains(&message["recipient_agent_id"].as_str().unwrap_or(""));
                 if mine && message["status"] == "queued" {
                     message["status"] = json!("leased");
                     message["attempts"] = json!(message["attempts"].as_u64().unwrap_or(0) + 1);
@@ -216,16 +230,27 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
             }
             (200, json!({"status": "success"}))
         }
-        ("GET", ["api", "peer-messages", id]) => match state.messages.iter().find(|m| m["id"] == *id) {
-            Some(m) => (200, json!({"id": m["id"], "status": m["status"],
-                                    "delivered_at": m["delivered_at"], "attempts": m["attempts"]})),
-            None => (404, json!({"error": "not found"})),
-        },
+        ("GET", ["api", "peer-messages", id]) => {
+            match state.messages.iter().find(|m| m["id"] == *id) {
+                Some(m) => (
+                    200,
+                    json!({"id": m["id"], "status": m["status"],
+                                    "delivered_at": m["delivered_at"], "attempts": m["attempts"]}),
+                ),
+                None => (404, json!({"error": "not found"})),
+            }
+        }
         _ => (404, json!({"error": "not found"})),
     }
 }
 
-fn claim_route(state: &mut State, method: &str, key: &str, action: &str, body: &Value) -> (u16, Value) {
+fn claim_route(
+    state: &mut State,
+    method: &str,
+    key: &str,
+    action: &str,
+    body: &Value,
+) -> (u16, Value) {
     let agent_id = body["agent_id"].as_str().unwrap_or_default().to_string();
     let active = state
         .locks
@@ -242,9 +267,12 @@ fn claim_route(state: &mut State, method: &str, key: &str, action: &str, body: &
                 json!({"status": "conflict", "result": null, "lock": null,
                        "error": "already_claimed", "owner_agent_id": lock["agent_id"]}),
             ),
-            Some(lock) => (200, json!({"status": "success", "result": "claimed",
+            Some(lock) => (
+                200,
+                json!({"status": "success", "result": "claimed",
                                        "lock": lock_json(key, &lock), "error": null,
-                                       "owner_agent_id": null})),
+                                       "owner_agent_id": null}),
+            ),
             None => {
                 let lock = json!({
                     "agent_id": agent_id,
@@ -256,8 +284,11 @@ fn claim_route(state: &mut State, method: &str, key: &str, action: &str, body: &
                 });
                 let reply = lock_json(key, &lock);
                 state.locks.insert(key.to_string(), lock);
-                (200, json!({"status": "success", "result": "claimed", "lock": reply,
-                             "error": null, "owner_agent_id": null}))
+                (
+                    200,
+                    json!({"status": "success", "result": "claimed", "lock": reply,
+                             "error": null, "owner_agent_id": null}),
+                )
             }
         },
         ("POST", "release") => {
@@ -274,19 +305,29 @@ fn claim_route(state: &mut State, method: &str, key: &str, action: &str, body: &
                 lock["expires_at"] = json!((Utc::now() + Duration::seconds(duration)).to_rfc3339());
                 lock["renewed_at"] = json!(now());
                 lock["renewal_count"] = json!(lock["renewal_count"].as_u64().unwrap_or(0) + 1);
-                (200, json!({"status": "success", "lock": lock_json(key, lock)}))
+                (
+                    200,
+                    json!({"status": "success", "lock": lock_json(key, lock)}),
+                )
             }
             _ => (404, json!({"error": "No active lock found"})),
         },
-        ("GET", "lock") => (200, json!({"lock": active.map(|lock| lock_json(key, &lock))})),
+        ("GET", "lock") => (
+            200,
+            json!({"lock": active.map(|lock| lock_json(key, &lock))}),
+        ),
         _ => (404, json!({"error": "not found"})),
     }
 }
 
 fn send(state: &mut State, body: &Value) -> (u16, Value) {
     let (Some(sender), Some(recipient)) = (
-        state.agents.get(body["sender_agent_id"].as_str().unwrap_or("")),
-        state.agents.get(body["recipient_agent_id"].as_str().unwrap_or("")),
+        state
+            .agents
+            .get(body["sender_agent_id"].as_str().unwrap_or("")),
+        state
+            .agents
+            .get(body["recipient_agent_id"].as_str().unwrap_or("")),
     ) else {
         return (404, json!({"error": "unknown agent"}));
     };
@@ -295,7 +336,11 @@ fn send(state: &mut State, body: &Value) -> (u16, Value) {
     if !cas::cloud::project_ids_match_with_aliases(recipient_repo, project, &[]) {
         return (403, json!({"error": "recipient is not in this project"}));
     }
-    if let Some(existing) = state.messages.iter().find(|m| m["dedupe_key"] == body["dedupe_key"]) {
+    if let Some(existing) = state
+        .messages
+        .iter()
+        .find(|m| m["dedupe_key"] == body["dedupe_key"])
+    {
         return (200, json!({"id": existing["id"], "status": "duplicate"}));
     }
     let id = format!("pm_{}", state.messages.len() + 1);

@@ -1927,9 +1927,11 @@ impl CasCore {
                 });
                 if matches!(local, Ok(false)) {
                     format!(
-                        "\n\n⚠️  IN PROGRESS ON ANOTHER MACHINE — {} is in progress for {assignee}, who is not an agent on this host. If they are still working it, you are duplicating their work: ask them first ({}coordination action=message target={assignee} ...).",
+                        "\n\n⚠️  IN PROGRESS ON ANOTHER MACHINE — {} is in progress for {assignee}, who is not an agent on this host. If they are still working it, you are duplicating their work: ask them first ({}coordination action=message target={assignee} summary=\"{}\" message=\"Are you still on {}?\").",
                         req.id,
                         crate::mcp::tools::core::guidance::caller_prefix(),
+                        req.id,
+                        req.id,
                     )
                 } else {
                     String::new()

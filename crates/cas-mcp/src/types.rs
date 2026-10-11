@@ -637,11 +637,11 @@ pub struct TaskRequest {
     /// reset anyway. The audit note will record that the reset was forced.
     ///
     /// On `action=start`, `force=true` starts a task whose Cassy Cloud claim
-    /// a peer session of this repository holds on another machine (cas-5f28).
+    /// a peer session of this repository holds on another machine. The start
+    /// refusal names that override, so the schema text stays short.
     #[schemars(
         description = "Force reset even when the task's assignee has a fresh heartbeat (alive worker). \
-                       Omit or false → warn and abort; true → reset immediately and log a forced-reset audit note. \
-                       For start: take a task a peer session of this repository on another machine holds (cas-5f28); the override is reported."
+                       Omit or false → warn and abort; true → reset immediately and log a forced-reset audit note."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,

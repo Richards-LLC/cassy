@@ -8,7 +8,11 @@ export function presentFleetSheet(container: HTMLElement, dismiss: () => void): 
   const sheet = document.createElement("dialog");
   sheet.className = "fleet-action-sheet";
   sheet.classList.toggle("fleet-action-sheet--picker", content.classList.contains("fleet-ops-picker"));
-  sheet.setAttribute("aria-label", content.getAttribute("aria-label") ?? "Fleet actions");
+  // cas-68d0 F01: a panel named by its visible heading lends that heading to
+  // the dialog and drops its own name, so the name is announced once.
+  const labelledBy = content.getAttribute("aria-labelledby");
+  if (labelledBy) { sheet.setAttribute("aria-labelledby", labelledBy); content.removeAttribute("aria-labelledby"); }
+  else sheet.setAttribute("aria-label", content.getAttribute("aria-label") ?? "Fleet actions");
   const close = document.createElement("button");
   close.type = "button"; close.className = "fleet-sheet-close";
   // cas-4cf2: a panel may name its own close ("Close write access").

@@ -4671,7 +4671,13 @@ function renderStatus(status?: Record<string, unknown>): void {
     const target = want.endsWith(":first-item")
       ? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
       : [...(phoneLayout() ? document : container).querySelectorAll<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`)].find((node) => node.getClientRects().length > 0);
-    if (target) { target.focus({ preventScroll: false }); return; }
+    if (target) {
+      target.focus({ preventScroll: false });
+      // cas-68d0 F02: focus alone may leave the receipt under the rail's
+      // bottom fade; scrolling honours its scroll margin.
+      if (want === "header:grant-result") target.scrollIntoView({ block: "nearest" });
+      return;
+    }
     if (want === "undo") {
       const fallback = progressSheetOpen() || !phoneLayout() ? container.querySelector<HTMLElement>('[data-fleet-focus="header:add"]') : document.querySelector<HTMLElement>("#conversation-fleet");
       fallback?.focus(); return;

@@ -43,7 +43,10 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(panel).toBeVisible();
         // cas-4cf2: a visible title matching the accessible name, what the
         // grant does, and on a phone where it acts and a close named for it.
-        await expect(panel.getByRole("heading", { name: "Write access outside the worktree" })).toBeVisible();
+        await expect(panel.getByRole("heading", { level: 3, name: "Write access outside the worktree" })).toBeVisible();
+        // cas-68d0 F01: the name is announced once: by the group at 1280, by
+        // the phone sheet's dialog at 390, never also by an inner group.
+        await expect(page.getByRole("group", { name: "Write access outside the worktree" })).toHaveCount(width === 390 ? 0 : 1);
         await expect(panel.locator(".write-grant-lead")).toHaveText("Lets the agents on one task write to a folder outside their worktree until the task closes.");
         if (width === 390) {
           await expect(panel.locator(".write-grant-where")).toHaveText("cas-src on Atlas");
@@ -87,6 +90,14 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
         await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveText("cas-1234");
         await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveCSS("white-space", "nowrap");
+        // cas-68d0 F02: the receipt is in view clear of the rail's bottom fade.
+        if (width === 1280) {
+          await expect.poll(() => rail.locator(".write-grant-result").evaluate((line) => {
+            const scroller = line.closest(".conversation-context")!;
+            const fade = parseFloat(getComputedStyle(scroller, "::after").height) || 0;
+            return scroller.getBoundingClientRect().bottom - fade - line.getBoundingClientRect().bottom;
+          }), "receipt bottom clears the fade").toBeGreaterThanOrEqual(0);
+        }
         expect(hub.writeGrants.map((call: any) => [call.status, call.body])).toEqual([[200, {
           action: "grant", task: "cas-1234", path: "~/soundwave-config/docs/requests", mode: "create+edit", reason: "INGEST request files",
         }]]);

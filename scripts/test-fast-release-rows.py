@@ -20,6 +20,67 @@ LANE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LANE)
 
 
+EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"
+VIOLET_SKILL = "---\nname: violet\ndescription: Use when posting to Slack.\n---\nShort body.\n"
+
+
+def catalog(name):
+    entries = "".join(
+        f'    BuiltinFile {{\n        path: "skills/{skill}/SKILL.md",\n'
+        f'        content: include_str!("builtins/skills/{skill}/SKILL.md"),\n    }},\n'
+        for skill in ("example", "violet"))
+    return f"pub const {name}: &[BuiltinFile] = &[\n{entries}];\n"
+
+
+BUILTINS_RS = "".join(catalog(name) for name in ("BUILTIN_SKILLS", "CODEX_BUILTIN_SKILLS", "GROK_BUILTIN_SKILLS"))
+JOURNEY_CATALOG = """# Journeys
+
+## Commander
+
+- **Surface-wide:** `hub-web/src/**`
+
+### HUB-J1 · Open a conversation
+
+- **Entry:** the list
+- **Goal:** read a thread
+- **Touches:** `hub-web/src/list.ts`
+- **Suite:** `hub-web/e2e/journeys/example.journey.ts`
+- **Gaps:** none
+
+**Steps**
+
+1. Tap the row — the thread opens
+
+**Expected experience**
+
+- The thread shows at once.
+
+**Edge paths**
+
+- An empty list.
+"""
+JOURNEY_SPEC = "test('HUB-J1 open a conversation', async () => {\n  await test.step('Tap the row', async () => {});\n});\n"
+DOCTOR_RS = """impl CheckGroup {
+    fn for_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "symbol index" => Self::Indexes,
+            _ => Self::Store,
+        }
+    }
+}
+fn run(recorder: &mut Recorder) {
+    recorder.mark("store open", &checks);
+}
+"""
+DOCTOR_SNAPSHOT = """---
+source: cas-cli/tests/component_output_test.rs
+---
+Store         [OK] database
+Indexes       [OK] symbol index
+"""
+MIGRATIONS_RS = "mod m001_first;\n\npub static MIGRATIONS: &[Migration] = &[\n    m001_first::MIGRATION,\n];\n"
+
+
 def command(repo, *args, **kwargs):
     if (repo / "cargo-tripwire").exists() and "env" not in kwargs:
         kwargs["env"] = dict(os.environ, CARGO=str(repo / "cargo-tripwire"))
@@ -36,11 +97,21 @@ class FastRows(unittest.TestCase):
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py",
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
-                       "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py"):
+                       "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
+                       "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
+                       "check-migration-registry.py", "ci-script-tests-for-diff.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
         self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
-        self.write("cas-cli/src/builtins/skills/example/SKILL.md", "fixture contract\n")
+        self.write("cas-cli/src/builtins/skills/example/SKILL.md", EXAMPLE_SKILL)
+        self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
+        self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
+        self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
+        self.write("cas-cli/src/cli/doctor.rs", DOCTOR_RS)
+        self.write("cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap", DOCTOR_SNAPSHOT)
+        self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
+        self.write("cas-cli/src/migration/migrations/mod.rs", MIGRATIONS_RS)
         self.write(".markdownlint-cli2.jsonc", (ROOT / ".markdownlint-cli2.jsonc").read_text())
         for crate in ("cas-cli", "crates/cas-types", "crates/cas-search", "crates/cas-store", "crates/cas-core", "crates/cas-mcp"):
             self.write(crate + "/Cargo.toml", '[package]\nname = "fixture"\nversion = "9.99.7"\nautotests = false\n')
@@ -97,7 +168,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 12)
+        self.assertEqual(len(proof['rows']), 18)
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):
@@ -125,7 +196,9 @@ class FastRows(unittest.TestCase):
         self.assertLess(time.monotonic() - start, LANE.fast_rows_budget())
         for row in ("failure-log", "version-literals", "changelog-and-versions", "release-script",
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
-                    "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene"):
+                    "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
+                    "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
+                    "ci-script-tests-changed", "fixture-paths-src"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -215,6 +288,28 @@ sleep 2
             ("procedure-guardrails", "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md", "missing procedure\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "Repository Richards-LLC/private-project\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "removed contract\n"),
+            # cas-462b: rows that failed only at the October 2026 release cut.
+            ("journey-catalog", "docs/qa/journeys.md",
+             JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
+             VIOLET_SKILL + "x" * 80 + "\n" + "Padding line.\n" * 1200),
+            ("builtin-skill-limits", "cas-cli/src/builtins/skills/example/SKILL.md",
+             "---\nname: example\ndescription: " + "y" * 251 + "\n---\nfixture contract\n"),
+            ("doctor-snapshot", "cas-cli/src/cli/doctor.rs",
+             DOCTOR_RS.replace('recorder.mark("store open", &checks);',
+                               'recorder.mark("store open", &checks);\n    recorder.mark("code index copies", &checks);')),
+            ("doctor-snapshot", "cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap",
+             DOCTOR_SNAPSHOT.replace("[OK] database", "[OK] database  [OK] symbol index")),
+            ("migration-registry", "cas-cli/src/migration/migrations/m002_second.rs",
+             "pub const MIGRATION: Migration = Migration {\n    id: 2,\n};\n"),
+            ("fixture-paths-src", "cas-cli/src/example_tests.rs",
+             '#[test] fn reads() { let _ = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("x"); }\n'),
+            # cas-ae01, the merge-queue failure: a crate src guard walking its own
+            # src at runtime (absent on archive shards).
+            ("fixture-paths-src", "crates/cas-store/src/guard.rs",
+             '#[test] fn guard() { for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() { let _ = entry; } }\n'),
+            ("fixture-paths-src", "crates/cas-core/tests/reads.rs",
+             '#[test] fn reads() { let dir = env!("CARGO_MANIFEST_DIR"); let _ = std::fs::read_to_string(format!("{dir}/x")); }\n'),
         ]
         for row, path, body in cases:
             with self.subTest(row=row):
@@ -225,6 +320,51 @@ sleep 2
                 result = self.fast()
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("FAIL " + row, result.stdout)
+
+    def test_contract_phrase_and_oversize_skill_are_refused_at_merge_with_the_row_named(self):
+        # The lane check worktree_merge runs: a detached merge preview, then the
+        # fast rows. Each cut-time failure class is refused here with its row.
+        cases = [
+            ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md",
+             EXAMPLE_SKILL.replace("fixture contract", "drifted wording")),
+            ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
+             VIOLET_SKILL + "Padding line.\n" * 1200),
+            ("journey-catalog", "docs/qa/journeys.md",
+             JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            ("fixture-paths-src", "cas-cli/src/example_tests.rs",
+             '#[test] fn reads() { let _ = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent(); }\n'),
+        ]
+        for row, path, body in cases:
+            with self.subTest(row=row):
+                command(self.repo, "git", "checkout", "-q", "target")
+                command(self.repo, "git", "branch", "-qD", "factory/lane")
+                command(self.repo, "git", "checkout", "-qb", "factory/lane")
+                self.write(path, body)
+                self.commit()
+                result = command(self.repo, "python3", "scripts/check-lane-fast-rows.py", ".", "target",
+                                 "factory/lane")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("FAIL " + row, result.stdout)
+                self.assertIn("merge refused", result.stderr)
+                self.assertEqual(command(self.repo, "git", "rev-parse", "target").stdout.strip(), self.base)
+
+    def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
+        self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"
+                   "\tcd .. && python3 scripts/test-unrelated.py\n")
+        self.write("scripts/test-unrelated.py", "raise SystemExit('unrelated script test ran')\n")
+        self.write("scripts/test-example.py", "print('example ok')\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("scripts/example.py", "# changed subject\n")
+        self.commit()
+        passing = self.fast_from(base)
+        self.assertEqual(passing.returncode, 0, passing.stdout + passing.stderr)
+        self.assertIn("PASS ci-script-tests-changed", passing.stdout)
+        self.write("scripts/test-example.py", "raise SystemExit('example broke')\n")
+        self.commit()
+        failing = self.fast_from(base)
+        self.assertEqual(failing.returncode, 1, failing.stdout + failing.stderr)
+        self.assertIn("FAIL ci-script-tests-changed", failing.stdout)
 
     def test_changed_markdown_failure(self):
         if not shutil.which("npx") and not shutil.which("markdownlint-cli2"):

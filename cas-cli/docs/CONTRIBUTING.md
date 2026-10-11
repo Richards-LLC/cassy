@@ -535,8 +535,28 @@ The assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
 dry-run/ignore-error modes removed. A failing script suite retains its output
 and stops assembly before either Rust suite. The full release gate runs this
-same mandatory row before build and Rust test rows; it is excluded from the
-short `--fast-rows` lane checks.
+same mandatory row before build and Rust test rows. The short `--fast-rows`
+lane checks run only `ci-script-tests-changed`: the tier entries whose script
+or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
+Entries that take over 20 seconds alone are reported as deferred to the full
+row.
+
+The fast rows also run the no-build checks that the October 2026 release cut
+found only at assembly.
+Each runs when the lane changes its inputs, and the full gate always runs it:
+
+- `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
+  still matches a `test.step` title in its journey spec.
+- `builtin-skill-limits`: skill description, size and line limits checked on
+  the exact `include_str!` catalog bytes, mirroring the Rust tests.
+- `doctor-snapshot`: every doctor snapshot row sits in the group
+  `CheckGroup::for_name` assigns, and a lane that adds a
+  `recorder.mark(..)` phase also updates the snapshot.
+- `migration-registry`: every migration file is declared, registered and
+  listed in id order.
+
+Contract phrases were already part of `builtin-doc-hygiene`. On this host a
+lane spanning that release's three epics ran every fast row in about 25 seconds.
 
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date

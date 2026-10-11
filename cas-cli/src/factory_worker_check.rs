@@ -640,6 +640,14 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     #[cfg(unix)]
     if let Some(lease) = &target_lease {
         lease.inherit(&mut command);
+        // cas-4ad0: test binaries start through a runner that closes the
+        // inherited lease, so a test's leaked child cannot hold the worktree.
+        if test.is_some()
+            && let Some(variable) = crate::factory_target_cache::owner::host_runner_env()
+        {
+            let runner = crate::factory_target_cache::owner::write_release_runner(&slots)?;
+            command.env(variable, runner);
+        }
     }
     let mut child = command
         .args(&cargo_args)
@@ -761,6 +769,73 @@ fi"#);
             assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
             assert_eq!(std::env::var_os("CARGO_BUILD_RUSTC_WRAPPER").unwrap(), cache.as_os_str(), "parent cache configuration is unchanged");
         }
+    }
+
+    /// cas-4ad0: through the real capped runner, a test binary started by
+    /// nextest runs through the release runner. It does not hold the target
+    /// lease, so a child it leaks cannot lock the worktree out. A plain
+    /// `cargo check` sets no runner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leaked_test_child_does_not_lock_the_worktree_out_cas_4ad0() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            &format!(
+                r#"if [ "$1" != nextest ]; then
+    [ -z "${{{variable}:-}}" ] || {{ echo 'check must not set a test runner' >&2; exit 3; }}
+    exit 0
+fi
+# The "test binary": runs through the runner, must not see the lease, leaks a child.
+"${{{variable}}}" python3 - <<'PY'
+import json, os, subprocess
+from pathlib import Path
+repo = Path.cwd()
+record, = [json.loads(p.read_text()) for p in (repo.parent.parent / 'worker-target-owners').glob('*.json')
+           if json.loads(p.read_text())['worktree'] == str(repo)]
+held = []
+for fd in os.listdir('/proc/self/fd'):
+    try:
+        stat = os.fstat(int(fd))
+    except OSError:
+        continue
+    if (stat.st_dev, stat.st_ino) == (record['lease_dev'], record['lease_ino']):
+        held.append(fd)
+assert not held, f'test binary inherited the lease on fd {{held}}'
+leak = subprocess.Popen(['sleep', '30'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, start_new_session=True)
+(repo / 'target/leaked-pid').write_text(str(leak.pid))
+PY
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
+'"#
+            ),
+        );
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &fake).unwrap();
+        let test_args =
+            ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
+        execute_at(&root, &test_args, &repo, &fake).unwrap();
+        let leaked: i32 = std::fs::read_to_string(repo.join("target/leaked-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only probes the leaked child this test caused.
+        let alive = unsafe { libc::kill(leaked, 0) } == 0;
+        let free = crate::factory_target_cache::owner::for_retirement(&root, &repo);
+        // SAFETY: kill only the leaked child this test caused.
+        unsafe { libc::kill(leaked, libc::SIGKILL) };
+        assert!(alive, "the leaked child outlives the run");
+        assert!(
+            free.is_ok_and(|lease| lease.is_some()),
+            "a leaked test child must not hold the worktree's target lease"
+        );
     }
 
     /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at

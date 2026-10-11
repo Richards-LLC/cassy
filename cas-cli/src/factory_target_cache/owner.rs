@@ -233,7 +233,13 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
     if !lock_meta.is_file() || file.metadata()?.ino() != lock_meta.ino() {
         return Err(io::Error::other("invalid target lease"));
     }
-    file.try_lock_exclusive()?;
+    if let Err(error) = file.try_lock_exclusive() {
+        return Err(if error.kind() == io::ErrorKind::WouldBlock {
+            held_lease_error(&lock_path)
+        } else {
+            error
+        });
+    }
     let fresh = if create {
         match fs::DirBuilder::new().mode(0o700).create(&target) {
             Ok(()) => true,
@@ -349,6 +355,8 @@ impl Lease {
     pub(crate) fn inherit(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         let fd = self.fd();
+        // cas-4ad0: name the fd, so the test runner can close it.
+        command.env(LEASE_FD_ENV, fd.to_string());
         // SAFETY: pre_exec only calls async-signal-safe fcntl; fd is held until wait.
         unsafe {
             command.pre_exec(move || {
@@ -360,6 +368,113 @@ impl Lease {
             });
         }
     }
+}
+
+/// cas-4ad0: environment variable naming the inherited lease fd, so the
+/// test runner wrapper can close it before a test binary starts.
+pub(crate) const LEASE_FD_ENV: &str = "CAS_TARGET_LEASE_FD";
+
+/// cas-4ad0: Cargo's target runner for test binaries in a capped worker
+/// check. Cargo, rustc and build scripts keep the inherited output lease
+/// (cas-f96d); a test binary, and anything it leaks, must not, or a leaked
+/// fake server would lock the worktree out (EAGAIN) until killed.
+pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/sh
+# cas-4ad0: close the inherited worker target lease before a test binary runs.
+case "${CAS_TARGET_LEASE_FD:-}" in
+  ''|*[!0-9]*) ;;
+  *) eval "exec ${CAS_TARGET_LEASE_FD}>&-" ;;
+esac
+unset CAS_TARGET_LEASE_FD
+exec "$@"
+"#;
+
+/// cas-4ad0: write [`RELEASE_RUNNER`] into `dir` (0700) and return its path.
+pub(crate) fn write_release_runner(dir: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir)?;
+    let path = dir.join("release-target-lease-runner.sh");
+    let temp = dir.join(format!(".release-target-lease-runner.{}.tmp", std::process::id()));
+    fs::write(&temp, RELEASE_RUNNER)?;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(0o700))?;
+    fs::rename(&temp, &path)?;
+    Ok(path)
+}
+
+/// cas-4ad0: the `CARGO_TARGET_<HOST>_RUNNER` variable for this host, which
+/// Cargo and nextest use to start test binaries (not build scripts).
+pub(crate) fn host_runner_env() -> Option<String> {
+    let vendor_os = if cfg!(target_os = "linux") {
+        if cfg!(target_env = "musl") {
+            "unknown-linux-musl"
+        } else {
+            "unknown-linux-gnu"
+        }
+    } else if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        return None;
+    };
+    let triple = format!("{}-{vendor_os}", std::env::consts::ARCH);
+    Some(format!(
+        "CARGO_TARGET_{}_RUNNER",
+        triple.to_uppercase().replace('-', "_")
+    ))
+}
+
+/// cas-4ad0: processes holding an open descriptor on `lock_path` (Linux
+/// `/proc`; elsewhere unknown, so empty).
+pub(crate) fn lease_holders(lock_path: &Path) -> Vec<u32> {
+    let mut holders = Vec::new();
+    let wanted = lock_path
+        .canonicalize()
+        .unwrap_or_else(|_| lock_path.to_path_buf());
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return holders;
+    };
+    for process in processes.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        if fds
+            .flatten()
+            .any(|fd| fs::read_link(fd.path()).is_ok_and(|target| target == wanted))
+        {
+            holders.push(pid);
+        }
+    }
+    holders.sort_unstable();
+    holders
+}
+
+fn held_lease_error(lock_path: &Path) -> io::Error {
+    let holders = lease_holders(lock_path);
+    let holders = if holders.is_empty() {
+        "an unidentified process".to_string()
+    } else {
+        format!(
+            "pid {}",
+            holders
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!(
+            "worker target lease {} is held by {holders}; a build or a leaked test process \
+             still uses this worktree's target. Wait for it, or kill a leaked process, then retry",
+            lock_path.display()
+        ),
+    )
 }
 
 impl Drop for Lease {
@@ -493,6 +608,81 @@ mod tests {
             for_retirement(&root, &worker).is_err(),
             "world-writable checkout remains unverifiable"
         );
+    }
+
+    /// cas-4ad0: a test binary started through the release runner closes
+    /// the inherited lease first, so a grandchild that outlives the run (a
+    /// leaked fake server) no longer locks the worktree out.
+    #[test]
+    fn leaked_test_grandchild_does_not_hold_the_target_lease_cas_4ad0() {
+        use std::io::BufRead;
+        let (_temp, root, worker) = fixture();
+        let runner = write_release_runner(&root.join("worker-check-slots")).unwrap();
+        let lease = acquire(&root, &worker).unwrap().unwrap();
+        let lock_path = lease.lock_path.clone();
+        // The runner execs the "test binary", which leaks a sleeping child.
+        let mut command = std::process::Command::new(&runner);
+        command
+            .args(["sh", "-c", "sleep 30 </dev/null >/dev/null 2>&1 & echo $!"])
+            .stdout(std::process::Stdio::piped());
+        lease.inherit(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let grandchild: i32 = line.trim().parse().unwrap();
+        assert!(child.wait().unwrap().success());
+        drop(lease);
+        let reacquired = for_retirement(&root, &worker);
+        let holders = lease_holders(&lock_path);
+        // SAFETY: kill only signals the grandchild this test started.
+        unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        assert!(
+            reacquired.is_ok_and(|lease| lease.is_some()),
+            "a leaked test grandchild still holds the lease"
+        );
+        assert!(!holders.contains(&(grandchild as u32)), "{holders:?}");
+    }
+
+    /// cas-4ad0: a held lease refuses with the lock path and the holder PID,
+    /// not a bare "Resource temporarily unavailable (os error 11)".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_lease_refusal_names_lock_path_and_holder_cas_4ad0() {
+        use std::io::BufRead;
+        let (_temp, root, worker) = fixture();
+        let lease = acquire(&root, &worker).unwrap().unwrap();
+        let lock_path = lease.lock_path.clone();
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "echo ready; read release"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        lease.inherit(&mut command);
+        let mut holder = command.spawn().unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        drop(lease);
+        let refusal = for_retirement(&root, &worker).err().map(|error| error.to_string());
+        let holders = lease_holders(&lock_path);
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(holders.contains(&holder.id()), "{holders:?}");
+        let refusal = refusal.expect("the held lease refuses");
+        assert!(refusal.contains(&lock_path.display().to_string()), "{refusal}");
+        assert!(refusal.contains(&holder.id().to_string()), "{refusal}");
+    }
+
+    #[test]
+    fn host_runner_env_names_this_targets_cargo_runner_cas_4ad0() {
+        let name = host_runner_env().expect("supported host");
+        assert!(name.starts_with("CARGO_TARGET_") && name.ends_with("_RUNNER"), "{name}");
+        assert_eq!(name, name.to_uppercase());
+        assert!(!name.contains('-'), "{name}");
+        assert!(name.contains(&std::env::consts::ARCH.to_uppercase()), "{name}");
     }
 
     #[test]

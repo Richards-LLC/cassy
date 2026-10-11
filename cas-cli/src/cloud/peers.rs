@@ -171,6 +171,9 @@ pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
     out
 }
 
+/// Per-request cap for a peer lookup; status views must not hang on the cloud.
+pub const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Result of a peer lookup for one project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerDiscovery {
@@ -202,12 +205,61 @@ pub fn discover_peers(
         .chain(std::iter::once(canonical_id.clone()))
         .collect::<Vec<_>>();
     let peers = crate::cloud::CloudCoordinator::new(config)?
-        .with_timeout(std::time::Duration::from_secs(10))
+        .with_timeout(DISCOVERY_TIMEOUT)
         .list_repo_peers(&canonical_id, &alias_class, self_id, Utc::now())?;
     Ok(PeerDiscovery::Found {
         canonical_id,
         peers,
     })
+}
+
+/// The Peers section shown by `coordination action=peers`,
+/// `factory action=worker_status` and `cas status --verbose`. Blocking (one
+/// HTTP round trip per page, [`DISCOVERY_TIMEOUT`] each); a failure is
+/// reported in the section, never raised.
+pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
+    match discover_peers(cas_root, self_id) {
+        Ok(PeerDiscovery::Found {
+            canonical_id,
+            peers,
+        }) => render_peers(&canonical_id, &peers),
+        Ok(PeerDiscovery::NotLoggedIn) => "Peers: not logged in to Cassy Cloud, so supervisors \
+             on other machines are unknown (`cas login`).\n"
+            .to_string(),
+        Ok(PeerDiscovery::NoProjectIdentity) => "Peers: this project has no canonical id to \
+             match peers by (set [project] canonical_id or a git origin).\n"
+            .to_string(),
+        Err(error) => format!("Peers: Cassy Cloud lookup failed: {error}\n"),
+    }
+}
+
+/// How long [`peers_section_cached`] reuses a lookup.
+pub const PEERS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// [`peers_section`], reused for [`PEERS_CACHE_TTL`] per project and caller
+/// so a supervisor polling `worker_status` does not query the cloud on every
+/// call.
+pub fn peers_section_cached(cas_root: &Path, self_id: Option<&str>) -> String {
+    type Key = (std::path::PathBuf, Option<String>);
+    static CACHE: std::sync::Mutex<Option<HashMap<Key, (std::time::Instant, String)>>> =
+        std::sync::Mutex::new(None);
+    let key = (cas_root.to_path_buf(), self_id.map(str::to_string));
+    if let Some((at, text)) = CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|cache| cache.get(&key))
+        && at.elapsed() < PEERS_CACHE_TTL
+    {
+        return text.clone();
+    }
+    let text = peers_section(cas_root, self_id);
+    CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(key, (std::time::Instant::now(), text.clone()));
+    text
 }
 
 #[cfg(test)]

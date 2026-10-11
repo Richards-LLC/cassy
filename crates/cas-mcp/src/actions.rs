@@ -101,6 +101,8 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "remind_list",
     "remind_cancel",
     "my_context",
+    // cas-e477: live supervisors of this repo on any machine.
+    "peers",
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,

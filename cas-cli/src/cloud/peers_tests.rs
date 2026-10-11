@@ -152,3 +152,15 @@ fn render_peers_names_machine_session_focus_age_and_liveness() {
     let none = render_peers(REPO, &[]);
     assert!(none.contains("no other supervisors"), "{none}");
 }
+
+#[test]
+fn peers_section_explains_a_logged_out_project_without_a_network_call() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!("[project]\ncanonical_id = \"{REPO}\"\n"),
+    )
+    .unwrap();
+    let text = peers_section(dir.path(), None);
+    assert!(text.starts_with("Peers: not logged in"), "{text}");
+}

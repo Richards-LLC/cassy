@@ -570,7 +570,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context. Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
+        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (live supervisors of this repo on any machine, via Cassy Cloud). Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
     )]
     pub async fn coordination(
         &self,
@@ -1366,6 +1366,9 @@ impl CasService {
                     let agent_req = req.to_agent_request("cleanup");
                     this.agent_cleanup(agent_req).await
                 }
+
+                // cas-e477: read-only peer supervisor discovery.
+                "peers" => this.coordination_peers().await,
 
                 // ---- Disposable database branches (cas-0033) ----
                 "db_branch_create" => this.db_branch_create(&req).await,

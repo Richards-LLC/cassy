@@ -11537,3 +11537,45 @@ async fn cas_3e3a_public_refusals_offer_a_supported_remedy_and_preserve_work() {
         worker_before
     );
 }
+
+/// cas-e477: `coordination action=peers` is wired, read-only, and explains
+/// a project that is not logged in to Cassy Cloud instead of listing nothing.
+#[tokio::test]
+async fn coordination_peers_reports_a_logged_out_project_cas_e477() {
+    let env = FactoryTestEnv::new();
+    let result = env
+        .service
+        .coordination(Parameters(coord_req("peers")))
+        .await
+        .expect("coordination action=peers must dispatch");
+    let text = get_text(&result);
+    assert!(text.starts_with("Peers: not logged in"), "{text}");
+}
+
+/// cas-e477: worker_status carries the Peers section on both its no-agent and
+/// its full path; the summary fast path stays local and omits it.
+#[tokio::test]
+async fn worker_status_shows_peers_but_the_summary_does_not_cas_e477() {
+    let env = FactoryTestEnv::new();
+    let empty = get_text(
+        &env.service
+            .factory_request(Parameters(factory_req("worker_status")))
+            .await
+            .unwrap(),
+    );
+    assert!(empty.contains("Peers: not logged in"), "{empty}");
+
+    env.register_worker_with_id("peer-status-worker", "peer-status-worker", None);
+    let full = get_text(
+        &env.service
+            .factory_request(Parameters(factory_req("worker_status")))
+            .await
+            .unwrap(),
+    );
+    assert!(full.contains("Peers: not logged in"), "{full}");
+
+    let mut summary = factory_req("worker_status");
+    summary.summary = Some(true);
+    let summary = get_text(&env.service.factory_request(Parameters(summary)).await.unwrap());
+    assert!(!summary.contains("Peers"), "{summary}");
+}

@@ -3719,6 +3719,18 @@ impl CasService {
             }));
         }
 
+        // cas-e477: supervisors of this repo on other machines or sessions,
+        // from Cassy Cloud. Not on the summary fast path, which stays local.
+        let peers_section = {
+            let cas_root = self.inner.cas_root.clone();
+            let self_id = self.inner.get_agent_id().ok();
+            tokio::task::spawn_blocking(move || {
+                crate::cloud::peers::peers_section_cached(&cas_root, self_id.as_deref())
+            })
+            .await
+            .unwrap_or_default()
+        };
+
         // Opportunistically prune stale agents so status output stays actionable.
         // Worker threshold tightened from 120s → 30s per cas-2749 so a dead CC
         // client is detected within one supervisor poll. Paired with the
@@ -4068,6 +4080,8 @@ impl CasService {
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
+            msg.push('\n');
+            msg.push_str(&peers_section);
             if stale_pruned > 0 {
                 msg.push_str(&format!(
                     "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
@@ -4432,6 +4446,9 @@ impl CasService {
         if let Some(warning) = shared_clone_warning.as_deref() {
             output.push_str(warning);
         }
+
+        output.push_str(&peers_section);
+        output.push('\n');
 
         if workers.is_empty() {
             output.push_str("Workers: None active\n");
@@ -5666,6 +5683,25 @@ impl CasService {
         }
 
         Ok(Self::success(output))
+    }
+
+    /// `coordination action=peers` (cas-e477): the live supervisors of this
+    /// repo on any machine, from the Cassy Cloud agent registry. Read-only;
+    /// peers are never spawned, messaged or claimed for (cas-604d).
+    pub(super) async fn coordination_peers(&self) -> Result<CallToolResult, McpError> {
+        let cas_root = self.inner.cas_root.clone();
+        let self_id = self.inner.get_agent_id().ok();
+        let text = tokio::task::spawn_blocking(move || {
+            crate::cloud::peers::peers_section(&cas_root, self_id.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Peer lookup failed: {e}"),
+            )
+        })?;
+        Ok(Self::success(text))
     }
 
     pub(super) async fn factory_my_context(

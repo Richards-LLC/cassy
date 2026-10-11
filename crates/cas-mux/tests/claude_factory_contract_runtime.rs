@@ -185,11 +185,13 @@ fn claude_21280_factory_launch_contract_passes_live_matrix() {
         claude_21280_available(),
         "live receipt requires Claude Code 2.1.280"
     );
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+    // cas-ae01: the probe lives under the runtime workspace's target/, found
+    // from the package root (the test's working directory), never from the
+    // producer's compile-time manifest path.
+    let root = std::env::var_os("CAS_TEST_WORKSPACE_ROOT")
+        .or_else(|| std::env::var_os("NEXTEST_WORKSPACE_ROOT"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap().join("../.."))
         .join("target/claude-factory-contract-probe");
     if root.exists() {
         std::fs::remove_dir_all(&root).unwrap();

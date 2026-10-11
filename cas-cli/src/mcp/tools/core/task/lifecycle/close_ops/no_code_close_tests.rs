@@ -619,3 +619,73 @@ async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
     );
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
 }
+
+/// cas-12ab: the fast-rows receipt gate in isolation. A tree without the fast
+/// rows is never gated; with them, only a PASS receipt for the exact tip,
+/// in the clone's common dir, lets it park.
+#[test]
+fn fast_rows_receipt_gate_requires_the_exact_tip_where_the_rows_ship_cas_12ab() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "pub fn a() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "no fast rows"]);
+    let plain = git(repo, &["rev-parse", "HEAD"]);
+    assert!(fast_rows_receipt_refusal(repo, &plain, "main", "cas-fr01").is_none());
+
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::write(repo.join(FAST_ROWS_GATE_MARKER), "print('rows')\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "ship the fast rows"]);
+    let tip = git(repo, &["rev-parse", "HEAD"]);
+    let refusal = fast_rows_receipt_refusal(repo, &tip, "epic/x", "cas-fr01").expect("no receipt yet");
+    assert!(refusal.contains("FAST ROWS REQUIRED"), "{refusal}");
+    assert!(refusal.contains("./scripts/release-gate.sh --fast-rows --base origin/epic/x"), "{refusal}");
+
+    let receipts = repo.join(".git/cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join(format!("{plain}.pass")), format!("fast-rows: PASS {plain} base=x\n")).unwrap();
+    assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_some(), "another tip's receipt");
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: FAIL {tip}\n")).unwrap();
+    assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_some(), "not a PASS");
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=x\n")).unwrap();
+    assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_none());
+}
+
+/// cas-12ab: a worker's close refuses to park a tip that ships the fast rows
+/// until `release-gate.sh --fast-rows` passed on it; with the receipt (written
+/// to the shared common dir, here from the worker's worktree) it parks.
+#[tokio::test]
+async fn worker_park_requires_a_same_tip_fast_rows_receipt_cas_12ab() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
+    std::fs::write(worker_path.join(FAST_ROWS_GATE_MARKER), "print('rows')\n").unwrap();
+    std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+    git(&worker_path, &["add", "."]);
+    git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
+    git(&worker_path, &["push", "-q", "origin", LANE]);
+    let tip = git(&worker_path, &["rev-parse", "HEAD"]);
+    let id = "cas-fr02";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
+
+    let refused = call(&f.worker, close.clone()).await;
+    if refused.contains("DELIVERY BRANCH UNRESOLVED") {
+        panic!("fixture did not reach the park: {refused}");
+    }
+    assert!(refused.contains("FAST ROWS REQUIRED"), "{refused}");
+    assert_ne!(f.task(id).status, TaskStatus::AwaitingMerge, "{refused}");
+
+    let common = git(&worker_path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let receipts = PathBuf::from(common).join("cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=main\n")).unwrap();
+    let parked = call(&f.worker, close).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(!parked.contains("FAST ROWS REQUIRED"), "{parked}");
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+}

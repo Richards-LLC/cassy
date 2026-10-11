@@ -48,6 +48,14 @@ on:
   # arrive via a push, a PR, or the weekly cron.
   workflow_dispatch:
 
+# cas-12ab: a newer push to the same factory/* branch cancels the run it
+# supersedes (one worker pushed 6 times in 31 minutes: 12 workflow runs). Every
+# other event gets a group of its own (the run id), so main, epic, tag, merge
+# queue, PR, schedule and manual runs are never queued or cancelled by this.
+concurrency:
+  group: ${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"

@@ -1762,6 +1762,26 @@ if [[ "${#failures[@]}" -gt 0 ]]; then
     exit 1
 fi
 
+# cas-12ab: a factory park requires this receipt for the exact delivered tip.
+# Only a committed tree earns it: uncommitted work is not what was checked.
+record_fast_rows_receipt() {
+    local head common dir
+    if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        printf 'fast rows: no receipt written: tracked files have uncommitted changes; commit, then rerun\n'
+        return 0
+    fi
+    head="$(git rev-parse HEAD 2>/dev/null)" || return 0
+    common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+    dir="$common/cas/fast-rows"
+    mkdir -p "$dir" || return 0
+    printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
+    printf 'fast rows: receipt %s\n' "$dir/$head.pass"
+}
+if [[ "$fast_rows" == true ]]; then
+    record_fast_rows_receipt
+fi
+
 if [[ -n "$only_rows" ]]; then
     printf 'RELEASE GATE PASSED: selected checks are green for %s: %s\n' "$version" "$selected_rows_summary"
 else

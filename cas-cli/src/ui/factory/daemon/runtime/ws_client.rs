@@ -90,8 +90,9 @@ pub(super) fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
 /// WebSocket transport adapter for the shared Commander control dispatcher.
 pub(super) fn commander_control_from_ws_message(
     message: &ClientMessage,
+    relay_trusted: bool,
 ) -> Option<super::delivery::CommanderControl> {
-    super::delivery::commander_control_from_message(message)
+    super::delivery::commander_control_from_message(message, relay_trusted)
 }
 
 impl FactoryDaemon {
@@ -303,7 +304,7 @@ impl FactoryDaemon {
         // touch the store under the pass wait budget; terminal IO may not.
         let _operator_command =
             (!is_terminal_io(&msg)).then(cas_store::wait_budget::permit_store_access);
-        if let Some(control) = commander_control_from_ws_message(&msg) {
+        if let Some(control) = commander_control_from_ws_message(&msg, false) {
             let error_prefix = control.error_prefix();
             let client_ref = control.client_ref().map(str::to_owned);
             match self.dispatch_commander_control(control).await {

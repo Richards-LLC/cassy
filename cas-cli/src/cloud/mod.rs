@@ -26,6 +26,8 @@ pub mod code_embeddings;
 pub mod embeddings;
 // cas-e477: peer supervisor discovery through the cloud agent registry.
 pub mod peers;
+// cas-f9c7: cross-machine supervisor messaging through a cloud peer mailbox.
+pub mod peer_mailbox;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;

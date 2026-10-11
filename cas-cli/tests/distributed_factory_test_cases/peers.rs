@@ -19,7 +19,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use super::TestMachine;
 
-type Registry = Arc<Mutex<BTreeMap<String, Value>>>;
+pub(super) type Registry = Arc<Mutex<BTreeMap<String, Value>>>;
 
 struct Register(Registry);
 impl Respond for Register {
@@ -67,7 +67,7 @@ impl Respond for Heartbeat {
     }
 }
 
-async fn fake_cloud() -> (MockServer, Registry) {
+pub(super) async fn fake_cloud() -> (MockServer, Registry) {
     let server = MockServer::start().await;
     let registry: Registry = Arc::default();
     Mock::given(method("POST"))
@@ -89,7 +89,7 @@ async fn fake_cloud() -> (MockServer, Registry) {
 }
 
 /// Point a machine's project at the fake cloud under `canonical_id`.
-fn seed_project(machine: &TestMachine, endpoint: &str, canonical_id: &str) {
+pub(super) fn seed_project(machine: &TestMachine, endpoint: &str, canonical_id: &str) {
     let config = CloudConfig {
         endpoint: endpoint.to_string(),
         token: Some("test-token".to_string()),
@@ -104,7 +104,7 @@ fn seed_project(machine: &TestMachine, endpoint: &str, canonical_id: &str) {
 }
 
 /// Register a supervisor of `cas_dir`'s project, as the daemon does.
-fn register_supervisor(cas_dir: &Path, id: &str, machine_id: &str, focus: &str) {
+pub(super) fn register_supervisor(cas_dir: &Path, id: &str, machine_id: &str, focus: &str) {
     let config = CloudConfig::load_from_cas_dir(cas_dir).unwrap();
     let canonical_id = cas::cloud::resolve_canonical_id(cas_dir);
     let mut coordinator = CloudCoordinator::new(config)
@@ -119,7 +119,7 @@ fn register_supervisor(cas_dir: &Path, id: &str, machine_id: &str, focus: &str) 
         .unwrap();
 }
 
-fn peers_of(cas_dir: &Path, self_id: &str) -> Vec<cas::cloud::peers::Peer> {
+pub(super) fn peers_of(cas_dir: &Path, self_id: &str) -> Vec<cas::cloud::peers::Peer> {
     match discover_peers(cas_dir, Some(self_id)).unwrap() {
         PeerDiscovery::Found { peers, .. } => peers,
         other => panic!("expected peers, got {other:?}"),

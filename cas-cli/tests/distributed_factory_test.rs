@@ -85,3 +85,6 @@ mod tests;
 
 #[path = "distributed_factory_test_cases/peers.rs"]
 mod peers;
+
+#[path = "distributed_factory_test_cases/peer_messages.rs"]
+mod peer_messages;

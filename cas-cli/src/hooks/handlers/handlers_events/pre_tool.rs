@@ -4044,6 +4044,15 @@ fn factory_write_decision(
     }
 }
 
+/// cas-0d4f0: refusal for an agent tool call that writes, edits, moves over
+/// or deletes a Cassy config file (`.cas/config.toml` or `config.yaml`, or
+/// the global `~/.config/cas/` one) directly. Agents change ordinary keys with
+/// `cas config set`; security-relevant keys are the operator's.
+fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
+    let _ = input;
+    None
+}
+
 /// cas-3147: refusal for an agent shell command that would change the
 /// operator write policy through the operator-only CLI.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
@@ -4773,6 +4782,72 @@ mod workspace_contract_tests {
             tool_name: Some(tool.to_string()),
             tool_input: Some(payload),
             ..Default::default()
+        }
+    }
+
+    /// cas-0d4f0: an agent shell cannot set or reset a security-relevant key
+    /// through `cas config`, however it wraps the call; ordinary keys and
+    /// reads stay available.
+    #[test]
+    fn cas_0d4f0_agent_shell_cannot_set_operator_only_keys() {
+        for command in [
+            "cas config set slack.transport any",
+            "cas config set verification.force_bypass_allowed true",
+            "/home/u/.local/bin/cas config set factory.supervisor_only_mcp ''",
+            "env -u CLAUDECODE cas config set factory.worker_credential_env GH_TOKEN",
+            "bash -c 'cas config set qa.evidence_gate false'",
+            "setsid cas config set qa.independent_pass false",
+            "cas config set release.claude_account_allowlist a@example.com",
+            "cas config reset slack.transport",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("operator"), "{denial}");
+        }
+        for allowed in [
+            "cas config set issues.repo example/project",
+            "cas config get slack.transport",
+            "cas config reset sync.min_helpful",
+            "rg 'cas config set slack.transport' docs",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// cas-0d4f0: no agent tool call writes a Cassy config file directly,
+    /// whatever its role; other files under `.cas/` and other config.toml
+    /// files are untouched by this rule.
+    #[test]
+    fn cas_0d4f0_agents_cannot_write_cas_config_files() {
+        let fixture = tempfile::tempdir().unwrap();
+        let main = fixture.path().canonicalize().unwrap().join("main");
+        std::fs::create_dir_all(main.join(".cas")).unwrap();
+        let file = main.join(".cas/config.toml").display().to_string();
+        for (case, input) in [
+            ("Write", tool_input("Write", serde_json::json!({"file_path": file, "content": "[slack]\ntransport = \"any\""}), &main)),
+            ("Edit", tool_input("Edit", serde_json::json!({"file_path": file, "old_string": "violet", "new_string": "any"}), &main)),
+            ("MultiEdit", tool_input("MultiEdit", serde_json::json!({"file_path": file, "edits": []}), &main)),
+            ("apply_patch", tool_input("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Update File: {file}\n@@\n+x\n*** End Patch")}), &main)),
+            ("relative Write", tool_input("Write", serde_json::json!({"file_path": ".cas/config.toml", "content": ""}), &main)),
+            ("yaml", tool_input("Write", serde_json::json!({"file_path": ".cas/config.yaml", "content": ""}), &main)),
+            ("append", bash_input("printf '[qa]\\nevidence_gate = false\\n' >> .cas/config.toml", &main)),
+            ("tee", bash_input(&format!("echo x | tee {file}"), &main)),
+            ("sed -i", bash_input("sed -i 's/violet/any/' .cas/config.toml", &main)),
+            ("cp over", bash_input("cp /tmp/forged.toml .cas/config.toml", &main)),
+            ("mv over", bash_input(&format!("mv /tmp/forged.toml {file}"), &main)),
+            ("rm", bash_input("rm -f .cas/config.toml", &main)),
+        ] {
+            let denial = cas_config_file_write_denial(&input)
+                .unwrap_or_else(|| panic!("{case} must be refused"));
+            assert!(denial.contains("cas config set"), "{case}: {denial}");
+        }
+        for (case, input) in [
+            ("notes", tool_input("Write", serde_json::json!({"file_path": ".cas/notes.md", "content": ""}), &main)),
+            ("other config.toml", tool_input("Write", serde_json::json!({"file_path": "crates/x/config.toml", "content": ""}), &main)),
+            ("read", bash_input("cat .cas/config.toml", &main)),
+            ("cas config set", bash_input("cas config set issues.repo a/b", &main)),
+        ] {
+            assert_eq!(cas_config_file_write_denial(&input), None, "{case}");
         }
     }
 

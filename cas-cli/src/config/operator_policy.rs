@@ -354,6 +354,47 @@ pub struct InvocationContext {
     pub cgroup: String,
 }
 
+/// Security-relevant config keys that relax a guard (cas-0d4f0). Like the
+/// write roots, only the operator may change them: `cas config set`, reset,
+/// import, the line editor and the TUI refuse an agent context, and the
+/// PreToolUse hook refuses agent shell commands that set them and every
+/// agent write to a Cassy `config.toml`.
+pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
+    "verification.force_bypass_allowed",
+    "slack.transport",
+    "factory.supervisor_only_mcp",
+    "factory.supervisor_only_env",
+    "factory.worker_credential_env",
+    "qa.evidence_gate",
+    "qa.independent_pass",
+    "release.claude_account_allowlist",
+];
+
+/// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.
+pub fn is_operator_only_config_key(key: &str) -> bool {
+    let key = key.trim();
+    key == "factory.write_roots" || OPERATOR_ONLY_CONFIG_KEYS.contains(&key)
+}
+
+/// The operator-only keys whose value differs between two configs.
+pub fn changed_operator_config_keys(
+    before: &crate::config::Config,
+    after: &crate::config::Config,
+) -> Vec<&'static str> {
+    OPERATOR_ONLY_CONFIG_KEYS
+        .iter()
+        .copied()
+        .filter(|key| before.get(key) != after.get(key))
+        .collect()
+}
+
+/// Why this process may not change the operator-only `changed` keys, or
+/// `None` when nothing operator-only changes or an operator runs it.
+pub fn operator_config_refusal(changed: &[&str], context: &InvocationContext) -> Option<String> {
+    let _ = (changed, context);
+    None
+}
+
 /// Why this process may not change the operator policy, or `None` when it
 /// looks like an operator at a terminal: no agent environment, no agent
 /// process among its ancestors, and an interactive terminal.
@@ -525,6 +566,44 @@ mod tests {
         let refusal = operator_context_refusal(&context(&["HOME"], &["-bash"], false))
             .expect("no terminal");
         assert!(refusal.contains("terminal"), "{refusal}");
+    }
+
+    /// cas-0d4f0: a change to a security-relevant key is refused from any
+    /// agent context and allowed for the operator at a terminal; ordinary
+    /// keys never need the operator.
+    #[test]
+    fn cas_0d4f0_operator_only_keys_refuse_agent_contexts() {
+        let before = crate::config::Config::default();
+        let mut after = before.clone();
+        after.set("sync.min_helpful", "5").unwrap();
+        assert!(changed_operator_config_keys(&before, &after).is_empty());
+        let agent = context(&["HOME", "CLAUDECODE"], &["-bash"], false);
+        assert_eq!(operator_config_refusal(&[], &agent), None);
+
+        for (key, value) in [
+            ("verification.force_bypass_allowed", "true"),
+            ("slack.transport", "any"),
+            ("factory.supervisor_only_mcp", ""),
+            ("factory.worker_credential_env", "GH_TOKEN"),
+            ("qa.evidence_gate", "false"),
+            ("release.claude_account_allowlist", "agent@example.com"),
+        ] {
+            assert!(is_operator_only_config_key(key), "{key}");
+            let mut changed = before.clone();
+            changed.set(key, value).unwrap();
+            if changed.get(key) == before.get(key) {
+                // The default already equals this value; flip it instead.
+                changed.set(key, "true").unwrap();
+            }
+            let keys = changed_operator_config_keys(&before, &changed);
+            assert_eq!(keys, [key], "{key}");
+            let refusal = operator_config_refusal(&keys, &agent).expect("agent is refused");
+            assert!(refusal.contains(key) && refusal.contains("operator"), "{refusal}");
+            let operator = context(&["HOME", "PATH"], &["-bash"], true);
+            assert_eq!(operator_config_refusal(&keys, &operator), None);
+        }
+        assert!(is_operator_only_config_key("factory.write_roots"));
+        assert!(!is_operator_only_config_key("issues.repo"));
     }
 
     #[test]

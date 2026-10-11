@@ -115,6 +115,12 @@ pub(crate) fn execute_import(
             std::process::exit(1);
         }
 
+        // cas-0d4f0: an import may not relax a security-relevant key.
+        crate::cli::config::operator_ops::guard_operator_config(
+            &current_config,
+            &imported_config,
+            crate::config::operator_policy::InvocationContext::from_process,
+        )?;
         imported_config.save(cas_root)?;
 
         if cli.json {

@@ -5971,6 +5971,8 @@ impl CasCore {
             }
         }
 
+        // cas-5f28: a parked delivery no longer needs its Cassy Cloud claim.
+        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &task.id);
         if let Ok(agent_store) = self.open_agent_store() {
             if let Err(e) = agent_store
                 .release_lease_for_task(&task.id, "MERGE REQUIRED: parked awaiting_merge")
@@ -10184,6 +10186,8 @@ impl CasCore {
         } else {
             ""
         };
+        // cas-5f28: a closed task's Cassy Cloud claim is released too.
+        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.id);
 
         self.retire_delivered_worker_cache(&task);
 
@@ -10715,6 +10719,7 @@ impl CasCore {
         if let Ok(agent_store) = self.open_agent_store() {
             let _ = agent_store.release_lease_for_task(&task.id, "Task cancelled without delivery");
         }
+        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &task.id);
 
         // cas-7877: cancelling a QA work item is the supervisor deciding the
         // review will not happen. Withdraw its round too, so the delivery is

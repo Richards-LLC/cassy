@@ -387,6 +387,26 @@ pub(crate) fn validate_demo_statement_requirement(
     ))
 }
 
+/// cas-5f28: refusal for a start whose task a peer on another machine holds.
+fn peer_claim_refusal(task_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -> String {
+    let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+    format!(
+        "⛔ HELD BY A PEER — task {task_id} is claimed by {} (a session of this repository on another machine or clone) until {}.\n\
+         Starting it here would duplicate their work. Ask them first: \
+         {prefix}coordination action=message target={} summary=\"{task_id}\" message=\"Are you still on {task_id}? I'd like to take it.\"\n\
+         If it is safe to take over (they stopped, or the operator decided): \
+         {prefix}task action=start id={task_id} force=true",
+        hold.describe(),
+        hold.until(),
+        hold.name(),
+    )
+}
+
+/// cas-5f28: advisory when a peer on another machine works the same epic.
+fn shared_epic_note(epic_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -> String {
+    hold.shared_epic_note(epic_id, &crate::mcp::tools::core::guidance::caller_prefix())
+}
+
 fn no_code_external_ref_guidance(task: &Task) -> &'static str {
     if task.execution_note.as_deref() == Some("no-code") {
         "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
@@ -1897,6 +1917,27 @@ impl CasCore {
             }
         }
 
+        // cas-5f28: a task pulled from the cloud already in progress under an
+        // assignee who is not an agent here is being worked on another
+        // machine. Say who, before this start takes it over.
+        let elsewhere_note = match task.assignee.as_deref() {
+            Some(assignee) if task.status == TaskStatus::InProgress => {
+                let local = agent_store.list(None).map(|agents| {
+                    agents.iter().any(|agent| agent.name == assignee || agent.id == assignee)
+                });
+                if matches!(local, Ok(false)) {
+                    format!(
+                        "\n\n⚠️  IN PROGRESS ON ANOTHER MACHINE — {} is in progress for {assignee}, who is not an agent on this host. If they are still working it, you are duplicating their work: ask them first ({}coordination action=message target={assignee} ...).",
+                        req.id,
+                        crate::mcp::tools::core::guidance::caller_prefix(),
+                    )
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        };
+
         // cas-156b (GH #135): a task with no work target used to be leased with
         // no nativity check at all, so replicated foreign rows were claimed,
         // worked and closed from the wrong repository. Gather the four local
@@ -1950,6 +1991,68 @@ impl CasCore {
         let config = self.load_config();
         let lease_duration = (config.lease().default_duration_mins as i64) * 60;
 
+        // cas-5f28: a task leased here may be leased in another database of
+        // this repository (another machine or clone). Mirror the lease as a
+        // Cassy Cloud claim first, so a peer's live claim refuses this start
+        // before anything changes. Not logged in, or no repository id: no
+        // peers to see, nothing said.
+        let peer_claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root);
+        let agent_name = agent_store
+            .get(&agent_id)
+            .map(|agent| agent.name)
+            .unwrap_or_else(|_| agent_id.clone());
+        let is_local_agent = |id: &str| agent_store.get(id).is_ok();
+        let cloud_duration = lease_duration.clamp(1, 3600) as u32;
+        let mut peer_notes = elsewhere_note;
+        let mut cloud_claimed = false;
+        if let Some(claims) = peer_claims.as_ref() {
+            use crate::cloud::peer_claims::{Acquire, ClaimKind};
+            let kind = if task.task_type == crate::types::TaskType::Epic {
+                ClaimKind::Epic
+            } else {
+                ClaimKind::Task
+            };
+            match claims.acquire(&req.id, kind, &agent_id, &agent_name, cloud_duration, &is_local_agent) {
+                Acquire::Claimed => cloud_claimed = true,
+                // Peers share epics; the overlap is worth knowing, not a block.
+                Acquire::PeerHolds(hold) if kind == ClaimKind::Epic => {
+                    peer_notes.push_str(&shared_epic_note(&req.id, &hold));
+                }
+                Acquire::PeerHolds(hold) if !req.force.unwrap_or(false) => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        peer_claim_refusal(&req.id, &hold),
+                    ));
+                }
+                Acquire::PeerHolds(hold) => {
+                    peer_notes.push_str(&format!(
+                        "\n\n⚠️  PEER CLAIM OVERRIDDEN — {} holds the claim on {} until {}; started anyway (force=true). Tell them, so you don't both work it: {}coordination action=message target={} summary=\"took over {}\" message=\"...\"",
+                        hold.describe(),
+                        req.id,
+                        hold.until(),
+                        crate::mcp::tools::core::guidance::caller_prefix(),
+                        hold.name(),
+                        req.id,
+                    ));
+                }
+                Acquire::StalePeer(hold) => {
+                    peer_notes.push_str(&format!(
+                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} expired at {} without being released (their machine stopped renewing it). Started here on the local lease. Cassy Cloud still lists them as the holder until it expires the claim (petra-stella-cloud#150).",
+                        hold.describe(),
+                        req.id,
+                        hold.until(),
+                    ));
+                }
+                Acquire::Unavailable(reason) => {
+                    peer_notes.push_str(&format!(
+                        "\n\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}), so claims on {} from other machines could not be checked. Started on the local lease only.",
+                        crate::mcp::tools::truncate_str(&reason, 200),
+                        req.id,
+                    ));
+                }
+            }
+        }
+
         let claim_info =
             match agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started")) {
                 Ok(ClaimResult::Success(lease)) => Some(format!(
@@ -1973,6 +2076,10 @@ impl CasCore {
                             .get(&held_by)
                             .map(|a| format!("{} ({})", a.name, held_by))
                             .unwrap_or_else(|_| held_by.clone());
+                        if cloud_claimed {
+                            // The local lease refused; leave no cloud claim behind.
+                            crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.id);
+                        }
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
                             format!(
@@ -1990,6 +2097,30 @@ impl CasCore {
                     None
                 }
             };
+        // cas-5f28: a standard agent's start also focuses the parent epic
+        // (claimed locally below). Mirror that focus, and say when a peer on
+        // another machine already works the same epic.
+        if !is_worker && let Some(claims) = peer_claims.as_ref() {
+            for dep in task_store.get_dependencies(&req.id).unwrap_or_default() {
+                if dep.dep_type != crate::types::DependencyType::ParentChild {
+                    continue;
+                }
+                let Ok(parent) = task_store.get(&dep.to_id) else { continue };
+                if parent.task_type != crate::types::TaskType::Epic {
+                    continue;
+                }
+                use crate::cloud::peer_claims::{Acquire, ClaimKind};
+                match claims.acquire(&parent.id, ClaimKind::Epic, &agent_id, &agent_name, cloud_duration, &is_local_agent) {
+                    Acquire::PeerHolds(hold) => peer_notes.push_str(&shared_epic_note(&parent.id, &hold)),
+                    Acquire::Claimed | Acquire::StalePeer(_) | Acquire::Unavailable(_) => {}
+                }
+            }
+        }
+        let claim_info = if peer_notes.is_empty() {
+            claim_info
+        } else {
+            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
+        };
 
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed

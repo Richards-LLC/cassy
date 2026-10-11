@@ -115,6 +115,17 @@ impl PeerHold {
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|at| at <= now)
     }
+
+    /// Advisory when this peer also works `epic_id`. `prefix` is the
+    /// caller's tool prefix (e.g. `mcp__cas__`).
+    pub fn shared_epic_note(&self, epic_id: &str, prefix: &str) -> String {
+        format!(
+            "\n\n👥 SHARED EPIC — {} also works epic {epic_id} (claimed until {}). Agree who takes which children before both of you start the same one: {prefix}coordination action=message target={} summary=\"{epic_id}\" message=\"...\"",
+            self.describe(),
+            self.until(),
+            self.name(),
+        )
+    }
 }
 
 /// The outcome of mirroring a lease into the cloud.
@@ -317,6 +328,31 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     report
 }
 
+/// How often the daemon heartbeat renews an agent's claims. Claims last a
+/// full lease, so a renewal every two minutes keeps them alive with margin
+/// and stays far below the cloud's per-user rate limit.
+pub const RENEW_EVERY: Duration = Duration::from_secs(120);
+
+/// [`renew_agent_claims`] at most once per [`RENEW_EVERY`] per agent.
+pub fn renew_agent_claims_if_due(cas_root: &Path, agent_id: &str) -> Option<RenewReport> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    {
+        let mut last = LAST.get_or_init(Default::default).lock().ok()?;
+        let now = Instant::now();
+        if last
+            .get(agent_id)
+            .is_some_and(|at| now.duration_since(*at) < RENEW_EVERY)
+        {
+            return None;
+        }
+        last.insert(agent_id.to_string(), now);
+    }
+    Some(renew_agent_claims(cas_root, agent_id))
+}
+
 /// Release the cloud claim on `task_id` held by any agent of this database.
 /// Best-effort: called beside every local lease release.
 pub fn release_task_claim(cas_root: &Path, task_id: &str) {
@@ -329,6 +365,39 @@ pub fn release_task_claim(cas_root: &Path, task_id: &str) {
     let is_local = |id: &str| agents.get(id).is_ok();
     if let Err(error) = claims.release_local(task_id, &is_local) {
         tracing::debug!(task = %task_id, %error, "cloud claim release failed");
+    }
+}
+
+/// A live claim a peer holds on `task_id`, if the project is logged in and
+/// the cloud answers. Read-only: for advisories such as `spawn_workers`.
+pub fn peer_hold_for(cas_root: &Path, task_id: &str) -> Option<PeerHold> {
+    let claims = PeerClaims::for_project(cas_root)?;
+    let agents = crate::store::open_agent_store(cas_root).ok()?;
+    let is_local = |id: &str| agents.get(id).is_ok();
+    claims.peer_hold(task_id, &is_local).ok().flatten()
+}
+
+/// Claim the focus on `epic_id` for `agent_id` (a supervisor's
+/// `focus_epic`). Returns the peer that already works it, if any; the focus
+/// is never refused.
+pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Option<PeerHold> {
+    let claims = PeerClaims::for_project(cas_root)?;
+    let agents = crate::store::open_agent_store(cas_root).ok()?;
+    let name = agents
+        .get(agent_id)
+        .map(|agent| agent.name)
+        .unwrap_or_else(|_| agent_id.to_string());
+    let is_local = |id: &str| agents.get(id).is_ok();
+    match claims.acquire(
+        epic_id,
+        ClaimKind::Epic,
+        agent_id,
+        &name,
+        lease_duration_secs(cas_root),
+        &is_local,
+    ) {
+        Acquire::PeerHolds(hold) => Some(hold),
+        _ => None,
     }
 }
 

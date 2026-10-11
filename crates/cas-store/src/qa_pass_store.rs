@@ -527,6 +527,77 @@ pub fn waive_qa_pass(
     Ok(pass)
 }
 
+/// cas-0c988: carry a recorded verdict to a rebased tip of the same delivery.
+///
+/// The caller has proved that `bound_head` carries the reviewed source patch
+/// byte for byte (only generated build output differs). A new row records the
+/// verdict at `bound_head` with the original state, reviewer, QA task, ledger
+/// and findings, and a summary naming the round it came from, so the audit
+/// trail shows the carry rather than a fresh review. Only a passed or waived
+/// round carries.
+pub fn carry_qa_pass(
+    cas_dir: &Path,
+    from: &QaPass,
+    bound_head: &str,
+    branch: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<QaPass> {
+    if !from.state.satisfies_gate() {
+        return Err(StoreError::Parse(format!(
+            "only a passed or waived QA round carries to a new tip; pass {} is {}",
+            from.id, from.state
+        )));
+    }
+    if bound_head.trim().is_empty() || reason.trim().is_empty() {
+        return Err(StoreError::Parse(
+            "a carried QA verdict needs the new tip and the reason it is the same delivery"
+                .to_string(),
+        ));
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let tx = ImmediateTx::new(&conn)?;
+    if let Some(active) = active_with_conn(&tx, &from.task_id)? {
+        set_state(&tx, &active.id, QaPassState::Superseded, Some(now))?;
+    }
+    let id = new_pass_id();
+    let head8 = &from.bound_head[..from.bound_head.len().min(8)];
+    let summary = format!(
+        "carried over from @{head8} (pass {}, round {}, {}): {}. Original verdict: {}",
+        from.id,
+        from.round,
+        from.state,
+        reason.trim(),
+        from.summary.as_deref().unwrap_or("(none recorded)"),
+    );
+    tx.execute(
+        "INSERT INTO qa_passes (id, task_id, round, implementer_agent_id, branch, bound_head,
+            qa_task_id, reviewer_agent_id, state, summary, issues_json, ledger_path,
+            issuer_agent_id, requested_at, deadline_at, resolved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?14)",
+        params![
+            id,
+            from.task_id,
+            i64::from(from.round),
+            from.implementer_agent_id,
+            branch,
+            bound_head,
+            from.qa_task_id,
+            from.reviewer_agent_id,
+            from.state.as_str(),
+            summary,
+            from.issues_json,
+            from.ledger_path,
+            from.issuer_agent_id,
+            now.to_rfc3339(),
+        ],
+    )?;
+    let pass = by_id_with_conn(&tx, &id)?;
+    tx.commit()?;
+    Ok(pass)
+}
+
 /// Withdraw the open round for `task_id` because the delivery no longer needs
 /// independent QA (cas-5c38). Only an unclaimed (pending) round is withdrawn
 /// unless `include_claimed`; a reviewer already at work keeps its round. The

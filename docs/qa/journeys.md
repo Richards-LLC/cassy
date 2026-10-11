@@ -310,7 +310,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
 7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
 8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row
-9. Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row, Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output title and Close sits under either notch band (cas-5072; a separate part at 844×390 in dark)
+9. Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row, Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom sheet, and 932×430, where it is a side drawer with no empty left gutter, in dark)
 
 #### Expected experience
 

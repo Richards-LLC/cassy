@@ -3031,5 +3031,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .thread .msgs { padding-left: calc(16px + env(safe-area-inset-left)); padding-right: calc(16px + env(safe-area-inset-right)); }
 }
 /* The raw-output drawer is a bottom sheet on a narrow phone and a side drawer
-   on a wider one held sideways; either way its title and Close clear the bands. */
-.raw-output-drawer { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+   on a wider one held sideways. The side drawer sits on the right edge, so
+   only its right side meets a notch band; the bottom sheet spans the screen
+   and clears both (cas-5072 QA F01: no empty left gutter on the drawer). */
+.raw-output-drawer { padding-right: env(safe-area-inset-right); }
+@media (max-width: 53rem) {
+  .raw-output-drawer { padding-left: env(safe-area-inset-left); }
+}

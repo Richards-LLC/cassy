@@ -163,8 +163,9 @@ A phone on its side gets both side insets in a Safari tab too
 (`viewport-fit=cover`), so the phone body adds them to its own edge spacing:
 the conversation rows, Write to a supervisor, the footer, the thread, the
 Waiting-on-you strip, the composer (glass margin and base padding) and the
-Raw output sheet (cas-5072). HUB-J9's sideways part in `phone.journey.ts` checks
-every control at 844×390 with 44px side insets.
+Raw output bottom sheet (cas-5072); the wider side drawer pads only its right
+edge. HUB-J9's sideways parts in `phone.journey.ts` check every control at
+844×390 and 932×430 with 44px side insets.
 
 Rules:
 

@@ -345,8 +345,9 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
 // page side insets (viewport-fit=cover) in a tab as well as installed, so
 // every row, button, field and sheet control must sit clear of both bands.
 // Chromium's CDP override supplies the insets to the production bundle.
-const WIDTH = 844;
-const HEIGHT = 390;
+// 844×390 shows Raw output as a bottom sheet; 932×430 (a larger phone) as the
+// side drawer, which must not gain an empty left gutter (cas-5072 QA F01).
+const SIDEWAYS = [{ width: 844, height: 390 }, { width: 932, height: 430 }] as const;
 const NOTCH = 44;
 
 async function notchInsets(page: Page): Promise<void> {
@@ -356,6 +357,7 @@ async function notchInsets(page: Page): Promise<void> {
 
 /** Visible, reachable controls inside `scope` whose box enters a notch band. */
 async function underTheBands(page: Page, scope: string): Promise<string[]> {
+  const width = page.viewportSize()!.width;
   return page.locator(`${scope} :is(button, a[href], input, textarea, select, summary, [role="button"], [tabindex]:not([tabindex="-1"]))`).evaluateAll(
     (nodes, [width, notch]) =>
       nodes
@@ -377,14 +379,14 @@ async function underTheBands(page: Page, scope: string): Promise<string[]> {
           const name = element.getAttribute("aria-label") || element.id || element.textContent?.trim().slice(0, 32) || element.tagName;
           return `${name} (left ${Math.round(box.left)}, right ${Math.round(box.right)})`;
         }),
-    [WIDTH, NOTCH] as const,
+    [width, NOTCH] as const,
   );
 }
 
-test.describe("sideways with a notch", () => {
-  test.use({ viewport: { width: WIDTH, height: HEIGHT }, hasTouch: true, isMobile: true, colorScheme: "dark" });
+for (const { width, height } of SIDEWAYS) test.describe(`sideways with a notch ${width}x${height}`, () => {
+  test.use({ viewport: { width, height }, hasTouch: true, isMobile: true, colorScheme: "dark" });
 
-  test("HUB-J9 sideways phone with a notch: nothing to tap sits under the side bands (cas-5072)", journeyPart, async ({ page, journey }) => {
+  test(`HUB-J9 sideways phone with a notch at ${width}x${height}: nothing to tap sits under the side bands (cas-5072)`, journeyPart, async ({ page, journey }) => {
     const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
     await notchInsets(page);
     const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -410,8 +412,14 @@ test.describe("sideways with a notch", () => {
       const drawer = page.getByRole("dialog", { name: "Raw output" });
       await expect(drawer).toBeVisible();
       expect(await underTheBands(page, ".raw-output-drawer"), "the raw-output title and Close clear both notches").toEqual([]);
-      const title = await drawer.getByRole("heading", { name: "Raw output" }).boundingBox();
-      expect(title!.x, "the raw-output title clears the left notch").toBeGreaterThanOrEqual(NOTCH);
+      const title = (await drawer.getByRole("heading", { name: "Raw output" }).boundingBox())!;
+      expect(title.x, "the raw-output title clears the left notch").toBeGreaterThanOrEqual(NOTCH);
+      const sheet = (await drawer.boundingBox())!;
+      if (sheet.x > 0) {
+        // The side drawer sits on the right edge, away from the left band: its
+        // title keeps the ordinary padding, with no notch-width gutter.
+        expect(title.x - sheet.x, "no empty left gutter on the side drawer").toBeLessThan(NOTCH);
+      }
       await page.keyboard.press("Escape");
       await expect(drawer).toBeHidden();
     });

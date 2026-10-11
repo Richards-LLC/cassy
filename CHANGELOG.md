@@ -22,6 +22,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `.cas/proxy.toml`.
 - MCP `proxy_add` and `proxy_remove` refuse to remove, replace or alias a
   `factory.supervisor_only_mcp` server.
+- The same rule covers `cas mcp add`, `remove` and `import` (cas-1b94). From
+  an agent session they refuse to remove, replace or alias a supervisor-only
+  server, and the PreToolUse hook refuses the agent shell command. The
+  operator at a terminal, and ordinary servers, are unaffected.
 
 ### Added — a task one machine works is not started on another (cas-5f28)
 

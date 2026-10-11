@@ -451,6 +451,75 @@ fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> 
     None
 }
 
+/// cas-0d4f0: refusal for an MCP proxy change that would weaken
+/// `factory.supervisor_only_mcp`: removing or replacing a supervisor-only
+/// server, or adding the same endpoint under another name, which workers
+/// could then call. The operator manages those with `cas mcp` at a terminal.
+///
+/// cas-1b94: shared by the MCP `proxy_add`/`proxy_remove` tools, the `cas mcp`
+/// CLI and the PreToolUse hook, so the three apply one rule.
+#[cfg(feature = "mcp-proxy")]
+pub fn supervisor_only_mcp_refusal(
+    name: &str,
+    added: Option<&cmcp_core::config::ServerConfig>,
+    existing: &cmcp_core::config::Config,
+    supervisor_only: &[String],
+) -> Option<String> {
+    use cmcp_core::config::ServerConfig;
+    fn endpoint(server: &ServerConfig) -> String {
+        match server {
+            ServerConfig::Stdio { command, args, .. } => format!("{command} {}", args.join(" ")),
+            ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url.clone(),
+        }
+    }
+    let refusal = |what: String| {
+        format!(
+            "🚫 OPERATOR-ONLY (cas-0d4f0): {what}. factory.supervisor_only_mcp keeps it from workers, so only the operator changes it, with `cas mcp add|remove` from their own terminal. Ask the supervisor to request the operator's approval."
+        )
+    };
+    if supervisor_only
+        .iter()
+        .any(|only| only == name || cas_types::public_upstream_id(only) == name)
+    {
+        return Some(refusal(format!("'{name}' is a supervisor-only MCP server")));
+    }
+    let added = endpoint(added?);
+    existing
+        .servers
+        .iter()
+        .find(|(existing_name, server)| {
+            supervisor_only.contains(existing_name) && endpoint(server) == added
+        })
+        .map(|(existing_name, _)| {
+            refusal(format!(
+                "'{name}' would reach supervisor-only server '{existing_name}' under another name"
+            ))
+        })
+}
+
+/// The `factory.supervisor_only_mcp` server names configured at `cas_root`.
+pub fn supervisor_only_mcp_names(cas_root: &Path) -> Vec<String> {
+    crate::config::Config::load(cas_root)
+        .map(|config| config.factory().worker_policy.supervisor_only_mcp)
+        .unwrap_or_default()
+}
+
+/// cas-1b94: whether `cas mcp add|remove|import` may make a change that
+/// `proxy_refusal` (from [`supervisor_only_mcp_refusal`]) objects to. The
+/// operator at their own terminal may; an agent context may not.
+pub fn supervisor_only_mcp_cli_refusal(
+    proxy_refusal: Option<String>,
+    context: &InvocationContext,
+) -> Option<String> {
+    let refusal = proxy_refusal?;
+    context_refusal(
+        context,
+        "Servers on factory.supervisor_only_mcp are operator-only",
+        "the operator runs `cas mcp add|remove` from their own terminal",
+    )
+    .map(|why| format!("{refusal}\n{why}"))
+}
+
 impl InvocationContext {
     /// Describe the current process for [`operator_context_refusal`].
     pub fn from_process() -> Self {

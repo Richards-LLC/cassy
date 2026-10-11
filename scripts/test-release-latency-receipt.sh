@@ -123,6 +123,57 @@ out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$run_
 expect_field "$out" INTERVENTIONS 0 'ordinary internal dispatch and status reads remain zero'
 expect_field "$out" BLOCKERS none 'ordinary internal calls do not invent blockers'
 
+# End-to-end metrics (cas-a629): request and first cut to publication, and a
+# run with two blockers priced from each block to its stage's completion.
+published_epoch=1787227450  # 2026-08-20T12:04:10Z
+e2e="$tmp/e2e-run"
+mkdir -p "$e2e"
+printf '%s\n' "$((published_epoch - 7200))" >"$e2e/release.request.epoch"
+printf '%s\n' "$((published_epoch - 3600))" >"$e2e/cut.start.epoch"
+event() { printf '%s\t%s\t%s\n' "$((published_epoch - $1))" "$2" "$3" >>"$e2e/stage-events.tsv"; }
+event 3500 gate start
+event 3400 gate blocked
+event 3400 gate blocked        # the stage body and the cut loop both record it
+event 3000 gate start
+event 2800 gate done
+event 2700 pipeline start
+event 2600 pipeline blocked
+event 1000 pipeline start
+event 900 pipeline done
+event 800 publish start
+event 200 publish done
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$e2e")"
+expect_field "$out" PUBLISH_LATENCY_SECONDS 250 'end-to-end metrics leave tag-to-published unchanged'
+expect_field "$out" REQUEST_TO_PUBLISHED_SECS 7200 'request to published spans the whole wait'
+expect_field "$out" REQUEST_SOURCE recorded 'a recorded request time is labelled recorded'
+expect_field "$out" CUT_TO_PUBLISHED_SECS 3600 'cut to published starts at the first cut'
+expect_field "$out" BLOCKER_COUNT 2 'two blocked stages are two blockers; a duplicate row is one'
+expect_field "$out" BLOCKER_COSTS gate:600,pipeline:1700 'each blocker costs block to its stage completion'
+expect_field "$out" BLOCKED_SECS 2300 'blocked time totals the blockers'
+expect_field "$out" STAGE_SECS gate:200,pipeline:100,publish:600 'stage time is its last attempt'
+rm "$e2e/release.request.epoch"
+event 150 receipts start
+event 100 receipts blocked
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$e2e")"
+expect_field "$out" REQUEST_SOURCE cut-start 'without a request time the cut start is named as the source'
+expect_field "$out" REQUEST_TO_PUBLISHED_SECS 3600 'request time falls back to the first cut'
+expect_field "$out" BLOCKER_COSTS gate:600,pipeline:1700,receipts:100+ \
+    'an unresolved blocker is priced to publication and marked open'
+rm "$e2e/stage-events.tsv"
+printf 'gate\npipeline\n' >"$e2e/blockers.log"
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$e2e")"
+expect_field "$out" BLOCKER_COUNT 2 'a pre-event run counts blockers from blockers.log'
+expect_field "$out" BLOCKER_COSTS unavailable 'a pre-event run cannot invent blocker costs'
+out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0 --run-dir "$tmp/no-such-run")"
+expect_field "$out" CUT_TO_PUBLISHED_SECS unavailable 'a missing run directory reports unavailable'
+if python3 "$script_dir/release-metrics.py" --normalize-request 2026-08-20T10:04:10Z | grep -qx "$((published_epoch - 7200))" \
+    && ! python3 "$script_dir/release-metrics.py" --normalize-request 2999-01-01T00:00:00Z >/dev/null 2>&1 \
+    && ! python3 "$script_dir/release-metrics.py" --normalize-request 2026-08-20T10:04:10 >/dev/null 2>&1; then
+    ok 'request time accepts ISO 8601 UTC and refuses future or offset-less times'
+else
+    bad 'request time normalization'
+fi
+
 # 2. A slow published release must record the overrun and continue.
 set +e
 slow_out="$(FAKE_PUBLISHED_AT=2026-08-20T12:21:00Z "$receipt" v3.4.0 2>&1)"

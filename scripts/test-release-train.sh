@@ -2924,6 +2924,19 @@ if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --res
 else
     bad 'final --cut --resume did not finish or reran the gate'
 fi
+# cas-a629: the two blockers above are timed events, each closed by its
+# stage's later completion, and resumes never move the first cut's clock.
+combined_metrics="$(python3 "$script_dir/release-metrics.py" "$combined_resume_dir" "$(date -u +%s)")"
+if grep -qx 'BLOCKER_COUNT=2' <<<"$combined_metrics" \
+    && grep -qE '^BLOCKER_COSTS=gate:[0-9]+,announce:[0-9]+$' <<<"$combined_metrics" \
+    && grep -qE '^CUT_TO_PUBLISHED_SECS=[0-9]+$' <<<"$combined_metrics" \
+    && grep -qx 'REQUEST_SOURCE=cut-start' <<<"$combined_metrics" \
+    && [[ "$(grep -c "$(printf '\t')start$" "$combined_resume_dir/stage-events.tsv")" -ge 13 ]] \
+    && [[ "$(wc -l <"$combined_resume_dir/cut.start.epoch")" == 1 ]]; then
+    ok 'a cut with gate and announce blockers records two priced, resolved blockers'
+else
+    bad "release metrics after two blockers: $combined_metrics"
+fi
 
 # A fixed epic advances integration after the first gate fails. Resume must
 # consume it and prepare the release again, retaining its draft.

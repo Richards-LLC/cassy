@@ -358,7 +358,9 @@ pub struct TaskRequest {
     pub stranded_branch_override: Option<String>,
 
     /// Successful docs/artifact delivery deliberately retained outside integration.
-    #[schemars(description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a non-empty reason. The delivery history may hold only regular docs/artifacts files; the supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts.")]
+    #[schemars(
+        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a non-empty reason. The delivery history may hold only regular docs/artifacts files; the supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts."
+    )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub evidence_only: Option<bool>,
     #[schemars(description = "Existing durable evidence beneath configured [factory] artifacts_root/<project-key>/<task-id>/; required with evidence_only=true.")]
@@ -405,7 +407,9 @@ pub struct TaskRequest {
     /// entry reports `hits == 0`, a warning note is appended rather than
     /// letting the close proceed silently. Ordinary code tasks and tasks
     /// that omit this field are entirely unaffected.
-    #[schemars(description = "JSON array of a Spike task's search steps, e.g. [{\"command\": \"grep -c foo file\", \"hits\": 3}]. Optional; on a Spike close any entry with hits=0 becomes a warning note, not a silent pass.")]
+    #[schemars(
+        description = "JSON array of a Spike task's search steps, e.g. [{\"command\": \"grep -c foo file\", \"hits\": 3}]. Optional; on a Spike close any entry with hits=0 becomes a warning note, not a silent pass."
+    )]
     #[serde(default)]
     pub search_manifest: Option<String>,
 

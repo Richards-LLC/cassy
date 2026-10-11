@@ -3723,7 +3723,8 @@ impl CasService {
         // from Cassy Cloud. Not on the summary fast path, which stays local.
         let peers_section = {
             let cas_root = self.inner.cas_root.clone();
-            let self_id = self.inner.get_agent_id().ok();
+            // Read-only: never auto-register or revive the caller for a lookup.
+            let self_id = self.inner.get_registered_agent_id_read_only().ok();
             tokio::task::spawn_blocking(move || {
                 crate::cloud::peers::peers_section_cached(&cas_root, self_id.as_deref())
             })
@@ -5690,7 +5691,8 @@ impl CasService {
     /// peers are never spawned, messaged or claimed for (cas-604d).
     pub(super) async fn coordination_peers(&self) -> Result<CallToolResult, McpError> {
         let cas_root = self.inner.cas_root.clone();
-        let self_id = self.inner.get_agent_id().ok();
+        // Read-only: never auto-register or revive the caller for a lookup.
+        let self_id = self.inner.get_registered_agent_id_read_only().ok();
         let text = tokio::task::spawn_blocking(move || {
             crate::cloud::peers::peers_section(&cas_root, self_id.as_deref())
         })

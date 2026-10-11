@@ -2473,7 +2473,7 @@ fn worktree_merge_unions_unreleased_changelog_sections_cas_7aa5() {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
-    let base = "# Changelog\n\n## [Unreleased]\n\n## [3.50.0] - 2026-10-10\n\n- shipped\n";
+    let base = "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-10-10\n\n- shipped\n";
     std::fs::write(repo.join(".gitattributes"), "CHANGELOG.md merge=cas-changelog\n").unwrap();
     std::fs::write(repo.join("CHANGELOG.md"), base).unwrap();
     run(&["add", "."]);
@@ -2498,7 +2498,7 @@ fn worktree_merge_unions_unreleased_changelog_sections_cas_7aa5() {
     let (one, two, released) = (
         changelog.find("### One").expect("first kept"),
         changelog.find("### Two").expect("second kept"),
-        changelog.find("## [3.50.0]").unwrap(),
+        changelog.find("## [1.2.3]").unwrap(),
     );
     assert!(one < two && two < released, "{changelog}");
     assert!(!changelog.contains("<<<<<<<"), "{changelog}");

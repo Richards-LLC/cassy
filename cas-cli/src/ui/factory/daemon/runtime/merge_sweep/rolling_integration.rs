@@ -2327,7 +2327,7 @@ exit "$failed"
         assert_eq!(git(repo.path(), &["rev-parse", &second.branch]), second.tip);
         assert!(!repo.path().join(".git/MERGE_HEAD").exists());
     }
-    const CHANGELOG_BASE: &str = "# Changelog\n\n## [Unreleased]\n\n## [3.50.0] - 2026-10-10\n\n### Changed\n\n- shipped thing\n";
+    const CHANGELOG_BASE: &str = "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-10-10\n\n### Changed\n\n- shipped thing\n";
 
     /// One epic's CHANGELOG with `section` added under `## [Unreleased]`,
     /// and optionally the `.gitattributes` line that opts the repo in.
@@ -2373,7 +2373,7 @@ exit "$failed"
         let changelog = git(repo.path(), &["show", &format!("{tip}:CHANGELOG.md")]);
         let peers = changelog.find("cas-571d").expect("first section kept");
         let latency = changelog.find("cas-baa3").expect("second section kept");
-        let released = changelog.find("## [3.50.0]").unwrap();
+        let released = changelog.find("## [1.2.3]").unwrap();
         assert!(peers < latency && latency < released, "{changelog}");
         assert!(!changelog.contains("<<<<<<<"), "{changelog}");
         assert!(

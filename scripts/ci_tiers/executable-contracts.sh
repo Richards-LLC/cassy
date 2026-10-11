@@ -502,7 +502,7 @@ case "${FAKE_GH_MODE:?}:$*" in
   merge-wrong-event:*actions/runs/791*) printf '%s\n' '{"event":"push","status":"completed","conclusion":"success","html_url":"https://example.test/actions/runs/791"}' ;;
   miss:*actions/artifacts*) printf '%s\n' '{"artifacts":[]}' ;;
   gate-*:*pulls/1134*) printf '%s\n' '{"head":{"sha":"1111111111111111111111111111111111111111"}}' ;;
-  gate-tree-mismatch:*git/commits/1111111111111111111111111111111111111111*) printf '%s\n' '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
+  gate-tree-mismatch:*git/commits/1111111111111111111111111111111111111111* | gate-journeys-tree-mismatch:*git/commits/1111111111111111111111111111111111111111*) printf '%s\n' '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
   gate-*:*git/commits/1111111111111111111111111111111111111111*) printf '{"tree":{"sha":"%s"}}\n' "${FAKE_TREE:?}" ;;
   gate-hit:*statuses*) printf '[{"context":"cas/full-gate","state":"success","description":"PASS tree=%s","target_url":"https://example.test/gate"}]\n' "$FAKE_TREE" ;;
   gate-tree-mismatch:*statuses*) printf '[{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
@@ -510,6 +510,12 @@ case "${FAKE_GH_MODE:?}:$*" in
   gate-failed:*statuses*) printf '[{"context":"cas/full-gate","state":"failure","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
   gate-superseded:*statuses*) printf '[{"context":"cas/full-gate","state":"failure","description":"FAIL tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
   gate-other-context:*statuses*) printf '[{"context":"ci/other","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
+  gate-journeys-hit:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s","target_url":"https://example.test/journeys"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s","target_url":"https://example.test/gate"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
+  gate-journeys-other-tree:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=3333333333333333333333333333333333333333"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
+  gate-journeys-failed:*statuses*) printf '[{"context":"cas/full-journeys","state":"failure","description":"PASS tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
+  gate-journeys-superseded:*statuses*) printf '[{"context":"cas/full-journeys","state":"failure","description":"FAIL tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"},{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" "$FAKE_TREE" ;;
+  gate-journeys-only:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" ;;
+  gate-journeys-tree-mismatch:*statuses*) printf '[{"context":"cas/full-journeys","state":"success","description":"PASS tree=%s"},{"context":"cas/full-gate","state":"success","description":"PASS tree=%s"}]\n' "$FAKE_TREE" "$FAKE_TREE" ;;
   gate-missing:*statuses*) printf '%s\n' '[]' ;;
   error:*) exit 1 ;;
   *) exit 2 ;;
@@ -591,6 +597,26 @@ GITHUB_OUTPUT="$non_queue_output" GITHUB_EVENT_NAME=merge_group GITHUB_REF=refs/
     GITHUB_REPOSITORY=example/repo FAKE_GH_MODE=gate-hit FAKE_TREE="$guard_tree" \
     FAKE_GH_LOG="$guard_tmp/gh.log" PATH="$guard_tmp/bin:$PATH" "$merge_queue_guard" >/dev/null
 require_absent "$(<"$non_queue_output")" 'run-fast-validation=false' 'a queue ref without a PR number never skips'
+
+# cas-9f70: the queue also skips the Commander journeys, but only when the
+# full-gate receipt matches and the latest `cas/full-journeys` status is a PASS
+# naming the same tree. Every other case runs the journeys.
+require_text "$gate_hit_output" 'journeys-reuse=false' 'a full-gate receipt alone still runs the Commander journeys'
+require_absent "$gate_hit_output" 'journeys-reuse=true' 'a full-gate receipt alone never skips the Commander journeys'
+journeys_hit_output="$(run_queue_gate_guard gate-journeys-hit)"
+require_text "$journeys_hit_output" 'run-fast-validation=false' 'the full-gate receipt is still reused alongside the journeys proof'
+require_text "$journeys_hit_output" 'journeys-reuse=true' 'a matching full-journeys proof skips the queue Commander journeys'
+require_text "$journeys_hit_output" 'journeys-prior-url=https://example.test/journeys' 'journeys reuse exposes the proof URL'
+for mode in gate-journeys-other-tree gate-journeys-failed gate-journeys-superseded; do
+    output_path="$(run_queue_gate_guard "$mode")"
+    require_text "$output_path" 'run-fast-validation=false' "$mode keeps the full-gate reuse"
+    require_absent "$output_path" 'journeys-reuse=true' "$mode full-journeys evidence fails closed to running the journeys"
+done
+for mode in gate-journeys-only gate-journeys-tree-mismatch gate-missing error; do
+    output_path="$(run_queue_gate_guard "$mode")"
+    require_text "$output_path" 'run-fast-validation=true' "$mode runs the full queue validation"
+    require_absent "$output_path" 'journeys-reuse=true' "$mode never skips the journeys without a matching full gate"
+done
 
 mutated_guard="$guard_tmp/check-ci-merge-queue-validation-mutated.sh"
 sed 's/\.event == "merge_group"/.event == "push"/' "$merge_queue_guard" >"$mutated_guard"

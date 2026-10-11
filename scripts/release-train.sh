@@ -43,6 +43,8 @@
 #   CAS_RELEASE_TRAIN_FAST_BASE   comparison ref for small-delta admission
 #   CAS_RELEASE_TRAIN_FAST_MAX_FILES default 5
 #   CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT optional supervisor proof receipt
+#   CAS_RELEASE_TRAIN_JOURNEY_RECEIPT default <run-dir>/journeys/journey-receipt.json
+#       (full-scope journey-eval receipt; --pipeline posts cas/full-journeys for it)
 #   CAS_RELEASE_TRAIN_POLL_SECS   default 45 (checks) / 60 (queue watch)
 #   CAS_RELEASE_TRAIN_CHECK_TRIES default 40
 #   CAS_RELEASE_TRAIN_WATCH_TRIES default 60
@@ -495,6 +497,34 @@ post_full_gate_tree_receipt() {
     fi
 }
 
+# cas-9f70: the full gate has no journeys row. When the supervisor's
+# `scripts/journey-eval.sh <run-dir>/journeys --full` receipt (or
+# CAS_RELEASE_TRAIN_JOURNEY_RECEIPT) proves every catalog journey on this exact
+# tree, post `cas/full-journeys` so the queue also skips its Commander
+# journeys. The proven revision's journey-receipt.py verify-full judges the
+# receipt; anything it refuses posts nothing and the queue runs the journeys.
+post_full_journeys_tree_receipt() {
+    local repo_slug="$1" sha="$2" tree receipt verdict
+    receipt="${CAS_RELEASE_TRAIN_JOURNEY_RECEIPT:-$run_dir/journeys/journey-receipt.json}"
+    if [[ ! -f "$receipt" ]]; then
+        pipeline_log "no full-journeys receipt at $receipt; the merge queue will run the Commander journeys"
+        return 0
+    fi
+    tree="$(git -C "$worktree" rev-parse "$sha^{tree}" 2>/dev/null)" || return 0
+    if ! verdict="$(python3 "$worktree/scripts/journey-receipt.py" verify-full \
+        --repo "$worktree" --sha "$sha" --receipt "$receipt" 2>&1)"; then
+        pipeline_log "full-journeys receipt not posted on $sha: ${verdict:-verify-full failed}; the merge queue will run the Commander journeys"
+        return 0
+    fi
+    pipeline_log "$verdict"
+    if gh_cmd api --method POST "repos/$repo_slug/statuses/$sha" -f state=success -f context=cas/full-journeys \
+        -f "description=PASS tree=$tree" >/dev/null 2>&1; then
+        pipeline_log "full-journeys receipt posted: cas/full-journeys PASS tree=$tree on $sha"
+    else
+        pipeline_log "full-journeys receipt not posted on $sha (status API); the merge queue will run the Commander journeys"
+    fi
+}
+
 run_pipeline() {
     local gate_status gate_sha current_sha
     gate_status="$(cat "$run_dir/gate.done" 2>/dev/null || true)"
@@ -558,6 +588,7 @@ run_pipeline() {
         >>"$run_dir/pipeline.pushes.log"
     pipeline_log "pushed $branch local=$gate_sha previous=${pushed_sha:-none} lease=$lease"
     post_full_gate_tree_receipt "$repo_slug" "$gate_sha"
+    post_full_journeys_tree_receipt "$repo_slug" "$gate_sha"
 
     local pr_number
     pr_number="$(gh_cmd pr list -R "$repo_slug" --head "$branch" --json number 2>/dev/null \

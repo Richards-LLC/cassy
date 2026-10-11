@@ -47,6 +47,26 @@ pub struct ConfigRevokeWriteArgs {
     pub path: Option<String>,
 }
 
+/// cas-0d4f0: refuse to save `after` over `before` when that changes a
+/// security-relevant key and `context` (read only when one changes) is not
+/// the operator at a terminal. Every config save path calls this.
+pub(crate) fn guard_operator_config(
+    before: &crate::config::Config,
+    after: &crate::config::Config,
+    context: impl FnOnce() -> InvocationContext,
+) -> anyhow::Result<()> {
+    let changed = crate::config::operator_policy::changed_operator_config_keys(before, after);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    if let Some(refusal) =
+        crate::config::operator_policy::operator_config_refusal(&changed, &context())
+    {
+        anyhow::bail!(refusal);
+    }
+    Ok(())
+}
+
 fn require_operator() -> anyhow::Result<()> {
     if let Some(refusal) = operator_context_refusal(&InvocationContext::from_process()) {
         anyhow::bail!(refusal);
@@ -183,4 +203,81 @@ pub(crate) fn execute_revoke_write(args: &ConfigRevokeWriteArgs, cli: &Cli, cas_
         println!("Revoked {removed} grant(s) for {}", args.task);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::config::read_ops::set_config_value;
+    use crate::config::Config;
+
+    fn agent() -> InvocationContext {
+        InvocationContext {
+            env_names: ["HOME", "CLAUDECODE"].into_iter().map(String::from).collect(),
+            ancestors: vec!["-bash".into()],
+            ..InvocationContext::default()
+        }
+    }
+
+    fn operator() -> InvocationContext {
+        InvocationContext {
+            env_names: ["HOME", "PATH"].into_iter().map(String::from).collect(),
+            ancestors: vec!["-bash".into()],
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            cgroup: String::new(),
+        }
+    }
+
+    /// cas-0d4f0: `cas config set` refuses a security-relevant key from an
+    /// agent and leaves config.toml unchanged; ordinary keys stay settable,
+    /// and the operator at a terminal can still set the key.
+    #[test]
+    fn cas_0d4f0_config_set_refuses_operator_keys_from_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut config = Config::load(&root).unwrap();
+        let error = set_config_value(&mut config, "slack.transport", "any", &root, agent)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("slack.transport") && error.contains("operator"), "{error}");
+        let mut config = Config::load(&root).unwrap();
+        let error = set_config_value(&mut config, "verification.enabled", "false", &root, agent)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("verification.enabled"), "{error}");
+        assert_ne!(
+            Config::load(&root).unwrap().get("verification.enabled").as_deref(),
+            Some("false")
+        );
+        assert_ne!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
+
+        let mut config = Config::load(&root).unwrap();
+        set_config_value(&mut config, "issues.repo", "example/project", &root, agent).unwrap();
+        assert_eq!(
+            Config::load(&root).unwrap().get("issues.repo").as_deref(),
+            Some("example/project")
+        );
+
+        let mut config = Config::load(&root).unwrap();
+        set_config_value(&mut config, "slack.transport", "any", &root, operator).unwrap();
+        assert_eq!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
+    }
+
+    /// cas-0d4f0: reset, import and the line editor save through the same
+    /// guard, so a whole-config replacement cannot relax a guard either.
+    #[test]
+    fn cas_0d4f0_whole_config_saves_refuse_operator_key_changes() {
+        let before = Config::default();
+        let mut after = before.clone();
+        after.set("verification.force_bypass_allowed", "true").unwrap();
+        assert!(guard_operator_config(&before, &after, agent).is_err());
+        assert!(guard_operator_config(&before, &after, operator).is_ok());
+        let mut ordinary = before.clone();
+        ordinary.set("sync.min_helpful", "5").unwrap();
+        assert!(
+            guard_operator_config(&before, &ordinary, || panic!("context read for ordinary key"))
+                .is_ok()
+        );
+    }
 }

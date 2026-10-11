@@ -114,6 +114,10 @@ fn handle_pre_tool_use_inner(
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
+    // cas-0d4f0: no agent writes a Cassy config file directly, for every role.
+    if let Some(reason) = cas_config_file_write_denial(input) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
@@ -4044,6 +4048,71 @@ fn factory_write_decision(
     }
 }
 
+/// cas-0d4f0: refusal for an agent tool call that writes, edits, moves over
+/// or deletes a Cassy config file (`.cas/config.toml` or `config.yaml`, or
+/// the global `~/.config/cas/` one) directly. Agents change ordinary keys with
+/// `cas config set`; security-relevant keys are the operator's.
+fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
+    let tool = input.tool_name.as_deref()?;
+    let tool_input = input.tool_input.as_ref()?;
+    let raw_targets: Vec<String> = match tool {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("path"))
+            .and_then(|value| value.as_str())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        "Bash" => {
+            let command = tool_input.get("command").and_then(|value| value.as_str())?;
+            bash_write_targets(command)
+                .into_iter()
+                .chain(bash_in_place_edit_targets(command))
+                .chain(bash_delete_targets(command).into_iter().map(|(path, _)| path))
+                .collect()
+        }
+        "apply_patch" => tool_input
+            .get("command")
+            .or_else(|| tool_input.get("patch"))
+            .or_else(|| tool_input.get("input"))
+            .and_then(|value| value.as_str())
+            .map(|patch| {
+                apply_patch_write_targets_with_modes(patch)
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => return None,
+    };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let global = crate::config::global_cas_dir();
+    let target = raw_targets.into_iter().find(|raw| {
+        let expanded = match (raw.strip_prefix("~/"), home.as_ref()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => std::path::PathBuf::from(raw),
+        };
+        let path = lexically_normalize_path(if expanded.is_absolute() {
+            expanded
+        } else {
+            std::path::PathBuf::from(&input.cwd).join(expanded)
+        });
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let is_config = matches!(name, "config.toml" | "config.yaml" | "config.yml");
+        let parent = path.parent();
+        let in_cas = parent.and_then(|dir| dir.file_name()).is_some_and(|dir| dir == ".cas");
+        (is_config || (name == "proxy.toml" && in_cas))
+            && (in_cas || parent.is_some_and(|dir| global.as_deref() == Some(dir)))
+    })?;
+    if target.ends_with("proxy.toml") {
+        return Some(format!(
+            "🚫 CASSY PROXY CONFIG (cas-0d4f0): agents do not write {target} directly. Manage MCP servers with `system action=proxy_add|proxy_remove` (or `cas mcp add|remove`); servers on factory.supervisor_only_mcp are operator-only."
+        ));
+    }
+    Some(format!(
+        "🚫 CASSY CONFIG (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
+    ))
+}
+
 /// cas-3147: refusal for an agent shell command that would change the
 /// operator write policy through the operator-only CLI.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
@@ -4095,6 +4164,22 @@ fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Optio
                             || (rest.first().is_some_and(|sub| sub == "set")
                                 && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
                     });
+                    // cas-0d4f0: security-relevant keys, set or reset.
+                    let guarded_key = config.and_then(|at| {
+                        let rest = &args[at + 1..];
+                        rest.first()
+                            .filter(|sub| *sub == "set" || *sub == "reset")
+                            .and_then(|_| rest.get(1))
+                            .filter(|key| {
+                                key.as_str() != "factory.write_roots"
+                                    && crate::config::operator_policy::is_operator_only_config_key(key)
+                            })
+                    });
+                    if let Some(key) = guarded_key {
+                        return Some(format!(
+                            "🚫 OPERATOR-ONLY (cas-0d4f0): {key} relaxes a Cassy guard, so only the operator changes it, from their own terminal, never an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set {key} …` themselves. Ordinary keys stay settable with `cas config set`."
+                        ));
+                    }
                     if refused {
                         return Some(
                             "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."
@@ -4773,6 +4858,88 @@ mod workspace_contract_tests {
             tool_name: Some(tool.to_string()),
             tool_input: Some(payload),
             ..Default::default()
+        }
+    }
+
+    /// cas-0d4f0: an agent shell cannot set or reset a security-relevant key
+    /// through `cas config`, however it wraps the call; ordinary keys and
+    /// reads stay available.
+    #[test]
+    fn cas_0d4f0_agent_shell_cannot_set_operator_only_keys() {
+        for command in [
+            "cas config set slack.transport any",
+            "cas config set verification.force_bypass_allowed true",
+            "cas config set verification.enabled false",
+            "/home/u/.local/bin/cas config set factory.supervisor_only_mcp ''",
+            "env -u CLAUDECODE cas config set factory.worker_credential_env GH_TOKEN",
+            "bash -c 'cas config set qa.evidence_gate false'",
+            "setsid cas config set qa.independent_pass false",
+            "cas config set release.claude_account_allowlist a@example.com",
+            "cas config reset slack.transport",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("operator"), "{denial}");
+        }
+        for allowed in [
+            "cas config set issues.repo example/project",
+            "cas config get slack.transport",
+            "cas config reset sync.min_helpful",
+            "rg 'cas config set slack.transport' docs",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// cas-0d4f0: no agent tool call writes a Cassy config file directly,
+    /// whatever its role; other files under `.cas/` and other config.toml
+    /// files are untouched by this rule.
+    #[test]
+    fn cas_0d4f0_agents_cannot_write_cas_config_files() {
+        let fixture = tempfile::tempdir().unwrap();
+        let main = fixture.path().canonicalize().unwrap().join("main");
+        std::fs::create_dir_all(main.join(".cas")).unwrap();
+        let file = main.join(".cas/config.toml").display().to_string();
+        for (case, input) in [
+            ("Write", tool_input("Write", serde_json::json!({"file_path": file, "content": "[slack]\ntransport = \"any\""}), &main)),
+            ("Edit", tool_input("Edit", serde_json::json!({"file_path": file, "old_string": "violet", "new_string": "any"}), &main)),
+            ("MultiEdit", tool_input("MultiEdit", serde_json::json!({"file_path": file, "edits": []}), &main)),
+            ("apply_patch", tool_input("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Update File: {file}\n@@\n+x\n*** End Patch")}), &main)),
+            ("relative Write", tool_input("Write", serde_json::json!({"file_path": ".cas/config.toml", "content": ""}), &main)),
+            ("yaml", tool_input("Write", serde_json::json!({"file_path": ".cas/config.yaml", "content": ""}), &main)),
+            ("append", bash_input("printf '[qa]\\nevidence_gate = false\\n' >> .cas/config.toml", &main)),
+            ("tee", bash_input(&format!("echo x | tee {file}"), &main)),
+            ("sed -i", bash_input("sed -i 's/violet/any/' .cas/config.toml", &main)),
+            ("cp over", bash_input("cp /tmp/forged.toml .cas/config.toml", &main)),
+            ("mv over", bash_input(&format!("mv /tmp/forged.toml {file}"), &main)),
+            ("rm", bash_input("rm -f .cas/config.toml", &main)),
+        ] {
+            let denial = cas_config_file_write_denial(&input)
+                .unwrap_or_else(|| panic!("{case} must be refused"));
+            assert!(denial.contains("cas config set"), "{case}: {denial}");
+        }
+        // The proxy server list: the same file-edit bypass that proxy_add's
+        // supervisor-only refusal closes.
+        let proxy = main.join(".cas/proxy.toml").display().to_string();
+        for (case, input) in [
+            ("proxy Write", tool_input("Write", serde_json::json!({"file_path": proxy, "content": "[servers.vercel2]"}), &main)),
+            ("proxy Edit", tool_input("Edit", serde_json::json!({"file_path": ".cas/proxy.toml", "old_string": "a", "new_string": "b"}), &main)),
+            ("proxy append", bash_input("echo '[servers.x]' >> .cas/proxy.toml", &main)),
+            ("proxy sed -i", bash_input("sed -i '/vercel/d' .cas/proxy.toml", &main)),
+            ("proxy rm", bash_input("rm .cas/proxy.toml", &main)),
+        ] {
+            let denial = cas_config_file_write_denial(&input)
+                .unwrap_or_else(|| panic!("{case} must be refused"));
+            assert!(denial.contains("proxy_add"), "{case}: {denial}");
+        }
+        for (case, input) in [
+            ("notes", tool_input("Write", serde_json::json!({"file_path": ".cas/notes.md", "content": ""}), &main)),
+            ("other config.toml", tool_input("Write", serde_json::json!({"file_path": "crates/x/config.toml", "content": ""}), &main)),
+            ("other proxy.toml", tool_input("Write", serde_json::json!({"file_path": "fixtures/proxy.toml", "content": ""}), &main)),
+            ("read", bash_input("cat .cas/config.toml", &main)),
+            ("cas config set", bash_input("cas config set issues.repo a/b", &main)),
+        ] {
+            assert_eq!(cas_config_file_write_denial(&input), None, "{case}");
         }
     }
 

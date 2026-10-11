@@ -766,6 +766,53 @@ mod tests {
         );
     }
 
+    /// cas-3c26: every operator-only CLI path shares one gate, so the
+    /// write-policy (cas-3147), guarded-config (cas-0d4f0) and supervisor-only
+    /// MCP (cas-1b94) checks refuse the same spoofed contexts.
+    #[test]
+    fn cas_3c26_every_operator_only_path_refuses_the_same_spoofed_contexts() {
+        let mut worker = context(&[], &[], true);
+        worker.cgroup = "0::/user.slice/cas-worker-cas-src-a-b".into();
+        let spoofed = [
+            context(&[], &["bash -c cas config set x", "claude"], true),
+            context(
+                &[],
+                &[
+                    "script -qc cas mcp remove github",
+                    "/opt/codex/bin/codex exec",
+                ],
+                true,
+            ),
+            context(&["CAS_AGENT_ROLE"], &[], true),
+            worker,
+        ];
+        for spoof in &spoofed {
+            assert!(operator_context_refusal(spoof).is_some(), "{spoof:?}");
+            assert!(
+                operator_config_refusal(&["verification.enabled"], spoof).is_some(),
+                "{spoof:?}"
+            );
+            assert!(
+                supervisor_only_mcp_cli_refusal(Some("supervisor-only".into()), spoof).is_some(),
+                "{spoof:?}"
+            );
+            assert!(
+                operator_action_refusal("Pairing", "run it", spoof).is_some(),
+                "{spoof:?}"
+            );
+        }
+        let operator = context(&[], &["-bash"], true);
+        assert_eq!(operator_context_refusal(&operator), None);
+        assert_eq!(
+            operator_config_refusal(&["verification.enabled"], &operator),
+            None
+        );
+        assert_eq!(
+            supervisor_only_mcp_cli_refusal(Some("x".into()), &operator),
+            None
+        );
+    }
+
     /// cas-3c26: `--yes` paths drop only the terminal requirement.
     #[test]
     fn cas_3c26_unattended_operator_paths_still_refuse_agents() {

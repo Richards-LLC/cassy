@@ -1530,7 +1530,11 @@ fn environment_blocker(log: &str, failures: &[String]) -> Option<String> {
                 "sccache: caused by",
                 "sccache: encountered fatal error",
             ],
-            "restart or disable sccache (RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=), then rerun the sweep",
+            // cas-3a29: a shared server started under a since-deleted TMPDIR
+            // fails every compile with "Failed to create temp dir".
+            "restart the sccache server with a stable TMPDIR (`sccache --stop-server; \
+             env TMPDIR=<stable dir> SCCACHE_IDLE_TIMEOUT=0 sccache --start-server`) or \
+             disable it (RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=), then rerun the sweep",
         ),
         (
             "linker",
@@ -1953,6 +1957,11 @@ mod tests {
                 .unwrap()
                 .starts_with("environment blocker (linker)")
         );
+        // cas-3a29: the shared server's TMPDIR was deleted under it.
+        let tmpdir = "error: failed to run `rustc`\nsccache: error: Failed to create temp dir\n";
+        let blocker = environment_blocker(tmpdir, &[]).unwrap();
+        assert!(blocker.contains("sccache --stop-server"), "{blocker}");
+        assert!(blocker.contains("Failed to create temp dir"), "{blocker}");
         let disk = "error: failed to write target/debug/deps/x.rlib: No space left on device (os error 28)\n";
         assert!(
             environment_blocker(disk, &[])

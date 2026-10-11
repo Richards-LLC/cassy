@@ -301,3 +301,12 @@ fn peer_targets_resolve_by_name_or_name_at_machine() {
     assert!(ambiguous.contains("twin-fox-1@box-c"), "{ambiguous}");
     assert!(ambiguous.contains("twin-fox-1@box-d"), "{ambiguous}");
 }
+
+#[test]
+fn http_peer_mailbox_debug_never_prints_its_token() {
+    let mailbox = HttpPeerMailbox::new("https://cloud.example/", "peer-secret-token-123");
+    let printed = format!("{mailbox:?}");
+    assert!(!printed.contains("peer-secret-token-123"), "{printed}");
+    assert!(printed.contains("[REDACTED]"), "{printed}");
+    assert!(printed.contains("https://cloud.example"), "{printed}");
+}

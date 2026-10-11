@@ -847,3 +847,66 @@ fn only_a_wake_naming_this_recipients_row_takes_the_claim() {
         Some(cas_store::SurfacingSource::TransportClaimed)
     );
 }
+
+/// cas-b5ad reproduction (message 4184454): a worker in one long turn keeps
+/// its pane busy, so the daemon claims a supervisor decision for the Claude
+/// teams transport and every wake is declined ("pane has not been silent long
+/// enough"). Claude Code holds the teams copy until the turn ends. The claim
+/// hid the row from each tool boundary, so the worker finished the work, and
+/// sent its merge request, without ever seeing the decision. The next tool
+/// boundary after the claim must surface it, once.
+#[test]
+fn a_never_silent_worker_sees_a_claimed_message_at_its_next_tool_boundary_cas_b5ad() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let project = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let store = store_at_root(&cas_root);
+
+    let turn_prompt = "start cas-0d4f0";
+    let turn_started = chrono::Utc::now();
+    let transcript = project.path().join("session.jsonl");
+    let mut hook = input("worker");
+    hook.cwd = project.path().to_string_lossy().into_owned();
+    hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
+    hook.prompt_id = Some("turn-1".into());
+    std::fs::write(
+        &transcript,
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"turn-1\",\"timestamp\":\"{}\",\"message\":{{\"content\":\"{turn_prompt}\"}}}}\n",
+            hook.session_id,
+            turn_started.to_rfc3339(),
+        ),
+    )
+    .unwrap();
+    crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
+    hook.hook_event_name = "PostToolUse".into();
+    hook.tool_name = Some("Bash".into());
+    assert!(crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap().hook_specific_output.is_none());
+
+    // Mid-turn: the supervisor decides, and the daemon claims the row for
+    // the teams transport; its wake is then declined, so nothing else moves.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let decision = "Take (B), but make verification.enabled operator-only.";
+    let id = store
+        .enqueue_with_session("supervisor", WORKER, decision, SESSION)
+        .unwrap();
+    assert!(store.claim_recipient_transport(id, WORKER).unwrap());
+    store
+        .record_wake_gate_decline(id, "pane has not been silent long enough")
+        .unwrap();
+
+    let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    let Some(HookSpecificOutput::PostToolUse {
+        additional_context: Some(context),
+    }) = output.hook_specific_output
+    else {
+        panic!("the claimed decision must surface at the worker's next tool boundary");
+    };
+    assert!(context.contains(decision), "{context}");
+    let report = store.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
+
+    let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    assert!(again.hook_specific_output.is_none(), "a surfaced message is delivered once");
+}

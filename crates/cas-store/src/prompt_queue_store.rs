@@ -10695,6 +10695,59 @@ mod tests {
         assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
     }
 
+    /// cas-b5ad: the daemon's transport claim is a reservation, not a read.
+    /// A claimed row whose wake keeps being declined (message 4184454) is
+    /// still unread, so its sender must hear that it stalled; a row the
+    /// recipient's hook surfaced is read and is not bounced.
+    #[test]
+    fn a_claimed_but_unrendered_row_still_bounces_to_its_sender_cas_b5ad() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let claimed = store
+            .enqueue_full(
+                "supervisor",
+                "busy-worker",
+                "scope decision",
+                Some("session"),
+                Some("scope decision"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        let surfaced = store
+            .enqueue_full(
+                "supervisor",
+                "busy-worker",
+                "read already",
+                Some("session"),
+                Some("read already"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        assert!(store.claim_recipient_transport(claimed, "busy-worker").unwrap());
+        store
+            .record_recipient_surfaced(surfaced, "busy-worker", SurfacingSource::HookSurfaced)
+            .unwrap();
+        let old = (Utc::now() - chrono::Duration::seconds(13 * 60)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id IN (?, ?)",
+                params![old, claimed, surfaced],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .delivery_stalled_candidates("session", 10 * 60, 12 * 60, 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![claimed]
+        );
+    }
+
     #[test]
     fn delivery_stalled_bounce_uses_priority_threshold_once_and_cancels_on_read() {
         let (_temp, store) = create_test_store();

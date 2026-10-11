@@ -4,6 +4,7 @@ mod evidence_only;
 mod delivery_evolution;
 mod snapshot_approval;
 mod epic_verdict_cache;
+mod receipt_scope;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
 use crate::git_evidence::measurement as epic_measurement;
@@ -2122,7 +2123,7 @@ fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String 
         }
     }
     format!(
-        "Ask a live registered supervisor to run `{supervisor}task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `{supervisor}task action=close id={} supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
+        "A crate the worker tested is covered without a scope fix (cas-b38a): run a capped targeted test in each uncovered module's crate at the delivered commit (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), then retry close. Otherwise, ask a live registered supervisor to run `{supervisor}task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `{supervisor}task action=close id={} supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
         task.id,
         targets.join(","),
         task.id,
@@ -9503,8 +9504,29 @@ impl CasCore {
                     task.notes = format!("{}\n\n[{ts}] {warning}", task.notes);
                 }
             }
-            if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
+            // cas-b38a: the blast-radius scope is derived from the delivered
+            // diff. A delivered module whose crate the worker tested at the
+            // delivered head is covered without a supervisor scope fix; a
+            // crate with no test run still refuses.
+            let receipt_scoped_task = match receipt_scope::for_close(
+                &self.cas_root,
+                proof_repo,
                 &task,
+                &changed_paths,
+                delivered_tip.as_deref(),
+            ) {
+                Some((judged, note)) => {
+                    if !task.notes.contains(&note) {
+                        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+                        task.notes = format!("{}\n\n[{ts}] {note}", task.notes);
+                    }
+                    Some(judged)
+                }
+                None => None,
+            };
+            let gate_task = receipt_scoped_task.as_ref().unwrap_or(&task);
+            if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
+                gate_task,
                 &changed_paths,
                 proof_repo,
                 target_repo,
@@ -9513,7 +9535,7 @@ impl CasCore {
                 build_proofs,
                 &mut scoped_proof_cache,
             ) {
-                let measured_gaps = declared_risk_close_gaps(&task, &changed_paths);
+                let measured_gaps = declared_risk_close_gaps(gate_task, &changed_paths);
                 if !supervisor_override {
                     return Ok(Self::tool_error(epic_refusal(message)));
                 }

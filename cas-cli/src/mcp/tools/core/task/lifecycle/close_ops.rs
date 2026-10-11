@@ -26683,7 +26683,7 @@ mod merge_state_gate_tests {
 
         assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(new_tip.as_str()));
         assert_eq!(
-            crate::prompt_revalidation::merge_request_branch(Some(&task)).as_deref(),
+            crate::prompt_revalidation::merge_request_branch(Some(&task), Some(p)).as_deref(),
             Some("factory/new-cas-test1"),
             "the merge-request reader names the new worker's branch"
         );

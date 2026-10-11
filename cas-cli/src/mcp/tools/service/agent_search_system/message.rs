@@ -1602,7 +1602,10 @@ impl CasService {
                     &repo.repo_root,
                     &repo.target_branch,
                 );
-                let branch = crate::prompt_revalidation::merge_request_branch(Some(&task));
+                let branch = crate::prompt_revalidation::merge_request_branch(
+                    Some(&task),
+                    Some(&repo.repo_root),
+                );
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its
                 // delivery lands or the worker starts another task on this
@@ -4331,6 +4334,131 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(row.prompt.contains("**Door:** two-way"));
         assert!(row.prompt.contains("/proof/task-b/qa/bundle.json"));
         assert!(row.prompt.contains("A\ttask-b.txt"));
+    }
+
+    /// cas-b3ab: a worker whose default `factory/<name>` branch already landed
+    /// resumes a task on its per-task branch `factory/<name>-<task>` with
+    /// unmerged commits. Its merge request is judged by that branch and
+    /// queued, never suppressed as "already landed" by the other task's branch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_request_on_a_per_task_branch_is_not_judged_by_the_merged_default_branch() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("host repo schema");
+        let project = tempfile::tempdir().expect("temporary project");
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        std::fs::create_dir(repo.join(".cas")).expect("Cassy directory");
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-b3ab-message-test\"\n",
+        )
+        .expect("Cassy config");
+        std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        // The worker's previous task landed from its default branch.
+        git(repo, &["checkout", "-qb", "factory/worker-a"]);
+        std::fs::write(repo.join("earlier.txt"), "earlier task\n").unwrap();
+        git(repo, &["add", "earlier.txt"]);
+        git(repo, &["commit", "-qm", "cas-0001 earlier task"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "factory/worker-a",
+                "-m",
+                "merge earlier",
+            ],
+        );
+        // This task lives on its own, unmerged, per-task branch.
+        git(repo, &["checkout", "-qb", "factory/worker-a-cas-b3ab"]);
+        std::fs::write(repo.join("delivery.txt"), "this task\n").unwrap();
+        git(repo, &["add", "delivery.txt"]);
+        git(repo, &["commit", "-qm", "cas-b3ab delivery"]);
+        let rev_parse = || {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(repo)
+                    .output()
+                    .expect("rev-parse")
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        };
+        // MERGE REQUIRED parked this tip; a conflict sent the task back to
+        // work, retiring that anchor, and the worker pushed a rebased fix.
+        let retired_anchor = rev_parse();
+        std::fs::write(repo.join("delivery.txt"), "this task, rebased\n").unwrap();
+        git(repo, &["commit", "-qam", "cas-b3ab rebase fix"]);
+        let per_task_tip = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .expect("per-task tip")
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git(repo, &["checkout", "-q", "main"]);
+
+        let cas_root = repo.join(".cas");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).expect("register worker");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).expect("register supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        // Resumed after a MERGE REQUIRED park: back in progress, no parked branch.
+        let tasks = core.open_task_store().expect("task store");
+        let mut task = Task::new("cas-b3ab".to_string(), "per-task branch".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-b3ab-message-test".to_string(),
+            target_branch: "main".to_string(),
+        });
+        task.deliverables.historical_factory_branch_anchors = vec![retired_anchor];
+        tasks.add(&task).expect("add task");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+        let mut request = message_request(true);
+        request.task_id = Some(task.id.clone());
+        let response = response_text(service.message_send(request).await.expect("merge request"));
+        assert!(
+            !response.contains("Merge already landed"),
+            "another task's merged branch must not suppress this request: {response}"
+        );
+        assert!(response.contains("Message queued"), "{response}");
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .unwrap()
+            .poll_all(10)
+            .unwrap();
+        let envelope = rows
+            .iter()
+            .find_map(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt))
+            .unwrap_or_else(|| panic!("typed merge request reaches the queue: {response}"));
+        assert_eq!(envelope.branch_tip, per_task_tip);
+        assert_eq!(
+            crate::prompt_revalidation::merge_request_branch(Some(&task), Some(repo)).as_deref(),
+            Some("factory/worker-a-cas-b3ab"),
+            "the per-task branch is preferred over the merged default branch"
+        );
     }
 
     /// GH #734: a worker in one factory session must not inherit the newest

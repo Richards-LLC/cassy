@@ -134,7 +134,7 @@ enqueue, so the 15-minute `check_response_timeout_minutes` is unaffected.
 | Preflight step | On reuse | Why |
 | --- | --- | --- |
 | Commander web: typecheck, unit tests, build, visual QA, dist drift | skipped | Full-gate rows `hub-web-tests`, `hub-web-visual-qa`, `hub-web-dist-drift` |
-| Commander journeys (`npm run journeys -- --workers=4`) | **runs** | The full gate has no journeys row |
+| Commander journeys (`npm run journeys -- --workers=4`) | **runs**, unless a matching `cas/full-journeys` receipt (cas-9f70, below) | The full gate has no journeys row |
 | Release publication guards (`make -C cas-cli test-ci-tiers`) | skipped | Full-gate row `ci-script-tests` runs the same target (it includes `test-cas-install.sh`) |
 | `cargo check -p cas`, portable ISA audit test, `cargo build -p cas --no-default-features` | **run** | Cheap (72 s on 3.47.0); the no-MCP-proxy build has no full-gate row |
 | Installer fixtures, trust-boundary checks, toolchain setup | run | Unchanged, seconds |
@@ -146,8 +146,9 @@ The expected saving on a release like 3.47.0 is the 260 s of publication
 guards, plus the Commander non-journey work, off the preflight critical path.
 The queue then waits on the longer of the journeys and `macOS Check`.
 Measuring the real saving takes one live queue run, recorded under the next
-release's `release-latency.receipt`. A follow-up can also skip the journeys
-once the train's receipt carries a full-journeys proof for the same tree.
+release's `release-latency.receipt`. With a matching full-journeys receipt
+(cas-9f70, below) the journeys are skipped too, and the queue waits on
+`macOS Check` and the compile checks.
 
 ### What counts as a receipt
 
@@ -171,12 +172,48 @@ that `gate.full.sha` proved: a full `release-gate.sh` run, not `--only`, on
 that exact SHA. The pipeline already refuses a stale or partial gate, so the
 status is only ever posted for a tree the full gate passed.
 
+### Full-journeys receipt (cas-9f70)
+
+The Commander step skips the journeys only when the guard also sets
+`journeys-reuse=true`. That requires the full-gate receipt above. It also
+requires the newest `cas/full-journeys` status on the same head to be
+`success`, with the description exactly `PASS tree=<queue tree>`. A missing,
+failed, superseded or other-tree status leaves `journeys-reuse=false`, and the
+journeys run. A journeys status without a full-gate receipt skips nothing.
+
+The train posts it in `--pipeline` (`post_full_journeys_tree_receipt`), right
+after the full-gate status. It needs a receipt from
+`scripts/journey-eval.sh <run-dir>/journeys --full`, the supervisor's
+assembly run, or a receipt named by `CAS_RELEASE_TRAIN_JOURNEY_RECEIPT`. The
+proven revision's `scripts/journey-receipt.py verify-full` judges it. It
+refuses anything that is not all of the following:
+
+- a schema-1 `journey-eval` receipt with scope `full`;
+- `suite_exit` 0, with no runner errors;
+- every result `PASS`, with at least one passed attempt and no failed or
+  skipped attempt;
+- a head commit whose tree is the release tree, byte for byte;
+- a selection that is exactly the full catalog, re-derived by the release
+  revision's own `scripts/journeys-for-diff.py --all`.
+
+A refused or missing receipt posts nothing and logs why. The queue then runs
+the journeys. A receipt that a full run reused from the background evaluator
+(cas-bb5e) at a different tip passes only if that tip has the same full tree.
+
 ### Trust
 
 A `cas/full-gate` status can be posted by anyone with write access to the
 repository: the same people who can push to `main`'s queue in the first place.
 The status is a claim about one tree, checked against the queue tree byte for
-byte, so a stale or mistyped claim cannot cover different code.
+byte, so a stale or mistyped claim cannot cover different code. The same holds
+for `cas/full-journeys`.
+
+The journeys receipt is produced on the supervisor's host, not on the GitHub
+runner. Both run the Chromium build pinned by `@playwright/test`, and that pin
+is part of the tree. A host-only difference, such as fonts or CPU speed, could
+pass locally and fail on the runner. The full gate already accepts the same
+trade for the Rust suite. Any PR whose tree has no receipt still runs the
+journeys on the runner.
 
 ### Proof
 
@@ -199,3 +236,25 @@ byte, so a stale or mistyped claim cannot cover different code.
   `~/.cas/artifacts/<project>/cas-4cb8/dry-run.{log,output}`.
 - `scripts/test-release-train.sh` checks that `--pipeline` posts the status for
   the proven SHA and its tree.
+- cas-9f70 fixture proof: `executable-contracts.sh` checks that a matching
+  `cas/full-journeys` status sets `journeys-reuse=true`. The following leave
+  it false, so the journeys run:
+  - the full-gate receipt alone;
+  - a journeys status for another tree;
+  - a failed or superseded journeys status;
+  - a journeys status without the full gate;
+  - a PR head tree mismatch;
+  - an API error.
+- `test-policy.py` runs the real Commander step body with stub `npm`/`npx`:
+  - both receipts: no journeys and no `npm ci`;
+  - the full gate only: the journeys run;
+  - a journeys receipt without the full gate: the whole step runs.
+- `test-release-train.sh` drives `verify-full` with these receipts:
+  - accepted: a valid one, and one whose head is a different commit with
+    the same tree;
+  - refused: another tree, affected scope, a missing catalog ID, a failed
+    row, a non-zero suite exit, runner errors, an unknown head, garbage, and
+    a missing file.
+
+  It also checks that `--pipeline` posts `cas/full-journeys` for a verified
+  receipt, and refuses and logs a receipt for the parent tree.

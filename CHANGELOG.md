@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — the merge queue can skip the Commander journeys too (cas-9f70)
+
+- `--pipeline` also posts a `cas/full-journeys` status for the proven commit
+  when `<run-dir>/journeys/journey-receipt.json` passes the new
+  `scripts/journey-receipt.py verify-full`, or the receipt named by
+  `CAS_RELEASE_TRAIN_JOURNEY_RECEIPT` does. To pass, it must be a full-scope
+  journey-eval PASS of every catalog journey, from a commit with exactly the
+  release tree. A queue entry with both the full-gate and the full-journeys
+  receipt for its tree skips the whole Commander step. Any other entry runs
+  the journeys, and a refused receipt is logged and posts nothing.
+
 ### Changed — the merge queue reuses the release train's full gate (cas-4cb8)
 
 - When `--pipeline` pushes a release commit that the full gate proved, it

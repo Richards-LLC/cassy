@@ -2025,6 +2025,114 @@ if grep -qF "api --method POST repos/Richards-LLC/cassy/statuses/$ok_sha -f stat
 else
     bad "no cas/full-gate status for $ok_sha tree $ok_tree: $(grep statuses "$state/calls.log" || echo none)"
 fi
+# cas-9f70: without a full-journeys receipt the queue must still run the journeys.
+if ! grep -q 'context=cas/full-journeys' "$state/calls.log"; then
+    ok 'no full-journeys receipt: no cas/full-journeys status is posted'
+else
+    bad "a cas/full-journeys status was posted without a receipt: $(grep full-journeys "$state/calls.log")"
+fi
+
+# --- cas-9f70: the full-journeys receipt is bound to the exact release tree ---
+# journey-receipt.py verify-full is the train's only judge of a journeys
+# receipt. It runs from the proven revision, re-derives the full catalog with
+# that revision's selector, and binds the receipt's head to the gated tree.
+add_journey_inputs() {
+    local worktree="$1"
+    mkdir -p "$worktree/scripts"
+    cp "$repo_root/scripts/journey-receipt.py" "$worktree/scripts/journey-receipt.py"
+    cat >"$worktree/scripts/journeys-for-diff.py" <<'PY'
+import json
+print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J2'}]}))
+PY
+    git -C "$worktree" add scripts
+    git -C "$worktree" -c commit.gpgsign=false commit -q -m 'journey inputs'
+}
+# write_journey_receipt <path> <head> [scope] [ids] [status] [suite_exit] [errors]
+write_journey_receipt() {
+    mkdir -p "$(dirname "$1")"
+    python3 - "$@" <<'PY'
+import json, sys
+path, head = sys.argv[1], sys.argv[2]
+scope = sys.argv[3] if len(sys.argv) > 3 else 'full'
+ids = (sys.argv[4] if len(sys.argv) > 4 else 'HUB-J1,HUB-J2').split(',')
+status = sys.argv[5] if len(sys.argv) > 5 else 'PASS'
+suite_exit = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+errors = [sys.argv[7]] if len(sys.argv) > 7 and sys.argv[7] else []
+results = [{'id': i, 'status': status, 'passed': 1 if status == 'PASS' else 0,
+            'failed': 0 if status == 'PASS' else 1, 'skipped': 0} for i in ids]
+receipt = {'schema': 1, 'producer': 'journey-eval', 'kind': 'local', 'scope': scope,
+           'base_sha': head, 'head_sha': head, 'selection_ids': ids, 'results': results,
+           'tool_version': '1.59.0', 'suite_exit': suite_exit, 'errors': errors}
+open(path, 'w').write(json.dumps(receipt))
+PY
+}
+jr_wt="$(new_pipeline_fixture journeys-verify)"
+add_journey_inputs "$jr_wt"
+jr_sha="$(git -C "$jr_wt" rev-parse HEAD)"
+jr_old="$(git -C "$jr_wt" rev-parse HEAD~1)"
+git -C "$jr_wt" -c commit.gpgsign=false commit -q --allow-empty -m 'same tree, new commit'
+jr_same_tree="$(git -C "$jr_wt" rev-parse HEAD)"
+jr_dir="$tmp/journeys-verify-receipts"
+verify_journeys() {
+    python3 "$jr_wt/scripts/journey-receipt.py" verify-full --repo "$jr_wt" --sha "$jr_same_tree" --receipt "$1" >/dev/null 2>&1
+}
+write_journey_receipt "$jr_dir/valid.json" "$jr_sha"
+write_journey_receipt "$jr_dir/same-tree.json" "$jr_same_tree"
+write_journey_receipt "$jr_dir/other-tree.json" "$jr_old"
+write_journey_receipt "$jr_dir/affected.json" "$jr_sha" affected
+write_journey_receipt "$jr_dir/partial.json" "$jr_sha" full HUB-J1
+write_journey_receipt "$jr_dir/failed-row.json" "$jr_sha" full HUB-J1,HUB-J2 FAIL
+write_journey_receipt "$jr_dir/suite-exit.json" "$jr_sha" full HUB-J1,HUB-J2 PASS 1
+write_journey_receipt "$jr_dir/errors.json" "$jr_sha" full HUB-J1,HUB-J2 PASS 0 'native runner reported errors'
+write_journey_receipt "$jr_dir/unknown-head.json" 9999999999999999999999999999999999999999
+printf 'not json\n' >"$jr_dir/garbage.json"
+for name in valid same-tree; do
+    if verify_journeys "$jr_dir/$name.json"; then
+        ok "verify-full accepts a full PASS receipt whose head has the release tree ($name)"
+    else
+        bad "verify-full refused the $name receipt"
+    fi
+done
+for name in other-tree affected partial failed-row suite-exit errors unknown-head garbage missing; do
+    if verify_journeys "$jr_dir/$name.json"; then
+        bad "verify-full accepted the $name journeys receipt"
+    else
+        ok "verify-full refuses the $name journeys receipt"
+    fi
+done
+
+# The pipeline posts cas/full-journeys only for a receipt that verify-full accepts.
+run_pipeline_with_journeys() {
+    local name="$1" receipt_head="$2" wt state_dir run
+    wt="$(new_pipeline_fixture "$name")"
+    add_journey_inputs "$wt"
+    run="$(pipeline_run_dir "$wt")"
+    seed_gate_receipt "$run" "$wt"
+    case "$receipt_head" in
+        HEAD) write_journey_receipt "$run/journeys/journey-receipt.json" "$(git -C "$wt" rev-parse HEAD)" ;;
+        HEAD~1) write_journey_receipt "$run/journeys/journey-receipt.json" "$(git -C "$wt" rev-parse HEAD~1)" ;;
+    esac
+    state_dir="$tmp/state-$name"; mkdir -p "$state_dir"
+    printf '' > "$state_dir/pr-list.json"
+    printf '4242\n' > "$state_dir/pr-number.txt"
+    printf '%s\n' '[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]' > "$state_dir/checks-default.json"
+    printf '{"state":"MERGED","mergeCommit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state_dir/prview-default.json"
+    run_pipeline "$wt" "$state_dir" >"$state_dir/pipeline.out" 2>&1 || true
+    printf '%s %s %s\n' "$state_dir" "$(git -C "$wt" rev-parse HEAD)" "$(git -C "$wt" rev-parse 'HEAD^{tree}')"
+}
+read -r jstate jsha jtree < <(run_pipeline_with_journeys journeys-proven HEAD)
+if grep -qF "api --method POST repos/Richards-LLC/cassy/statuses/$jsha -f state=success -f context=cas/full-journeys -f description=PASS tree=$jtree" "$jstate/calls.log"; then
+    ok 'a verified full-journeys receipt is posted as cas/full-journeys on the proven sha and tree'
+else
+    bad "no cas/full-journeys status for $jsha tree $jtree: $(grep statuses "$jstate/calls.log" || echo none)"
+fi
+read -r jstate jsha jtree < <(run_pipeline_with_journeys journeys-stale HEAD~1)
+if ! grep -q 'context=cas/full-journeys' "$jstate/calls.log" \
+    && grep -q 'full-journeys receipt not posted' "$jstate/pipeline.out"; then
+    ok 'a journeys receipt for another tree is refused and names the refusal'
+else
+    bad "a stale journeys receipt was posted or silently ignored: $(grep full-journeys "$jstate/calls.log" "$jstate/pipeline.out" || echo none)"
+fi
 
 # Gap 5: enqueue waits for GitHub to resolve mergeability and report the
 # required check contexts; pending checks are sufficient once they are present.

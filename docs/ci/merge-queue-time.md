@@ -81,6 +81,12 @@ steps are skipped. The Commander journeys (no full-gate row), the compile
 checks and `macOS Check` still run. The branch-protection review is section 3 of
 `docs/branch-protection/README.md`.
 
+cas-9f70 closes the journeys gap. Suppose the supervisor's full journey-eval
+receipt proves every catalog journey on the exact release tree, and
+`journey-receipt.py verify-full` accepts it. The train then also posts
+`cas/full-journeys`, and the queue skips the Commander step entirely. Without
+that receipt, the queue runs the journeys as before.
+
 ## What cas-12ab changed for factory lanes
 
 - Push-once guidance: the cas-worker skill and the worker contract say to

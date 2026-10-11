@@ -33,10 +33,6 @@ async function expectGeneration(page: Page, generation: number): Promise<void> {
 }
 
 test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and inventory (cas-5e53)", journeyPart, async ({ page, context, journey }) => {
-  // This one walk runs five installation cells across reloads and tabs. Measured
-  // 54.3s, 58.9s, 60s+ and 58.5s against the default 60s budget, so it timed
-  // out under four-worker load without failing an assertion (cas-eaa3).
-  test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS] });
   await journey.open();
   let id: string;

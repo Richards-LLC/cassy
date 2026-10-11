@@ -60,6 +60,17 @@ pub fn supervisor_harness_from_env() -> SupervisorCli {
         .unwrap_or(SupervisorCli::Claude)
 }
 
+/// cas-3c26: the role a process acts with. `CAS_AGENT_ROLE` is only the
+/// environment's claim, which an agent can set or unset from its shell; a
+/// process inside a factory worker's cgroup is a worker whatever it claims.
+pub(crate) fn effective_role(env_role: Option<&str>, worker_cgroup: bool) -> Option<String> {
+    let _ = worker_cgroup;
+    env_role
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(str::to_string)
+}
+
 pub fn is_supervisor_from_env() -> bool {
     cas_core::env_overlay::var("CAS_AGENT_ROLE")
         .map(|r| r.eq_ignore_ascii_case("supervisor"))
@@ -542,6 +553,18 @@ mod alias_receipt_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-3c26: a worker cgroup outranks a spoofed or unset role variable.
+    #[test]
+    fn cas_3c26_a_worker_cgroup_is_a_worker_whatever_the_environment_claims() {
+        assert_eq!(effective_role(Some("supervisor"), true).as_deref(), Some("worker"));
+        assert_eq!(effective_role(None, true).as_deref(), Some("worker"));
+        assert_eq!(effective_role(Some(" "), true).as_deref(), Some("worker"));
+        assert_eq!(effective_role(Some("supervisor"), false).as_deref(), Some("supervisor"));
+        assert_eq!(effective_role(Some("worker"), false).as_deref(), Some("worker"));
+        assert_eq!(effective_role(None, false), None);
+        assert_eq!(effective_role(Some(""), false), None);
+    }
 
     // ----------------------------------------------------------------------
     // Role-helper tests (field-first, env-fallback).

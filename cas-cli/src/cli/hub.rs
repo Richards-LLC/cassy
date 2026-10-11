@@ -1904,6 +1904,21 @@ fn auth_store() -> Result<AuthStore> {
     AuthStore::open(paths.root(), machine.id)
 }
 
+/// cas-3c26: admit a `cas hub pair`. Minting an invitation hands a device
+/// the scopes it names (`pane:input`, `message:send` drive this machine's
+/// agents), so only the operator does it: an agent context is refused, then
+/// the operator confirms the origin and scopes. `confirm` receives the
+/// summary and answers the prompt.
+pub(crate) fn pairing_admission(
+    context: &crate::config::operator_policy::InvocationContext,
+    origin: &str,
+    scopes: &[Scope],
+    confirm: &mut dyn FnMut(&str) -> bool,
+) -> std::result::Result<(), String> {
+    let _ = (context, origin, scopes, confirm);
+    Ok(())
+}
+
 fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
     let scopes = args
         .scopes
@@ -3022,6 +3037,51 @@ fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn invocation(ancestors: &[&str], tty: bool) -> crate::config::operator_policy::InvocationContext {
+        crate::config::operator_policy::InvocationContext {
+            env_names: Default::default(),
+            ancestors: ancestors.iter().map(|line| line.to_string()).collect(),
+            stdin_is_terminal: tty,
+            stdout_is_terminal: tty,
+            cgroup: String::new(),
+        }
+    }
+
+    /// cas-3c26: an agent context is refused before any prompt, even through
+    /// a PTY wrapper; the operator must confirm the origin and scopes.
+    #[test]
+    fn cas_3c26_hub_pair_refuses_agents_and_requires_operator_confirmation() {
+        let scopes = [Scope::MachineRead, Scope::PaneInput, Scope::MessageSend];
+        let origin = "https://commander.example";
+        let mut asked = Vec::new();
+
+        let agent = invocation(&["script -qc cas hub pair", "claude"], true);
+        let refused = pairing_admission(&agent, origin, &scopes, &mut |summary| {
+            asked.push(summary.to_string());
+            true
+        })
+        .unwrap_err();
+        assert!(refused.contains("refused"), "{refused}");
+        assert!(asked.is_empty(), "an agent is never even asked");
+
+        let operator = invocation(&["-bash"], true);
+        let declined = pairing_admission(&operator, origin, &scopes, &mut |summary| {
+            asked.push(summary.to_string());
+            false
+        })
+        .unwrap_err();
+        assert!(declined.contains("not confirmed"), "{declined}");
+        let summary = asked.pop().expect("the operator was asked");
+        assert!(summary.contains(origin), "{summary}");
+        assert!(summary.contains("pane:input"), "{summary}");
+        assert!(summary.contains("message:send"), "{summary}");
+        assert!(summary.to_lowercase().contains("control"), "{summary}");
+
+        assert_eq!(pairing_admission(&operator, origin, &scopes, &mut |_| true), Ok(()));
+        // No terminal, so no confirmation: refused.
+        assert!(pairing_admission(&invocation(&["-bash"], false), origin, &scopes, &mut |_| true).is_err());
+    }
 
     #[test]
     fn hub_log_lines_carry_an_rfc3339_utc_timestamp() {

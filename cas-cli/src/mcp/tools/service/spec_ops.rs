@@ -519,3 +519,29 @@ impl CasService {
         )))
     }
 }
+
+/// cas-3c26: who approved a spec, as recorded. An MCP approval is always an
+/// agent's, so it is stamped as one (`agent:<id> (<registry role>)`) and can
+/// never read as the operator's sign-off.
+pub(crate) fn spec_approval_stamp(agent_id: Option<&str>, role: Option<&str>) -> Option<String> {
+    let _ = role;
+    agent_id.map(str::to_string)
+}
+
+#[cfg(test)]
+mod spec_approval_tests {
+    use super::spec_approval_stamp;
+
+    #[test]
+    fn cas_3c26_spec_approval_is_stamped_as_an_agents_never_the_operators() {
+        assert_eq!(
+            spec_approval_stamp(Some("sup-1"), Some("supervisor")).as_deref(),
+            Some("agent:sup-1 (supervisor)")
+        );
+        assert_eq!(
+            spec_approval_stamp(Some("w-2"), None).as_deref(),
+            Some("agent:w-2 (unregistered role)")
+        );
+        assert_eq!(spec_approval_stamp(None, None).as_deref(), Some("agent:unknown (unregistered role)"));
+    }
+}

@@ -418,6 +418,49 @@ pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
     )
 }
 
+/// cas-3c26: why this process may not run the operator-only `action`, or
+/// `None` when it looks like an operator at an interactive terminal.
+pub fn operator_action_refusal(
+    action: &str,
+    remedy: &str,
+    context: &InvocationContext,
+) -> Option<String> {
+    let _ = (action, remedy, context);
+    None
+}
+
+/// cas-3c26: [`operator_action_refusal`] without the interactive-terminal
+/// requirement, for operator paths that legitimately run unattended (an
+/// explicit `--yes`). An agent context is still refused.
+pub fn agent_context_refusal(
+    action: &str,
+    remedy: &str,
+    context: &InvocationContext,
+) -> Option<String> {
+    let _ = (action, remedy, context);
+    None
+}
+
+/// cas-3c26: whether a `/proc/self/cgroup` path places the process in a
+/// Cassy factory worker's scope (or a server nested under one).
+pub fn in_factory_worker_cgroup(cgroup: &str) -> bool {
+    let _ = cgroup;
+    false
+}
+
+/// cas-3c26: whether this process runs in a factory worker's cgroup. Read
+/// once; a process does not change cgroup by itself.
+pub fn process_in_factory_worker_cgroup() -> bool {
+    false
+}
+
+/// cas-3c26: the operator-only action a `cas` invocation performs, judged
+/// by the real CLI parser (`args` are the words after `cas`).
+pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
+    let _ = args;
+    None
+}
+
 /// `subject` states what is operator-only; `remedy` what the operator runs.
 fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> Option<String> {
     if let Some(marker) = context.env_names.iter().find(|name| {
@@ -540,6 +583,79 @@ mod tests {
             stdin_is_terminal: tty,
             stdout_is_terminal: tty,
             cgroup: "0::/user.slice/user@1000.service/app.slice/app-org.kde.konsole-1.scope/tab(2).scope".into(),
+        }
+    }
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// cas-3c26: an agent that unsets every agent variable (`env -u …`) or
+    /// gives itself a terminal (`script -qc …`) still descends from its
+    /// harness, and a worker still runs in its cgroup; each is refused. An
+    /// operator's terminal passes.
+    #[test]
+    fn cas_3c26_operator_actions_refuse_env_spoof_pty_wrappers_and_worker_cgroups() {
+        let action = "Pairing a Commander device";
+        let remedy = "run `cas hub pair` yourself";
+        // `env -u CAS_AGENT_ROLE -u CLAUDECODE … cas hub pair` from Claude Code.
+        let env_spoof = context(&[], &["bash -c cas hub pair", "claude --dangerously-skip-permissions"], true);
+        let refused = operator_action_refusal(action, remedy, &env_spoof).expect("env spoof refused");
+        assert!(refused.contains("descends from an agent"), "{refused}");
+        assert!(refused.contains(action), "{refused}");
+
+        // `script -qc 'cas hub pair'` from Codex: a terminal, but an agent ancestor.
+        let pty = context(&[], &["script -qc cas hub pair", "/usr/bin/bash", "/opt/codex/bin/codex exec"], true);
+        assert!(operator_action_refusal(action, remedy, &pty).is_some());
+
+        // A role variable alone is an agent marker.
+        let spoofed_role = context(&["CAS_AGENT_ROLE"], &[], true);
+        assert!(operator_action_refusal(action, remedy, &spoofed_role).is_some());
+
+        // A worker scope, even with a clean environment and a terminal.
+        let mut worker = context(&[], &[], true);
+        worker.cgroup = "0::/user.slice/cas-worker-cas-src-mighty-crane-74/cas-private-server-1".into();
+        let refused = operator_action_refusal(action, remedy, &worker).expect("worker cgroup refused");
+        assert!(refused.contains("worker cgroup"), "{refused}");
+
+        // The operator at a terminal passes; without a terminal it is refused.
+        assert_eq!(operator_action_refusal(action, remedy, &context(&[], &["-bash"], true)), None);
+        assert!(operator_action_refusal(action, remedy, &context(&[], &["-bash"], false)).is_some());
+    }
+
+    /// cas-3c26: `--yes` paths drop only the terminal requirement.
+    #[test]
+    fn cas_3c26_unattended_operator_paths_still_refuse_agents() {
+        let (action, remedy) = ("Authorizing a Commander pairing", "run it yourself");
+        assert_eq!(agent_context_refusal(action, remedy, &context(&[], &["cron"], false)), None);
+        assert!(agent_context_refusal(action, remedy, &context(&[], &["claude"], false)).is_some());
+        assert!(agent_context_refusal(action, remedy, &context(&["CLAUDECODE"], &[], true)).is_some());
+    }
+
+    #[test]
+    fn cas_3c26_worker_cgroups_are_recognized_and_server_scopes_are_not() {
+        assert!(in_factory_worker_cgroup("0::/user.slice/x.scope/cas-worker-cas-src-a-b"));
+        assert!(in_factory_worker_cgroup("0::/user.slice/cas-worker-a/cas-private-server-9"));
+        assert!(!in_factory_worker_cgroup("0::/user.slice/cas-server-hub"));
+        assert!(!in_factory_worker_cgroup("0::/user.slice/user@1000.service/app.slice"));
+        assert!(!in_factory_worker_cgroup(""));
+    }
+
+    /// cas-3c26: operator-only `cas` invocations, by the real CLI parser.
+    #[test]
+    fn cas_3c26_operator_only_cas_invocations_are_classified_by_the_cli_parser() {
+        for line in [
+            "hub pair --origin https://commander.example",
+            "hub pair --origin https://x --scopes machine:read,pane:input,message:send",
+            "hub authorize K7MW-4H2Q --yes",
+            "factory",
+            "factory --workers 3",
+            "--verbose factory -w 2",
+        ] {
+            assert!(operator_only_cas_invocation(&words(line)).is_some(), "{line}");
+        }
+        for line in ["hub status", "factory status", "task list", "hub", "config get factory.write_roots"] {
+            assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
         }
     }
 

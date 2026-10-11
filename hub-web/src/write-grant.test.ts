@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { AuthenticationError, HubRequestError } from "./connection";
-import { WriteGrantState, sendWriteGrant, type WriteGrantSend } from "./write-grant";
+import { WriteGrantState, focusAfterResult, sendWriteGrant, type WriteGrantSend } from "./write-grant";
 import { writeAccessPanel, type WriteAccessHandlers } from "./write-grant-view";
 import { presentFleetSheet } from "./fleet-sheet";
 import type { FleetTask } from "./fleet-ops";
@@ -161,6 +161,48 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
     refused.review();
     await sendWriteGrant(refused, vi.fn<WriteGrantSend>().mockRejectedValue(new HubRequestError("no", 400, "invalid_write_grant", "task is closed")), "grant");
     expect(refused.draft).toMatchObject({ path: "~/soundwave-config/docs/requests", reason: "INGEST request files" });
+  });
+
+  // cas-5020: focus never lands on the status line (it drew the browser's
+  // default outline through its text). It goes to the control that fixes a
+  // refusal, or to the receipt's next action, and the status is announced.
+  it("moves focus to a control, not the status line, after a result", async () => {
+    const state = new WriteGrantState();
+    state.reset(tasks);
+    state.review();
+    expect(focusAfterResult(state)).toBe("header:grant-path");
+    state.draft.path = "~/x";
+    state.review();
+    expect(focusAfterResult(state)).toBe("header:grant-reason");
+    state.draft.reason = "why";
+    state.draft.modes.clear();
+    state.review();
+    expect(focusAfterResult(state)).toBe("header:grant-mode:create");
+    state.draft.task = "";
+    state.askRevoke();
+    expect(focusAfterResult(state)).toBe("header:grant-task");
+
+    const granted = filled();
+    granted.review();
+    await sendWriteGrant(granted, vi.fn<WriteGrantSend>().mockResolvedValue({ grant: { path: "/x", modes: ["create"] } }), "grant");
+    expect(focusAfterResult(granted, "grant")).toBe("header:grant-revoke");
+    const revoked = filled();
+    revoked.askRevoke();
+    await sendWriteGrant(revoked, vi.fn<WriteGrantSend>().mockResolvedValue({ removed: 1 }), "revoke");
+    expect(focusAfterResult(revoked, "revoke")).toBe("header:grant-review");
+    const refused = filled();
+    refused.review();
+    await sendWriteGrant(refused, vi.fn<WriteGrantSend>().mockRejectedValue(new HubRequestError("no", 400, "invalid_write_grant", "task is closed")), "grant");
+    expect(focusAfterResult(refused, "grant")).toBe("header:grant-review");
+
+    const panel = writeAccessPanel(document, { state: granted, tasks, on: { changed: vi.fn(), review: vi.fn(), revoke: vi.fn(), confirm: vi.fn(), cancel: vi.fn() } });
+    const line = panel.querySelector<HTMLElement>(".write-grant-result")!;
+    expect(line.getAttribute("role")).toBe("status");
+    expect(line.hasAttribute("tabindex")).toBe(false);
+    expect(line.dataset.fleetFocus).toBeUndefined();
+    for (const key of ["header:grant-mode:create", "header:grant-mode:edit", "header:grant-mode:delete"]) {
+      expect(panel.querySelector(`[data-fleet-focus="${key}"]`)).not.toBeNull();
+    }
   });
 
   // cas-06e8: the task id in the receipt never breaks at its hyphen.

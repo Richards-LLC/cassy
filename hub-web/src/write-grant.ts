@@ -146,3 +146,8 @@ export async function sendWriteGrant(state: WriteGrantState, send: WriteGrantSen
     state.stage = "editing";
   }
 }
+
+/** cas-5020: where keyboard focus goes once a result line is shown. Red stub. */
+export function focusAfterResult(_state: WriteGrantState, _sent?: "grant" | "revoke"): string {
+  return "header:grant-result";
+}

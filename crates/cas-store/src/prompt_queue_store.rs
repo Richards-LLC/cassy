@@ -190,10 +190,18 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.id DESC";
 
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
+///
+/// cas-b5ad: a row the daemon claimed for its transport after the turn began
+/// is eligible too. A busy worker's pane is never silent, so the daemon's
+/// wake is declined after the claim, and Claude Code holds the transported
+/// copy until the turn ends; without this the claim hid the row from every
+/// tool boundary of a long turn. Both placeholders bind the turn start.
 const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
-    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
-     AND (q.transport_delivered_at IS NULL
-          OR julianday(q.transport_delivered_at) > julianday(?))";
+    "AND (((seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
+           AND (q.transport_delivered_at IS NULL
+                OR julianday(q.transport_delivered_at) > julianday(?)))
+          OR (seen.source = 'transport_claimed'
+              AND julianday(seen.seen_at) > julianday(?)))";
 
 /// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
 /// The daemon's claim (`transport_claimed`) hides a handed-off row from every
@@ -6587,9 +6595,11 @@ impl SqlitePromptQueueStore {
                 if let Some(session) = factory_session {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
+                    // cas-b5ad: the receipt clause binds the turn start twice.
                     params.extend(
                         turn_start_param
-                            .clone()
+                            .iter()
+                            .flat_map(|at| [at.clone(), at.clone()])
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -6631,9 +6641,11 @@ impl SqlitePromptQueueStore {
                 } else {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
+                    // cas-b5ad: the receipt clause binds the turn start twice.
                     params.extend(
                         turn_start_param
-                            .clone()
+                            .iter()
+                            .flat_map(|at| [at.clone(), at.clone()])
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -6694,7 +6706,13 @@ impl SqlitePromptQueueStore {
                      WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
                         OR (?5 AND prompt_queue_recipient_seen.source = 'transport_claimed')",
                 )?;
-                let takes_claim = matches!(transport, TransportEligibility::WakeNamed);
+                // cas-b5ad: a tool-boundary drain returns a claimed row only
+                // when the claim came after the turn began; it takes that
+                // claim over as the pointer wake's turn does.
+                let takes_claim = matches!(
+                    transport,
+                    TransportEligibility::WakeNamed | TransportEligibility::After(_)
+                );
                 for prompt in &prompts {
                     stmt.execute(params![prompt.id, recipient, seen_at, source.as_str(), takes_claim])?;
                 }

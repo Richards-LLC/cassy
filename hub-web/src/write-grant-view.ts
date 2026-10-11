@@ -19,7 +19,11 @@ export interface WriteAccessContext {
   readonly state: WriteGrantState;
   readonly tasks: readonly FleetTask[];
   readonly on: WriteAccessHandlers;
+  /** On a phone, the conversation and machine the sheet acts on ("cas-src on Atlas"). */
+  readonly where?: string;
 }
+
+export const WRITE_ACCESS_TITLE = "Write access outside the worktree";
 
 function labelled(document: Document, text: string, control: HTMLElement): HTMLLabelElement {
   const label = document.createElement("label");
@@ -45,7 +49,24 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   const panel = document.createElement("div");
   panel.className = "fleet-ops-panel write-grant";
   panel.setAttribute("role", "group");
-  panel.setAttribute("aria-label", "Write access outside the worktree");
+  // cas-4cf2: the visible title is the accessible name; a phone sheet names
+  // its close button for the panel.
+  panel.setAttribute("aria-label", WRITE_ACCESS_TITLE);
+  panel.dataset.closeLabel = "Close write access";
+  const title = document.createElement("h4");
+  title.className = "write-grant-title";
+  title.textContent = WRITE_ACCESS_TITLE;
+  const lead = document.createElement("p");
+  lead.className = "write-grant-lead";
+  lead.textContent = "Lets the agents on one task write to a folder outside their worktree until the task closes.";
+  panel.append(title);
+  if (context.where) {
+    const where = document.createElement("p");
+    where.className = "write-grant-where";
+    where.textContent = context.where;
+    panel.append(where);
+  }
+  panel.append(lead);
 
   if (state.stage === "confirm-grant" || state.stage === "confirm-revoke" || state.stage === "sending") {
     const confirm = document.createElement("div");
@@ -124,7 +145,15 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
     line.setAttribute("role", "status");
     line.tabIndex = -1;
     line.dataset.fleetFocus = "header:grant-result";
-    line.textContent = state.result.text;
+    // cas-06e8: the task id never breaks at its hyphen.
+    const at = state.result.task ? state.result.text.indexOf(state.result.task) : -1;
+    if (at < 0) line.textContent = state.result.text;
+    else {
+      const id = document.createElement("span");
+      id.className = "write-grant-id";
+      id.textContent = state.result.task!;
+      line.append(state.result.text.slice(0, at), id, state.result.text.slice(at + state.result.task!.length));
+    }
     panel.append(line);
   }
   return panel;

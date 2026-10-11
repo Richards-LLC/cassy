@@ -41,7 +41,9 @@ export interface PairedMachineActions {
 function fleetPermissionMarkup(id: string, kind: 'operate' | 'manage', name: string, gate: FleetControlGate, label: string): string {
   const key = `${kind}-${id.replace(/[^a-z0-9_-]/gi, '_')}`;
   const state = gate.allowed ? 'Allowed' : gate.state;
-  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}">${escapeHtml(state)}</span></p>`;
+  // cas-a217: say which permission allows Commander write grants.
+  const also = kind === 'manage' ? '<p class="field-hint fleet-permission-also">Also needed to grant a task write access outside its worktree.</p>' : '';
+  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}">${escapeHtml(state)}</span></p>${also}`;
   if (gate.allowed) return `<div class="fleet-permission" data-permission="${kind}" data-allowed="true">${head}</div>`;
   const reason = `<p class="field-hint fleet-permission-reason" id="fleet-reason-${key}">${escapeHtml(gate.reason)}</p>`;
   // The control the permission unlocks reads as unavailable, and says why,

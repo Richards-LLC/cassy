@@ -196,7 +196,8 @@ request/response shapes, and the existing MCP tests stay the regression net.
 - `parseGrantedScopes` learns `factory-operate` and `factory-manage`
   (`pairing-scopes.ts`).
 - The consent copy names them in plain words: "Manage workers and tasks" and
-  "Stop and restart workers and sessions".
+  "Stop and restart workers and sessions"; Paired machines adds that it also
+  allows write grants (cas-ab04, cas-a217).
 - Each control renders only when its scope is held.
 - A missing scope shows the control disabled with the command that grants it,
   the same pattern as the read-only pair link (cas-b52d).

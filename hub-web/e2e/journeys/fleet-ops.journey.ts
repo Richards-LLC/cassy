@@ -344,6 +344,17 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
     await expect(row("swift-lark-3").locator(".fleet-ops-reason").first()).toContainText("Allow managing workers in Paired machines.");
+    // cas-a217: the header names the permission each control needs; Write
+    // access needs factory:manage, not the factory:operate the others need.
+    const header = page.locator("#status-view .fleet-ops-header");
+    await expect(header.locator(":scope > .fleet-ops-reason")).toHaveText([
+      "Add worker and Focus epic: Not allowed on this pairing. Needs the Manage workers and tasks permission. Allow managing workers in Paired machines.",
+      "Write access: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.",
+    ]);
+    for (const name of ["Add worker…", "Focus epic…", "Write access…"]) {
+      const control = header.getByRole("button", { name });
+      await expect(header.locator(`#${await control.getAttribute("aria-describedby")}`), name).toBeVisible();
+    }
     const before = hub.operations.length;
     await stop.click({ force: true });
     expect(hub.operations.length, "a disabled item sends nothing").toBe(before);

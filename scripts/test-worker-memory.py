@@ -457,6 +457,14 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
     def test_cas_3a29_no_sccache_wrapper_is_off(self):
         self.assertEqual(host.ensure_compiler_cache(self.env), ('off', ''))
 
+    def test_cas_3a29_an_uninstalled_sccache_wrapper_is_off_not_blocked(self):
+        # CI runners export RUSTC_WRAPPER=sccache without installing it.
+        env = dict(self.env, RUSTC_WRAPPER='sccache', PATH=str(self.root / 'empty-bin'),
+                   RUSTC=sys.executable)
+        status, detail = host.ensure_compiler_cache(env)
+        self.assertEqual(status, 'off', detail)
+        self.assertIn('not installed', detail)
+
     def test_cas_4cb9_slot_symlink_fails_closed(self):
         host.private_directory(self.pool)
         (self.root/'target').write_text('')

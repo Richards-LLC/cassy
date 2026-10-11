@@ -32,6 +32,13 @@ class ReceiptTests(unittest.TestCase):
         patcher = mock.patch.object(proof, "HOST_MEMORY_DIRECTORY", self.root / ".host-memory")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Hermetic compiler cache (cas-3a29): the host's or CI runner's
+        # RUSTC_WRAPPER must never reach a real sccache from these fixtures.
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        for key in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"):
+            os.environ.pop(key, None)
         self.git("init", "-q")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "user.name", "Fixture")

@@ -536,6 +536,11 @@ def ensure_compiler_cache(env):
     wrapper = _sccache_wrapper(env)
     if not wrapper:
         return 'off', ''
+    # A wrapper that does not exist is not a server to heal: there is nothing
+    # to restart, and a real build fails on its own terms (cas-3a29: CI
+    # runners export RUSTC_WRAPPER=sccache without installing it).
+    if not (os.path.isfile(wrapper) or shutil.which(wrapper, path=env.get('PATH'))):
+        return 'off', f'{wrapper} is not installed'
     start_compiler_cache(env)
     ok, output = _compiler_cache_canary(env, wrapper)
     if ok:

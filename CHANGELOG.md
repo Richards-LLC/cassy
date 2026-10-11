@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — parallel hub-web lanes no longer conflict on the built bundle (cas-0c988)
+
+- `hub-web/dist` is marked `merge=cas-generated` in `.gitattributes`. A merge
+  keeps the target's copy without a conflict, then
+  `scripts/regenerate-generated-artifacts.sh` rebuilds the bundle from the
+  merged sources and commits it. Cassy's merges register the driver and run
+  the script; after a manual `git merge`, run
+  `git config merge.cas-generated.driver true` once per clone, then run the
+  script. The release still ships the committed bundle.
+- An independent QA verdict carries over a rebase when the delivery's source
+  patch, without `hub-web/dist`, is byte-identical. This applies at re-park,
+  at `worktree_merge` and at the raw-merge guard. The carried round keeps the
+  original reviewer and ledger, and is logged as a task note. A supervisor's
+  `qa_request` still opens a fresh round.
+
 ## [3.50.0] - 2026-10-10
 
 ### Changed — many agents on one machine (#1165)

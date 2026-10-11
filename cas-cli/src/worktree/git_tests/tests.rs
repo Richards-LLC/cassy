@@ -2398,3 +2398,65 @@ fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
     assert!(!sibling.join("delivered.txt").exists());
     let _ = std::fs::remove_dir_all(&sibling);
 }
+
+/// cas-0c988: two parallel lanes each rebuilt a committed output file from
+/// their own source change. Merging both into the epic used to conflict on
+/// that file. Now the output merges without a conflict (the `cas-generated`
+/// driver keeps the epic's copy) and the repository's regeneration script
+/// rebuilds it from the merged source.
+#[test]
+fn parallel_lanes_merge_generated_output_without_conflict_and_regenerate_it_cas_0c988() {
+    let (_temp, repo) = create_test_repo();
+    let git_ops = GitOperations::new(repo.clone());
+    let run = |args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let write = |path: &str, body: &str| {
+        let full = repo.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, body).unwrap();
+    };
+    let regenerate = |repo: &std::path::Path| {
+        let a = std::fs::read_to_string(repo.join("src/a.txt")).unwrap();
+        let b = std::fs::read_to_string(repo.join("src/b.txt")).unwrap();
+        std::fs::write(repo.join("gen/out.txt"), format!("{a}{b}")).unwrap();
+    };
+    write(".gitattributes", "gen/** merge=cas-generated\n");
+    write("src/a.txt", "a0\n");
+    write("src/b.txt", "b0\n");
+    write("gen/out.txt", "a0\nb0\n");
+    write(
+        "scripts/regenerate-generated-artifacts.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\n\
+         git diff --quiet \"$1\" \"$2\" -- src && exit 0\n\
+         cat src/a.txt src/b.txt > gen/out.txt\n\
+         if [ -n \"$(git status --porcelain -- gen)\" ]; then\n\
+           git add gen && git commit -q -m 'build: regenerate gen from merged sources'\n\
+         fi\n",
+    );
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "generated output and its source"]);
+    run(&["branch", "epic/ui"]);
+    for (lane, file, body) in [("factory/one", "src/a.txt", "a1\n"), ("factory/two", "src/b.txt", "b1\n")] {
+        run(&["checkout", "-q", "-b", lane, "epic/ui"]);
+        write(file, body);
+        regenerate(&repo);
+        run(&["commit", "-q", "-am", lane]);
+    }
+    run(&["checkout", "-q", "epic/ui"]);
+
+    git_ops.merge_branch("epic/ui", "factory/one", true).expect("first lane merges");
+    git_ops
+        .merge_branch("epic/ui", "factory/two", true)
+        .expect("the second lane merges without a conflict on the generated file");
+
+    assert_eq!(std::fs::read_to_string(repo.join("gen/out.txt")).unwrap(), "a1\nb1\n");
+    assert_eq!(run(&["status", "--porcelain"]), "", "the regenerated output is committed");
+    assert!(
+        run(&["log", "-1", "--format=%s"]).contains("regenerate"),
+        "the regeneration is its own commit on the epic"
+    );
+    assert_eq!(run(&["config", "--get", "merge.cas-generated.driver"]), "true");
+}

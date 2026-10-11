@@ -1784,7 +1784,21 @@ exit "$failed"
         .unwrap();
         let proof = receipt.no_build.unwrap();
         assert_eq!(Some(proof.tip), receipt.tip);
-        assert_eq!(proof.rows.len(), 12);
+        // Every production fast row plus ci-script-tests runs; the inventory
+        // grows (cas-462b added six), so derive it instead of pinning a count.
+        let inventory = Command::new("python3")
+            .current_dir(repo.path())
+            .args(["scripts/release-integration-gates.py", "--fast-rows"])
+            .output()
+            .unwrap();
+        let expected = String::from_utf8_lossy(&inventory.stdout)
+            .trim()
+            .split(',')
+            .filter(|row| !row.is_empty())
+            .count()
+            + 1;
+        assert!(expected >= 12, "fast-row inventory: {expected}");
+        assert_eq!(proof.rows.len(), expected);
         assert!(proof.rows.values().all(|value| value == "PASS"));
     }
 

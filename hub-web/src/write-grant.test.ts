@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { HubRequestError } from "./connection";
+import { AuthenticationError, HubRequestError } from "./connection";
 import { WriteGrantState, sendWriteGrant, type WriteGrantSend } from "./write-grant";
 import { writeAccessPanel, type WriteAccessHandlers } from "./write-grant-view";
 import type { FleetTask } from "./fleet-ops";
@@ -91,6 +91,25 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
     forbidden.review();
     await sendWriteGrant(forbidden, vi.fn<WriteGrantSend>().mockRejectedValue(new HubRequestError("no", 403, "scope_denied")), "grant");
     expect(forbidden.result?.text).toBe("Could not grant: this pairing does not allow managing workers. Add it in Paired machines.");
+  });
+
+  // cas-42c0: the connection turns a 403 into AuthenticationError
+  // ("scope-mismatch"); that is a permission refusal, not a lost pairing.
+  it("says a scope refusal is about permission, and only a lost pairing asks to pair again", async () => {
+    const scope = filled();
+    scope.review();
+    await sendWriteGrant(scope, vi.fn<WriteGrantSend>().mockRejectedValue(new AuthenticationError("scope-mismatch", "scope denied")), "grant");
+    expect(scope.result).toEqual({ tone: "error", text: "Could not grant: this pairing does not allow managing workers. Add it in Paired machines." });
+    const revoke = filled();
+    revoke.askRevoke();
+    await sendWriteGrant(revoke, vi.fn<WriteGrantSend>().mockRejectedValue(new AuthenticationError("scope-mismatch", "scope denied")), "revoke");
+    expect(revoke.result?.text).toBe("Could not revoke: this pairing does not allow managing workers. Add it in Paired machines.");
+    for (const kind of ["expired", "revoked", "needs-pairing"] as const) {
+      const lost = filled();
+      lost.review();
+      await sendWriteGrant(lost, vi.fn<WriteGrantSend>().mockRejectedValue(new AuthenticationError(kind, kind)), "grant");
+      expect(lost.result?.text, kind).toBe("Could not grant: the pairing is no longer accepted. Pair the machine again.");
+    }
   });
 
   it("renders the form, the confirmation and the receipt", () => {

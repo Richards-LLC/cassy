@@ -56,6 +56,14 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await panel.getByRole("textbox", { name: "Reason" }).fill("INGEST request files");
         await panel.getByRole("button", { name: "Review grant" }).click();
         const confirm = rail.getByRole("alertdialog", { name: "Confirm write access" });
+        // cas-42c0: Escape backs out of the confirmation to the form, with
+        // focus on Review grant, and sends nothing.
+        await expect(confirm).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(confirm).toHaveCount(0);
+        await expect(panel.getByRole("button", { name: "Review grant" })).toBeFocused();
+        expect(hub.writeGrants).toHaveLength(0);
+        await page.keyboard.press("Enter");
         await expect(confirm).toContainText("Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?");
         await expect(confirm.getByRole("button")).toHaveText(["Cancel", "Grant"]);
         await confirm.getByRole("button", { name: "Grant", exact: true }).click();
@@ -69,6 +77,11 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       await journey.stage("Revoke it after confirming", async () => {
         await panel.getByRole("button", { name: "Revoke…" }).click();
         const confirm = rail.getByRole("alertdialog", { name: "Confirm revoke" });
+        await expect(confirm).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(confirm).toHaveCount(0);
+        await expect(panel.getByRole("button", { name: "Revoke…" })).toBeFocused();
+        await page.keyboard.press("Enter");
         await expect(confirm).toContainText("Revoke every write grant for cas-1234?");
         await confirm.getByRole("button", { name: "Revoke", exact: true }).click();
         await expect(rail.locator(".write-grant-result")).toHaveText("Write access revoked for cas-1234: 1 grant removed.");

@@ -100,7 +100,13 @@ export class WriteGrantState {
 }
 
 function refusal(error: unknown): string {
-  if (error instanceof AuthenticationError) return "the pairing is no longer accepted. Pair the machine again.";
+  // cas-42c0: a 403 arrives as AuthenticationError("scope-mismatch"): the
+  // pairing works but lacks factory:manage. Only a lost pairing re-pairs.
+  if (error instanceof AuthenticationError) {
+    return error.kind === "scope-mismatch"
+      ? "this pairing does not allow managing workers. Add it in Paired machines."
+      : "the pairing is no longer accepted. Pair the machine again.";
+  }
   if (!(error instanceof HubRequestError)) return "the machine could not be reached. Check its connection and try again.";
   if (error.status === 403) return "this pairing does not allow managing workers. Add it in Paired machines.";
   if (error.status === 401) return "the pairing is no longer accepted. Pair the machine again.";

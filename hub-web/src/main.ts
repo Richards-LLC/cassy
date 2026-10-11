@@ -4569,7 +4569,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
         changed: () => {},
         review: () => { writeGrant.review(); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : "header:grant-result"); },
         revoke: () => { writeGrant.askRevoke(); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : "header:grant-result"); },
-        cancel: () => { writeGrant.cancel(); rerender("header:grant-review"); },
+        cancel: () => { const opener = writeGrant.stage === "confirm-revoke" ? "header:grant-revoke" : "header:grant-review"; writeGrant.cancel(); rerender(opener); },
         confirm: () => { void runWriteGrant(); },
       },
     },
@@ -4637,7 +4637,17 @@ function renderStatus(status?: Record<string, unknown>): void {
   syncFleetSelection();
   container.onkeydown = (event) => {
     if (event.key !== "Escape" || !container.querySelector(".fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview, .fleet-ops-panel")) return;
-    event.preventDefault(); event.stopPropagation(); dismissFleetPanel();
+    event.preventDefault(); event.stopPropagation();
+    // cas-42c0: Escape on a Write access confirmation backs out to the form,
+    // like Cancel, and puts focus back on the action that opened it.
+    if (fleetHeaderPanel === "grant" && (writeGrant.stage === "confirm-grant" || writeGrant.stage === "confirm-revoke")) {
+      const opener = writeGrant.stage === "confirm-revoke" ? "header:grant-revoke" : "header:grant-review";
+      writeGrant.cancel();
+      fleetFocusNext = opener;
+      renderStatus(selectedMachineId && selectedSession ? statuses.get(sessionKey(selectedMachineId, selectedSession)) : undefined);
+      return;
+    }
+    dismissFleetPanel();
   };
   const undoFocused = document.activeElement instanceof HTMLElement && document.activeElement.dataset.fleetFocus === "undo";
   const hadFocus = document.activeElement instanceof HTMLElement && (container.contains(document.activeElement) || document.activeElement.closest("#fleet-phone-undo")) ? document.activeElement.dataset.fleetFocus : undefined;

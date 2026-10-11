@@ -4096,15 +4096,18 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
         } else {
             std::path::PathBuf::from(&input.cwd).join(expanded)
         });
-        let is_config = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| matches!(name, "config.toml" | "config.yaml" | "config.yml"));
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let is_config = matches!(name, "config.toml" | "config.yaml" | "config.yml");
         let parent = path.parent();
-        is_config
-            && (parent.and_then(|dir| dir.file_name()).is_some_and(|name| name == ".cas")
-                || parent.is_some_and(|dir| global.as_deref() == Some(dir)))
+        let in_cas = parent.and_then(|dir| dir.file_name()).is_some_and(|dir| dir == ".cas");
+        (is_config || (name == "proxy.toml" && in_cas))
+            && (in_cas || parent.is_some_and(|dir| global.as_deref() == Some(dir)))
     })?;
+    if target.ends_with("proxy.toml") {
+        return Some(format!(
+            "🚫 CASSY PROXY CONFIG (cas-0d4f0): agents do not write {target} directly. Manage MCP servers with `system action=proxy_add|proxy_remove` (or `cas mcp add|remove`); servers on factory.supervisor_only_mcp are operator-only."
+        ));
+    }
     Some(format!(
         "🚫 CASSY CONFIG (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
     ))
@@ -4866,6 +4869,7 @@ mod workspace_contract_tests {
         for command in [
             "cas config set slack.transport any",
             "cas config set verification.force_bypass_allowed true",
+            "cas config set verification.enabled false",
             "/home/u/.local/bin/cas config set factory.supervisor_only_mcp ''",
             "env -u CLAUDECODE cas config set factory.worker_credential_env GH_TOKEN",
             "bash -c 'cas config set qa.evidence_gate false'",
@@ -4914,9 +4918,24 @@ mod workspace_contract_tests {
                 .unwrap_or_else(|| panic!("{case} must be refused"));
             assert!(denial.contains("cas config set"), "{case}: {denial}");
         }
+        // The proxy server list: the same file-edit bypass that proxy_add's
+        // supervisor-only refusal closes.
+        let proxy = main.join(".cas/proxy.toml").display().to_string();
+        for (case, input) in [
+            ("proxy Write", tool_input("Write", serde_json::json!({"file_path": proxy, "content": "[servers.vercel2]"}), &main)),
+            ("proxy Edit", tool_input("Edit", serde_json::json!({"file_path": ".cas/proxy.toml", "old_string": "a", "new_string": "b"}), &main)),
+            ("proxy append", bash_input("echo '[servers.x]' >> .cas/proxy.toml", &main)),
+            ("proxy sed -i", bash_input("sed -i '/vercel/d' .cas/proxy.toml", &main)),
+            ("proxy rm", bash_input("rm .cas/proxy.toml", &main)),
+        ] {
+            let denial = cas_config_file_write_denial(&input)
+                .unwrap_or_else(|| panic!("{case} must be refused"));
+            assert!(denial.contains("proxy_add"), "{case}: {denial}");
+        }
         for (case, input) in [
             ("notes", tool_input("Write", serde_json::json!({"file_path": ".cas/notes.md", "content": ""}), &main)),
             ("other config.toml", tool_input("Write", serde_json::json!({"file_path": "crates/x/config.toml", "content": ""}), &main)),
+            ("other proxy.toml", tool_input("Write", serde_json::json!({"file_path": "fixtures/proxy.toml", "content": ""}), &main)),
             ("read", bash_input("cat .cas/config.toml", &main)),
             ("cas config set", bash_input("cas config set issues.repo a/b", &main)),
         ] {

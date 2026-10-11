@@ -241,6 +241,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("slack.transport") && error.contains("operator"), "{error}");
+        let mut config = Config::load(&root).unwrap();
+        let error = set_config_value(&mut config, "verification.enabled", "false", &root, agent)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("verification.enabled"), "{error}");
+        assert_ne!(
+            Config::load(&root).unwrap().get("verification.enabled").as_deref(),
+            Some("false")
+        );
         assert_ne!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
 
         let mut config = Config::load(&root).unwrap();

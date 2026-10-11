@@ -630,6 +630,7 @@ mod tests {
         let mut app = ConfigTuiApp::new(&root).unwrap();
         app.config.set("qa.evidence_gate", "false").unwrap();
         app.config.set("qa.independent_pass", "false").unwrap();
+        app.config.set("verification.enabled", "false").unwrap();
         app.has_unsaved = true;
         app.save_config_with(agent).unwrap();
         assert!(app.has_unsaved);

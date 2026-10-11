@@ -9,7 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Security — guard-relaxing config keys are operator-only (cas-0d4f0)
 
-- `verification.force_bypass_allowed`, `slack.transport`,
+- `verification.enabled`, `verification.force_bypass_allowed`, `slack.transport`,
   `factory.supervisor_only_mcp`, `factory.supervisor_only_env`,
   `factory.worker_credential_env`, `qa.evidence_gate`, `qa.independent_pass`
   and `release.claude_account_allowlist` can only be changed by the operator
@@ -18,7 +18,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `factory.write_roots`. Ordinary keys stay settable.
 - The PreToolUse hook refuses agent shell commands that set or reset those
   keys, and refuses every direct agent write, edit, copy, move or delete of
-  `.cas/config.toml` (or `config.yaml`) and the global Cassy config.
+  `.cas/config.toml` (or `config.yaml`), the global Cassy config and
+  `.cas/proxy.toml`.
 - MCP `proxy_add` and `proxy_remove` refuse to remove, replace or alias a
   `factory.supervisor_only_mcp` server.
 

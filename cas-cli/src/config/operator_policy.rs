@@ -360,6 +360,7 @@ pub struct InvocationContext {
 /// PreToolUse hook refuses agent shell commands that set them and every
 /// agent write to a Cassy `config.toml`.
 pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
+    "verification.enabled",
     "verification.force_bypass_allowed",
     "slack.transport",
     "factory.supervisor_only_mcp",
@@ -599,6 +600,7 @@ mod tests {
         assert_eq!(operator_config_refusal(&[], &agent), None);
 
         for (key, value) in [
+            ("verification.enabled", "false"),
             ("verification.force_bypass_allowed", "true"),
             ("slack.transport", "any"),
             ("factory.supervisor_only_mcp", ""),

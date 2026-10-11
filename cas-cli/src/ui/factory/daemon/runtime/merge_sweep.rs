@@ -2046,6 +2046,53 @@ mod tests {
         );
     }
 
+    fn quiet_request(commit: &str) -> SweepRequest {
+        SweepRequest {
+            epic_id: "cas-baa3".to_string(),
+            target_branch: "epic/release".to_string(),
+            commit: commit.to_string(),
+        }
+    }
+
+    #[test]
+    fn cas_833e_a_merge_burst_starts_one_sweep_after_the_quiet_period() {
+        let quiet = Duration::from_secs(120);
+        let start = Instant::now();
+        let mut gate = QuietGate::default();
+        for (offset, commit) in [(0, "one"), (30, "two"), (60, "three")] {
+            gate.note(quiet_request(commit), start + Duration::from_secs(offset));
+        }
+        // Each merge restarts the wait: nothing starts inside the burst.
+        for offset in [60, 120, 179] {
+            assert_eq!(gate.due(start + Duration::from_secs(offset), quiet, false), None, "{offset}s");
+        }
+        // Only the newest tip runs, once, after the burst has been quiet.
+        let due = gate.due(start + Duration::from_secs(180), quiet, false);
+        assert_eq!(due.map(|request| request.commit), Some("three".to_string()));
+        assert_eq!(gate.due(start + Duration::from_secs(600), quiet, false), None);
+    }
+
+    #[test]
+    fn cas_833e_quiet_gate_waits_for_the_cancelled_sweep_and_zero_disables_the_wait() {
+        let start = Instant::now();
+        let mut gate = QuietGate::default();
+        gate.note(quiet_request("next"), start);
+        // A superseded sweep is still being torn down: never overlap it.
+        assert_eq!(gate.due(start + Duration::from_secs(900), Duration::ZERO, true), None);
+        assert!(gate.holds());
+        let due = gate.due(start, Duration::ZERO, false);
+        assert_eq!(due.map(|request| request.commit), Some("next".to_string()));
+        assert!(!gate.holds());
+    }
+
+    #[test]
+    fn cas_833e_quiet_period_comes_from_factory_config() {
+        let mut config = FactoryConfig::default();
+        assert_eq!(SweepSettings::from(&config).quiet, Duration::from_secs(120));
+        config.merge_sweep_quiet_secs = 0;
+        assert_eq!(SweepSettings::from(&config).quiet, Duration::ZERO);
+    }
+
     #[test]
     fn newer_merge_supersedes_only_a_different_tip() {
         let request = SweepRequest {

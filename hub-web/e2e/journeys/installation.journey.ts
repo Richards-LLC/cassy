@@ -1,6 +1,7 @@
 import { test, expect, journeyPart } from "./journey";
 import type { Page } from "@playwright/test";
 import { ATLAS } from "./world";
+import type { HubDouble } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,7 +33,21 @@ async function expectGeneration(page: Page, generation: number): Promise<void> {
   await expect(technical).not.toHaveAttribute("open", "");
 }
 
-test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and inventory (cas-5e53)", journeyPart, async ({ page, context, journey }) => {
+// cas-f7c5: HUB-J2's installation journey ran as one test of five stages,
+// about 54 s idle against a 60 s budget, so a loaded host timed it out. Every
+// action is traced with screen snapshots, so time goes with the number of
+// actions; each part now starts from its own one-pairing setup and carries
+// its own budget. The assertions are the original stages' own.
+
+/** One pairing from the link: the installation every later stage acts on. */
+async function pairedInstallation(page: Page, hub: HubDouble): Promise<string> {
+  await pair(page, "1".repeat(43));
+  expect(hub.installations.size).toBe(1);
+  expect([...hub.installations.values()][0]!.credential_generation).toBe(1);
+  return [...hub.installations.keys()][0]!;
+}
+
+test("HUB-J2 possession-proven repairs update one browser installation (cas-5e53)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS] });
   await journey.open();
   let id: string;
@@ -49,7 +64,13 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     await expect(page.locator(".installation-inventory-row")).toContainText("Not in an operator inbox");
     await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
   });
+  expect(id!).toBeTruthy();
+});
 
+test("HUB-J2 another IndexedDB tab adopts the accepted repair (cas-5e53)", journeyPart, async ({ page, context, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  await pairedInstallation(page, hub);
   const peer = await context.newPage();
   // Force stale-request adoption rather than letting BroadcastChannel update
   // the peer first. Both clients still share the real IDB and real Web Lock.
@@ -58,15 +79,20 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
   await peer.goto(page.url());
   await expect(peer.locator("#paired-machines-toggle")).toBeAttached();
   await journey.stage("M02 another open tab adopts the accepted credential on refusal", async () => {
-    await pair(page, "6".repeat(43));
+    await pair(page, "2".repeat(43));
     await inventory(peer);
-    await expectGeneration(peer, 6);
+    await expectGeneration(peer, 2);
     expect(hub.staleInstallationRefusals.length).toBeGreaterThan(0);
     expect(hub.installations.size).toBe(1);
     await peer.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
     await peer.close();
   });
+});
 
+test("HUB-J2 cancelling a staged repair restores access on reload (cas-5e53)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  const id = await pairedInstallation(page, hub);
   await journey.stage("M03 cancelling a staged repair restores access on reload", async () => {
     if (await page.locator("#paired-machines-dialog").isVisible()) await page.getByRole("button", { name: "Close paired machines", exact: true }).click();
     let release!: () => void;
@@ -84,13 +110,18 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     release();
     await expect(dialog).toBeHidden();
     await page.unroute("https://atlas.test/v1/auth/pairing/commit");
-    expect(hub.installations.get(id!)!.credential_generation).toBe(6);
+    expect(hub.installations.get(id!)!.credential_generation).toBe(1);
     await page.reload();
     await inventory(page);
-    await expectGeneration(page, 6);
+    await expectGeneration(page, 1);
     await page.locator(".installation-inventory").getByRole("button", { name: "Close", exact: true }).click();
   });
+});
 
+test("HUB-J2 the installation inventory on keyboard and phone, and exact-device revocation (cas-5e53)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS] });
+  await journey.open();
+  const id = await pairedInstallation(page, hub);
   await journey.stage("M04 keyboard and phone inventory keep identity and actions reachable", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ colorScheme: "dark" });
@@ -179,9 +210,9 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
   const peer = await context.newPage(); await hub.install(peer);
   await journey.stage("M01 expired tabs serialize their refresh through real Web Locks and IndexedDB", async () => {
     await Promise.all([page.goto(url), peer.goto(url)]);
-    await inventory(page); await inventory(peer);
-    await expectGeneration(page, 2);
-    await expectGeneration(peer, 2);
+    // cas-f7c5: the two tabs are independent pages; read both at once.
+    await Promise.all([inventory(page), inventory(peer)]);
+    await Promise.all([expectGeneration(page, 2), expectGeneration(peer, 2)]);
     expect(hub.installationRefreshes).toBe(1);
     expect(hub.installations.size).toBe(1);
   });

@@ -2323,6 +2323,87 @@ exit "$failed"
         assert_eq!(git(repo.path(), &["rev-parse", &second.branch]), second.tip);
         assert!(!repo.path().join(".git/MERGE_HEAD").exists());
     }
+    const CHANGELOG_BASE: &str = "# Changelog\n\n## [Unreleased]\n\n## [3.50.0] - 2026-10-10\n\n### Changed\n\n- shipped thing\n";
+
+    /// One epic's CHANGELOG with `section` added under `## [Unreleased]`,
+    /// and optionally the `.gitattributes` line that opts the repo in.
+    fn changelog_epic(path: &Path, id: &str, section: &str, attributes: bool) -> EpicTip {
+        let branch = format!("epic/{id}");
+        git(path, &["checkout", "-b", &branch, "main"]);
+        fs::write(
+            path.join("CHANGELOG.md"),
+            CHANGELOG_BASE.replace("## [Unreleased]\n\n", &format!("## [Unreleased]\n\n{section}\n")),
+        )
+        .unwrap();
+        if attributes {
+            fs::write(path.join(".gitattributes"), "CHANGELOG.md merge=cas-changelog\n").unwrap();
+        }
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", id]);
+        EpicTip { id: id.to_owned(), branch, tip: git(path, &["rev-parse", "HEAD"]), owner: None }
+    }
+
+    fn changelog_fixture() -> tempfile::TempDir {
+        let repo = fixture();
+        fs::write(repo.path().join("CHANGELOG.md"), CHANGELOG_BASE).unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "changelog"]);
+        repo
+    }
+
+    /// cas-7aa5: the 2026-10-11 rolling integration stopped on "Conflict
+    /// adding cas-baa3 against cas-571d. Files: CHANGELOG.md". Each epic
+    /// inserts a `###` section directly under `## [Unreleased]`, and the
+    /// second one carries the `.gitattributes` opt-in. Both sections must
+    /// survive, in merge order, and the merge-tree probe must agree.
+    #[test]
+    fn parallel_unreleased_sections_assemble_without_conflict_cas_7aa5() {
+        let repo = changelog_fixture();
+        let first = changelog_epic(repo.path(), "cas-571d", "### Added — peers (cas-571d)\n\n- peer claims\n", false);
+        let second = changelog_epic(repo.path(), "cas-baa3", "### Changed — release latency (cas-baa3)\n\n- faster cut\n", true);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let result = assemble(repo.path(), "main", "main", &[first.clone(), second.clone()]).unwrap();
+        let Assembly::Clean { tip, .. } = result else {
+            panic!("expected a clean assembly, got {result:?}");
+        };
+        let changelog = git(repo.path(), &["show", &format!("{tip}:CHANGELOG.md")]);
+        let peers = changelog.find("cas-571d").expect("first section kept");
+        let latency = changelog.find("cas-baa3").expect("second section kept");
+        let released = changelog.find("## [3.50.0]").unwrap();
+        assert!(peers < latency && latency < released, "{changelog}");
+        assert!(!changelog.contains("<<<<<<<"), "{changelog}");
+        assert!(
+            !merge_tree_conflicts(repo.path(), &first.tip, &second.tip).unwrap(),
+            "the merge-tree probe agrees with the merge"
+        );
+    }
+
+    /// cas-7aa5: conflicting edits to an already released section still
+    /// conflict; only [Unreleased] additions are unioned.
+    #[test]
+    fn edits_to_a_released_changelog_section_still_conflict_cas_7aa5() {
+        let repo = changelog_fixture();
+        let edit = |id: &str, text: &str, attributes: bool| {
+            let branch = format!("epic/{id}");
+            git(repo.path(), &["checkout", "-b", &branch, "main"]);
+            fs::write(repo.path().join("CHANGELOG.md"), CHANGELOG_BASE.replace("- shipped thing", text)).unwrap();
+            if attributes {
+                fs::write(repo.path().join(".gitattributes"), "CHANGELOG.md merge=cas-changelog\n").unwrap();
+            }
+            git(repo.path(), &["add", "."]);
+            git(repo.path(), &["commit", "-m", id]);
+            EpicTip { id: id.to_owned(), branch, tip: git(repo.path(), &["rev-parse", "HEAD"]), owner: None }
+        };
+        let first = edit("a", "- shipped thing, reworded", false);
+        let second = edit("b", "- shipped thing, corrected", true);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let result = assemble(repo.path(), "main", "main", &[first, second]).unwrap();
+        let Assembly::Conflict { detail, .. } = result else {
+            panic!("an edit to a released section must still conflict");
+        };
+        assert!(detail.contains("CHANGELOG.md"), "{detail}");
+    }
+
     fn release_epic(id: &str, label: Option<&str>) -> Task {
         let mut task = Task::new(id.to_owned(), id.to_owned());
         task.task_type = TaskType::Epic;

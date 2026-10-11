@@ -321,6 +321,53 @@ fn parse_proxy_health_cache(json: &str) -> serde_json::Result<serde_json::Value>
         .and_then(serde_json::to_value)
 }
 
+/// cas-0d4f0: refusal for an agent's MCP proxy change that would weaken
+/// `factory.supervisor_only_mcp`: removing or replacing a supervisor-only
+/// server, or adding the same endpoint under another name, which workers
+/// could then call. The operator manages those with `cas mcp` at a terminal.
+#[cfg(feature = "mcp-proxy")]
+fn supervisor_only_proxy_refusal(
+    name: &str,
+    added: Option<&cmcp_core::config::ServerConfig>,
+    existing: &cmcp_core::config::Config,
+    supervisor_only: &[String],
+) -> Option<String> {
+    use cmcp_core::config::ServerConfig;
+    fn endpoint(server: &ServerConfig) -> String {
+        match server {
+            ServerConfig::Stdio { command, args, .. } => format!("{command} {}", args.join(" ")),
+            ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url.clone(),
+        }
+    }
+    let refusal = |what: String| {
+        format!(
+            "🚫 OPERATOR-ONLY (cas-0d4f0): {what}. factory.supervisor_only_mcp keeps it from workers, so only the operator changes it, with `cas mcp add|remove` from their own terminal. Ask the supervisor to request the operator's approval."
+        )
+    };
+    if supervisor_only.iter().any(|only| only == name) {
+        return Some(refusal(format!("'{name}' is a supervisor-only MCP server")));
+    }
+    let added = endpoint(added?);
+    existing
+        .servers
+        .iter()
+        .find(|(existing_name, server)| {
+            supervisor_only.contains(existing_name) && endpoint(server) == added
+        })
+        .map(|(existing_name, _)| {
+            refusal(format!(
+                "'{name}' would reach supervisor-only server '{existing_name}' under another name"
+            ))
+        })
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn supervisor_only_mcp(cas_root: &Path) -> Vec<String> {
+    crate::config::Config::load(cas_root)
+        .map(|config| config.factory().worker_policy.supervisor_only_mcp)
+        .unwrap_or_default()
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn system_version(
         &self,
@@ -687,6 +734,14 @@ impl CasService {
                 ));
             }
         };
+        if let Some(refusal) = supervisor_only_proxy_refusal(
+            &raw_name,
+            Some(&server_config),
+            &config,
+            &supervisor_only_mcp(&self.inner.cas_root),
+        ) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+        }
         config.add_server(raw_name.clone(), server_config);
         config.save_to(&proxy_path).map_err(|e| {
             Self::error(
@@ -764,6 +819,14 @@ impl CasService {
         let Some((raw_name, public_name)) = resolved else {
             return Ok(Self::success("Server identifier not found in proxy config"));
         };
+        if let Some(refusal) = supervisor_only_proxy_refusal(
+            &raw_name,
+            None,
+            &config,
+            &supervisor_only_mcp(&self.inner.cas_root),
+        ) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+        }
 
         debug_assert!(config.remove_server(&raw_name));
 
@@ -862,6 +925,39 @@ impl CasService {
         Ok(Self::success(
             serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
         ))
+    }
+}
+
+#[cfg(all(test, feature = "mcp-proxy"))]
+mod cas_0d4f0_tests {
+    use super::supervisor_only_proxy_refusal;
+    use cmcp_core::config::{Config, ServerConfig};
+
+    fn stdio(command: &str) -> ServerConfig {
+        ServerConfig::Stdio { command: command.into(), args: vec!["--mcp".into()], env: Default::default() }
+    }
+
+    /// cas-0d4f0: an agent's MCP proxy_add/proxy_remove cannot remove,
+    /// replace or alias a supervisor-only server; ordinary servers stay
+    /// manageable.
+    #[test]
+    fn cas_0d4f0_mcp_proxy_changes_cannot_weaken_supervisor_only_servers() {
+        let only = vec!["vercel".to_string()];
+        let mut existing = Config::default();
+        existing.add_server("vercel".into(), stdio("vercel-mcp"));
+        existing.add_server("docs".into(), stdio("docs-mcp"));
+
+        let removal = supervisor_only_proxy_refusal("vercel", None, &existing, &only)
+            .expect("removing a supervisor-only server is refused");
+        assert!(removal.contains("operator") && removal.contains("vercel"), "{removal}");
+        assert!(supervisor_only_proxy_refusal("vercel", Some(&stdio("other")), &existing, &only).is_some());
+        let alias = supervisor_only_proxy_refusal("vercel2", Some(&stdio("vercel-mcp")), &existing, &only)
+            .expect("aliasing a supervisor-only endpoint is refused");
+        assert!(alias.contains("vercel2") && alias.contains("'vercel'"), "{alias}");
+
+        assert_eq!(supervisor_only_proxy_refusal("docs", None, &existing, &only), None);
+        assert_eq!(supervisor_only_proxy_refusal("search", Some(&stdio("search-mcp")), &existing, &only), None);
+        assert_eq!(supervisor_only_proxy_refusal("vercel", None, &existing, &[]), None);
     }
 }
 

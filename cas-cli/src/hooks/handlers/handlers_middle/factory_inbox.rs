@@ -181,6 +181,16 @@ fn surface_factory_inbox_with_transport_delivery(
         Surfacing::TurnStart => wake_named_ids(input.submitted_prompt().unwrap_or_default()),
         Surfacing::ToolBoundary(_) => Vec::new(),
     };
+    // cas-7ce4: read before this turn's drain, so only an earlier surfacing
+    // counts as "already shown".
+    let already_shown = match &surfacing {
+        Surfacing::TurnStart => already_surfaced_envelopes(
+            &*queue,
+            input.submitted_prompt().unwrap_or_default(),
+            &aliases,
+        ),
+        Surfacing::ToolBoundary(_) => Vec::new(),
+    };
     let mut rows: Vec<QueuedPrompt> = Vec::new();
     for alias in &aliases {
         let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
@@ -265,8 +275,9 @@ fn surface_factory_inbox_with_transport_delivery(
         }
     }
 
+    let repeat_note = already_shown_note(&already_shown);
     if rows.is_empty() {
-        return None;
+        return repeat_note;
     }
     // cas-3bf1 (GH #176): a surfacing retires the row for the WHOLE identity,
     // not just the alias that happened to fetch it. Without this, a row drained
@@ -279,14 +290,81 @@ fn surface_factory_inbox_with_transport_delivery(
         &aliases,
         cas_store::SurfacingSource::HookSurfaced,
     );
-    Some(match surfacing {
+    let rendered = match surfacing {
         Surfacing::TurnStart => render_surfaced(&rows),
         Surfacing::ToolBoundary(_) => render_surfaced_with_header(
             &rows,
             "The following message(s) arrived while you were working. \
              They are delivered here once — read them before your next step.",
         ),
+    };
+    Some(match repeat_note {
+        Some(note) => format!("{note}\n\n{rendered}"),
+        None => rendered,
     })
+}
+
+/// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon
+/// stamps every queued message's body with this envelope, so a teams copy
+/// Claude Code renders as a teammate message names its row.
+fn envelope_ids(prompt: &str) -> Vec<i64> {
+    const MARKER: &str = "[cas #";
+    let mut ids = Vec::new();
+    let mut rest = prompt;
+    while let Some(start) = rest.find(MARKER) {
+        rest = &rest[start + MARKER.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(id) = digits.parse::<i64>()
+            && rest[digits.len()..].starts_with(' ')
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// cas-7ce4: messages this turn's prompt repeats that a hook already put in
+/// front of this agent in an earlier turn. After cas-b5ad a busy Claude worker
+/// sees a claimed message at a tool boundary, and Claude Code later renders
+/// the teams copy it held; the harness copy cannot be withdrawn (the teams
+/// layer drains its inbox file at once), so the turn says it is a repeat.
+fn already_surfaced_envelopes(
+    queue: &dyn cas_store::PromptQueueStore,
+    prompt: &str,
+    aliases: &[String],
+) -> Vec<i64> {
+    envelope_ids(prompt)
+        .into_iter()
+        .filter(|id| {
+            queue
+                .message_delivery_report(*id)
+                .ok()
+                .flatten()
+                .is_some_and(|report| {
+                    report.recipient_receipt == Some(cas_store::SurfacingSource::HookSurfaced)
+                        && aliases
+                            .iter()
+                            .any(|alias| alias.eq_ignore_ascii_case(&report.target))
+                })
+        })
+        .collect()
+}
+
+fn already_shown_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    let named = ids
+        .iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "[already shown] Message {named} in this turn's prompt was already shown to you in an \
+         earlier turn, at a tool call. This is the harness's held copy of the same message, not a \
+         new one: act on it only if you have not already."
+    ))
 }
 
 /// cas-ad92: the message ids named by daemon pointer wakes in a submitted
@@ -409,6 +487,23 @@ mod tests {
         let rendered = render_surfaced(&[spoofed]);
         assert!(rendered.contains("[cas #82 unverified:Daniel@iphone-15 "), "{rendered}");
         assert!(!rendered.contains("in_reply_to=82"), "{rendered}");
+    }
+
+    #[test]
+    fn envelope_ids_read_the_message_stamp_cas_7ce4() {
+        assert_eq!(
+            envelope_ids(
+                "[cas #4184530 supervisor-authored 9s replay]\nbody [cas #12 agent-authored 0s first]"
+            ),
+            vec![4184530, 12]
+        );
+        assert!(envelope_ids("see [cas #abc] or [cas #12x] or cas #13").is_empty());
+        let note = already_shown_note(&[7, 9]).unwrap();
+        assert!(
+            note.contains("#7, #9") && note.contains("already shown"),
+            "{note}"
+        );
+        assert!(already_shown_note(&[]).is_none());
     }
 
     #[test]

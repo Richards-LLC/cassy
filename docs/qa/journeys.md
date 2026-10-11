@@ -553,7 +553,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns it
 3. Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and focused; confirming stops it, and a stale stop says what changed
 4. Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it once and the row reads "Asked … ago"
-5. A pairing without factory:manage — Stop… is disabled, saying it is not allowed on this pairing and naming the command that adds it
+5. A pairing without factory:manage — Stop… is disabled, saying it is not allowed on this pairing and naming the command that adds it; the header gives one line per missing permission, naming its controls (Add worker and Focus epic: Manage workers and tasks; Write access: Stop and restart workers and sessions), and each disabled control is described by its line
 
 #### Expected experience
 
@@ -625,17 +625,17 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 390 (dark) and 1280 (light), an open conversation whose session has a task in progress, on a device paired with factory:manage
 - **Goal:** grant the agents on a task create and edit access to a folder outside their worktree until the task closes, see the receipt, and revoke it; a pairing without factory:manage cannot
-- **Touches:** `hub-web/src/write-grant.ts`, `hub-web/src/write-grant-view.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Touches:** `hub-web/src/write-grant.ts`, `hub-web/src/write-grant-view.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/fleet-sheet.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
 - **Suite:** `hub-web/e2e/journeys/write-grant.journey.ts`
 - **Gaps:** the hub double answers `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml` with the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub tests (cas-ab04)
 
 #### Steps
 
-1. Open Write access on the current task — "Write access…" opens a panel on the first task in progress, with create and edit allowed and delete not
+1. Open Write access on the current task — "Write access…" opens a panel titled "Write access outside the worktree", saying it lets the task's agents write to a folder outside their worktree until the task closes, on the first task in progress, with create and edit allowed and delete not; on a phone the sheet names the conversation and machine ("cas-src on Atlas") and its close button is "Close write access"
 2. An incomplete grant says what is missing — Review grant with no folder says to enter one, and nothing is sent
-3. Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder, is shown and announced
+3. Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder with the task id unbroken, is shown and announced; Folder and Reason clear, so one more click cannot resend the grant
 4. Revoke it after confirming — Revoke… asks to revoke every grant for the task; confirming says how many were removed
-5. A pairing without factory:manage — Write access… is disabled, saying it is not allowed on this pairing
+5. A pairing without factory:manage — Write access… is disabled, and its line reads "Write access: … Needs the Stop and restart workers and sessions permission. Add it in Paired machines."
 
 #### Expected experience
 

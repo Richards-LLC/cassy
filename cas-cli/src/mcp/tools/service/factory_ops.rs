@@ -2823,8 +2823,19 @@ impl CasService {
             .task_id
             .as_ref()
             .map(|id| {
+                // cas-5f28: a peer on another machine may already hold it;
+                // the worker's start would then be refused.
+                let peer = crate::cloud::peer_claims::peer_hold_for(&self.inner.cas_root, id)
+                    .map(|hold| {
+                        format!(
+                            "\n⚠️  HELD BY A PEER — {} claims {id} until {}. The spawned worker's start will be refused unless the claim is released or the start is forced (force=true); check with them first.",
+                            hold.describe(),
+                            hold.until(),
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}"
+                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}{peer}"
                 )
             })
             .unwrap_or_default();
@@ -3719,6 +3730,19 @@ impl CasService {
             }));
         }
 
+        // cas-e477: supervisors of this repo on other machines or sessions,
+        // from Cassy Cloud. Not on the summary fast path, which stays local.
+        let peers_section = {
+            let cas_root = self.inner.cas_root.clone();
+            // Read-only: never auto-register or revive the caller for a lookup.
+            let self_id = self.inner.get_registered_agent_id_read_only().ok();
+            tokio::task::spawn_blocking(move || {
+                crate::cloud::peers::peers_section_cached(&cas_root, self_id.as_deref())
+            })
+            .await
+            .unwrap_or_default()
+        };
+
         // Opportunistically prune stale agents so status output stays actionable.
         // Worker threshold tightened from 120s → 30s per cas-2749 so a dead CC
         // client is detected within one supervisor poll. Paired with the
@@ -4068,6 +4092,8 @@ impl CasService {
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
+            msg.push('\n');
+            msg.push_str(&peers_section);
             if stale_pruned > 0 {
                 msg.push_str(&format!(
                     "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
@@ -4432,6 +4458,9 @@ impl CasService {
         if let Some(warning) = shared_clone_warning.as_deref() {
             output.push_str(warning);
         }
+
+        output.push_str(&peers_section);
+        output.push('\n');
 
         if workers.is_empty() {
             output.push_str("Workers: None active\n");
@@ -5668,6 +5697,26 @@ impl CasService {
         Ok(Self::success(output))
     }
 
+    /// `coordination action=peers` (cas-e477): the live supervisors of this
+    /// repo on any machine, from the Cassy Cloud agent registry. Read-only;
+    /// peers are never spawned, messaged or claimed for (cas-604d).
+    pub(super) async fn coordination_peers(&self) -> Result<CallToolResult, McpError> {
+        let cas_root = self.inner.cas_root.clone();
+        // Read-only: never auto-register or revive the caller for a lookup.
+        let self_id = self.inner.get_registered_agent_id_read_only().ok();
+        let text = tokio::task::spawn_blocking(move || {
+            crate::cloud::peers::peers_section(&cas_root, self_id.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Peer lookup failed: {e}"),
+            )
+        })?;
+        Ok(Self::success(text))
+    }
+
     pub(super) async fn factory_my_context(
         &self,
         _req: FactoryRequest,
@@ -6640,8 +6689,28 @@ impl CasService {
 
         // cas-566b: the body is the operator facade the Commander hub also
         // calls; this arm keeps MCP's request parsing and error codes.
+        // cas-5f28: a pinned focus is also a Cassy Cloud claim on the epic,
+        // so a supervisor of this repository on another machine sees it, and
+        // this one is told when such a peer already works it. Never refused.
+        let pinned_epic = (!clear).then(|| epic_id.map(str::to_string)).flatten();
+        let cas_root = self.inner.cas_root.clone();
+        let agent_id = self.inner.get_agent_id().ok();
         focus_epic(&self.inner.cas_root, &factory_session, request)
-            .map(|text| Self::success(text))
+            .map(|text| {
+                let shared = pinned_epic
+                    .zip(agent_id)
+                    .and_then(|(epic, agent)| {
+                        crate::cloud::peer_claims::claim_epic_focus(&cas_root, &epic, &agent)
+                            .map(|hold| {
+                                hold.shared_epic_note(
+                                    &epic,
+                                    &crate::mcp::tools::core::guidance::caller_prefix(),
+                                )
+                            })
+                    })
+                    .unwrap_or_default();
+                Self::success(format!("{text}{shared}"))
+            })
             .map_err(|error| match error {
                 OperationError::Failed(message) => {
                     Self::error(ErrorCode::INTERNAL_ERROR, message)

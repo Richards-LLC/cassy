@@ -179,6 +179,17 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
             fmt.warning("Sync disabled via environment")?;
         }
 
+        // cas-e477: supervisors of this repo on any machine, via Cassy Cloud.
+        // Verbose only: the one-line summary and --json stay offline.
+        fmt.newline()?;
+        fmt.subheading("Peers")?;
+        fmt.write_muted(&"─".repeat(40))?;
+        fmt.newline()?;
+        for line in crate::cloud::peers::peers_section(cas_root, None).lines() {
+            fmt.write_raw(&format!("  {line}"))?;
+            fmt.newline()?;
+        }
+
         // Show recent entries
         if !entries.is_empty() {
             fmt.newline()?;

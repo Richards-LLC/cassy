@@ -163,6 +163,17 @@ async fn run_server_impl() -> anyhow::Result<()> {
     let guarded_stdin =
         crate::mcp::server::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
 
+    // GH #1170: refuse a `.cas` without an initialized store before anything
+    // opens `cas.db`. Opening it created an empty database here, which then
+    // read as "already initialized" to `cas init`.
+    if !crate::store::detect::cas_store_present(&cas_root) {
+        anyhow::bail!(
+            "no Cassy store in {} (no initialized cas.db); run `cas init` in {}",
+            cas_root.display(),
+            cas_root.parent().unwrap_or(&cas_root).display()
+        );
+    }
+
     // This is deliberately before every remaining background path and every
     // store opener. All MCP configurations — including freshly spawned
     // factory workers — enter through `cas serve` and share this boundary.

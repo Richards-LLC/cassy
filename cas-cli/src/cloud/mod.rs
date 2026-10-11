@@ -20,10 +20,15 @@ mod backfill;
 pub mod comments;
 mod config;
 mod coordinator;
+pub mod peer_claims;
 pub mod device;
 // T5: capability-gated cloud embeddings for distilled knowledge pages.
 pub mod code_embeddings;
 pub mod embeddings;
+// cas-e477: peer supervisor discovery through the cloud agent registry.
+pub mod peers;
+// cas-f9c7: cross-machine supervisor messaging through a cloud peer mailbox.
+pub mod peer_mailbox;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;
@@ -84,7 +89,7 @@ pub use project_aliases::{
     select_alias_record,
 };
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
-pub use coordinator::CloudCoordinator;
+pub use coordinator::{AgentInfo, CloudCoordinator};
 pub use device::DeviceConfig;
 pub use embed_drain::{
     CodeVectorDrain, DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history,

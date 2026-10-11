@@ -82,3 +82,15 @@ impl TestMachine {
 
 #[path = "distributed_factory_test_cases/tests.rs"]
 mod tests;
+
+#[path = "distributed_factory_test_cases/peers.rs"]
+mod peers;
+
+#[path = "distributed_factory_test_cases/peer_messages.rs"]
+mod peer_messages;
+
+#[path = "distributed_factory_test_cases/fake_cloud.rs"]
+mod fake_cloud;
+
+#[path = "distributed_factory_test_cases/two_machine.rs"]
+mod two_machine;

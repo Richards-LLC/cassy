@@ -1712,7 +1712,12 @@ impl EmbeddedDaemon {
                 if !reused {
                     let mut coord_guard = self.cloud_coordinator.write().await;
                     if let Some(ref mut coord) = *coord_guard {
-                        match coord.register(&agent) {
+                        // cas-e477: peers find each other by repo identity and
+                        // epic focus carried in the registration metadata.
+                        let focus = agent.factory_session.as_deref().and_then(
+                            crate::ui::factory::preferred_epic_id_from_session_metadata_named,
+                        );
+                        match coord.register_with_focus(&agent, focus.as_deref()) {
                             Ok(_) => {
                                 eprintln!(
                                     "[Cassy] Cloud registered agent: {}",
@@ -1960,11 +1965,25 @@ impl EmbeddedDaemon {
                 {
                     let coord_guard = self.cloud_coordinator.read().await;
                     if let Some(ref coord) = *coord_guard {
+                        // cas-e477: heartbeat this daemon's own agent. The
+                        // coordinator's registered id is whichever agent the
+                        // socket owner registered last, often a worker.
                         let coord_clone = coord.clone();
+                        let own_id = id.clone();
                         drop(tokio::task::spawn_blocking(move || {
-                            let _ = coord_clone.heartbeat();
+                            let _ = coord_clone.heartbeat_agent(&own_id);
                         }));
                     }
+                }
+
+                // cas-5f28: keep this agent's Cassy Cloud task claims alive
+                // while it works; once it stops, they run out on their own.
+                if succeeded && !terminal && self.cloud_coordinator.read().await.is_some() {
+                    let cas_root = self.config.cas_root.clone();
+                    let agent = id.clone();
+                    drop(tokio::task::spawn_blocking(move || {
+                        crate::cloud::peer_claims::renew_agent_claims_if_due(&cas_root, &agent);
+                    }));
                 }
             }
 
@@ -2356,7 +2375,10 @@ fn init_cloud_syncer(cas_root: &std::path::Path) -> Option<Arc<CloudSyncer>> {
 
 fn init_cloud_coordinator(cas_root: &std::path::Path) -> Option<CloudCoordinator> {
     let cloud_config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
-    CloudCoordinator::new(cloud_config).ok()
+    let canonical_id = crate::cloud::resolve_canonical_id(cas_root);
+    CloudCoordinator::new(cloud_config)
+        .ok()
+        .map(|coordinator| coordinator.with_canonical_id(canonical_id))
 }
 
 /// Initialize code watcher if code indexing is enabled

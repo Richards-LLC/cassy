@@ -42,6 +42,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         ws_clients: HashMap::new(),
         terminal_exchange: Default::default(),
         next_ws_client_id: 0,
+        relay_token: None,
         web_pane_sizes: HashMap::new(),
         teams: None,
         notify_rx: None,

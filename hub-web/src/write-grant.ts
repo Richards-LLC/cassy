@@ -10,6 +10,7 @@
  */
 
 import { AuthenticationError, HubRequestError } from "./connection";
+import { FACTORY_MANAGE_CAPABILITY } from "./pairing-scopes";
 
 export type WriteMode = "create" | "edit" | "delete";
 export const WRITE_MODES: readonly WriteMode[] = ["create", "edit", "delete"];
@@ -26,6 +27,8 @@ export type WriteGrantStage = "editing" | "confirm-grant" | "confirm-revoke" | "
 export interface WriteGrantResult {
   readonly tone: "ok" | "error";
   readonly text: string;
+  /** The task a receipt names, drawn unbroken (cas-06e8). */
+  readonly task?: string;
 }
 
 export type WriteGrantBody = Readonly<Record<string, unknown>>;
@@ -99,10 +102,20 @@ export class WriteGrantState {
   }
 }
 
+// cas-a217: write grants need factory:manage; name that permission, not
+// factory:operate's "managing workers".
+const MISSING_MANAGE = `this pairing lacks the ${FACTORY_MANAGE_CAPABILITY} permission. Add it in Paired machines.`;
+
 function refusal(error: unknown): string {
-  if (error instanceof AuthenticationError) return "the pairing is no longer accepted. Pair the machine again.";
+  // cas-42c0: a 403 arrives as AuthenticationError("scope-mismatch"): the
+  // pairing works but lacks factory:manage. Only a lost pairing re-pairs.
+  if (error instanceof AuthenticationError) {
+    return error.kind === "scope-mismatch"
+      ? MISSING_MANAGE
+      : "the pairing is no longer accepted. Pair the machine again.";
+  }
   if (!(error instanceof HubRequestError)) return "the machine could not be reached. Check its connection and try again.";
-  if (error.status === 403) return "this pairing does not allow managing workers. Add it in Paired machines.";
+  if (error.status === 403) return MISSING_MANAGE;
   if (error.status === 401) return "the pairing is no longer accepted. Pair the machine again.";
   if (error.detail?.trim()) return error.detail.trim();
   return error.status >= 500 ? "the machine returned an error. Try again." : "the machine refused the request.";
@@ -119,10 +132,13 @@ export async function sendWriteGrant(state: WriteGrantState, send: WriteGrantSen
       const grant = (answer?.grant ?? {}) as Record<string, unknown>;
       const modes = Array.isArray(grant.modes) ? (grant.modes as string[]).join("+") : state.modeText();
       const path = typeof grant.path === "string" ? grant.path : state.draft.path.trim();
-      state.result = { tone: "ok", text: `Write access granted for ${task}: ${path} (${modes}) until the task closes.` };
+      state.result = { tone: "ok", text: `Write access granted for ${task}: ${path} (${modes}) until the task closes.`, task };
+      // cas-06e8: a sent grant leaves no primed form; keep the task and modes.
+      state.draft.path = "";
+      state.draft.reason = "";
     } else {
       const removed = Number(answer?.removed ?? 0);
-      state.result = { tone: "ok", text: `Write access revoked for ${task}: ${removed} ${removed === 1 ? "grant" : "grants"} removed.` };
+      state.result = { tone: "ok", text: `Write access revoked for ${task}: ${removed} ${removed === 1 ? "grant" : "grants"} removed.`, task };
     }
   } catch (error) {
     state.result = { tone: "error", text: `Could not ${kind}: ${refusal(error)}` };

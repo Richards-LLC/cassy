@@ -839,6 +839,9 @@ main {
 .write-grant-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .write-grant-confirm p { margin: 0; color: var(--text-hi); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 .write-grant-result { margin: 0; overflow-wrap: anywhere; }
+.write-grant-id { white-space: nowrap; }
+.write-grant-title { margin: 0; font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-ui); color: var(--text-hi); }
+.write-grant-lead, .write-grant-where { margin: 0; font-size: var(--fs-meta); color: var(--text-mid); overflow-wrap: anywhere; }
 .fleet-ops-note--ok { color: var(--state-ok); }
 .fleet-ops-undo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--bg-raised); border-radius: var(--radius-card); color: var(--text-hi); font-size: var(--fs-meta); }
 /* cas-97d58 F12: a destructive action's result, where the Undo would be. */

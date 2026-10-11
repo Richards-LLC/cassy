@@ -1676,3 +1676,65 @@ fn factory_worker_serve_never_starts_the_code_indexer_cas_8256() {
     );
     assert!(!stderr.contains("Code indexing off in this process"), "{stderr}");
 }
+
+/// GH #1170: a `.cas` holding only `proxy.toml` (an isolated MCP proxy
+/// store). `cas serve` must refuse without leaving an empty `cas.db` that
+/// fools init, `cas update --schema-only` must fail rather than exit 0 having
+/// done nothing, and `cas init --force` must leave a store serve accepts.
+#[test]
+fn partial_cas_with_only_proxy_toml_initializes_and_serves_gh_1170() {
+    let sandbox = CasSandbox::new();
+    let cas_dir = sandbox.path().join(".cas");
+    std::fs::remove_dir_all(&cas_dir).expect("drop the sandbox store");
+    std::fs::create_dir_all(&cas_dir).expect("partial .cas");
+    std::fs::write(cas_dir.join("proxy.toml"), "").expect("proxy.toml");
+
+    // serve refuses, and does not leave a v0 cas.db behind.
+    let refused = sandbox
+        .command()
+        .arg("serve")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run cas serve");
+    assert!(!refused.status.success(), "serve must refuse a partial .cas");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("cas init"), "the refusal names the fix: {stderr}");
+    let leftover = cas_dir.join("cas.db");
+    assert!(
+        !leftover.exists() || std::fs::metadata(&leftover).unwrap().len() == 0,
+        "serve must not create a store"
+    );
+
+    // A v0 cas.db as 3.49.0's serve left it must not read as initialized.
+    std::fs::write(&leftover, b"").expect("empty cas.db");
+
+    let schema_only = sandbox
+        .command()
+        .args(["update", "--schema-only"])
+        .output()
+        .expect("run cas update --schema-only");
+    assert!(
+        !schema_only.status.success(),
+        "--schema-only that migrated nothing must fail: {}",
+        String::from_utf8_lossy(&schema_only.stdout)
+    );
+
+    let init = sandbox
+        .command()
+        .args(["init", "--force", "--yes", "--no-integrations"])
+        .output()
+        .expect("run cas init --force");
+    assert!(
+        init.status.success(),
+        "init --force: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    // serve now starts at the current schema.
+    let mut client = McpTestClient::spawn(&sandbox);
+    let response = client.initialize();
+    assert!(
+        response.error.is_none(),
+        "serve must start after init --force: {response:?}"
+    );
+}

@@ -11,7 +11,8 @@ export function presentFleetSheet(container: HTMLElement, dismiss: () => void): 
   sheet.setAttribute("aria-label", content.getAttribute("aria-label") ?? "Fleet actions");
   const close = document.createElement("button");
   close.type = "button"; close.className = "fleet-sheet-close";
-  close.setAttribute("aria-label", "Close actions"); close.textContent = "×";
+  // cas-4cf2: a panel may name its own close ("Close write access").
+  close.setAttribute("aria-label", content.dataset.closeLabel ?? "Close actions"); close.textContent = "×";
   close.onclick = () => dismiss();
   sheet.oncancel = (event) => { event.preventDefault(); dismiss(); };
   // Native dialog containment includes the browser's document focus stop.

@@ -41,6 +41,16 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       await journey.stage("Open Write access on the current task", async () => {
         await rail.getByRole("button", { name: "Write access…" }).click();
         await expect(panel).toBeVisible();
+        // cas-4cf2: a visible title matching the accessible name, what the
+        // grant does, and on a phone where it acts and a close named for it.
+        await expect(panel.getByRole("heading", { name: "Write access outside the worktree" })).toBeVisible();
+        await expect(panel.locator(".write-grant-lead")).toHaveText("Lets the agents on one task write to a folder outside their worktree until the task closes.");
+        if (width === 390) {
+          await expect(panel.locator(".write-grant-where")).toHaveText("cas-src on Atlas");
+          await expect(page.getByRole("dialog", { name: "Write access outside the worktree" }).getByRole("button", { name: "Close write access", exact: true })).toBeVisible();
+        } else {
+          await expect(panel.locator(".write-grant-where")).toHaveCount(0);
+        }
         await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
         await expect(panel.getByRole("checkbox", { name: "create" })).toBeChecked();
         await expect(panel.getByRole("checkbox", { name: "edit" })).toBeChecked();
@@ -56,12 +66,27 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await panel.getByRole("textbox", { name: "Reason" }).fill("INGEST request files");
         await panel.getByRole("button", { name: "Review grant" }).click();
         const confirm = rail.getByRole("alertdialog", { name: "Confirm write access" });
+        // cas-42c0: Escape backs out of the confirmation to the form, with
+        // focus on Review grant, and sends nothing.
+        await expect(confirm).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(confirm).toHaveCount(0);
+        await expect(panel.getByRole("button", { name: "Review grant" })).toBeFocused();
+        expect(hub.writeGrants).toHaveLength(0);
+        await page.keyboard.press("Enter");
         await expect(confirm).toContainText("Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?");
         await expect(confirm.getByRole("button")).toHaveText(["Cancel", "Grant"]);
         await confirm.getByRole("button", { name: "Grant", exact: true }).click();
         const receipt = "Write access granted for cas-1234: /home/operator/soundwave-config/docs/requests (create+edit) until the task closes.";
         await expect(rail.locator(".write-grant-result")).toHaveText(receipt);
         await expect(announcer).toHaveText(receipt);
+        // cas-06e8: the sent grant leaves no primed form, and the task id in
+        // the receipt stays whole.
+        await expect(panel.getByRole("textbox", { name: "Folder" })).toHaveValue("");
+        await expect(panel.getByRole("textbox", { name: "Reason" })).toHaveValue("");
+        await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
+        await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveText("cas-1234");
+        await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveCSS("white-space", "nowrap");
         expect(hub.writeGrants.map((call: any) => [call.status, call.body])).toEqual([[200, {
           action: "grant", task: "cas-1234", path: "~/soundwave-config/docs/requests", mode: "create+edit", reason: "INGEST request files",
         }]]);
@@ -69,6 +94,11 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       await journey.stage("Revoke it after confirming", async () => {
         await panel.getByRole("button", { name: "Revoke…" }).click();
         const confirm = rail.getByRole("alertdialog", { name: "Confirm revoke" });
+        await expect(confirm).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(confirm).toHaveCount(0);
+        await expect(panel.getByRole("button", { name: "Revoke…" })).toBeFocused();
+        await page.keyboard.press("Enter");
         await expect(confirm).toContainText("Revoke every write grant for cas-1234?");
         await confirm.getByRole("button", { name: "Revoke", exact: true }).click();
         await expect(rail.locator(".write-grant-result")).toHaveText("Write access revoked for cas-1234: 1 grant removed.");
@@ -92,7 +122,8 @@ test.describe("write access without factory:manage cas_ab04", () => {
       await grant.focus();
       await page.keyboard.press("Enter");
       await expect(page.locator("#status-view .write-grant")).toHaveCount(0);
-      await expect(page.locator("#fleet-reason-header-grant")).toContainText("Not allowed on this pairing");
+      // cas-a217: the line names Write access and the permission that enables it.
+      await expect(page.locator(`#${await grant.getAttribute("aria-describedby")}`)).toHaveText("Write access: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.");
       expect(hub.writeGrants).toHaveLength(0);
     });
   });

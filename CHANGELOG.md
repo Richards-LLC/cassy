@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security — guard-relaxing config keys are operator-only (cas-0d4f0)
+
+- `verification.enabled`, `verification.force_bypass_allowed`, `slack.transport`,
+  `factory.supervisor_only_mcp`, `factory.supervisor_only_env`,
+  `factory.worker_credential_env`, `qa.evidence_gate`, `qa.independent_pass`
+  and `release.claude_account_allowlist` can only be changed by the operator
+  at a terminal. `cas config set`, `reset`, `import`, `edit` and the config
+  TUI refuse a change from inside an agent session, using the same checks as
+  `factory.write_roots`. Ordinary keys stay settable.
+- The PreToolUse hook refuses agent shell commands that set or reset those
+  keys, and refuses every direct agent write, edit, copy, move or delete of
+  `.cas/config.toml` (or `config.yaml`), the global Cassy config and
+  `.cas/proxy.toml`.
+- MCP `proxy_add` and `proxy_remove` refuse to remove, replace or alias a
+  `factory.supervisor_only_mcp` server.
+
+### Added — a task one machine works is not started on another (cas-5f28)
+
+- When the project is logged in to Cassy Cloud, `task start` and
+  `task action=claim` also claim the task in the cloud. A session of the same
+  repository on another machine (or in another clone) that tries to start it
+  is refused. The refusal names the holder and its machine, and shows how to
+  message them. `force=true` takes the task over and says so.
+- Claims are scoped to the repository, so the same task id in two of your
+  repositories never collides.
+- Claims are released on close, release, reset, transfer, park and cancel.
+  The daemon heartbeat renews them every two minutes.
+- When the holder's machine stops, its claim runs out and a peer may start
+  the task with a stale-claim warning. When the cloud is unreachable, the
+  local lease applies, with a "peers not checked" warning.
+- Two sessions working children of the same epic (subtask start, epic start,
+  `focus_epic`) are told about each other; nothing is refused.
+- `spawn_workers` warns when a peer holds the task it pre-assigns.
+- `task start` of a pulled task already in progress under an assignee who is
+  not on this host names that assignee.
+
 ## [3.50.0] - 2026-10-10
 
 ### Changed — many agents on one machine (#1165)

@@ -2903,6 +2903,40 @@ echo 'Summary: 1 passed'
         }
     }
 
+    /// cas-bb5e: a green integration offers its tip's dist tree to the
+    /// background journey scheduler and asks it to start, passing whether the
+    /// build guard reports the host idle. The scheduler owns every decision.
+    #[test]
+    fn cas_bb5e_green_integration_offers_dist_tree_and_ticks() {
+        let repo = fixture();
+        assert!(!journey_background_supported(repo.path()));
+        let log = repo.path().join("journey-helper.log");
+        fs::write(
+            repo.path().join("scripts/journey-background.py"),
+            format!(
+                "import sys\nopen({:?}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\nprint('journey-background ' + sys.argv[1] + ': ok')\n",
+                log.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(journey_background_supported(repo.path()));
+        let line = offer_journey_background(repo.path(), "abc123", true).unwrap();
+        assert!(line.contains("offer: ok") && line.contains("tick: ok"), "{line}");
+        offer_journey_background(repo.path(), "def456", false).unwrap();
+        let calls = fs::read_to_string(&log).unwrap();
+        let worktree = repo.path().display().to_string();
+        let lines: Vec<_> = calls.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                format!("offer --repo {worktree} --tip abc123 --green"),
+                format!("tick --repo {worktree} --host-idle"),
+                format!("offer --repo {worktree} --tip def456 --green"),
+                format!("tick --repo {worktree}"),
+            ]
+        );
+    }
+
     /// cas-398c: a passing integration proves release-binary-isa and
     /// macos-check in the background through the repository's helper; a
     /// failing helper is reported, and a newer merge cancels the run.

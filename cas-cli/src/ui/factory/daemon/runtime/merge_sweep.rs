@@ -1710,6 +1710,16 @@ fn first_output_line(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// cas-bb5e: the coordinator asks the journey scheduler at most once a
+    /// minute; the first poll asks at once.
+    #[test]
+    fn cas_bb5e_journey_tick_is_throttled_to_once_a_minute() {
+        let now = Instant::now();
+        assert!(journey_tick_due(None, now));
+        assert!(!journey_tick_due(Some(now), now + Duration::from_secs(59)));
+        assert!(journey_tick_due(Some(now), now + JOURNEY_TICK_INTERVAL));
+    }
+
     #[test]
     fn unavailable_is_recorded_once_per_coordinator_session_across_merges() {
         let temp = tempfile::tempdir().unwrap();

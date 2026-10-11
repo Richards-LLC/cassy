@@ -383,6 +383,88 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         self.assertFalse(host.start_compiler_cache({k: v for k, v in self.env.items()
                                                     if k not in ('RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER')}))
 
+    # cas-3a29: a shared sccache server that inherited a run's TMPDIR fails
+    # every later compile with "Failed to create temp dir" once that run's
+    # temporary directory is deleted.
+    FAKE_SCCACHE = (
+        'import json,os,pathlib,sys\n'
+        'state_path=pathlib.Path(os.environ["FAKE_SCCACHE_STATE"])\n'
+        'state=json.loads(state_path.read_text()) if state_path.exists() else {"server_tmpdir":None,"starts":[]}\n'
+        'def start():\n'
+        '    state["server_tmpdir"]=os.environ.get("TMPDIR","/tmp"); state["starts"].append(state["server_tmpdir"])\n'
+        'args=sys.argv[1:]\n'
+        'if args==["--start-server"]:\n'
+        '    if state["server_tmpdir"] is not None:\n'
+        '        state_path.write_text(json.dumps(state)); print("Address in use",file=sys.stderr); sys.exit(2)\n'
+        '    start(); state_path.write_text(json.dumps(state)); sys.exit(0)\n'
+        'if args==["--stop-server"]:\n'
+        '    state["server_tmpdir"]=None; state_path.write_text(json.dumps(state)); sys.exit(0)\n'
+        'if state["server_tmpdir"] is None: start()  # a client auto-starts the server\n'
+        'state_path.write_text(json.dumps(state))\n'
+        'if os.environ.get("FAKE_SCCACHE_MODE")=="broken" or not pathlib.Path(state["server_tmpdir"]).is_dir():\n'
+        '    print("sccache: error: Failed to create temp dir",file=sys.stderr); sys.exit(2)\n'
+        'sys.exit(0)\n'
+    )
+
+    def fake_sccache(self, mode='normal'):
+        fake = self.root / 'fake-bin' / 'sccache'
+        fake.parent.mkdir(exist_ok=True)
+        fake.write_text('#!' + sys.executable + '\n' + self.FAKE_SCCACHE)
+        fake.chmod(0o755)
+        state = self.root / 'fake-sccache-state.json'
+        env = dict(self.env, RUSTC_WRAPPER=str(fake), FAKE_SCCACHE_STATE=str(state),
+                   FAKE_SCCACHE_MODE=mode, RUSTC=sys.executable,
+                   SCCACHE_DIR=str(self.root / 'cache' / 'sccache'))
+        return env, state
+
+    def test_cas_3a29_server_starts_under_a_stable_tmpdir_never_the_runs(self):
+        env, state = self.fake_sccache()
+        run_tmp = self.root / 'run-tmp'
+        run_tmp.mkdir()
+        env['TMPDIR'] = str(run_tmp)
+        self.assertTrue(host.start_compiler_cache(env))
+        started = Path(json.loads(state.read_text())['server_tmpdir'])
+        self.assertEqual(started, host.compiler_cache_tmpdir(env))
+        self.assertNotEqual(started, run_tmp)
+        self.assertTrue(started.is_dir())
+        self.assertFalse(str(started).startswith(str(run_tmp)))
+
+    def test_cas_3a29_a_server_whose_tmpdir_was_deleted_is_restarted(self):
+        env, state = self.fake_sccache()
+        gone = self.root / 'deleted-run-tmp'  # an earlier run's TMPDIR, since removed
+        state.write_text(json.dumps({'server_tmpdir': str(gone), 'starts': [str(gone)]}))
+        status, detail = host.ensure_compiler_cache(env)
+        self.assertEqual(status, 'restarted', detail)
+        self.assertIn('Failed to create temp dir', detail)
+        self.assertEqual(Path(json.loads(state.read_text())['server_tmpdir']),
+                         host.compiler_cache_tmpdir(env))
+
+    def test_cas_3a29_a_healthy_server_is_left_running(self):
+        env, state = self.fake_sccache()
+        self.assertEqual(host.ensure_compiler_cache(env), ('ok', ''))
+        self.assertEqual(len(json.loads(state.read_text())['starts']), 1)
+        self.assertEqual(host.ensure_compiler_cache(env), ('ok', ''))
+        self.assertEqual(len(json.loads(state.read_text())['starts']), 1, 'no restart when healthy')
+
+    def test_cas_3a29_an_unrecoverable_cache_is_a_named_environment_blocker(self):
+        env, _ = self.fake_sccache('broken')
+        status, detail = host.ensure_compiler_cache(env)
+        self.assertEqual(status, 'blocked')
+        self.assertIn('ENVIRONMENT BLOCKER', detail)
+        self.assertIn('sccache --stop-server', detail)
+        self.assertIn('Failed to create temp dir', detail)
+
+    def test_cas_3a29_no_sccache_wrapper_is_off(self):
+        self.assertEqual(host.ensure_compiler_cache(self.env), ('off', ''))
+
+    def test_cas_3a29_an_uninstalled_sccache_wrapper_is_off_not_blocked(self):
+        # CI runners export RUSTC_WRAPPER=sccache without installing it.
+        env = dict(self.env, RUSTC_WRAPPER='sccache', PATH=str(self.root / 'empty-bin'),
+                   RUSTC=sys.executable)
+        status, detail = host.ensure_compiler_cache(env)
+        self.assertEqual(status, 'off', detail)
+        self.assertIn('not installed', detail)
+
     def test_cas_4cb9_slot_symlink_fails_closed(self):
         host.private_directory(self.pool)
         (self.root/'target').write_text('')

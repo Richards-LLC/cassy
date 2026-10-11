@@ -617,8 +617,15 @@ def run_contexts(root, clone, env, log_dir, clone_target, execution):
     wait = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS") or 600
     poll = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS") or 1
     # Rows build with sccache; its server must not start inside the proof's
-    # tree, where it would outlive the proof (cas-7b7b9).
-    host.start_compiler_cache(env)
+    # tree, where it would outlive the proof (cas-7b7b9), and must be able to
+    # compile: a server whose TMPDIR was deleted fails every rustc instantly,
+    # which used to surface as a nextest FAIL with no test names (cas-3a29).
+    cache_status, cache_detail = host.ensure_compiler_cache(env)
+    if cache_status == "blocked":
+        raise ValueError(cache_detail)
+    if cache_status == "restarted":
+        print("assembly compiler cache: restarted an sccache server that could not compile "
+              f"({cache_detail.splitlines()[0] if cache_detail else 'no output'})", flush=True)
     with host.admission("proof", env, memory_budget, wait, poll, HOST_MEMORY_DIRECTORY) as (admitted_env, fds), \
          host.LeaseHolder(fds) as holder:
         # Rows never receive the proof's intent/budget descriptors, so an

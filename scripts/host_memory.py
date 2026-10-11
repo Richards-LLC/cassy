@@ -20,11 +20,13 @@ import os
 import re
 from pathlib import Path
 import secrets
+import shutil
 import select
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'
@@ -443,10 +445,19 @@ def start_compiler_cache(env):
     "Address in use" means a server already runs; any failure is ignored and
     the build still runs normally.
     """
-    wrapper = env.get('RUSTC_WRAPPER') or env.get('CARGO_BUILD_RUSTC_WRAPPER')
-    if not wrapper or Path(wrapper).name != 'sccache':
+    wrapper = _sccache_wrapper(env)
+    if not wrapper:
         return False
     clean = {key: value for key, value in env.items() if key not in LEASE_ENV_KEYS}
+    # cas-3a29: the server outlives this build and serves every later one,
+    # so it must never inherit a run's temporary TMPDIR: once that directory
+    # is deleted, every compile through it fails "Failed to create temp dir".
+    stable = compiler_cache_tmpdir(env)
+    try:
+        stable.mkdir(parents=True, exist_ok=True)
+        clean['TMPDIR'] = str(stable)
+    except OSError:
+        pass
     try:
         subprocess.run([wrapper, '--start-server'], env=clean, stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -454,6 +465,105 @@ def start_compiler_cache(env):
     except (OSError, subprocess.SubprocessError):
         return False
     return True
+
+
+SCCACHE_RESTART_HINT = 'sccache --stop-server'
+
+
+def _sccache_wrapper(env):
+    wrapper = env.get('RUSTC_WRAPPER') or env.get('CARGO_BUILD_RUSTC_WRAPPER')
+    return wrapper if wrapper and Path(wrapper).name == 'sccache' else None
+
+
+def compiler_cache_tmpdir(env):
+    """The TMPDIR the shared sccache server runs under (cas-3a29).
+
+    A sibling of the sccache cache directory, so it lives as long as the
+    cache, never under a run's temporary directory and never inside the cache
+    itself (which sccache sizes and evicts). `CAS_SCCACHE_TMPDIR` overrides.
+    """
+    override = env.get('CAS_SCCACHE_TMPDIR')
+    if override:
+        return Path(override)
+    cache = env.get('SCCACHE_DIR') or str(Path(env.get('HOME') or Path.home()) / '.cache' / 'sccache')
+    return Path(cache.rstrip('/') + '-tmp')
+
+
+def _compiler_cache_canary(env, wrapper):
+    """Compile a one-line crate through the server: ``(ok, output)``.
+
+    A compile is what needs the server's temporary directory, so only a
+    compile proves the server healthy; ``--show-stats`` does not.
+    """
+    rustc = env.get('RUSTC') or shutil.which('rustc', path=env.get('PATH'))
+    if not rustc:
+        return True, 'no rustc on PATH; compiler cache not probed'
+    clean = {key: value for key, value in env.items() if key not in LEASE_ENV_KEYS}
+    parent = compiler_cache_tmpdir(env)
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='cas-sccache-canary-', dir=parent) as scratch:
+            source = Path(scratch) / 'canary.rs'
+            source.write_text('pub fn canary() {}\n')
+            result = subprocess.run(
+                [wrapper, rustc, '--crate-name', 'cas_sccache_canary', '--crate-type', 'lib',
+                 '--emit=metadata', '--out-dir', scratch, str(source)],
+                env=clean, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                start_new_session=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f'sccache: canary could not run: {error}'
+    return result.returncode == 0, (result.stderr + result.stdout).strip()
+
+
+def ensure_compiler_cache(env):
+    """Start sccache's server and prove it can compile (cas-3a29).
+
+    Returns ``(status, detail)``:
+
+    - ``off``: no sccache wrapper, nothing to do.
+    - ``ok``: the server compiled the canary.
+    - ``restarted``: the canary failed in sccache (typically a server whose
+      TMPDIR was deleted); the server was stopped and restarted under the
+      stable TMPDIR, and then compiled. ``detail`` is the original failure.
+    - ``blocked``: sccache still cannot compile. ``detail`` is a named
+      environment blocker with the restart command, for the caller to report
+      instead of a build or test failure.
+
+    A canary failure that is not sccache's own (rustc itself failing) is
+    reported ``ok`` with its output, so the build runs and fails on its own
+    terms.
+    """
+    wrapper = _sccache_wrapper(env)
+    if not wrapper:
+        return 'off', ''
+    # A wrapper that does not exist is not a server to heal: there is nothing
+    # to restart, and a real build fails on its own terms (cas-3a29: CI
+    # runners export RUSTC_WRAPPER=sccache without installing it).
+    if not (os.path.isfile(wrapper) or shutil.which(wrapper, path=env.get('PATH'))):
+        return 'off', f'{wrapper} is not installed'
+    start_compiler_cache(env)
+    ok, output = _compiler_cache_canary(env, wrapper)
+    if ok:
+        return 'ok', ''
+    if 'sccache' not in output.lower():
+        return 'ok', output
+    clean = {key: value for key, value in env.items() if key not in LEASE_ENV_KEYS}
+    try:
+        subprocess.run([wrapper, '--stop-server'], env=clean, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       start_new_session=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    start_compiler_cache(env)
+    retried, retry_output = _compiler_cache_canary(env, wrapper)
+    if retried:
+        return 'restarted', output
+    first = next((line for line in (retry_output or output).splitlines() if line.strip()), 'no output')
+    return 'blocked', (
+        f'ENVIRONMENT BLOCKER: the sccache compiler cache cannot compile ({first}), even after a '
+        f'restart under {compiler_cache_tmpdir(env)}. This is a host problem, not a build or test '
+        f'failure. Fix: run `{SCCACHE_RESTART_HINT}` (the next build starts a fresh server), or set '
+        f'RUSTC_WRAPPER= to build uncached, then rerun.')
 
 
 if __name__ == '__main__':

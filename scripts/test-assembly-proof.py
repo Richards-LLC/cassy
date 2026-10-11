@@ -32,6 +32,13 @@ class ReceiptTests(unittest.TestCase):
         patcher = mock.patch.object(proof, "HOST_MEMORY_DIRECTORY", self.root / ".host-memory")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Hermetic compiler cache (cas-3a29): the host's or CI runner's
+        # RUSTC_WRAPPER must never reach a real sccache from these fixtures.
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        for key in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"):
+            os.environ.pop(key, None)
         self.git("init", "-q")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "user.name", "Fixture")
@@ -929,6 +936,37 @@ p.prove(root)
                 mock.patch.object(proof, "inputs", side_effect=AssertionError("tools must not run")):
             with self.assertRaisesRegex(ValueError, r"\.cas ancestor"):
                 proof.prove(self.root)
+
+
+
+class CompilerCacheBlockerTests(unittest.TestCase):
+    """cas-3a29: an sccache server that cannot compile fails the proof as a
+    named environment blocker before any row runs, never as a nextest FAIL
+    with no test names."""
+
+    def test_cas_3a29_blocked_compiler_cache_fails_before_any_row(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        fake = root / "bin" / "sccache"
+        fake.parent.mkdir()
+        fake.write_text("#!" + sys.executable + "\n"
+                        "import sys\n"
+                        "if sys.argv[1:] in (['--start-server'], ['--stop-server']): sys.exit(0)\n"
+                        "print('sccache: error: Failed to create temp dir', file=sys.stderr); sys.exit(2)\n")
+        fake.chmod(0o755)
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CARGO_BUILD_RUSTC_WRAPPER", "CAS_HOST_MEMORY_LEASE")}
+        env.update(RUSTC_WRAPPER=str(fake), RUSTC=sys.executable,
+                   SCCACHE_DIR=str(root / "cache" / "sccache"),
+                   # The blocker must come before host admission; never wait on it.
+                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS="1",
+                   CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS="1")
+        with mock.patch.object(proof, "_run_contexts", side_effect=AssertionError("a row ran")):
+            with self.assertRaises(ValueError) as refused:
+                proof.run_contexts(root, root, env, root, root, {})
+        self.assertIn("ENVIRONMENT BLOCKER", str(refused.exception))
+        self.assertIn("sccache --stop-server", str(refused.exception))
 
 
 if __name__ == "__main__":

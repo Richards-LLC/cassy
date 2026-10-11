@@ -385,13 +385,29 @@ pub fn is_rebased_copy(repo: &Path, recorded: &str, tip: &str, target: &str) -> 
 /// `git patch-id --stable` of everything `head` brings over its merge-base
 /// with `target`. `None` when it cannot be computed or the change is empty.
 fn change_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
+    change_patch_id_excluding(repo, head, target, &[])
+}
+
+/// [`change_patch_id`] leaving out `excluded` paths (cas-0c988).
+fn change_patch_id_excluding(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    excluded: &[&str],
+) -> Option<String> {
     use std::io::Write;
     let base = Command::new("git").args(["merge-base", head, target]).current_dir(repo).output().ok()?;
     if !base.status.success() {
         return None;
     }
     let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
-    let diff = Command::new("git").args(["diff", "--no-color", &base, head]).current_dir(repo).output().ok()?;
+    let mut args = vec!["diff".to_string(), "--no-color".to_string(), base, head.to_string()];
+    if !excluded.is_empty() {
+        args.push("--".to_string());
+        args.push(".".to_string());
+        args.extend(excluded.iter().map(|path| format!(":(exclude){path}")));
+    }
+    let diff = Command::new("git").args(&args).current_dir(repo).output().ok()?;
     if !diff.status.success() || diff.stdout.is_empty() {
         return None;
     }
@@ -416,8 +432,7 @@ pub const GENERATED_ARTIFACT_PATHS: &[&str] = &["hub-web/dist"];
 /// with `target`, leaving out [`GENERATED_ARTIFACT_PATHS`]. Two tips with the
 /// same id carry the same reviewed source, whatever their build output.
 pub fn source_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
-    let _ = (repo, head, target);
-    None
+    change_patch_id_excluding(repo, head, target, GENERATED_ARTIFACT_PATHS)
 }
 
 /// cas-0c988: carry a passed or waived verdict from an earlier tip of this
@@ -431,8 +446,55 @@ pub fn carry_verdict(
     head: &str,
     target: &str,
 ) -> Option<QaPass> {
-    let _ = (cas_root, repo, task, passes, head, target);
-    None
+    if passes
+        .iter()
+        .any(|pass| same_sha(&pass.bound_head, head) && pass.state.satisfies_gate())
+    {
+        return None;
+    }
+    let head_patch = source_patch_id(repo, head, target)?;
+    let from = passes
+        .iter()
+        .filter(|pass| {
+            !pass.is_withdrawn()
+                && pass.state.satisfies_gate()
+                && !same_sha(&pass.bound_head, head)
+        })
+        .find(|pass| {
+            source_patch_id(repo, &pass.bound_head, target).as_deref() == Some(head_patch.as_str())
+        })?;
+    let reason = format!(
+        "the reviewed source patch is byte-identical (patch-id {}); only generated build output ({}) differs",
+        &head_patch[..head_patch.len().min(12)],
+        GENERATED_ARTIFACT_PATHS.join(", "),
+    );
+    let carried = match cas_store::carry_qa_pass(
+        cas_root,
+        from,
+        head,
+        &from.branch,
+        &reason,
+        chrono::Utc::now(),
+    ) {
+        Ok(carried) => carried,
+        Err(error) => {
+            tracing::warn!(task = %task.id, %error, "cas-0c988: QA verdict could not be carried");
+            return None;
+        }
+    };
+    let line = format!(
+        "[{}] DECISION: independent QA verdict carried over from @{} to @{} (pass {} → {}): {reason}. (cas-0c988)",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        from.head8(),
+        carried.head8(),
+        from.id,
+        carried.id,
+    );
+    tracing::info!(task = %task.id, "{line}");
+    if let Ok(store) = crate::store::open_task_store(cas_root) {
+        let _ = store.append_note(&task.id, &line);
+    }
+    Some(carried)
 }
 
 /// First changed path matching a configured glob, with the glob it matched.
@@ -549,7 +611,12 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .filter(|sha| !sha.is_empty());
         let refusal = match head {
-            Some(head) => merge_gate(task, &qa, &passes, &head).err(),
+            // cas-0c988: a rebased tip carrying the reviewed source patch byte
+            // for byte keeps the verdict (logged). A raw `git merge` merges
+            // into the checked-out branch, so that is the target.
+            Some(head) => merge_gate(task, &qa, &passes, &head)
+                .err()
+                .filter(|_| carry_verdict(cas_root, cwd, task, &passes, &head, "HEAD").is_none()),
             None => Some(format!(
                 "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
                 task.id

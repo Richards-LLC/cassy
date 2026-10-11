@@ -746,6 +746,30 @@ impl CasCore {
                  so no QA pass was dispatched. Push the branch and close again."
             )));
         };
+        // cas-0c988: a re-park after a rebase that only regenerated build
+        // output keeps the earlier verdict instead of dispatching a new
+        // review. A supervisor's explicit request always opens a round.
+        let carried_note = if requested.is_none() {
+            let prior = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            crate::qa_pass::carry_verdict(
+                &self.cas_root,
+                repo,
+                task,
+                &prior,
+                head,
+                &freshest_target_ref(repo, parent_branch),
+            )
+            .map(|carried| {
+                format!(
+                    "\n\n♻️  INDEPENDENT QA CARRIED OVER to @{}: {}",
+                    carried.head8(),
+                    carried.summary.as_deref().unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let now = chrono::Utc::now();
         // cas-624f: after `max_rounds` rejections Cassy escalates instead of
         // opening another round, and the escalation offers "a fix plan with
@@ -879,6 +903,7 @@ impl CasCore {
             }
         };
         status.push_str(&orphan_note);
+        status.push_str(&carried_note);
         if let Some(retired) = superseded {
             // Read the new round back after materialization so its QA task
             // id (linked just above) is known.
@@ -1127,7 +1152,22 @@ impl CasCore {
                 repo.display()
             ));
         };
-        crate::qa_pass::merge_gate(&task, &qa, &passes, &head).err()
+        let refusal = crate::qa_pass::merge_gate(&task, &qa, &passes, &head).err()?;
+        // cas-0c988: the delivery was rebased (its build output regenerated)
+        // without changing the reviewed source: the verdict carries, logged.
+        let target = self
+            .open_task_store()
+            .ok()
+            .and_then(|store| store.get_parent_epic(task_id).ok().flatten())
+            .and_then(|epic| epic.branch)
+            .map(|branch| freshest_target_ref(repo, &branch))
+            .unwrap_or_else(|| "HEAD".to_string());
+        if crate::qa_pass::carry_verdict(&self.cas_root, repo, &task, &passes, &head, &target)
+            .is_some()
+        {
+            return None;
+        }
+        Some(refusal)
     }
 
     /// cas-619f close backstop: an independently reviewed tip must be

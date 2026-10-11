@@ -1,3 +1,10 @@
 # Preserve the exact upstream crates.io source bytes. Its published assembly,
 # C, and generated SVG files contain intentional trailing whitespace.
 vendor/blake3-1.8.6/** whitespace=-trailing-space,-blank-at-eof
+
+# cas-0c988: hub-web/dist is build output committed as the Cargo input. Merges
+# never hand-merge it: the `cas-generated` driver keeps the target's copy (no
+# conflict) and scripts/regenerate-generated-artifacts.sh rebuilds it from the
+# merged sources. Cassy registers the driver before its merges; for a manual
+# merge run `git config merge.cas-generated.driver true` once per clone.
+hub-web/dist/** merge=cas-generated

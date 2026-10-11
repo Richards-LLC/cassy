@@ -2381,6 +2381,20 @@ fn delivery_stalled_threshold_i64(configured_secs: u64) -> i64 {
     i64::try_from(configured_secs).unwrap_or(i64::MAX)
 }
 
+/// cas-b5ad: how long before the delivery deadline a stalled message's
+/// sender is told at the latest.
+const DELIVERY_STALLED_DEADLINE_MARGIN_SECS: i64 = 3 * 60;
+
+/// cas-b5ad: a configured stall threshold, capped so the sender hears of an
+/// unread message before the queue abandons it. The default normal threshold
+/// (30 minutes) outlasted the 15-minute abandonment deadline, so a
+/// supervisor's decision to a busy worker could be dropped without its
+/// sender ever being told.
+fn delivery_stalled_threshold_before_abandonment(configured_secs: u64) -> i64 {
+    delivery_stalled_threshold_i64(configured_secs)
+        .min(cas_store::PROMPT_RETRY_MAX_AGE_SECS - DELIVERY_STALLED_DEADLINE_MARGIN_SECS)
+}
+
 /// cas-ef14 (GH #139): a queue row whose payload was written into the
 /// recipient's Agent-Teams inbox and left pending because the wake was
 /// deferred.
@@ -2730,8 +2744,8 @@ impl FactoryDaemon {
         let factory = config.factory();
         let candidates = match queue.delivery_stalled_candidates(
             &self.session_name,
-            delivery_stalled_threshold_i64(factory.delivery_stalled_priority_secs),
-            delivery_stalled_threshold_i64(factory.delivery_stalled_normal_secs),
+            delivery_stalled_threshold_before_abandonment(factory.delivery_stalled_priority_secs),
+            delivery_stalled_threshold_before_abandonment(factory.delivery_stalled_normal_secs),
             50,
         ) {
             Ok(candidates) => candidates,
@@ -9963,6 +9977,19 @@ mod tests {
             i64::MAX,
             "oversized unsigned config must not wrap negative at the store boundary"
         );
+    }
+
+    /// cas-b5ad: whatever the configuration, a stalled message's sender is
+    /// told before the queue abandons the message, with time to act.
+    #[test]
+    fn stall_notice_always_precedes_abandonment_cas_b5ad() {
+        let deadline = cas_store::PROMPT_RETRY_MAX_AGE_SECS;
+        for configured in [30 * 60, 15 * 60, u64::MAX] {
+            let threshold = super::delivery_stalled_threshold_before_abandonment(configured);
+            assert!(threshold <= deadline - 3 * 60, "{configured} -> {threshold}");
+        }
+        assert_eq!(super::delivery_stalled_threshold_before_abandonment(10 * 60), 10 * 60);
+        assert_eq!(super::delivery_stalled_threshold_before_abandonment(0), 0);
     }
 
     #[derive(Clone)]

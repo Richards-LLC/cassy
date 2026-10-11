@@ -190,10 +190,21 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.id DESC";
 
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
+///
+/// cas-b5ad: a row the daemon claimed for its transport after the turn began,
+/// but whose handoff it never completed, is eligible too. A busy worker's
+/// pane is never silent, so the daemon declines the wake after the claim and
+/// leaves the row gated (any Agent-Teams copy is held by Claude Code until
+/// the turn ends); without this the claim hid the row from every tool
+/// boundary of a long turn. A completed handoff (`transport_delivered_at`)
+/// keeps its claim (cas-27ad). Both placeholders bind the turn start.
 const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
-    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
-     AND (q.transport_delivered_at IS NULL
-          OR julianday(q.transport_delivered_at) > julianday(?))";
+    "AND (((seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
+           AND (q.transport_delivered_at IS NULL
+                OR julianday(q.transport_delivered_at) > julianday(?)))
+          OR (seen.source = 'transport_claimed'
+              AND q.transport_delivered_at IS NULL
+              AND julianday(seen.seen_at) > julianday(?)))";
 
 /// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
 /// The daemon's claim (`transport_claimed`) hides a handed-off row from every
@@ -3814,9 +3825,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND q.delivery_stalled_notified_at IS NULL
                AND q.acked_at IS NULL
                AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+               -- cas-b5ad: the daemon's transport claim is a reservation,
+               -- not a read; a claimed row whose wake keeps being declined is
+               -- still unread, and its sender must hear that it stalled.
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                       AND seen.source <> 'transport_claimed'
                )
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
                     OR (q.urgent = 0 AND q.priority > 1 AND q.created_at <= ?))
@@ -3876,6 +3891,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                        AND NOT EXISTS (
                            SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                              AND seen.source <> 'transport_claimed'
                        )",
                     params![prompt_id, factory_session, stale_cutoff],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
@@ -6587,9 +6603,11 @@ impl SqlitePromptQueueStore {
                 if let Some(session) = factory_session {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
+                    // cas-b5ad: the receipt clause binds the turn start twice.
                     params.extend(
                         turn_start_param
-                            .clone()
+                            .iter()
+                            .flat_map(|at| [at.clone(), at.clone()])
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -6631,9 +6649,11 @@ impl SqlitePromptQueueStore {
                 } else {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
+                    // cas-b5ad: the receipt clause binds the turn start twice.
                     params.extend(
                         turn_start_param
-                            .clone()
+                            .iter()
+                            .flat_map(|at| [at.clone(), at.clone()])
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -6694,7 +6714,13 @@ impl SqlitePromptQueueStore {
                      WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
                         OR (?5 AND prompt_queue_recipient_seen.source = 'transport_claimed')",
                 )?;
-                let takes_claim = matches!(transport, TransportEligibility::WakeNamed);
+                // cas-b5ad: a tool-boundary drain returns a claimed row only
+                // when the claim came after the turn began; it takes that
+                // claim over as the pointer wake's turn does.
+                let takes_claim = matches!(
+                    transport,
+                    TransportEligibility::WakeNamed | TransportEligibility::After(_)
+                );
                 for prompt in &prompts {
                     stmt.execute(params![prompt.id, recipient, seen_at, source.as_str(), takes_claim])?;
                 }
@@ -7011,6 +7037,68 @@ mod tests {
         assert!(
             store.message_delivery_report(transported).is_err(),
             "ordinary suppressed rows with delivery evidence stay invalid"
+        );
+    }
+
+    /// cas-b5ad: a busy worker's pane is never silent, so the daemon claims a
+    /// supervisor message for its transport and then declines every wake.
+    /// The claim (`transport_claimed`) hid the row from the tool-boundary
+    /// drain, and Claude Code holds the transported copy until the turn ends,
+    /// so the worker took many tool calls without seeing it (13+ minutes,
+    /// message 4184454). A row claimed after the current turn began is
+    /// surfaced at the next tool boundary and its claim becomes the hook's
+    /// receipt; one claimed before the turn began (possibly the turn's own
+    /// prompt) is not.
+    #[test]
+    fn tool_boundary_surfaces_rows_claimed_for_transport_after_the_turn_began_cas_b5ad() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-b5ad";
+        let before = store
+            .enqueue_with_session("supervisor", "worker-1", "the turn's own prompt", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let decision = store
+            .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(decision, "worker-1").unwrap());
+
+        let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()),
+            vec![decision],
+            "the mid-turn claim reaches the worker at its next tool call"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a surfaced row is receipted and never replayed"
+        );
+        let report = store.message_delivery_report(decision).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Confirmed, "{report:?}");
+        assert!(
+            !store.claim_recipient_transport(decision, "worker-1").unwrap(),
+            "the daemon cannot reclaim a row the hook surfaced"
+        );
+
+        // A claim whose handoff completed stays with its transport (cas-27ad).
+        let handed_off = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into the pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(handed_off, "worker-1").unwrap());
+        store.mark_transport_delivered(handed_off).unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a completed handoff is not surfaced a second time"
         );
     }
 
@@ -10627,6 +10715,59 @@ mod tests {
                 .is_none()
         );
         assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
+    }
+
+    /// cas-b5ad: the daemon's transport claim is a reservation, not a read.
+    /// A claimed row whose wake keeps being declined (message 4184454) is
+    /// still unread, so its sender must hear that it stalled; a row the
+    /// recipient's hook surfaced is read and is not bounced.
+    #[test]
+    fn a_claimed_but_unrendered_row_still_bounces_to_its_sender_cas_b5ad() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let claimed = store
+            .enqueue_full(
+                "supervisor",
+                "busy-worker",
+                "scope decision",
+                Some("session"),
+                Some("scope decision"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        let surfaced = store
+            .enqueue_full(
+                "supervisor",
+                "busy-worker",
+                "read already",
+                Some("session"),
+                Some("read already"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        assert!(store.claim_recipient_transport(claimed, "busy-worker").unwrap());
+        store
+            .record_recipient_surfaced(surfaced, "busy-worker", SurfacingSource::HookSurfaced)
+            .unwrap();
+        let old = (Utc::now() - chrono::Duration::seconds(13 * 60)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id IN (?, ?)",
+                params![old, claimed, surfaced],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .delivery_stalled_candidates("session", 10 * 60, 12 * 60, 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![claimed]
+        );
     }
 
     #[test]

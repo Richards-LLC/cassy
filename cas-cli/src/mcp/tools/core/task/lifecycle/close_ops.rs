@@ -6301,7 +6301,7 @@ impl CasCore {
         if let (Some(repo_path), Some(recorded_anchor)) = (
             repo_path,
             task.deliverables.factory_branch_anchor.as_deref(),
-        ) && merge_tip_contains_recorded_anchor(repo_path, factory_branch_anchor, recorded_anchor)
+        ) && merge_tip_is_delivery_container(repo_path, factory_branch_anchor, recorded_anchor)
         {
             return None;
         }
@@ -11756,6 +11756,24 @@ fn merge_tip_contains_recorded_anchor(
     parents.any(|parent| {
         parent == recorded_anchor || git_commit_is_ancestor(repo_path, recorded_anchor, parent)
     })
+}
+
+/// GH #873's delivery container: a merge that carries the recorded anchor only
+/// on a merged-in side, because the supervisor merged the delivery into the
+/// target. cas-9668: a worker who merges the epic into the task branch keeps
+/// the anchor on the merge's first-parent line; that merge is the task's next
+/// delivery tip, not a container.
+fn merge_tip_is_delivery_container(
+    repo_path: &std::path::Path,
+    merge_tip: &str,
+    recorded_anchor: &str,
+) -> bool {
+    if !merge_tip_contains_recorded_anchor(repo_path, merge_tip, recorded_anchor) {
+        return false;
+    }
+    let first_parent = format!("{merge_tip}^1");
+    !(git_ref_exists(repo_path, &first_parent)
+        && git_commit_is_ancestor(repo_path, recorded_anchor, &first_parent))
 }
 
 /// Two commit ids refer to the same commit when one is a prefix of the

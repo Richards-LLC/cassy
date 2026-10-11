@@ -4877,3 +4877,38 @@ async fn scope_factory_operate_roundtrip() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "a read-only pairing cannot grant itself control");
 }
+
+/// cas-eaa3: Commander's app switcher opens Explorer on the session's project,
+/// so the session wire shape carries the project's cloud identity, the same
+/// canonical id sync uses, and omits it when there is none to name.
+#[test]
+fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"github.com/Acme/Widget\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        cloud_project_id(&cas_root).as_deref(),
+        Some("github.com/acme/widget"),
+        "the pinned identity, in the canonical form Explorer filters on"
+    );
+
+    let mut session = fixture_session("factory-main");
+    assert!(
+        !serde_json::to_value(&session)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("cloud_project_id"),
+        "no identity, no field"
+    );
+    session.cloud_project_id = Some("github.com/acme/widget".into());
+    assert_eq!(
+        serde_json::to_value(&session).unwrap()["cloud_project_id"],
+        "github.com/acme/widget"
+    );
+}

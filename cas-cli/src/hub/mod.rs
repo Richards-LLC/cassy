@@ -515,6 +515,11 @@ pub struct HubSession {
     /// them has activity yet (cas-6acf).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    /// The project's Cassy Cloud identity (cas-eaa3), the `project_id`
+    /// Explorer filters on, so Commander's app switcher opens Explorer on
+    /// this project. Absent when the project has no cloud identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_project_id: Option<String>,
     #[serde(skip)]
     pub daemon_identity: Option<DaemonIdentity>,
 }
@@ -600,6 +605,37 @@ fn file_identity(path: &std::path::Path) -> Option<FileIdentity> {
     }
 }
 
+/// How long a project's resolved cloud identity is reused. Resolution may
+/// run `git` (the remote step of the canonical-id chain), and the session list
+/// is polled, so each project resolves at most once per interval.
+const CLOUD_PROJECT_ID_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A project's Cassy Cloud identity for Commander's Explorer link (cas-eaa3):
+/// the same canonical id sync pushes under (config pin, git remote, then
+/// folder name). The opaque path-hash fallback names no Explorer project, so
+/// it is not reported.
+fn cloud_project_id(cas_root: &std::path::Path) -> Option<String> {
+    type Cache = std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, Option<String>)>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((at, id)) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(cas_root)
+        && at.elapsed() < CLOUD_PROJECT_ID_TTL
+    {
+        return id.clone();
+    }
+    let id = crate::cloud::resolve_canonical_id_with_source(cas_root)
+        .filter(|(_, source)| *source != crate::cloud::CanonicalIdSource::PathHash)
+        .map(|(id, _)| id);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(cas_root.to_path_buf(), (std::time::Instant::now(), id.clone()));
+    id
+}
+
 fn session_cas_root(session: &SessionInfo) -> Option<std::path::PathBuf> {
     let project_dir = session.metadata.project_dir.as_deref()?;
     find_cas_root_ignoring_env(std::path::Path::new(project_dir)).ok()
@@ -615,6 +651,8 @@ impl LocalSessionReadModel {
             .iter()
             .map(|session| {
                 let mut projected = hub_session(session);
+                projected.cloud_project_id = session_cas_root(session)
+                    .and_then(|cas_root| cloud_project_id(&cas_root));
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
                     projected.last_activity = Some(label);
@@ -742,6 +780,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
         last_activity_at: None,
         last_activity: None,
         started_at: Some(session.metadata.created_at.clone()).filter(|at| !at.trim().is_empty()),
+        cloud_project_id: None,
         daemon_identity: session
             .metadata
             .daemon_pid_starttime
@@ -926,6 +965,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         last_activity_at: None,
         last_activity: None,
         started_at: None,
+        cloud_project_id: None,
         daemon_identity: None,
     }
 }

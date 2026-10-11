@@ -203,6 +203,14 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.merge_sweep_quiet_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.merge_sweep_quiet_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.merge_sweep_quiet_secs: {value}"
+                    ))
+                })?;
+            }
             // cas-1a05: registered factory keys that `set` did not accept.
             "factory.artifacts_root" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);

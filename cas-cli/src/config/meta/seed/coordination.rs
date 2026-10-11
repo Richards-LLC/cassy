@@ -280,6 +280,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.merge_sweep_quiet_secs",
+        section: "factory",
+        name: "Post-Merge Sweep Quiet Period",
+        description: "Seconds with no further epic merge before the rolling integration sweep starts. A burst of merges runs one sweep of the newest tip; each merge still cancels a stale running sweep. 0 starts immediately.",
+        value_type: ConfigType::Int,
+        default: "120",
+        constraint: Constraint::Range(0, 3_600),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "merge", "sweep", "debounce", "quiet", "proof"],
+        use_cases: &["Leave QA browser runs host memory during merge bursts", "Start every sweep immediately with 0"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.ai_enrichment.enabled",
         section: "factory",
         name: "AI Enrichment",

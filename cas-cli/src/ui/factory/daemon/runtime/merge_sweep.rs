@@ -33,6 +33,34 @@ const JOURNEY_TICK_INTERVAL: Duration = Duration::from_secs(60);
 fn journey_tick_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|last| now.saturating_duration_since(last) >= JOURNEY_TICK_INTERVAL)
 }
+
+/// cas-833e: merges arrive in bursts. Each merge used to start a new
+/// integration sweep on the next poll, and every assembly proof holds host
+/// memory admission from its start, so a burst kept QA browser runs waiting.
+/// The gate keeps only the newest merge and releases it once no merge has
+/// arrived for the quiet period and the superseded sweep has finished.
+#[derive(Debug, Default)]
+struct QuietGate {
+    latest: Option<(Instant, SweepRequest)>,
+}
+
+impl QuietGate {
+    fn note(&mut self, request: SweepRequest, now: Instant) {
+        self.latest = Some((now, request));
+    }
+
+    fn holds(&self) -> bool {
+        self.latest.is_some()
+    }
+
+    fn due(&mut self, now: Instant, quiet: Duration, sweep_active: bool) -> Option<SweepRequest> {
+        let (noted, _) = self.latest.as_ref()?;
+        if sweep_active || now.saturating_duration_since(*noted) < quiet {
+            return None;
+        }
+        self.latest.take().map(|(_, request)| request)
+    }
+}
 const MAX_FAILURE_LINES: usize = 12;
 const MAX_NOTE_CHARS: usize = 1400;
 pub(super) const TEST_PROCESS_IDENTITY_ENV: &[&str] = &[
@@ -99,6 +127,8 @@ struct ActiveSweep {
 struct SweepSettings {
     enabled: bool,
     timeout: Duration,
+    /// cas-833e: `factory.merge_sweep_quiet_secs`.
+    quiet: Duration,
     cargo_build_jobs: String,
     nice_cargo: bool,
     max_concurrent_builders: usize,
@@ -136,6 +166,7 @@ impl From<&FactoryConfig> for SweepSettings {
             recovery_epics: None,
             enabled: config.merge_sweep,
             timeout: Duration::from_secs(config.merge_sweep_timeout_secs.max(1)),
+            quiet: Duration::from_secs(config.merge_sweep_quiet_secs),
             cargo_build_jobs: config.cargo_build_jobs.clone(),
             nice_cargo: config.nice_cargo,
             max_concurrent_builders: config.max_concurrent_builders,
@@ -173,6 +204,7 @@ pub(crate) struct MergeSweepCoordinator {
     active: HashMap<String, ActiveSweep>,
     completed: HashMap<String, String>,
     retry_after: Option<(Instant, SweepRequest)>,
+    quiet: QuietGate,
     unavailable_reported: bool,
     journey_tick: Option<Instant>,
     journey_tick_busy: Arc<AtomicBool>,
@@ -196,6 +228,7 @@ impl MergeSweepCoordinator {
             active: HashMap::new(),
             completed: HashMap::new(),
             retry_after: None,
+            quiet: QuietGate::default(),
             unavailable_reported: false,
             journey_tick: None,
             journey_tick_busy: Arc::new(AtomicBool::new(false)),
@@ -208,7 +241,14 @@ impl MergeSweepCoordinator {
         cas_dir: &Path,
         config: &FactoryConfig,
     ) {
-        let mut requests = self.read_merge_events();
+        let settings = SweepSettings::from(config);
+        // cas-833e: a merge cancels a stale running sweep at once, which frees
+        // its host memory admission, but the next sweep waits in the quiet gate.
+        for request in self.read_merge_events() {
+            self.supersede_active(&request);
+            self.quiet.note(request, Instant::now());
+        }
+        let mut requests = Vec::new();
         if self
             .retry_after
             .as_ref()
@@ -218,9 +258,13 @@ impl MergeSweepCoordinator {
                 requests.push(request);
             }
         }
-        requests.extend(self.reap_finished(cas_dir).await);
-
-        let settings = SweepSettings::from(config);
+        let reaped = self.reap_finished(cas_dir).await;
+        // A superseded sweep's pending request is the merge the gate holds.
+        if !self.quiet.holds() {
+            requests.extend(reaped);
+        }
+        let active = self.active.contains_key("integration");
+        requests.extend(self.quiet.due(Instant::now(), settings.quiet, active));
         for request in requests {
             self.schedule(project_root, cas_dir, request, &settings, false);
         }
@@ -425,6 +469,19 @@ impl MergeSweepCoordinator {
         pending
     }
 
+    /// Cancel a running sweep of a different request; it becomes `pending`.
+    /// Returns whether a sweep is active.
+    fn supersede_active(&mut self, request: &SweepRequest) -> bool {
+        let Some(active) = self.active.get_mut("integration") else {
+            return false;
+        };
+        if &active.request != request {
+            active.pending = Some(request.clone());
+            active.cancel.store(true, Ordering::Relaxed);
+        }
+        true
+    }
+
     fn schedule(
         &mut self,
         project_root: &Path,
@@ -433,11 +490,7 @@ impl MergeSweepCoordinator {
         settings: &SweepSettings,
         strict_target: bool,
     ) {
-        if let Some(active) = self.active.get_mut("integration") {
-            if active.request != request {
-                active.pending = Some(request);
-                active.cancel.store(true, Ordering::Relaxed);
-            }
+        if self.supersede_active(&request) {
             return;
         }
         if self.completed.get(&request.epic_id) == Some(&request.commit) {
@@ -2064,12 +2117,19 @@ mod tests {
         }
         // Each merge restarts the wait: nothing starts inside the burst.
         for offset in [60, 120, 179] {
-            assert_eq!(gate.due(start + Duration::from_secs(offset), quiet, false), None, "{offset}s");
+            assert_eq!(
+                gate.due(start + Duration::from_secs(offset), quiet, false),
+                None,
+                "{offset}s"
+            );
         }
         // Only the newest tip runs, once, after the burst has been quiet.
         let due = gate.due(start + Duration::from_secs(180), quiet, false);
         assert_eq!(due.map(|request| request.commit), Some("three".to_string()));
-        assert_eq!(gate.due(start + Duration::from_secs(600), quiet, false), None);
+        assert_eq!(
+            gate.due(start + Duration::from_secs(600), quiet, false),
+            None
+        );
     }
 
     #[test]
@@ -2078,7 +2138,10 @@ mod tests {
         let mut gate = QuietGate::default();
         gate.note(quiet_request("next"), start);
         // A superseded sweep is still being torn down: never overlap it.
-        assert_eq!(gate.due(start + Duration::from_secs(900), Duration::ZERO, true), None);
+        assert_eq!(
+            gate.due(start + Duration::from_secs(900), Duration::ZERO, true),
+            None
+        );
         assert!(gate.holds());
         let due = gate.due(start, Duration::ZERO, false);
         assert_eq!(due.map(|request| request.commit), Some("next".to_string()));

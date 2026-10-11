@@ -959,6 +959,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.release_gate_home_dir", " /home/cas-release-gate/base ", "/home/cas-release-gate/base"),
         ("factory.merge_sweep_cwd", "web", "web"),
         ("factory.merge_sweep_timeout_secs", "900", "900"),
+        ("factory.merge_sweep_quiet_secs", "0", "0"),
         ("factory.ai_enrichment.enabled", "true", "true"),
         ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
         ("factory.ai_enrichment.provider", "openai-compatible", "openai-compatible"),

@@ -131,6 +131,80 @@ def estimate(command, cwd=None, depth=0):
     return heavy
 
 
+def _literal_statements(script):
+    """Split a literal `a && b ; c` shell script; None for anything else."""
+    if any(char in script for char in ('$', '`', '\n')):
+        return None
+    try:
+        lexer = shlex.shlex(script, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ''
+        words = list(lexer)
+    except ValueError:
+        return None
+    statements, current = [], []
+    for word in words:
+        if word in ('&&', ';'):
+            if not current:
+                return None
+            statements.append(current)
+            current = []
+        elif any(char in word for char in '&|()<>'):
+            return None  # background, pipes, subshells and redirections stay out
+        else:
+            current.append(word)
+    return statements + [current] if current else (statements or None)
+
+
+def _playwright_workers(args):
+    for arg in args:
+        if arg.startswith('--workers='):
+            value = arg.split('=', 1)[1]
+            return int(value) if value.isdigit() else None
+    return None
+
+
+def taste_eligible(command, cwd=None, depth=0):
+    """cas-833e: may this command take the taste lane beside a running proof?
+
+    Only positively bounded commands qualify: a light command whose estimate
+    is below the heavy default, a Playwright run capped at four workers
+    (cas-bb5e measured about 2.6 GiB peak at four), or the Commander visual QA
+    (one Chromium, sequential pages). Unknown commands, shell expansions,
+    background jobs and pipelines never do.
+    """
+    cwd = Path.cwd() if cwd is None else Path(cwd)
+    if not command or depth > 8:
+        return False
+    name, args = Path(command[0]).name, command[1:]
+    if name in ('bash', 'sh', 'dash', 'zsh') and args[:1] in (['-c'], ['-lc']):
+        statements = _literal_statements(args[1]) if len(args) == 2 else None
+        if not statements:
+            return False
+        for statement in statements:
+            if statement[0] == 'cd' and len(statement) == 2:
+                cwd = cwd / statement[1]
+            elif not taste_eligible(statement, cwd, depth + 1):
+                return False
+        return True
+    if name in ('python3', 'python') and args and Path(args[0]).name == 'worker-memory.py' and args[1:2] == ['--']:
+        return taste_eligible(constrained(args[2:]), cwd, depth + 1)
+    if name == 'npm' and args[:1] == ['exec'] and '--' in args:
+        # `npm exec --yes --package=playwright -- node scripts/visual-qa.mjs`
+        return taste_eligible(args[args.index('--') + 1:], cwd, depth + 1)
+    if name in ('node', 'nodejs') and args:
+        script = Path(args[0])
+        if script.name == 'visual-qa.mjs' and len(args) == 1:
+            return True
+        if script.name == 'cli.js' and '@playwright' in args[0] and args[1:2] == ['test']:
+            workers = _playwright_workers(args)
+            return workers is not None and 1 <= workers <= 4
+    if (name == 'npx' and args[:2] == ['playwright', 'test']) or (name == 'playwright' and args[:1] == ['test']):
+        workers = _playwright_workers(args)
+        return workers is not None and 1 <= workers <= 4
+    return estimate(command, cwd, depth) < host_memory.DEFAULT_ESTIMATE_BYTES
+
+
 def run(command, env=None, directory=None):
     env = dict(os.environ if env is None else env)
     wait = proof.positive_knob(env, 'CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS') or 600
@@ -139,9 +213,14 @@ def run(command, env=None, directory=None):
     # A compiler-cache server first started inside the suite would inherit the
     # suite's tree and outlive it (cas-7b7b9); start it outside admission.
     host_memory.start_compiler_cache(env)
+    lane = 'taste' if taste_eligible(command) else None
     with host_memory.admission('worker', env, proof.memory_budget, wait, poll, directory,
-                               estimate_bytes=estimate(command)) as (admitted_env, fds), \
+                               estimate_bytes=estimate(command), lane=lane) as (admitted_env, fds), \
          host_memory.LeaseHolder(fds) as holder:
+        try:
+            in_taste_lane = json.loads(admitted_env.get(host_memory.LEASE_ENV, '{}')).get('lane') == 'taste'
+        except ValueError:
+            in_taste_lane = False
         # The command never receives the lease descriptors: a daemon or orphan
         # it leaves behind cannot hold the budget. The holder covers a killed
         # wrapper for as long as the command's process group runs.
@@ -154,7 +233,13 @@ def run(command, env=None, directory=None):
             for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
                 handlers[sig] = signal.signal(sig, interrupted)
             while child.poll() is None:
-                if proof.memory_budget(env)['budget_bytes'] < proof.GUARD_HEADROOM_BYTES:
+                memory = proof.memory_budget(env)
+                if in_taste_lane:
+                    # The lane runs inside the proof's reserve, where the
+                    # budget is ~0 by design; protect the floor instead.
+                    if memory['available_bytes'] < host_memory.TASTE_FLOOR_BYTES:
+                        raise ValueError('taste lane reached the memory floor; stopping its process group')
+                elif memory['budget_bytes'] < proof.GUARD_HEADROOM_BYTES:
                     raise ValueError('worker suite reached assembly memory headroom; stopping its process group')
                 time.sleep(poll)
             return child.returncode if child.returncode >= 0 else 128 - child.returncode

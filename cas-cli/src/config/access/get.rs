@@ -141,6 +141,7 @@ impl Config {
             "factory.merge_sweep_timeout_secs" => {
                 Some(factory.merge_sweep_timeout_secs.to_string())
             }
+            "factory.merge_sweep_quiet_secs" => Some(factory.merge_sweep_quiet_secs.to_string()),
             "factory.ai_enrichment.enabled" => Some(factory.ai_enrichment.enabled.to_string()),
             "factory.ai_enrichment.endpoint" => Some(factory.ai_enrichment.endpoint.clone()),
             "factory.ai_enrichment.provider" => Some(factory.ai_enrichment.provider.clone()),

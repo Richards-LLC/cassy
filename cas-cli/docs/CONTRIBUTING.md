@@ -159,6 +159,50 @@ with its own process group if fresh budget falls inside the 2 GiB headroom.
 These are admission estimates and sampled protection, not OS memory limits;
 other applications remain outside this cooperative protocol.
 
+#### The taste lane beside a proof (cas-833e)
+
+A rolling-integration proof holds exclusive intent for its whole run. Without
+a lane, every QA browser run during a sweep waited the full 600 s and expired.
+The taste lane admits **one** positively bounded worker run beside a proof:
+
+- **Eligible commands** (`worker-memory.py` `taste_eligible`): light commands
+  (tsc, Vite build, capped Vitest), a Playwright run capped at four workers
+  (cas-bb5e measured about 2.6 GiB peak at four), and the Commander visual QA
+  (one Chromium, sequential pages). Unknown, expanded, piped or backgrounded
+  commands are never eligible and wait for the proof as before.
+- **Memory rule.** Let `R` be the proof's reserve, `A` fresh `MemAvailable`,
+  `E` the run's estimate (at most 4 GiB), `H` the 2 GiB headroom and `F` a
+  2 GiB floor. The lane admits only when `R >= E + H + F` and `A >= E + H + F`.
+  A proof phase plans to use at most `A - R`, so at the proof's planned peak
+  the lane still leaves `R - E >= H + F` free. With the default reserve
+  (`max(8 GiB, RAM / 4)`), any host can lend one 4 GiB run. A 64 GiB host
+  keeps 12 GiB free at the proof's peak.
+- **No planning into the lane.** While `taste.lock` is held, the proof's
+  memory budget subtracts the lane's full recorded estimate, even though
+  `MemAvailable` already shows part of it. Later proof phases and a newly
+  admitted proof therefore never plan into it.
+- **One at a time.** `taste.lock` is exclusive. A second eligible run waits,
+  printing `proof running; taste lane busy`.
+- **Guard.** A lane run sits inside the proof's reserve, where the worker
+  budget is about zero by design. It is stopped only if `MemAvailable` falls
+  below the floor, which means some estimate was exceeded, and never because
+  the proof is at its peak.
+
+The rolling-integration sweep also waits `[factory].merge_sweep_quiet_secs`
+(default 300 s) after the last epic merge before starting. Each merge still
+cancels a stale running sweep at once, which releases the proof's admission
+in the gap, so a burst of merges runs one proof of the newest tip instead of
+a proof per merge.
+
+The default was measured on 2026-10-11's 21 epic merges, which arrived 1 to
+8 minutes apart, with a proof run of about 13 minutes:
+
+| Quiet period | Proofs started | Cancelled | Completed | Proof lock held |
+| --- | --- | --- | --- | --- |
+| 0 s (before) | 21 | 19 | 2 | 91% of 115 min |
+| 120 s | 16 | 14 | 2 | 61% |
+| 300 s | 7 | 5 | 2 | 38% |
+
 Verified frontend tests default to one Playwright worker, honour explicit requests
 up to four, and enforce two Vitest workers. A proof's own child script tests reuse
 its admitted budget rather than waiting on themselves. Use `TMPDIR` on the

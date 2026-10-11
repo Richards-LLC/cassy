@@ -718,6 +718,12 @@ pub struct FactoryConfig {
     #[serde(default = "default_merge_sweep_timeout_secs")]
     pub merge_sweep_timeout_secs: u64,
 
+    /// cas-833e: seconds with no further epic merge before the rolling
+    /// integration sweep starts. A burst of merges runs one sweep, of the
+    /// newest tip, instead of a proof restarted per merge. 0 starts at once.
+    #[serde(default = "default_merge_sweep_quiet_secs")]
+    pub merge_sweep_quiet_secs: u64,
+
     /// Durable scratch base for the assembly proof's plain clone. The daemon
     /// passes this as CAS_RELEASE_GATE_HOME_DIR; no inherited shell env is
     /// required. Unset leaves full Cassy sweeps explicitly not configured.
@@ -933,6 +939,13 @@ fn default_merge_sweep_timeout_secs() -> u64 {
     30 * 60
 }
 
+fn default_merge_sweep_quiet_secs() -> u64 {
+    // Measured on 2026-10-11's 21 epic merges (1-8 min apart): 300 s ran the
+    // same 2 completed proofs as no quiet period while the proof lock was
+    // held 38% of the window instead of 91% (19 proofs were cancelled).
+    300
+}
+
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
@@ -966,6 +979,7 @@ impl Default for FactoryConfig {
             ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
             merge_sweep: true,
             merge_sweep_timeout_secs: default_merge_sweep_timeout_secs(),
+            merge_sweep_quiet_secs: default_merge_sweep_quiet_secs(),
             release_gate_home_dir: None,
             merge_sweep_command: None,
             merge_sweep_cwd: None,

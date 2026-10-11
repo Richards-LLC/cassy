@@ -549,8 +549,29 @@ def memory_budget(env):
         raise ValueError("cannot safely admit assembly without a memory snapshot: " + str(exc)) from exc
     configured = positive_knob(env, "CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB")
     reserve = configured * GIB if configured is not None else max(8 * GIB, snapshot["total_bytes"] // 4)
-    return dict(snapshot, reserve_bytes=reserve,
-                budget_bytes=max(0, snapshot["available_bytes"] - reserve))
+    # cas-833e: a running taste-lane run counts at its full estimate, even
+    # though MemAvailable already shows what it has used so far, so no phase
+    # plans into memory the lane may still grow into.
+    taste = taste_lane_bytes()
+    return dict(snapshot, reserve_bytes=reserve, taste_lane_bytes=taste,
+                budget_bytes=max(0, snapshot["available_bytes"] - reserve - taste))
+
+
+_HOST_MEMORY = []
+
+
+def taste_lane_bytes():
+    try:
+        if not _HOST_MEMORY:
+            spec = importlib.util.spec_from_file_location("host_memory", Path(__file__).with_name("host_memory.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _HOST_MEMORY.append(module)
+        return _HOST_MEMORY[0].taste_lane_bytes(HOST_MEMORY_DIRECTORY)
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read the taste-lane reservation: " + str(exc)) from exc
 
 
 def execution_plan(env):

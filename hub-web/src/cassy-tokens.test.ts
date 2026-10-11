@@ -63,4 +63,15 @@ describe("cassy-tokens.css", () => {
     expect(run(["--from", newer, "--to", vendored]).status).toBe(2);
     expect(run(["--from", "http://example.invalid/cassy-tokens.css", "--to", vendored]).status).toBe(2);
   });
+
+  it("prints usage for --help and for bad arguments instead of a stack trace (QA)", () => {
+    const help = run(["--help"]);
+    expect([help.status, help.stdout]).toEqual([0, expect.stringContaining("Usage: node sync-cassy-tokens.mjs --to <path>")]);
+    for (const args of [["--bogus"], []]) {
+      const bad = run(args);
+      expect(bad.status).toBe(2);
+      expect(bad.stderr).toContain("Usage:");
+      expect(bad.stderr).not.toMatch(/\n\s+at /);
+    }
+  });
 });

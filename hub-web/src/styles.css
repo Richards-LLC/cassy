@@ -1719,7 +1719,14 @@ dialog form > *,
 #app-switcher-toggle { anchor-name: --cassy-apps; }
 .cloud-brand-switch { min-height: var(--rail-item-min); margin-inline-start: calc(-1 * var(--space-1)); padding: 0 var(--space-1); border: 0; border-radius: 12px; background: var(--color-transparent); cursor: pointer; }
 .cloud-brand-switch:hover, .conversation-list-heading:has(.app-switcher:popover-open) .cloud-brand-switch { background: var(--bg-hover); }
-.cloud-brand-chevron { width: 9px; height: 9px; flex: none; margin-inline-start: calc(-1 * var(--space-1)); color: var(--ink-mid); }
+.cloud-brand-chevron { width: 11px; height: 11px; flex: none; margin-inline-start: calc(-1 * var(--space-1)); color: var(--ink-mid); }
+/* QA F01 (cas-eaa3): below 380px the header row cannot hold the wordmark,
+   Pair a machine and Appearance & commands, so the switch shows the mark and
+   chevron only. The wordmark stays in the button's name ("Cassy Cloud apps"). */
+@media (max-width: 23.74rem) {
+  .cloud-brand-switch .cloud-brand-word { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .cloud-brand-switch .cloud-brand-chevron { margin-inline-start: 0; }
+}
 .app-switcher[popover] { position-anchor: --cassy-apps; inset: auto; top: anchor(bottom); left: anchor(left); margin: var(--space-1) 0 0; width: min(18rem, calc(100vw - var(--space-6))); padding: var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: 16px; background: var(--bg-panel); color: var(--ink); box-shadow: var(--lift-strong); }
 @supports not (anchor-name: --cassy-apps) {
   .app-switcher[popover] { position: fixed; top: calc(64px + env(safe-area-inset-top)); left: var(--space-3); }

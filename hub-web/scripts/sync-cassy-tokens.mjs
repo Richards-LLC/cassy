@@ -26,9 +26,24 @@ export function inspect(css) {
   return { declared, actual, intact: Boolean(declared) && declared === actual };
 }
 
+const USAGE = `Usage: node sync-cassy-tokens.mjs --to <path> [--from <https URL or path>] [--check]
+
+  --to <path>     where the vendored cassy-tokens.css lives (required)
+  --from <src>    source; default ${DEFAULT_SOURCE}
+  --check         compare instead of writing: exit 0 current, 1 missing, edited or behind
+  --help          print this help
+
+Exit codes: 0 written or current, 1 drift (--check), 2 bad source or arguments.`;
+
 async function load(source) {
   if (/^https:\/\//.test(source)) {
-    const response = await fetch(source, { redirect: "error", credentials: "omit" });
+    let response;
+    try {
+      response = await fetch(source, { redirect: "error", credentials: "omit" });
+    } catch (error) {
+      throw new Error(`could not reach ${source}: ${error?.cause?.code ?? error?.cause?.message ?? error?.message ?? error}`);
+    }
+    if (response.status === 404) throw new Error(`${source} is not published (HTTP 404). It appears once a cassy release with this dist is promoted to the hub; until then pass --from <cassy checkout>/hub-web/public/cassy-tokens.css`);
     if (!response.ok) throw new Error(`${source}: HTTP ${response.status}`);
     return response.text();
   }
@@ -54,11 +69,26 @@ export async function sync({ from = DEFAULT_SOURCE, to, check = false }) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { values } = parseArgs({ options: {
-    from: { type: "string", default: DEFAULT_SOURCE },
-    to: { type: "string" },
-    check: { type: "boolean", default: false },
-  } });
+  let values;
+  try {
+    ({ values } = parseArgs({ options: {
+      from: { type: "string", default: DEFAULT_SOURCE },
+      to: { type: "string" },
+      check: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    } }));
+  } catch (error) {
+    console.error(`${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`);
+    process.exit(2);
+  }
+  if (values.help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  if (!values.to) {
+    console.error(`--to <path> is required\n\n${USAGE}`);
+    process.exit(2);
+  }
   try {
     const result = await sync(values);
     const short = (sha) => sha?.slice(0, 12);

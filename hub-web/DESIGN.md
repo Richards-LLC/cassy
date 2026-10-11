@@ -228,7 +228,9 @@ tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
   `--bg-hover` wash on hover and while open. That puts it in the same place on
   desktop, phone and landscape at no cost in height or width: the phone list
   still shows six conversations (HUB-J16), a desktop shows a project's
-  sessions whole (HUB-J14), and the header row still fits at 360px. The
+  sessions whole (HUB-J14), and the header row fits down to 320px: below
+  380px the switch shows the mark and chevron only (the wordmark stays in its
+  name). The
   dialogs' lockups stay plain. Explorer makes its own header lockup the same
   switch. An open conversation whose project has a cloud identity also offers
   **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone

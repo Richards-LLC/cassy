@@ -30,7 +30,7 @@ export function cloudBrand(): string {
  * (#app-switcher). The lockup is the switch so the header gains no width or row.
  */
 export function cloudBrandSwitcher(): string {
-  return `<button id="app-switcher-toggle" class="cloud-brand cloud-brand-switch" type="button" popovertarget="app-switcher" aria-label="Cassy Cloud apps" title="Switch between Commander and Explorer"><img class="cloud-brand-mark" src="${CASSY_MARK_SRC}" alt="" width="32" height="32" decoding="async" draggable="false"><span>Cassy Cloud</span><svg class="cloud-brand-chevron" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+  return `<button id="app-switcher-toggle" class="cloud-brand cloud-brand-switch" type="button" popovertarget="app-switcher" aria-label="Cassy Cloud apps" title="Switch between Commander and Explorer"><img class="cloud-brand-mark" src="${CASSY_MARK_SRC}" alt="" width="32" height="32" decoding="async" draggable="false"><span class="cloud-brand-word">Cassy Cloud</span><svg class="cloud-brand-chevron" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
 }
 
 export function projectBadge(path: string | undefined): string {

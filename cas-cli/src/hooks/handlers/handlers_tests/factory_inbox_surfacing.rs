@@ -938,9 +938,11 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         )
         .unwrap();
     assert_eq!(surfaced.len(), 1);
+    // Claimed for the teams transport and never surfaced by a hook.
     let unseen = store
         .enqueue_with_session("supervisor", WORKER, "Also rebase onto the new tip.", SESSION)
         .unwrap();
+    assert!(store.claim_recipient_transport(unseen, WORKER).unwrap());
 
     worker.teams_inbox.push_back(format!(
         "[cas #{shown} supervisor-authored 40s first]\n\nTake (B), but keep the flag operator-only."

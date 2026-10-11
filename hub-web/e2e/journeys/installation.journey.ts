@@ -145,7 +145,7 @@ test("HUB-J2 possession-proven repairs, actual IndexedDB tabs, cancellation and 
     await expect(page.getByText("Pair a machine to start your first conversation.")).toBeVisible();
     await expect(page.locator("body")).toMatchAriaSnapshot(`
       - complementary "Supervisor conversations":
-        - text: Cassy Cloud
+        - button "Cassy Cloud apps": Cassy Cloud
         - button "Pair a machine"
         - button "Appearance & commands"
         - heading "Conversations" [level=1]

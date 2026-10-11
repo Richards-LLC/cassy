@@ -7748,6 +7748,22 @@ impl CasCore {
                             &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee)),
                         )
                     });
+                    // cas-12ab: in a repository that ships the fast release
+                    // rows, a delivery parks only after they passed on this
+                    // exact tip (a miss costs a CI round instead of a minute).
+                    let parking_new_tip = task.status != TaskStatus::AwaitingMerge
+                        || task.deliverables.factory_branch_anchor.as_deref() != anchor.as_deref();
+                    if parking_new_tip
+                        && let Some(tip) = anchor.as_deref()
+                        && let Some(refusal) = fast_rows_receipt_refusal(
+                            &close_project_root,
+                            tip,
+                            &resolved_parent_branch,
+                            &task.id,
+                        )
+                    {
+                        return Ok(Self::tool_error(refusal));
+                    }
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
                         // this cycle survives the park (`record_park`). When
@@ -13677,6 +13693,50 @@ pub(crate) fn task_without_own_commits_judged(
         }
     }
     true
+}
+
+/// cas-12ab: the delivered tree ships the fast release rows (cas-src's
+/// `scripts/release-integration-gates.py`).
+const FAST_ROWS_GATE_MARKER: &str = "scripts/release-integration-gates.py";
+
+/// cas-12ab: refusal for a park whose tip has no `release-gate.sh --fast-rows`
+/// PASS receipt. The gate writes `$GIT_COMMON_DIR/cas/fast-rows/<sha>.pass`
+/// for a committed tree, so every worktree of the clone sees it. Repositories
+/// without the fast rows are never gated.
+pub(crate) fn fast_rows_receipt_refusal(
+    repo: &std::path::Path,
+    head: &str,
+    target: &str,
+    task_id: &str,
+) -> Option<String> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+    };
+    git(&["cat-file", "-e", &format!("{head}:{FAST_ROWS_GATE_MARKER}")])?;
+    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .map(|out| std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))?;
+    let receipt = common.join("cas").join("fast-rows").join(format!("{head}.pass"));
+    if std::fs::read_to_string(&receipt)
+        .is_ok_and(|text| text.starts_with(&format!("fast-rows: PASS {head} ")))
+    {
+        return None;
+    }
+    let target = target.strip_prefix("origin/").unwrap_or(target);
+    Some(format!(
+        "⚠️ FAST ROWS REQUIRED before {task_id} parks: no `release-gate.sh --fast-rows` PASS \
+         receipt covers the delivered tip {}.\n\nIn your worktree, with everything committed, run \
+         `./scripts/release-gate.sh --fast-rows --base origin/{target}`. A PASS writes the receipt \
+         for this exact tip ({}); then push and close again. The fast rows (version literals, test \
+         shape, Markdown, script tests and more) take about a minute here, and a miss costs a CI \
+         round after the park (cas-12ab).",
+        &head[..head.len().min(12)],
+        receipt.display(),
+    ))
 }
 
 /// MERGE REQUIRED text for a close whose receipt is newer than a parked

@@ -205,6 +205,25 @@ fi
                 changed = copy.deepcopy(job);changed['if'] += " || startsWith(github.ref, 'refs/heads/epic/')"
                 self.assertFalse(valid(changed))
 
+    def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
+        factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
+        factory_cancel = "${{ startsWith(github.ref, 'refs/heads/factory/') }}"
+        def valid(workflow):
+            concurrency = workflow.get('concurrency', {})
+            return (concurrency.get('group') == factory_group
+                    and concurrency.get('cancel-in-progress') == factory_cancel)
+        workflow = self.ci()
+        self.assertTrue(valid(workflow))
+        for mutate in (
+            lambda w: w.pop('concurrency'),
+            lambda w: w['concurrency'].__setitem__('cancel-in-progress', True),
+            lambda w: w['concurrency'].__setitem__('group', 'ci-${{ github.ref }}'),
+            lambda w: w['concurrency'].__setitem__('cancel-in-progress', False),
+        ):
+            changed = copy.deepcopy(workflow)
+            mutate(changed)
+            self.assertFalse(valid(changed))
+
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']
         def counts():

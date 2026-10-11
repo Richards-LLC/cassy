@@ -209,6 +209,32 @@ class FastRows(unittest.TestCase):
         self.assertNotIn("test-shape", (row_dir / "plan.txt").read_text().splitlines())
         self.assertEqual(LANE.unfinished_rows(row_dir), [])
 
+    def receipt(self):
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        return head, self.repo / ".git" / "cas" / "fast-rows" / f"{head}.pass"
+
+    def test_a_clean_pass_writes_the_same_tip_receipt_a_park_requires_cas_12ab(self):
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        head, path = self.receipt()
+        self.assertTrue(path.exists(), result.stdout)
+        self.assertTrue(path.read_text().startswith(f"fast-rows: PASS {head} "), path.read_text())
+        self.assertIn(str(path), result.stdout)
+
+    def test_a_failed_or_dirty_run_writes_no_receipt_cas_12ab(self):
+        self.write("docs/bad.md", "# Bad\n## Missing blank lines\nbody\n")
+        self.commit()
+        failed = self.fast()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse(self.receipt()[1].exists(), failed.stdout)
+        (self.repo / "docs/bad.md").unlink()
+        self.commit()
+        self.write("CHANGELOG.md", (self.repo / "CHANGELOG.md").read_text() + "\n- Uncommitted.\n")
+        dirty = self.fast()
+        self.assertEqual(dirty.returncode, 0, dirty.stdout + dirty.stderr)
+        self.assertFalse(self.receipt()[1].exists(), dirty.stdout)
+        self.assertIn("no receipt", dirty.stdout)
+
     def test_normal_factory_load_allows_rows_over_old_wall_budget(self):
         command(self.repo, "git", "checkout", "-qb", "factory/lane")
         self.write("scripts/example.py", "# scripts-only lane\n")

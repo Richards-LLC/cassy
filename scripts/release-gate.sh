@@ -1733,7 +1733,7 @@ run_check migration-registry 'python3 scripts/check-migration-registry.py (every
     check_migration_registry
 run_check ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \
     check_ci_script_tests_changed
-run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src (changed files in fast mode)' \
+run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src, crates/*/src, crates/*/tests (changed files in fast mode)' \
     check_fixture_paths_src
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \

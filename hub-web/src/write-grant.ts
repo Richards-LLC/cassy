@@ -147,7 +147,23 @@ export async function sendWriteGrant(state: WriteGrantState, send: WriteGrantSen
   }
 }
 
-/** cas-5020: where keyboard focus goes once a result line is shown. Red stub. */
-export function focusAfterResult(_state: WriteGrantState, _sent?: "grant" | "revoke"): string {
-  return "header:grant-result";
+/**
+ * cas-5020: where keyboard focus goes once a result line is shown. Never the
+ * status line itself (it drew the browser's default outline through its
+ * text): after a send, the receipt's next action (Revoke… after a grant,
+ * Review grant after a revoke) or the button to retry a refusal; after a
+ * refused review, the control that supplies what is missing. The line is
+ * announced through the live region instead.
+ */
+export function focusAfterResult(state: WriteGrantState, sent?: "grant" | "revoke"): string {
+  if (sent && state.result) {
+    if (state.result.tone === "ok") return sent === "grant" ? "header:grant-revoke" : "header:grant-review";
+    return sent === "grant" ? "header:grant-review" : "header:grant-revoke";
+  }
+  if (!state.draft.task) return "header:grant-task";
+  const path = state.draft.path.trim();
+  if (!(path.startsWith("/") || path.startsWith("~/"))) return "header:grant-path";
+  if (!state.draft.reason.trim()) return "header:grant-reason";
+  if (state.draft.modes.size === 0) return "header:grant-mode:create";
+  return "header:grant-review";
 }

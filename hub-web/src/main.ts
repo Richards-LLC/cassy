@@ -59,7 +59,7 @@ import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
 import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
-import { WriteGrantState, sendWriteGrant } from "./write-grant";
+import { WriteGrantState, focusAfterResult, sendWriteGrant } from "./write-grant";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -4573,8 +4573,9 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
       on: {
         // Typing keeps the field and its caret; only stage changes redraw.
         changed: () => {},
-        review: () => { writeGrant.review(); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : "header:grant-result"); },
-        revoke: () => { writeGrant.askRevoke(); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : "header:grant-result"); },
+        // cas-5020: a refusal focuses the control that fixes it and is announced.
+        review: () => { writeGrant.review(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : focusAfterResult(writeGrant)); },
+        revoke: () => { writeGrant.askRevoke(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : focusAfterResult(writeGrant)); },
         cancel: () => { const opener = writeGrant.stage === "confirm-revoke" ? "header:grant-revoke" : "header:grant-review"; writeGrant.cancel(); rerender(opener); },
         confirm: () => { void runWriteGrant(); },
       },
@@ -4595,7 +4596,7 @@ async function runWriteGrant(): Promise<void> {
   await sending;
   if (writeGrant.result) fleetAnnounce(writeGrant.result.text);
   if (selectedMachineId !== machineId || selectedSession !== session) return;
-  fleetFocusNext = "header:grant-result";
+  fleetFocusNext = focusAfterResult(writeGrant, kind);
   renderStatus(statuses.get(sessionKey(machineId, session)));
   void loadStatus(machineId, session);
 }
@@ -4674,8 +4675,11 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (target) {
       target.focus({ preventScroll: false });
       // cas-68d0 F02: focus alone may leave the receipt under the rail's
-      // bottom fade; scrolling honours its scroll margin.
-      if (want === "header:grant-result") target.scrollIntoView({ block: "nearest" });
+      // bottom fade; scrolling honours its scroll margin. cas-5020: focus is
+      // on a control now, so bring the receipt into view and then keep the
+      // focused control in sight.
+      const receipt = want.startsWith("header:grant") ? container.querySelector<HTMLElement>(".write-grant-result") : null;
+      if (receipt) { receipt.scrollIntoView({ block: "nearest" }); target.scrollIntoView({ block: "nearest" }); }
       return;
     }
     if (want === "undo") {

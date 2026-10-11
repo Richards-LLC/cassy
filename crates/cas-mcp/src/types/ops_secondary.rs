@@ -8,7 +8,7 @@ pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::search_action_schema",
-        description = "Operation. search is BM25 full-text; 'history' (search indexed git commits by text/path/time; each response carries an index_status block stating freshness and gaps); retrieval_metrics aggregates retrieval outcomes offline (optional strict session_id filter); skill_impact (alias impact_report) reports skill surface and session-outcome impact; code_search and code_show find and show indexed code symbols."
+        description = "Operation: search (BM25 full-text); history (indexed git commits by text, path or time; each response has an index_status block on freshness and gaps); retrieval_metrics (offline retrieval outcomes; optional strict session_id filter); skill_impact, alias impact_report (skill surface and session-outcome impact); code_search and code_show (indexed code symbols)."
     )]
     pub action: String,
 
@@ -239,7 +239,7 @@ pub struct SearchContextRequest {
 
     /// Request provenance on history results
     #[schemars(
-        description = "Resolve which task/session produced each commit, with the link method and confidence per edge. Coverage is partial and measured (index_status reports it); commits with no populated edge are returned with a stated reason rather than dropped."
+        description = "Resolve which task/session produced each commit, with each edge's link method and confidence. Coverage is partial and measured (see index_status); a commit with no edge comes back with a stated reason, not dropped."
     )]
     #[serde(default)]
     pub include_provenance: Option<bool>,
@@ -709,7 +709,7 @@ pub struct FactoryRequest {
     /// Target agent for hold_worker, release_worker, recycle_worker, clear_context, or remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent name for hold_worker/release_worker/recycle_worker/clear_context/remind (or 'all_workers' for broadcast where supported). For hold_worker/release_worker, worker_names is accepted as an alias. For remind: agent who receives the reminder (defaults to self)"
+        description = "Target agent for hold_worker/release_worker/clear_context/message/remind ('all_workers' broadcasts where supported). hold_worker/release_worker also accept worker_names. remind: who receives it (default self)."
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -755,7 +755,7 @@ pub struct FactoryRequest {
 
     /// Whether spawned workers need isolated worktrees (git worktree per worker)
     #[schemars(
-        description = "Whether workers need isolated git worktrees. true gives each worker its own branch and directory. false or omitted shares one mutable checkout/HEAD across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change on disk mid-session. Prefer true; non-isolated spawn receipts warn explicitly."
+        description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker's branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change mid-session. Such spawn receipts warn."
     )]
     #[serde(default)]
     pub isolate: Option<bool>,
@@ -845,7 +845,7 @@ pub struct FactoryRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "Account directory for the workers in this spawn request: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value also drops an inherited ANTHROPIC_API_KEY so that OAuth account is used), CODEX_HOME for Codex workers (must hold auth.json). Grok has no account plumbing and warns instead. Omitted: the requesting supervisor's own account directory for that harness is captured at enqueue time, never crossed between providers."
+        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue and never crossed between providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -863,7 +863,7 @@ pub struct FactoryRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command to run (for example 'npm run dev'), instead of a raw background `&`: registered servers are the only ones that survive worker teardown. Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
+        description = "server_start: the shell command (e.g. 'npm run dev'), instead of a raw background `&`; only registered servers survive worker teardown. Runs under `sh -c` from cwd; stdout/stderr go to a log file, never inherited."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -923,7 +923,7 @@ pub struct CoordinationRequest {
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only). For server_start: owning task. For server_list: exact owning task filter. For remind: bind stale-context cleanup to this task; close quarantines it unless cross_session=true explicitly keeps it. For message with merge_request=true: identify the parked merge delivery. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
+        description = "Task ID. loop_start/worktree_create: the task the loop or worktree is scoped to. spawn_workers: pre-assign it to the single spawned worker; an open task_id also authorizes the spawn without an active EPIC. server_start: owning task; server_list: owning-task filter. remind: bind stale-context cleanup to it (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
@@ -971,7 +971,7 @@ pub struct CoordinationRequest {
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent name for hold_worker/release_worker/clear_context/message/remind (or 'all_workers' for broadcast where supported). For hold_worker/release_worker, worker_names is accepted as an alias. For remind: agent who receives the reminder (defaults to self)"
+        description = "Target agent for hold_worker/release_worker/clear_context/message/remind ('all_workers' broadcasts where supported). hold_worker/release_worker also accept worker_names. remind: who receives it (default self)."
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -999,7 +999,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check worktree state first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (use allow_trunk). sync_all_workers: rebase a stale or offline worker's worktree that is dirty (WIP is stashed and restored) or mid-task; a live worker's worktree is always skipped and one already mid-rebase is refused, even with force=true."
+        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed and restored) or mid-task; a live worker is always skipped and a mid-rebase one refused, even with force=true."
     )]
     #[serde(default)]
     pub force: Option<bool>,
@@ -1008,7 +1008,7 @@ pub struct CoordinationRequest {
     /// task WorkTarget is declared (cas-0b32/cas-84df). Independent of `force`
     /// so authorizing trunk never bypasses dirty-worktree protection.
     #[schemars(
-        description = "worktree_merge only: authorize a genuine fallback to the configured trunk branch when no epic or task WorkTarget is declared. A declared WorkTarget does not require this flag. Refusals name the resolved trunk destination before authorization, and successful trunk pushes carry a loud warning. Separate from force= (dirty worktree override)."
+        description = "worktree_merge only: allow the fallback to the configured trunk when no epic or task WorkTarget is declared (a declared WorkTarget never needs it). Refusals name the trunk destination first; trunk pushes warn loudly. Separate from force= (dirty worktree)."
     )]
     #[serde(default)]
     pub allow_trunk: Option<bool>,
@@ -1180,7 +1180,7 @@ pub struct CoordinationRequest {
 
     /// Whether workers need isolated git worktrees
     #[schemars(
-        description = "Whether workers need isolated git worktrees. true gives each worker its own branch and directory. false or omitted shares one mutable checkout/HEAD across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change on disk mid-session. Prefer true; non-isolated spawn receipts warn explicitly."
+        description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker's branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change mid-session. Such spawn receipts warn."
     )]
     #[serde(default)]
     pub isolate: Option<bool>,
@@ -1220,7 +1220,7 @@ pub struct CoordinationRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "Account directory for the workers in this spawn_workers request: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value also drops an inherited ANTHROPIC_API_KEY so that OAuth account is used), CODEX_HOME for Codex workers (must hold auth.json). Grok has no account plumbing and warns instead. Omitted: the requesting supervisor's own account directory for that harness is captured at enqueue time, never crossed between providers."
+        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue and never crossed between providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -1315,7 +1315,7 @@ pub struct CoordinationRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command to run (for example 'npm run dev'), instead of a raw background `&`: registered servers are the only ones that survive worker teardown. Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
+        description = "server_start: the shell command (e.g. 'npm run dev'), instead of a raw background `&`; only registered servers survive worker teardown. Runs under `sh -c` from cwd; stdout/stderr go to a log file, never inherited."
     )]
     #[serde(default)]
     pub command: Option<String>,

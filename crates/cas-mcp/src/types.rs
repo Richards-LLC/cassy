@@ -352,13 +352,13 @@ pub struct TaskRequest {
     /// was inspected before waiving the gate, and it is stored next to the
     /// gate's own measurements. Only honored for a live registered supervisor.
     #[schemars(
-        description = "Supervisor override for the epic close stranded-branch gate. Pass a narrative describing what you inspected (e.g. 'diffed all 11 delivered paths against main; content present and later refactored by PR #406'). Only honored for a live registered supervisor. The narrative and the gate's own per-branch measurements are logged as a decision note. Use this instead of improvising a workaround when every lane is measurably stale."
+        description = "Supervisor override for the epic close stranded-branch gate: a narrative of what you inspected (e.g. 'diffed all 11 delivered paths against main; content present and later refactored by PR #406'). Live registered supervisor only; the narrative and the gate's per-branch measurements are logged as a decision note. Use it, not a workaround, when every lane is measurably stale."
     )]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
 
     /// Successful docs/artifact delivery deliberately retained outside integration.
-    #[schemars(description = "Supervisor-only successful evidence close. Requires evidence_only_artifact_path, evidence_only_reference and a non-empty reason. CAS measures the immutable delivery history and permits only regular docs/artifacts files; records the supervisor, SHA and paths. Mutually exclusive with negative_result and completion/external verification receipts.")]
+    #[schemars(description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a non-empty reason. The delivery history may hold only regular docs/artifacts files; the supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub evidence_only: Option<bool>,
     #[schemars(description = "Existing durable evidence beneath configured [factory] artifacts_root/<project-key>/<task-id>/; required with evidence_only=true.")]
@@ -376,7 +376,7 @@ pub struct TaskRequest {
     /// below plus a non-empty close `reason`. Ordinary closes that omit this
     /// flag retain the merge-state gate unchanged.
     #[schemars(
-        description = "Set true only when a registered supervisor is closing a measured negative result whose experimental delivery was deliberately left unmerged. Requires negative_result_artifact_path, negative_result_reference, and a non-empty reason; CAS logs the supervisor decision. Ordinary delivery closes must omit this flag and still require merge evidence."
+        description = "Supervisor-only close of a measured negative result whose experimental delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a non-empty reason; the decision is logged. Ordinary closes omit it and need merge evidence."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub negative_result: Option<bool>,
@@ -405,12 +405,7 @@ pub struct TaskRequest {
     /// entry reports `hits == 0`, a warning note is appended rather than
     /// letting the close proceed silently. Ordinary code tasks and tasks
     /// that omit this field are entirely unaffected.
-    #[schemars(description = "Serialized JSON array of search steps run during an \
-                       investigation (Spike) task, e.g. \
-                       [{\"command\": \"grep -c foo file\", \"hits\": 3}]. \
-                       Optional; when present on a Spike-type close, any \
-                       entry with hits=0 is surfaced as a warning note \
-                       instead of a silent pass.")]
+    #[schemars(description = "JSON array of a Spike task's search steps, e.g. [{\"command\": \"grep -c foo file\", \"hits\": 3}]. Optional; on a Spike close any entry with hits=0 becomes a warning note, not a silent pass.")]
     #[serde(default)]
     pub search_manifest: Option<String>,
 
@@ -423,13 +418,7 @@ pub struct TaskRequest {
     /// effect on the current target. It is only needed
     /// when no commit-time factory anchor was captured.
     #[schemars(
-        description = "Full commit SHA or unambiguous hexadecimal abbreviation produced by this \
-                       task. On close, CAS resolves it to a full immutable commit ID, validates \
-                       that it carries a non-empty diff, is an ancestor of the task's parent \
-                       branch, and still has its tree effect present or explicitly evolved by \
-                       post-integration work on the current target; CAS \
-                       persists only the full ID. Use this for merged-before-close \
-                       work when no automatic factory anchor was captured."
+        description = "Full commit SHA or unambiguous hex abbreviation produced by this task. On close CAS resolves it to the full ID and checks it has a non-empty diff, is an ancestor of the task's parent branch, and its tree effect is still present (or explicitly evolved) on the target; only the full ID is stored. For work merged before close with no automatic factory anchor."
     )]
     #[serde(default)]
     pub commit_receipt: Option<String>,
@@ -437,12 +426,7 @@ pub struct TaskRequest {
     /// Serialized immutable worker-delivery receipt. This is an additive,
     /// opt-in transactional handoff; omitting it preserves legacy close.
     #[schemars(
-        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates \
-                       the registered worker, task, repository, branch, commit/base/target \
-                       tips, proof reference, and optional artifact_path before persisting an \
-                       immutable delivery transaction. artifact_path must be an existing file \
-                       or directory under configured [factory] artifacts_root/<task-id>/. \
-                       Omit to use the legacy close path unchanged."
+        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, commit/base/target tips, proof reference and optional artifact_path (an existing file or directory under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery transaction. Omit for the legacy close path."
     )]
     #[serde(default)]
     pub completion_receipt: Option<String>,
@@ -455,7 +439,7 @@ pub struct TaskRequest {
     /// supervisor may present this receipt, and close revalidates its exact
     /// task, epic, factory session, gate, terminal verdict, and evidence.
     #[schemars(
-        description = "Delegation receipt ID from verification action=external_verify. On close, a live registered supervisor may present a completed passing receipt for the exact task, epic, and current factory session as zero-commit delivery evidence. This does not replace or alter completion_receipt and does not bypass other close gates."
+        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a completed passing receipt for this exact task, epic and factory session as zero-commit delivery evidence. It neither replaces completion_receipt nor bypasses other close gates."
     )]
     #[serde(default)]
     pub external_verification_receipt: Option<String>,
@@ -537,14 +521,14 @@ pub struct TaskRequest {
 
     /// Execution note (for create, update, and no-code close) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology for this task. One of: test-first, characterization-first, additive-only, value-only, no-code. value-only permits edits to existing values but rejects added, deleted, copied, or renamed files at close. no-code declares an operations/artifact task and requires external_ref proof at close. For action=close, only no-code is accepted, only when the stored methodology is empty or already no-code; its portable external_ref is validated and persisted with it before verification dispatch or atomically with an already-approved close. Pass empty string to clear on update."
+        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only allows edits to existing values but refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task and requires external_ref proof at close. On close only no-code is accepted, and only when the stored methodology is empty or no-code; its portable external_ref is validated and saved before verification dispatch, or with an already-approved close. Empty string clears it on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, strict widening of proof_targets, correction of a mistaken risk declaration on a merged or close-ready delivery, or execution_note methodology correction (empty string clears it). Change one correction kind per call. Methodology corrections also support task-only investigation proofs; switching to no-code requires portable external_ref, supplied inline or already stored. Accepts AwaitingMerge, InProgress and Blocked proof cycles. Preserves immutable merged deliveries. For an already-no-code task, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics. Ordinary close proofs still apply."
+        description = "Update only, supervisor: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it). One correction kind per call. Methodology corrections also cover task-only investigation proofs; switching to no-code needs a portable external_ref, inline or already stored. Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On a no-code task, target_repo=\"\" clears a stale code anchor. Needs a non-empty reason; invalidates the stale proof cycle, logs a decision note and reopens the task (not as review-failed). Close proofs still apply."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,

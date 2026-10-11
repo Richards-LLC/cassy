@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — parallel epics' CHANGELOG entries no longer conflict (cas-7aa5)
+
+- Two epics that each add a section under `## [Unreleased]` now merge with
+  both sections kept, in merge order. This holds in the rolling integration
+  sweep (including its `merge-tree` probes), in `worktree_merge` and in the
+  release-train assemble replay. A conflicting edit to a released section
+  still conflicts.
+- The `cas-changelog` driver lives in `scripts/cas-merge-drivers.py`. Cassy
+  installs it into the clone's git config and `info/attributes` before it
+  merges, as soon as any tree opts in through `.gitattributes`. For a manual
+  `git merge`, run `python3 scripts/cas-merge-drivers.py install` once per
+  clone.
+
 ### Changed — parallel hub-web lanes no longer conflict on the built bundle (cas-0c988)
 
 - `hub-web/dist` is marked `merge=cas-generated` in `.gitattributes`. A merge

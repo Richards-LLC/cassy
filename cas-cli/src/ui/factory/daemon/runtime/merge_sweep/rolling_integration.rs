@@ -271,6 +271,10 @@ fn assemble(
     git_output(worktree, &["reset", "--hard", base])?;
     let mut prefixes = vec![base.to_owned()];
     for (index, epic) in epics.iter().enumerate() {
+        // cas-7aa5: parallel CHANGELOG [Unreleased] sections union and
+        // generated hub-web/dist never hand-merges, here and in the
+        // merge-tree probes below, once any tree in the union opts in.
+        crate::worktree::git::ensure_merge_drivers(worktree, Some(&epic.tip));
         let merge = Command::new("git")
             .current_dir(worktree)
             .args([

@@ -287,8 +287,33 @@ def metadata_already_applied(root, old_tip, integration_tip):
     return all(blob("HEAD", path) == blob(integration_tip, path) for path in changed)
 
 
+MERGE_DRIVERS = Path(__file__).resolve().with_name("cas-merge-drivers.py")
+
+
+def install_merge_drivers(root, *revisions):
+    """cas-7aa5: register Cassy's merge drivers (CHANGELOG [Unreleased]
+    union, generated hub-web/dist) before replaying release metadata, when
+    this checkout or any of `revisions` opts in through .gitattributes."""
+    if not MERGE_DRIVERS.exists():
+        return
+    def marks(text):
+        return "merge=cas-changelog" in text or "merge=cas-generated" in text
+    local = Path(root) / ".gitattributes"
+    opted = local.exists() and marks(local.read_text(errors="replace"))
+    for revision in revisions:
+        if opted:
+            break
+        shown = subprocess.run(["git", "-C", str(root), "show", f"{revision}:.gitattributes"],
+                               capture_output=True, text=True)
+        opted = shown.returncode == 0 and marks(shown.stdout)
+    if opted:
+        subprocess.run(["python3", str(MERGE_DRIVERS), "install", str(root)],
+                       capture_output=True, text=True)
+
+
 def rebase_release_metadata(root, old_tip, integration_tip):
     """Replay metadata with diagnostics and restore the checkout on conflicts."""
+    install_merge_drivers(root, integration_tip, "HEAD")
     original = git(root, "rev-parse", "HEAD")
     if not git(root, "status", "--porcelain") and metadata_already_applied(root, old_tip, integration_tip):
         git(root, "reset", "--hard", integration_tip)

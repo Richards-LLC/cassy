@@ -5,7 +5,7 @@ The checked-in `dist/` is the Cargo input so ordinary Rust builds remain offline
 Merges never hand-merge `dist/`: `.gitattributes` marks it `merge=cas-generated`, so a merge keeps the
 target's copy without a conflict, and `scripts/regenerate-generated-artifacts.sh <pre-merge-head> <merged-head>`
 rebuilds and commits it from the merged sources. Cassy's merges register the driver and run the script; after a
-manual `git merge`, run `git config merge.cas-generated.driver true` once per clone and then the script.
+manual `git merge`, run `python3 scripts/cas-merge-drivers.py install` once per clone and then the script.
 
 Page-initiated pairing uses one explicit external relay boundary. The reviewed
 `cas-pairing-relay-origin` metadata in `index.html` is

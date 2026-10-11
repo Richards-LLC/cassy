@@ -6,5 +6,10 @@ vendor/blake3-1.8.6/** whitespace=-trailing-space,-blank-at-eof
 # never hand-merge it: the `cas-generated` driver keeps the target's copy (no
 # conflict) and scripts/regenerate-generated-artifacts.sh rebuilds it from the
 # merged sources. Cassy registers the driver before its merges; for a manual
-# merge run `git config merge.cas-generated.driver true` once per clone.
+# merge run `python3 scripts/cas-merge-drivers.py install` once per clone.
 hub-web/dist/** merge=cas-generated
+
+# cas-7aa5: parallel epics each add a section under ## [Unreleased]. The
+# `cas-changelog` driver (scripts/cas-merge-drivers.py) keeps both, in merge
+# order; a conflicting edit to a released section still conflicts.
+CHANGELOG.md merge=cas-changelog

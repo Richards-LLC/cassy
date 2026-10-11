@@ -191,16 +191,19 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
 
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
 ///
-/// cas-b5ad: a row the daemon claimed for its transport after the turn began
-/// is eligible too. A busy worker's pane is never silent, so the daemon's
-/// wake is declined after the claim, and Claude Code holds the transported
-/// copy until the turn ends; without this the claim hid the row from every
-/// tool boundary of a long turn. Both placeholders bind the turn start.
+/// cas-b5ad: a row the daemon claimed for its transport after the turn began,
+/// but whose handoff it never completed, is eligible too. A busy worker's
+/// pane is never silent, so the daemon declines the wake after the claim and
+/// leaves the row gated (any Agent-Teams copy is held by Claude Code until
+/// the turn ends); without this the claim hid the row from every tool
+/// boundary of a long turn. A completed handoff (`transport_delivered_at`)
+/// keeps its claim (cas-27ad). Both placeholders bind the turn start.
 const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
     "AND (((seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
            AND (q.transport_delivered_at IS NULL
                 OR julianday(q.transport_delivered_at) > julianday(?)))
           OR (seen.source = 'transport_claimed'
+              AND q.transport_delivered_at IS NULL
               AND julianday(seen.seen_at) > julianday(?)))";
 
 /// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
@@ -7082,6 +7085,20 @@ mod tests {
         assert!(
             !store.claim_recipient_transport(decision, "worker-1").unwrap(),
             "the daemon cannot reclaim a row the hook surfaced"
+        );
+
+        // A claim whose handoff completed stays with its transport (cas-27ad).
+        let handed_off = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into the pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(handed_off, "worker-1").unwrap());
+        store.mark_transport_delivered(handed_off).unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a completed handoff is not surfaced a second time"
         );
     }
 

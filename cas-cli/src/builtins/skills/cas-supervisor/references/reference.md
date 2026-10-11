@@ -8,8 +8,13 @@ Wrong field names and invalid actions waste dispatch cycles. This section covers
 
 Code tasks (`task`, `bug`, and `feature`) must carry `risk=blast-radius`,
 `platform`, `concurrency`, or `none` at creation. A `blast-radius` declaration
-also requires non-empty comma-separated `proof_targets`, which must cover every
-source module in the attributed delivery diff. Supervisor overrides require a
+also requires non-empty comma-separated `proof_targets`. At close, every source
+module in the attributed delivery diff must be named by a target or sit in a
+crate the worker tested at the delivered commit (a passing capped
+`cargo nextest run -p <crate>` receipt); only an untested crate needs a
+`proof_scope_fix`. An operations task whose work is a pull request elsewhere
+closes with `execution_note=no-code external_ref=<PR URL>`, or by
+`evidence_only` citing that PR. Supervisor overrides require a
 non-empty audit reason and are recorded as a decision note. Workers never run
 Rust builds or tests, so do not demand a scoped `--proof` receipt or a
 `loaded_proof` note from them: the declared risk and `proof_targets` tell you

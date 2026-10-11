@@ -524,8 +524,16 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
             if readable:
                 line = child.stdout.readline()
                 lines.append(line)
-                if 'waiting for host memory (proof running)' in line:
+                if 'waiting for host memory (proof running' in line:
                     return ''.join(lines)
+
+    @contextlib.contextmanager
+    def busy_taste_lane(self):
+        with host.private_file(self.pool / host.TASTE_LOCK) as lane:
+            fcntl.flock(lane, fcntl.LOCK_EX)
+            lane.write(str(4 * GIB))
+            lane.flush()
+            yield
 
     def test_frontend_runner_waits_for_proof_and_reports_wait(self):
         # Execute the actual frontend entry point with one fake native runner.
@@ -545,7 +553,9 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         fake.parent.mkdir(parents=True)
         fake.write_text("import {writeFileSync} from 'node:fs'; writeFileSync(" + json.dumps(str(marker)) + ", 'started'); const file=process.argv.find(a=>a.startsWith('--outputFile=')).slice(13); writeFileSync(file, JSON.stringify({numPassedTests:1}));")
         env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3')
-        with self.admit('proof'):
+        # cas-833e: a free taste lane would admit this bounded run beside the
+        # proof; hold it busy so the entry point must wait its turn.
+        with self.admit('proof'), self.busy_taste_lane():
             child = subprocess.Popen(['node', str(runner), 'vitest'], cwd=self.root/'hub', env=env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
@@ -557,7 +567,7 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         stdout, stderr = child.communicate(timeout=5)
         stdout = prefix + stdout
         self.assertEqual(child.returncode, 0, stdout + stderr)
-        self.assertIn('waiting for host memory (proof running)', stdout)
+        self.assertIn('waiting for host memory (proof running', stdout)
         self.assertIn('verified-web-tests: PASS (1 vitest tests passed)', stdout)
         self.assertTrue(marker.exists())
 
@@ -582,7 +592,7 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         for name in ['build', 'typecheck', 'visual-qa']:
             with self.subTest(name=name):
                 marker.unlink(missing_ok=True)
-                with self.admit('proof'):
+                with self.admit('proof'), self.busy_taste_lane():
                     child = subprocess.Popen(['sh', '-c', commands[name]], cwd=hub, env=env,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     try:
@@ -594,7 +604,7 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
                 stdout, stderr = child.communicate(timeout=5)
                 stdout = prefix + stdout
                 self.assertEqual(child.returncode, 0, stdout+stderr)
-                self.assertIn('waiting for host memory (proof running)', stdout)
+                self.assertIn('waiting for host memory (proof running', stdout)
                 self.assertTrue(marker.exists())
 
     def test_worker_wait_has_deadline_without_starting_command(self):
@@ -709,6 +719,104 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
              self.assertRaisesRegex(ValueError, 'memory headroom'):
             worker.run([sys.executable, '-c', 'import time;time.sleep(30)'], env=self.env, directory=self.pool)
         with self.admit('worker'): pass  # aborted command did not strand the lease
+
+    # cas-833e: a background assembly proof held intent for its whole run, and
+    # QA browser runs timed out at 600 s. One bounded "taste lane" run is
+    # admitted beside a proof, borrowing from the proof's reserve only when
+    # the reserve and fresh memory both still keep TASTE_FLOOR_BYTES free.
+    def taste(self, budget=HIGH, estimate=4*GIB, wait=.5):
+        return host.admission('worker', self.env, lambda _: budget, directory=self.pool, wait_secs=wait,
+                              poll_secs=.02, report=self.events.append, estimate_bytes=estimate, lane='taste')
+
+    def test_cas_833e_one_bounded_run_is_admitted_beside_a_running_proof(self):
+        with self.admit('proof'):
+            started = time.monotonic()
+            with self.taste() as (env, fds):
+                self.assertLess(time.monotonic() - started, .4, 'taste lane waited for the proof')
+                record = json.loads(env[host.LEASE_ENV])
+                self.assertEqual(record.get('lane'), 'taste')
+                self.assertTrue(host.inherited(env, self.pool))
+                self.assertEqual(host.taste_lane_bytes(self.pool), 4*GIB)
+        admitted = [e for e in self.events if e['reason'] == 'admitted']
+        self.assertEqual(admitted[-1].get('lane'), 'taste')
+        self.assertEqual(host.taste_lane_bytes(self.pool), 0)
+
+    def test_cas_833e_only_one_taste_lane_run_at_a_time(self):
+        with self.admit('proof'), self.taste():
+            with self.assertRaisesRegex(ValueError, 'deadline expired.*taste lane busy'):
+                with self.taste(wait=.2): self.fail('second taste run admitted beside a proof')
+
+    def test_cas_833e_taste_lane_refuses_when_memory_would_breach_the_floor(self):
+        cases = {
+            # The proof may use everything above its reserve; the lane must fit
+            # inside the reserve with headroom and still leave the floor free.
+            'reserve too small': dict(HIGH, reserve_bytes=7*GIB),
+            'fresh memory too low': dict(HIGH, available_bytes=7*GIB, budget_bytes=0),
+        }
+        for name, budget in cases.items():
+            with self.subTest(name), self.admit('proof'):
+                with self.assertRaisesRegex(ValueError, 'deadline expired.*taste lane'):
+                    with self.taste(budget, wait=.2): self.fail(f'admitted with {name}')
+        with self.subTest('estimate above the lane cap'), self.admit('proof'):
+            with self.assertRaisesRegex(ValueError, 'deadline expired.*proof running'):
+                with self.taste(estimate=5*GIB, wait=.2): self.fail('unbounded run admitted')
+
+    def test_cas_833e_without_the_lane_a_worker_still_waits_for_the_proof(self):
+        with self.admit('proof'):
+            with self.assertRaisesRegex(ValueError, 'deadline expired.*proof running'):
+                with host.admission('worker', self.env, lambda _: HIGH, directory=self.pool, wait_secs=.2,
+                                    poll_secs=.02, report=self.events.append, estimate_bytes=4*GIB):
+                    self.fail('worker admitted over a proof')
+
+    def test_cas_833e_proof_budget_counts_the_live_taste_lane(self):
+        proof = worker.proof
+        snapshot = {'total_bytes': 64*GIB, 'available_bytes': 40*GIB, 'source': 'fixture'}
+        with mock.patch.object(proof, 'memory_snapshot', return_value=snapshot), \
+             mock.patch.object(proof, 'HOST_MEMORY_DIRECTORY', self.pool):
+            self.assertEqual(proof.memory_budget({})['budget_bytes'], 24*GIB)
+            with self.admit('proof'), self.taste():
+                budget = proof.memory_budget({})
+                self.assertEqual(budget['taste_lane_bytes'], 4*GIB)
+                self.assertEqual(budget['budget_bytes'], 20*GIB)
+
+    def test_cas_833e_nested_admission_reuses_a_taste_lease(self):
+        with self.admit('proof'), self.taste() as (env, fds):
+            with host.admission('worker', env, lambda _: self.fail('nested resampled'),
+                                directory=self.pool, lane='taste') as (_, nested_fds):
+                self.assertEqual(nested_fds, fds)
+
+    def test_cas_833e_only_positively_bounded_commands_may_take_the_lane(self):
+        playwright = ['node', str(ROOT/'hub-web/node_modules/@playwright/test/cli.js'), 'test', '--project=journeys', '--workers=4']
+        commands = json.loads((ROOT/'hub-web/package.json').read_text())['scripts']
+        eligible = [worker.constrained(playwright), ['sh', '-c', commands['visual-qa']],
+                    ['tsc', '--noEmit'], worker.constrained(['npx', 'vitest', 'run'])]
+        refused = [['bash', '-c', 'tsc & vite build'], ['npm', 'run', 'unknown'], ['cargo', 'test'],
+                   ['bash', '-c', 'tsc && "$COMMAND"'], ['vitest', 'run', '--browser']]
+        for command in eligible:
+            with self.subTest(eligible=command):
+                self.assertTrue(worker.taste_eligible(command, ROOT/'hub-web'))
+        for command in refused:
+            with self.subTest(refused=command):
+                self.assertFalse(worker.taste_eligible(command, ROOT/'hub-web'))
+
+    def test_cas_833e_taste_run_guard_protects_the_floor_not_the_proof_reserve(self):
+        # Beside a proof at its peak, budget_bytes is ~0 by design: the lane
+        # lives in the reserve. It is stopped only when free memory reaches
+        # the floor, which means some estimate was exceeded.
+        at_peak = dict(HIGH, available_bytes=12*GIB, budget_bytes=0)
+        breach = dict(HIGH, available_bytes=GIB, budget_bytes=0)
+        command = [sys.executable, '-c', 'import time;time.sleep(.3)']
+        with self.admit('proof'):
+            with mock.patch.object(worker.proof, 'memory_budget', return_value=at_peak), \
+                 mock.patch.object(worker, 'taste_eligible', return_value=True):
+                self.assertEqual(worker.run(command, env=dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_POLL_SECS='1'),
+                                            directory=self.pool), 0)
+            snapshots = iter([at_peak, breach])
+            with mock.patch.object(worker.proof, 'memory_budget', side_effect=lambda _: next(snapshots, breach)), \
+                 mock.patch.object(worker, 'taste_eligible', return_value=True), \
+                 self.assertRaisesRegex(ValueError, 'taste lane reached the memory floor'):
+                worker.run([sys.executable, '-c', 'import time;time.sleep(30)'], env=self.env, directory=self.pool)
+        with self.admit('worker'): pass
 
     def test_cas_04ebf_background_jobs_are_named_not_cut_down(self):
         # The cas-7c94 command: the shell returned, run() ended its process

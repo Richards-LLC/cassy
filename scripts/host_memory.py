@@ -36,6 +36,12 @@ HEADROOM_BYTES = 2 * GIB
 DEFAULT_ESTIMATE_BYTES = 4 * GIB
 HOLD_POLL_SECS = 0.2
 STALE_SCAN_SECS = 5
+# cas-833e taste lane: one positively bounded worker run beside a proof. It
+# lives inside the proof's reserve, so the reserve and fresh memory must both
+# hold its estimate plus HEADROOM_BYTES and still leave this floor free.
+TASTE_LANE_MAX_BYTES = DEFAULT_ESTIMATE_BYTES
+TASTE_FLOOR_BYTES = 2 * GIB
+TASTE_LOCK = 'taste.lock'
 
 
 def private_directory(directory):
@@ -81,7 +87,7 @@ def inherited(env, directory=None):
             if ancestor == pid:
                 # A stale metadata file or inherited variable cannot waive admission.
                 lock = record.get('slot', 'budget.lock')
-                if lock != 'budget.lock' and not re.fullmatch(r'slot-[0-9]+\.lock', lock):
+                if lock not in ('budget.lock', TASTE_LOCK) and not re.fullmatch(r'slot-[0-9]+\.lock', lock):
                     return False
                 with private_file(directory / lock, False) as probe:
                     try:
@@ -168,13 +174,71 @@ def emit(role, reason, started, report, memory=None):
             'elapsed_s': round(time.monotonic() - started, 3), **(memory or {})})
 
 
+def taste_lane_bytes(directory=None):
+    """The live taste-lane reservation (0 when the lane is free).
+
+    A held lane counts its recorded estimate. The proof's memory budget
+    subtracts it, so a proof phase never plans into a running lane.
+    """
+    directory = directory or DIRECTORY
+    try:
+        stream = private_file(directory / TASTE_LOCK, False)
+    except FileNotFoundError:
+        return 0
+    with stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return 0
+        except BlockingIOError:
+            try:
+                weight = int(stream.read())
+            except ValueError:
+                return TASTE_LANE_MAX_BYTES  # mid-write: count the lane's cap
+            return weight if 0 < weight <= TASTE_LANE_MAX_BYTES else TASTE_LANE_MAX_BYTES
+
+
+def taste_fits(memory, estimate_bytes):
+    """Both the proof's reserve and fresh memory keep the floor with this run."""
+    need = estimate_bytes + HEADROOM_BYTES + TASTE_FLOOR_BYTES
+    return memory.get('reserve_bytes', 0) >= need and memory.get('available_bytes', 0) >= need
+
+
+def try_taste_lane(directory, env, memory_budget, estimate_bytes):
+    """Take the taste lane beside a running proof: (stream, memory, reason)."""
+    stream = private_file(directory / TASTE_LOCK)
+    try:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        stream.close()
+        return None, {}, 'proof running; taste lane busy'
+    memory = dict(memory_budget(env), estimate_bytes=estimate_bytes, headroom_bytes=HEADROOM_BYTES,
+                  taste_floor_bytes=TASTE_FLOOR_BYTES)
+    if not taste_fits(memory, estimate_bytes):
+        stream.close()
+        return None, memory, 'proof running; taste lane estimate + headroom + floor exceeds the proof reserve or fresh memory'
+    stream.seek(0)
+    stream.write(str(estimate_bytes))
+    stream.truncate()
+    stream.flush()
+    return stream, memory, 'admitted'
+
+
 @contextmanager
 def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=None, report=None,
-              estimate_bytes=DEFAULT_ESTIMATE_BYTES):
+              estimate_bytes=DEFAULT_ESTIMATE_BYTES, lane=None):
+    """Admit a proof or worker suite.
+
+    lane='taste' (workers only, cas-833e) lets one positively bounded run of
+    at most TASTE_LANE_MAX_BYTES start beside a running proof; see
+    taste_fits() for the memory rule. The caller vouches that the command is
+    bounded (worker-memory.taste_eligible); the estimate cap is enforced here.
+    """
     directory = directory or DIRECTORY
     report = report or default_report
     if role not in ('proof', 'worker'):
         raise ValueError('unknown host memory admission role')
+    if lane not in (None, 'taste') or (lane and role != 'worker'):
+        raise ValueError('unknown host memory admission lane')
     if type(estimate_bytes) is not int or estimate_bytes <= 0:
         raise ValueError('invalid worker memory estimate')
     private_directory(directory)
@@ -184,9 +248,10 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
         record = json.loads(env[LEASE_ENV])
         recorded_fds = tuple(record.get('fds', ()))
         fds = []
-        paths = ('intent.lock', record.get('slot', 'budget.lock'))
+        paths = ((TASTE_LOCK,) if record.get('lane') == 'taste'
+                 else ('intent.lock', record.get('slot', 'budget.lock')))
         if recorded_fds:
-            if len(recorded_fds) != 2 or any(type(fd) is not int or fd < 0 for fd in recorded_fds):
+            if len(recorded_fds) != len(paths) or any(type(fd) is not int or fd < 0 for fd in recorded_fds):
                 raise ValueError('invalid inherited host memory descriptors')
             for fd, path in zip(recorded_fds, paths):
                 with private_file(directory / path, False) as probe:
@@ -205,7 +270,7 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
     with private_file(directory / 'priority.lock') as priority, \
          private_file(directory / 'intent.lock') as intent, private_file(directory / 'budget.lock') as budget:
         priority_held = intent_held = False
-        slot = None
+        slot = taste = None
         next_scan, holders = time.monotonic(), []
         try:
             while True:
@@ -251,6 +316,16 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
                             fcntl.flock(budget, fcntl.LOCK_UN)
                         except BlockingIOError:
                             pass
+                    # cas-833e: a running proof holds intent EX (and budget
+                    # EX) for its whole run. Only then may one bounded run
+                    # take the taste lane instead of waiting the proof out.
+                    if reason == 'proof running' and lane == 'taste' \
+                            and estimate_bytes <= TASTE_LANE_MAX_BYTES:
+                        taste, memory, reason = try_taste_lane(directory, env, memory_budget, estimate_bytes)
+                        if taste:
+                            memory = dict(memory, lane='taste')
+                            emit(role, 'admitted', started, report, memory)
+                            break
                 # Proof keeps priority while draining old/new workers. Workers
                 # release all transient gates across a wait, so light commands
                 # may use the remaining budget ahead of a larger waiter.
@@ -276,9 +351,15 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
             token = secrets.token_hex(16)
             claim_path = directory / f'lease-{os.getpid()}-{token}.json'
             record = {'pid': os.getpid(), 'token': token, 'role': role}
-            if slot:
+            if taste:
+                # The lane holds only taste.lock; the proof keeps intent/budget.
+                record.update(slot=TASTE_LOCK, lane='taste')
+                fds = (taste.fileno(),)
+            elif slot:
                 record['slot'] = slot_name
-            fds = (intent.fileno(), slot.fileno()) if slot else (intent.fileno(), budget.fileno())
+                fds = (intent.fileno(), slot.fileno())
+            else:
+                fds = (intent.fileno(), budget.fileno())
             record['fds'] = list(fds)
             with private_file(claim_path) as claim:
                 json.dump(record, claim)
@@ -292,6 +373,8 @@ def admission(role, env, memory_budget, wait_secs=600, poll_secs=1, directory=No
             # wrapper still has descendants carrying its open description.
             if slot:
                 slot.close()
+            if taste:
+                taste.close()
             if priority_held:
                 fcntl.flock(priority, fcntl.LOCK_UN)
 

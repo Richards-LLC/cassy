@@ -49,6 +49,8 @@ export interface HubSession {
   last_activity?: string;
   /** When the session started; ranks Most recent when no session of a project has activity (cas-6acf). */
   started_at?: string;
+  /** The project's Cassy Cloud identity (cas-eaa3), so the app switcher opens Explorer on it. */
+  cloud_project_id?: string;
 }
 
 export interface PaneInfo {

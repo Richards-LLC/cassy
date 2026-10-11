@@ -1,4 +1,5 @@
-import { cloudBrand, escapeHtml, projectTitle } from "./cloud-brand";
+import { appSwitcherMarkup, projectExplorerLinkMarkup } from "./app-switcher";
+import { cloudBrand, cloudBrandSwitcher, escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
@@ -20,6 +21,8 @@ export interface ConversationShellModel {
    * allow it); absent with no machine paired.
    */
   launch?: "ready" | "grant";
+  /** Commander ↔ Explorer (cas-eaa3): Explorer's URL for this view, or null when no cloud origin is configured. */
+  explorerHref?: string | null;
 }
 
 /**
@@ -338,10 +341,10 @@ export function contextSheetWhere(model: Pick<ConversationShellModel, "projectDi
  * the 48px context track. No lockup, badge, supervisor or host: those live in
  * the header beside it.
  */
-function contextRailMarkup(selected: boolean): string {
+function contextRailMarkup(selected: boolean, projectExplorerHref: string | null = null): string {
   const sections = selected
     ? '<section class="context-section" data-section="waiting" aria-labelledby="context-waiting-heading" hidden><h2 id="context-waiting-heading">Waiting on you</h2><ul class="context-list context-waiting"></ul></section>'
-      + `<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>`
+      + `<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2>${projectExplorerHref ? projectExplorerLinkMarkup(projectExplorerHref) : ""}<p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>`
       + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
       + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
     : "";
@@ -361,7 +364,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div><div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors. <button id="inbox-toggle" class="link-button" type="button" aria-haspopup="dialog">Operator inbox</button></p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}${model.selected ? SKIP_TO_CONVERSATION : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${model.explorerHref === undefined ? cloudBrand() : cloudBrandSwitcher()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div>${model.explorerHref === undefined ? "" : appSwitcherMarkup(model.explorerHref)}<div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors. <button id="inbox-toggle" class="link-button" type="button" aria-haspopup="dialog">Operator inbox</button></p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}${model.selected ? SKIP_TO_CONVERSATION : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${!model.selected ? networkHelp : ""}
@@ -371,7 +374,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
     <main class="conversation-main">
       ${model.selected ? `${conversationHeaderMarkup(model)}${networkHelp}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button><p class="conversation-welcome-inbox">Machine off? <button id="empty-inbox" class="link-button" type="button" aria-haspopup="dialog">Read your inbox</button> without pairing.</p>' : ""}</div>`}
     </main>
-    ${contextRailMarkup(model.selected)}
+    ${contextRailMarkup(model.selected, model.explorerHref?.includes("project_id=") ? model.explorerHref : null)}
   </div>`;
 }
 

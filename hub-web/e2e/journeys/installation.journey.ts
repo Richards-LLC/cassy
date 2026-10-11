@@ -176,7 +176,7 @@ test("HUB-J2 the installation inventory on keyboard and phone, and exact-device 
     await expect(page.getByText("Pair a machine to start your first conversation.")).toBeVisible();
     await expect(page.locator("body")).toMatchAriaSnapshot(`
       - complementary "Supervisor conversations":
-        - text: Cassy Cloud
+        - button "Cassy Cloud apps": Cassy Cloud
         - button "Pair a machine"
         - button "Appearance & commands"
         - heading "Conversations" [level=1]

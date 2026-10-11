@@ -62,6 +62,9 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       await journey.stage("An incomplete grant says what is missing", async () => {
         await panel.getByRole("button", { name: "Review grant" }).click();
         await expect(rail.locator(".write-grant-result")).toHaveText("Enter the folder to grant, as an absolute path or ~/…");
+        // cas-5020: focus goes to the field that is missing, not the line.
+        await expect(panel.getByRole("textbox", { name: "Folder" })).toBeFocused();
+        await expect(announcer).toHaveText("Enter the folder to grant, as an absolute path or ~/…");
         expect(hub.writeGrants).toHaveLength(0);
       });
       await journey.stage("Review, confirm and see the receipt", async () => {
@@ -79,10 +82,32 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await page.keyboard.press("Enter");
         await expect(confirm).toContainText("Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?");
         await expect(confirm.getByRole("button")).toHaveText(["Cancel", "Grant"]);
-        await confirm.getByRole("button", { name: "Grant", exact: true }).click();
+        // cas-5020: a keyboard Grant.
+        await confirm.getByRole("button", { name: "Grant", exact: true }).focus();
+        await page.keyboard.press("Enter");
         const receipt = "Write access granted for cas-1234: /home/operator/soundwave-config/docs/requests (create+edit) until the task closes.";
         await expect(rail.locator(".write-grant-result")).toHaveText(receipt);
         await expect(announcer).toHaveText(receipt);
+        // cas-5020: focus lands on the receipt's next action (Revoke…), drawn
+        // with the token focus ring, never on the status line.
+        const revoke = panel.getByRole("button", { name: "Revoke…" });
+        await expect(revoke).toBeFocused();
+        await expect(rail.locator(".write-grant-result")).not.toBeFocused();
+        const ring = await revoke.evaluate((node) => {
+          const probe = document.createElement("span");
+          probe.style.outlineColor = "var(--color-focus)";
+          probe.style.outlineWidth = "var(--focus-ring-width)";
+          document.body.append(probe);
+          const token = getComputedStyle(probe);
+          const want = { color: token.outlineColor, width: token.outlineWidth };
+          probe.remove();
+          const style = getComputedStyle(node);
+          return { color: style.outlineColor, width: style.outlineWidth, style: style.outlineStyle, offset: style.outlineOffset, want };
+        });
+        expect(ring.style).toBe("solid");
+        expect(ring.color).toBe(ring.want.color);
+        expect(ring.width).toBe(ring.want.width);
+        expect(ring.offset).not.toBe("0px");
         // cas-06e8: the sent grant leaves no primed form, and the task id in
         // the receipt stays whole.
         await expect(panel.getByRole("textbox", { name: "Folder" })).toHaveValue("");

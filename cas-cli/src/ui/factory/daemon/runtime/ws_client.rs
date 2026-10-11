@@ -131,8 +131,15 @@ impl FactoryDaemon {
         while let Some(Ok((tcp_stream, addr))) = listener.accept().now_or_never() {
             tracing::info!("WS TCP connection from {}", addr);
 
-            // Perform the WebSocket handshake
-            let ws_stream = match tokio_tungstenite::accept_async(tcp_stream).await {
+            // Perform the WebSocket handshake. cas-ca22: note whether the
+            // client presented this daemon's relay token (the hub relay).
+            let mut presented = None;
+            let capture = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                           response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                presented = crate::ui::factory::relay_token::presented_token(request);
+                Ok(response)
+            };
+            let ws_stream = match tokio_tungstenite::accept_hdr_async(tcp_stream, capture).await {
                 Ok(ws) => ws,
                 Err(e) => {
                     tracing::warn!("WS handshake failed from {}: {}", addr, e);
@@ -140,6 +147,12 @@ impl FactoryDaemon {
                 }
             };
 
+            let relay_trusted = self.relay_token.as_deref().is_some_and(|expected| {
+                crate::ui::factory::relay_token::matches(presented.as_deref(), expected)
+            });
+            if relay_trusted {
+                tracing::info!("WS client from {} presented the Commander relay token", addr);
+            }
             let client_id = self.next_ws_client_id;
             self.next_ws_client_id += 1;
 
@@ -172,6 +185,7 @@ impl FactoryDaemon {
                     sink,
                     stream,
                     pane_sizes: HashMap::new(),
+                    relay_trusted,
                 },
             );
             any_new = true;
@@ -304,7 +318,11 @@ impl FactoryDaemon {
         // touch the store under the pass wait budget; terminal IO may not.
         let _operator_command =
             (!is_terminal_io(&msg)).then(cas_store::wait_budget::permit_store_access);
-        if let Some(control) = commander_control_from_ws_message(&msg, false) {
+        let relay_trusted = self
+            .ws_clients
+            .get(&client_id)
+            .is_some_and(|client| client.relay_trusted);
+        if let Some(control) = commander_control_from_ws_message(&msg, relay_trusted) {
             let error_prefix = control.error_prefix();
             let client_ref = control.client_ref().map(str::to_owned);
             match self.dispatch_commander_control(control).await {

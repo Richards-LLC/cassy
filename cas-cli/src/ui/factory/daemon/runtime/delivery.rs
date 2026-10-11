@@ -547,9 +547,14 @@ impl CommanderControl {
 
 /// Recognize the additive Commander controls without changing the legacy
 /// `ClientMessage::Interrupt` path.
+///
+/// cas-ca22: `relay_trusted` is true only for the hub relay's WebSocket
+/// connection, which presented this daemon's relay token. Every other
+/// client's `operator_verified` claim is dropped here, before the message is
+/// stamped and stored, so the queue column can be trusted by readers.
 pub(super) fn commander_control_from_message(
     message: &crate::ui::factory::protocol::ClientMessage,
-    _relay_trusted: bool,
+    relay_trusted: bool,
 ) -> Option<CommanderControl> {
     use crate::ui::factory::protocol::ClientMessage;
 
@@ -572,7 +577,11 @@ pub(super) fn commander_control_from_message(
             urgent: *urgent,
             client_ref: client_ref.clone(),
             in_reply_to: *in_reply_to,
-            attribution: attribution.clone(),
+            attribution: {
+                let mut attribution = attribution.clone();
+                attribution.operator_verified &= relay_trusted;
+                attribution
+            },
         }),
         _ => None,
     }

@@ -29,7 +29,7 @@ pub mod operator_inbox;
 pub mod projects;
 mod runtime;
 mod server;
-mod state;
+pub(crate) mod state;
 mod tailscale;
 mod worker_gate;
 

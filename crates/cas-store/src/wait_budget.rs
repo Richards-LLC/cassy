@@ -366,7 +366,13 @@ mod tests {
     /// wait behind another thread's unbudgeted busy wait.
     #[test]
     fn no_store_takes_the_shared_connection_mutex_directly() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Source scan (cas-ae01): a merge-queue shard runs the archived test
+        // binary without this crate's sources, so the guard runs only where
+        // they exist and skips elsewhere.
+        let Some(src) = store_sources() else {
+            eprintln!("skipped: no cas-store source checkout at runtime");
+            return;
+        };
         // Production code ends at the first `#[cfg(test)]` that opens a module.
         fn production(text: &str) -> &str {
             let mut from = 0;
@@ -425,6 +431,21 @@ mod tests {
             offenders.is_empty(),
             "take the connection with shared_db::lock_connection: {offenders:?}"
         );
+    }
+
+    /// This crate's `src` directory, found at runtime (cas-ae01). An explicit
+    /// workspace root wins, then the working directory, which cargo and
+    /// nextest set to the package root. The compile-time manifest path names
+    /// the machine that built the binary, so it is never used.
+    fn store_sources() -> Option<std::path::PathBuf> {
+        let workspace = ["CAS_TEST_WORKSPACE_ROOT", "NEXTEST_WORKSPACE_ROOT"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|root| std::path::PathBuf::from(root).join("crates/cas-store"));
+        workspace
+            .chain(std::env::current_dir().ok())
+            .map(|package| package.join("src"))
+            .find(|src| src.join("wait_budget.rs").is_file())
     }
 
     #[test]

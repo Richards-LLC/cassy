@@ -29,7 +29,13 @@ fn test_tui_binary() -> String {
             return path.to_string_lossy().into_owned();
         }
     }
-    format!("{}/../../target/debug/test_tui", env!("CARGO_MANIFEST_DIR"))
+    // cas-ae01: resolved at runtime from the package root (the test's working
+    // directory), never from the producer's compile-time manifest path.
+    std::env::current_dir()
+        .map(|package| package.join("../../target/debug/test_tui"))
+        .unwrap_or_else(|_| "target/debug/test_tui".into())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Helper to wait for TUI to fully render

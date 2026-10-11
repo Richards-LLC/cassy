@@ -1714,6 +1714,7 @@ impl CasService {
                                 &task,
                                 &repo.repo_root,
                                 Some(&live_tip),
+                                Some(repo.target_branch.as_str()),
                             )
                         })
                         .is_some();

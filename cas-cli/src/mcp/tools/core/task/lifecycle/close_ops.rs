@@ -6005,6 +6005,7 @@ impl CasCore {
         task: &Task,
         repo_path: &std::path::Path,
         candidate: Option<&str>,
+        upstream: Option<&str>,
     ) -> Option<String> {
         let candidate = candidate?;
         if task.status != TaskStatus::AwaitingMerge {
@@ -6019,6 +6020,7 @@ impl CasCore {
             &candidate,
             &task.id,
             foreign_since,
+            upstream,
         )
         .then_some(candidate)
     }
@@ -6150,6 +6152,7 @@ impl CasCore {
             &tip,
             &task.id,
             foreign_since,
+            Some(parent_branch),
         ) {
             return parking;
         }
@@ -6218,6 +6221,7 @@ impl CasCore {
             task,
             repo_path,
             Some(factory_branch_anchor),
+            Some(parent_branch),
         ) else {
             return;
         };
@@ -7529,6 +7533,8 @@ impl CasCore {
                             &task,
                             &close_project_root,
                             live_tip.as_deref(),
+                            (!resolved_parent_branch.is_empty())
+                                .then_some(resolved_parent_branch.as_str()),
                         )
                         .unwrap_or(anchor),
                     )
@@ -21040,7 +21046,14 @@ pub(crate) fn validate_pushed_task_receipt(
         let attributed = task_tip_has_non_empty_attributed_diff(
             &context.repo_root, task, &tip, task.deliverables.factory_branch_anchor.as_deref());
         let correction = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
-            parked_anchor_advance_is_attributable(&context.repo_root, anchor, &tip, &task.id, None)
+            parked_anchor_advance_is_attributable(
+                &context.repo_root,
+                anchor,
+                &tip,
+                &task.id,
+                None,
+                Some(&context.target_branch),
+            )
         });
         if !attributed && !correction {
             return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
@@ -21331,7 +21344,9 @@ pub(crate) fn parked_anchor_advance_is_attributable(
     candidate: &str,
     task_id: &str,
     foreign_since: Option<i64>,
+    upstream: Option<&str>,
 ) -> bool {
+    let _ = upstream;
     if commit_ids_match(recorded, candidate)
         || !is_safe_git_refname(recorded)
         || !is_safe_git_refname(candidate)
@@ -28733,10 +28748,11 @@ mod merge_state_gate_tests {
             &parked,
             &continuation,
             "cas-a0a0",
+            None,
             None
         ));
         assert!(
-            !parked_anchor_advance_is_attributable(p, &parked, &parked, "cas-a0a0", None),
+            !parked_anchor_advance_is_attributable(p, &parked, &parked, "cas-a0a0", None, None),
             "the same tip is not an advance"
         );
         assert!(
@@ -28745,21 +28761,57 @@ mod merge_state_gate_tests {
                 &parked,
                 &continuation,
                 "cas-a0a0",
-                Some(chrono::Utc::now().timestamp())
+                Some(chrono::Utc::now().timestamp()),
+                None
             ),
             "a commit made after a sibling task's lease began is that task's"
         );
 
         let foreign = commit_local(p, "b.rs", "feat(cas-b0b0): next task");
         assert!(!parked_anchor_advance_is_attributable(
-            p, &parked, &foreign, "cas-a0a0", None
+            p, &parked, &foreign, "cas-a0a0", None, None
         ));
 
         git(p, &["reset", "-q", "--hard", &base]);
         let forced = commit_local(p, "c.rs", "untagged work");
         assert!(
-            !parked_anchor_advance_is_attributable(p, &parked, &forced, "cas-a0a0", None),
+            !parked_anchor_advance_is_attributable(p, &parked, &forced, "cas-a0a0", None, None),
             "a force-pushed lane no longer carries the parked delivery"
+        );
+    }
+
+    /// cas-9668: a worker who merges the epic into the task branch has not
+    /// handed its delivery to another task. The epic's commits are already on
+    /// the upstream, and the merge commit that brings them in may name the
+    /// epic's own id; neither makes the merge tip someone else's. A merge of a
+    /// sibling branch that is not on the upstream still carries foreign work.
+    #[test]
+    fn parked_anchor_advance_accepts_an_epic_merge_on_top_cas_9668() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let parked = commit_local(p, "a.rs", "feat(cas-a0a0): task A delivery");
+        git(p, &["checkout", "-q", "main"]);
+        commit_local(p, "epic.rs", "feat(cas-b0b0): sibling delivery merged to the epic");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "-m", "Merge branch 'epic/rel-cas-ab12' into HEAD", "main"]);
+        let merged = rev_parse_local(p, "HEAD");
+        assert!(
+            parked_anchor_advance_is_attributable(p, &parked, &merged, "cas-a0a0", None, Some("main")),
+            "the epic merge on top of the task's commits is the task's delivery tip"
+        );
+        assert!(
+            !parked_anchor_advance_is_attributable(p, &parked, &merged, "cas-a0a0", None, None),
+            "without the upstream, the epic's commits read as foreign work"
+        );
+
+        git(p, &["checkout", "-q", "-b", "factory/sibling", "main"]);
+        commit_local(p, "sib.rs", "feat(cas-c0c0): a sibling's unmerged work");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "-m", "Merge branch 'factory/sibling'", "factory/sibling"]);
+        let foreign = rev_parse_local(p, "HEAD");
+        assert!(
+            !parked_anchor_advance_is_attributable(p, &parked, &foreign, "cas-a0a0", None, Some("main")),
+            "merging a sibling branch that is not on the upstream brings in its work"
         );
     }
 

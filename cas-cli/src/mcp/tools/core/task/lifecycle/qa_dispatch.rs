@@ -2742,6 +2742,101 @@ mod stale_anchor_rebind_tests_cas_00eb {
         }
     }
 
+    /// cas-9668: the worker merges the epic (here `main`, the target) into
+    /// the task branch on top of its own commits; the merge commit names the
+    /// epic, and the epic carries another task's commit. Returns the merge tip.
+    fn merge_epic_into_task_branch(repo: &std::path::Path) -> String {
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("sibling.rs"), "// sibling\n").unwrap();
+        git(repo, &["add", "sibling.rs"]);
+        git(repo, &["commit", "-q", "-m", "feat(cas-0f0f): sibling delivery on the epic"]);
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "Merge branch 'epic/rel-cas-ab12' into HEAD", "main"]);
+        let merged = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        merged
+    }
+
+    /// cas-9668: after an epic merge on top of the task's commits, the park
+    /// binds the round to the merge tip, not the first tip.
+    #[test]
+    fn park_binds_the_round_to_the_epic_merge_tip_cas_9668() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        let merged = merge_epic_into_task_branch(repo);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &f.task,
+            repo,
+            "main",
+            Some(WORKER_TASK_BRANCH),
+            Some(&merged),
+        );
+        assert_eq!(parking.deliverables.factory_branch_anchor.as_deref(), Some(merged.as_str()));
+    }
+
+    /// cas-9668: qa_request on a task re-parked after an epic merge retires
+    /// the round bound to the first tip and binds the merge tip.
+    #[test]
+    fn qa_request_binds_the_epic_merge_tip_cas_9668() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::AwaitingMerge);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let now = chrono::Utc::now();
+        cas_store::open_qa_pass(
+            &cas_dir,
+            &NewQaPass {
+                task_id: &f.task.id,
+                implementer_agent_id: "worker",
+                branch: WORKER_TASK_BRANCH,
+                bound_head: &f.anchor,
+                deadline_at: now + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
+        let merged = merge_epic_into_task_branch(repo);
+        f.core
+            .request_independent_qa(&f.task, "bind the round to the epic merge tip")
+            .expect("a round opens");
+        let passes = cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap();
+        let open = passes
+            .iter()
+            .find(|pass| pass.state == QaPassState::Pending)
+            .expect("a pending round");
+        assert_eq!(open.bound_head, merged, "the round binds the merge tip");
+        let stored = open_task_store(&cas_dir).unwrap().get(&f.task.id).unwrap();
+        assert_eq!(stored.deliverables.factory_branch_anchor.as_deref(), Some(merged.as_str()));
+    }
+
+    /// cas-9668: qa_request head_sha=<the pushed epic-merge tip> is accepted
+    /// as the task's delivery, not refused as "not attributable".
+    #[test]
+    fn pushed_epic_merge_tip_is_attributable_to_the_task_cas_9668() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::AwaitingMerge);
+        let repo = f.dir.path();
+        let merged = merge_epic_into_task_branch(repo);
+        let origin = f.dir.path().join("origin.git");
+        git(repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", WORKER_TASK_BRANCH]);
+        let context = crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "project:cas-9668-fixture".into(),
+            repo_root: repo.to_path_buf(),
+            git_common_dir: repo.join(".git"),
+            target_branch: "main".into(),
+        };
+        let (branch, tip) = super::super::close_ops::validate_pushed_task_receipt(&f.task, &context, &merged)
+            .expect("the pushed epic-merge tip is the task's delivery");
+        assert_eq!(branch, WORKER_TASK_BRANCH);
+        assert_eq!(tip, merged);
+    }
+
     /// AC2: qa_request on a parked task whose pending pass is bound to the
     /// stale anchor retires that pass and opens one at the tip, with the
     /// rebind on record.

@@ -26,6 +26,13 @@ mod rolling_integration;
 
 const LOG_DIR: &str = "merge-sweeps";
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// cas-bb5e: how often the coordinator asks the background journey
+/// scheduler to start a pending evaluation (rate cap and idle host permitting).
+const JOURNEY_TICK_INTERVAL: Duration = Duration::from_secs(60);
+
+fn journey_tick_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= JOURNEY_TICK_INTERVAL)
+}
 const MAX_FAILURE_LINES: usize = 12;
 const MAX_NOTE_CHARS: usize = 1400;
 pub(super) const TEST_PROCESS_IDENTITY_ENV: &[&str] = &[
@@ -167,6 +174,8 @@ pub(crate) struct MergeSweepCoordinator {
     completed: HashMap<String, String>,
     retry_after: Option<(Instant, SweepRequest)>,
     unavailable_reported: bool,
+    journey_tick: Option<Instant>,
+    journey_tick_busy: Arc<AtomicBool>,
 }
 
 impl MergeSweepCoordinator {
@@ -188,6 +197,8 @@ impl MergeSweepCoordinator {
             completed: HashMap::new(),
             retry_after: None,
             unavailable_reported: false,
+            journey_tick: None,
+            journey_tick_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -213,6 +224,51 @@ impl MergeSweepCoordinator {
         for request in requests {
             self.schedule(project_root, cas_dir, request, &settings, false);
         }
+        self.tick_journey_background(project_root, cas_dir, config);
+    }
+
+    /// cas-bb5e: start a pending background journey evaluation once the
+    /// rate cap and an idle host allow, even when no merge arrives. The
+    /// helper runs off the loop thread; one tick at a time.
+    fn tick_journey_background(
+        &mut self,
+        project_root: &Path,
+        cas_dir: &Path,
+        config: &FactoryConfig,
+    ) {
+        let now = Instant::now();
+        if !journey_tick_due(self.journey_tick, now) {
+            return;
+        }
+        self.journey_tick = Some(now);
+        let helper = project_root.join("scripts/journey-background.py");
+        if !helper.is_file() || self.journey_tick_busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let busy = Arc::clone(&self.journey_tick_busy);
+        let repo = project_root.to_path_buf();
+        let cas_dir = cas_dir.to_path_buf();
+        let config = config.clone();
+        std::thread::spawn(move || {
+            let idle =
+                crate::factory_build_guard::inspect(&cas_dir, &config, 0).live_cargo_workers == 0;
+            let mut command = Command::new("python3");
+            command
+                .arg(&helper)
+                .args(["tick", "--repo"])
+                .arg(&repo)
+                .current_dir(&repo)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if idle {
+                command.arg("--host-idle");
+            }
+            if let Err(error) = command.status() {
+                tracing::warn!(%error, "journey background tick failed");
+            }
+            busy.store(false, Ordering::Release);
+        });
     }
 
     async fn recover_once(
@@ -1709,6 +1765,16 @@ fn first_output_line(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-bb5e: the coordinator asks the journey scheduler at most once a
+    /// minute; the first poll asks at once.
+    #[test]
+    fn cas_bb5e_journey_tick_is_throttled_to_once_a_minute() {
+        let now = Instant::now();
+        assert!(journey_tick_due(None, now));
+        assert!(!journey_tick_due(Some(now), now + Duration::from_secs(59)));
+        assert!(journey_tick_due(Some(now), now + JOURNEY_TICK_INTERVAL));
+    }
 
     #[test]
     fn unavailable_is_recorded_once_per_coordinator_session_across_merges() {

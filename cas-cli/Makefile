@@ -243,6 +243,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-release-preflight.sh
 	cd .. && ./scripts/test-journeys.sh
 	cd .. && python3 scripts/test-journey-receipt.py
+	cd .. && python3 scripts/test-journey-background.py
 	cd .. && node --test scripts/test-verified-web-tests.mjs
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh

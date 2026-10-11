@@ -34,6 +34,13 @@ if existing:
     for path in existing:
         path.rename(archive / path.name)
 PY
+# cas-bb5e: a full run reuses the factory daemon's background evaluation of
+# the same hub-web/dist tree, journey sources, catalog and runner. Set
+# JOURNEY_EVAL_FRESH=1 to run the browsers anyway.
+if [[ "$scope" == full ]] && [[ -f "$repo/scripts/journey-background.py" ]] \
+    && python3 "$repo/scripts/journey-background.py" reuse --repo "$repo" --artifacts "$artifacts"; then
+    exit 0
+fi
 printf '%s\n' "$plan" > "$artifacts/journey-selection.json"
 mkdir -p "$artifacts/journeys" "$artifacts/playwright"
 status=0

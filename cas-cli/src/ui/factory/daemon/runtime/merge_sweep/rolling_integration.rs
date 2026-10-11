@@ -69,6 +69,45 @@ struct NoBuildReceipt {
     rows: std::collections::BTreeMap<String, String>,
 }
 
+/// cas-bb5e: the repository's background journey scheduler is present.
+fn journey_background_supported(worktree: &Path) -> bool {
+    worktree.join("scripts/journey-background.py").is_file()
+}
+
+/// cas-bb5e: offer a green tip's hub-web/dist tree to the background journey
+/// scheduler, then let it start an evaluation if the host is idle and its
+/// rate cap allows. Both steps are quick; the evaluation itself runs
+/// detached and is never cancelled by a newer merge.
+fn offer_journey_background(worktree: &Path, tip: &str, host_idle: bool) -> Result<String, String> {
+    let helper = worktree.join("scripts/journey-background.py");
+    let run = |args: &[&str]| -> Result<String, String> {
+        let output = Command::new("python3")
+            .arg(&helper)
+            .args(args)
+            .current_dir(worktree)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| error.to_string())?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() {
+            Ok(text)
+        } else {
+            Err(format!(
+                "{text} {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    let repo = worktree.to_string_lossy();
+    let offered = run(&["offer", "--repo", &repo, "--tip", tip, "--green"])?;
+    let mut tick = vec!["tick", "--repo", repo.as_ref()];
+    if host_idle {
+        tick.push("--host-idle");
+    }
+    let ticked = run(&tick)?;
+    Ok(format!("{offered}; {ticked}"))
+}
+
 /// cas-398c: the repository's proof helper can prove release rows.
 fn row_proofs_supported(worktree: &Path) -> bool {
     fs::read_to_string(worktree.join("scripts/assembly-proof.py"))
@@ -1070,6 +1109,19 @@ fn integrate(
             .summary
             .push_str(&format!("; release rows: {outcome}"));
         receipt.release_rows = Some(outcome);
+    }
+    // cas-bb5e: a green tip's dist tree may need a background journey
+    // evaluation; the scheduler decides (tree changed, idle host, rate cap).
+    if result.status == SweepStatus::Passed && journey_background_supported(&worktree) {
+        let idle = crate::factory_build_guard::inspect(cas_dir, &settings_to_config(settings), 0)
+            .live_cargo_workers
+            == 0;
+        match offer_journey_background(&worktree, &tip, idle) {
+            Ok(line) => result.summary.push_str(&format!("; journeys: {line}")),
+            Err(error) => result
+                .summary
+                .push_str(&format!("; journey scheduler failed: {error}")),
+        }
     }
     result.summary = format!("{branch} at {tip}: {}", result.summary);
     result.request = request.clone();
@@ -2921,7 +2973,10 @@ echo 'Summary: 1 passed'
         .unwrap();
         assert!(journey_background_supported(repo.path()));
         let line = offer_journey_background(repo.path(), "abc123", true).unwrap();
-        assert!(line.contains("offer: ok") && line.contains("tick: ok"), "{line}");
+        assert!(
+            line.contains("offer: ok") && line.contains("tick: ok"),
+            "{line}"
+        );
         offer_journey_background(repo.path(), "def456", false).unwrap();
         let calls = fs::read_to_string(&log).unwrap();
         let worktree = repo.path().display().to_string();

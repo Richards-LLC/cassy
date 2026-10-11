@@ -2460,3 +2460,52 @@ fn parallel_lanes_merge_generated_output_without_conflict_and_regenerate_it_cas_
     );
     assert_eq!(run(&["config", "--get", "merge.cas-generated.driver"]), "true");
 }
+
+/// cas-7aa5: worktree_merge of two lanes that each add a `###` section under
+/// `## [Unreleased]` keeps both sections, in merge order, without a conflict;
+/// an edit to a released section still conflicts.
+#[test]
+fn worktree_merge_unions_unreleased_changelog_sections_cas_7aa5() {
+    let (_temp, repo) = create_test_repo();
+    let git_ops = GitOperations::new(repo.clone());
+    let run = |args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let base = "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-10-10\n\n- shipped\n";
+    std::fs::write(repo.join(".gitattributes"), "CHANGELOG.md merge=cas-changelog\n").unwrap();
+    std::fs::write(repo.join("CHANGELOG.md"), base).unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "changelog"]);
+    run(&["branch", "epic/train"]);
+    for (lane, body) in [
+        ("factory/one", base.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n### One\n\n- one\n\n")),
+        ("factory/two", base.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n### Two\n\n- two\n\n")),
+        ("factory/edit-a", base.replace("- shipped", "- shipped, reworded")),
+        ("factory/edit-b", base.replace("- shipped", "- shipped, corrected")),
+    ] {
+        run(&["checkout", "-q", "-b", lane, "epic/train"]);
+        std::fs::write(repo.join("CHANGELOG.md"), body).unwrap();
+        run(&["commit", "-q", "-am", lane]);
+    }
+    run(&["checkout", "-q", "epic/train"]);
+    git_ops.merge_branch("epic/train", "factory/one", true).expect("first lane");
+    git_ops
+        .merge_branch("epic/train", "factory/two", true)
+        .expect("the second [Unreleased] section merges without a conflict");
+    let changelog = std::fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
+    let (one, two, released) = (
+        changelog.find("### One").expect("first kept"),
+        changelog.find("### Two").expect("second kept"),
+        changelog.find("## [1.2.3]").unwrap(),
+    );
+    assert!(one < two && two < released, "{changelog}");
+    assert!(!changelog.contains("<<<<<<<"), "{changelog}");
+
+    git_ops.merge_branch("epic/train", "factory/edit-a", true).expect("first edit");
+    let conflict = git_ops
+        .merge_branch("epic/train", "factory/edit-b", true)
+        .expect_err("a second edit to a released line still conflicts");
+    assert!(matches!(conflict, GitError::MergeConflictPaths(ref paths) if paths.iter().any(|p| p == "CHANGELOG.md")), "{conflict:?}");
+}

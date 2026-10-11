@@ -578,6 +578,41 @@ PY
         self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
         self.assertEqual(self.git("show", "--format=%s", "--no-patch", "HEAD"), "release docs")
 
+    def test_parallel_unreleased_sections_rebase_together_cas_7aa5(self):
+        """cas-7aa5: the integration tip and the release branch each add a
+        section under ## [Unreleased]. Assembly replays the release commit
+        without a conflict and keeps both sections; the driver is registered
+        from this checkout's scripts/cas-merge-drivers.py."""
+        base = "# Changelog\n\n## [Unreleased]\n\n## [0.0.0] - shipped\n\n- old\n"
+        self.git("checkout", "main")
+        (self.root / "CHANGELOG.md").write_text(base)
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "changelog")
+        main_tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", main_tip)
+        self.git("checkout", "-B", "epic/one", main_tip)
+        (self.root / ".gitattributes").write_text("CHANGELOG.md merge=cas-changelog\n")
+        (self.root / "CHANGELOG.md").write_text(
+            base.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n### Epic\n\n- epic entry\n\n"))
+        self.git("add", ".")
+        self.git("commit", "-m", "epic entry")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(base=main_tip, tip=self.tip, epics=[{"id": "one", "branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "-B", "release/test", main_tip)
+        (self.root / "CHANGELOG.md").write_text(
+            base.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n### Release\n\n- release entry\n\n"))
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "release docs")
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = (self.root / "CHANGELOG.md").read_text()
+        self.assertNotIn("<<<<<<<", text)
+        self.assertLess(text.index("### Epic"), text.index("### Release"))
+        self.assertLess(text.index("### Release"), text.index("## [0.0.0]"))
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+
     def test_changed_integration_refuses_wrong_receipt(self):
         self.git("update-ref", "refs/heads/integration/project", self.base)
         self.refused("tip changed")

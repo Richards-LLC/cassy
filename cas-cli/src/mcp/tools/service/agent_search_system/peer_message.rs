@@ -71,7 +71,10 @@ impl CasService {
                     format!(
                         "in_reply_to={row_id} is a message from peer supervisor {}@{}; reply \
                          with target={}@{}",
-                        envelope.sender_name, envelope.machine, envelope.sender_name, envelope.machine
+                        envelope.sender_name,
+                        envelope.machine,
+                        envelope.sender_name,
+                        envelope.machine
                     ),
                 ));
             }
@@ -123,10 +126,9 @@ impl CasService {
         }
 
         let (root, self_id, wanted) = (cas_root.clone(), sender.id.clone(), target.to_string());
-        let discovery =
-            tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
-                .await
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let discovery = tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
+            .await
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let peers = match discovery {
             Ok(PeerDiscovery::Found { peers, .. }) => peers,
             Ok(PeerDiscovery::NotLoggedIn) if qualified => {
@@ -156,7 +158,8 @@ impl CasService {
         if urgent {
             return Err(refuse_urgent());
         }
-        let (sender_id, body, summary) = (sender.id.clone(), message.to_string(), summary.to_string());
+        let (sender_id, body, summary) =
+            (sender.id.clone(), message.to_string(), summary.to_string());
         let to = peer.clone();
         let receipt = tokio::task::spawn_blocking(move || {
             peer_mailbox::send_to_peer(&cas_root, &sender_id, &to, &body, Some(&summary), None)

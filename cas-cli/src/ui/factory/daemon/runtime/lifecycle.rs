@@ -2420,7 +2420,8 @@ impl FactoryDaemon {
                         && last_peer_poll.elapsed() >= crate::cloud::peer_mailbox::POLL_INTERVAL
                     {
                         let peers = std::sync::Arc::clone(peers);
-                        peer_task = Some(tokio::task::spawn_blocking(move || peers.tick_blocking()));
+                        peer_task =
+                            Some(tokio::task::spawn_blocking(move || peers.tick_blocking()));
                         last_peer_poll = std::time::Instant::now();
                     }
                     if peer_task.as_ref().is_some_and(JoinHandle::is_finished) {

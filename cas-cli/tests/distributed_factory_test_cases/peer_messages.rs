@@ -39,10 +39,14 @@ impl Respond for Send {
         let project = body["project_id"].as_str().unwrap();
         let recipient_repo = recipient["metadata"]["canonical_id"].as_str().unwrap_or("");
         if !cas::cloud::project_ids_match_with_aliases(recipient_repo, project, &[]) {
-            return ResponseTemplate::new(403).set_body_json(json!({"error": "recipient is not in this project"}));
+            return ResponseTemplate::new(403)
+                .set_body_json(json!({"error": "recipient is not in this project"}));
         }
         let mut mailbox = self.1.lock().unwrap();
-        if let Some(existing) = mailbox.iter().find(|m| m["dedupe_key"] == body["dedupe_key"]) {
+        if let Some(existing) = mailbox
+            .iter()
+            .find(|m| m["dedupe_key"] == body["dedupe_key"])
+        {
             return ResponseTemplate::new(200)
                 .set_body_json(json!({"id": existing["id"], "status": "duplicate"}));
         }
@@ -161,10 +165,7 @@ fn supervisor_at(cas_dir: &Path, machine_name: &str, id: &str) {
     agent.role = AgentRole::Supervisor;
     agent.machine_id = Some(machine_name.to_string());
     agent.factory_session = Some(format!("factory-{id}"));
-    open_agent_store(cas_dir)
-        .unwrap()
-        .register(&agent)
-        .unwrap();
+    open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
 }
 
 /// One recipient-daemon tick for supervisor `id`'s session.
@@ -206,10 +207,28 @@ async fn a_supervisor_messages_a_peer_on_another_machine_and_gets_the_reply() {
 
         // A finds B by name and sends twice while B's daemon is offline.
         let peers = peers_of(&a, "a");
-        let to_b = resolve_peer_target(&peers, "sup-b").unwrap().expect("B is a peer");
-        let first = send_to_peer(&a, "a", to_b, "can you take cas-1234?", Some("take cas-1234?"), None).unwrap();
+        let to_b = resolve_peer_target(&peers, "sup-b")
+            .unwrap()
+            .expect("B is a peer");
+        let first = send_to_peer(
+            &a,
+            "a",
+            to_b,
+            "can you take cas-1234?",
+            Some("take cas-1234?"),
+            None,
+        )
+        .unwrap();
         assert_eq!(first.status, "queued");
-        send_to_peer(&a, "a", to_b, "and cas-5678 after", Some("then cas-5678"), None).unwrap();
+        send_to_peer(
+            &a,
+            "a",
+            to_b,
+            "and cas-5678 after",
+            Some("then cas-5678"),
+            None,
+        )
+        .unwrap();
         let receipts = http_mailbox(&a).unwrap();
         assert_eq!(receipts.status(&first.id).unwrap().status, "queued");
 
@@ -234,11 +253,26 @@ async fn a_supervisor_messages_a_peer_on_another_machine_and_gets_the_reply() {
 
         // B replies to the first message; its row is acked locally.
         let queue_b = open_prompt_queue_store(&b).unwrap();
-        let reply = reply_to_peer_row(&b, queue_b.as_ref(), rows[0].id, "b", "sup-b", "yes, taking it", Some("taking cas-1234"))
-            .unwrap()
-            .expect("row is a peer message");
+        let reply = reply_to_peer_row(
+            &b,
+            queue_b.as_ref(),
+            rows[0].id,
+            "b",
+            "sup-b",
+            "yes, taking it",
+            Some("taking cas-1234"),
+        )
+        .unwrap()
+        .expect("row is a peer message");
         assert_eq!(reply.to, "sup-a@machine-alpha");
-        assert!(queue_b.queued_prompt(rows[0].id).unwrap().unwrap().acked_at.is_some());
+        assert!(
+            queue_b
+                .queued_prompt(rows[0].id)
+                .unwrap()
+                .unwrap()
+                .acked_at
+                .is_some()
+        );
 
         // A receives the reply, linked to its message.
         let report = tick(&a, "a");
@@ -246,8 +280,17 @@ async fn a_supervisor_messages_a_peer_on_another_machine_and_gets_the_reply() {
         let replies = inbox(&a);
         assert_eq!(replies.len(), 1);
         assert!(replies[0].prompt.ends_with("yes, taking it"));
-        assert!(replies[0].prompt.contains(&format!("in reply to {}", first.id)), "{}", replies[0].prompt);
-        assert_eq!(parse_envelope(&replies[0].prompt).unwrap().sender_name, "sup-b");
+        assert!(
+            replies[0]
+                .prompt
+                .contains(&format!("in reply to {}", first.id)),
+            "{}",
+            replies[0].prompt
+        );
+        assert_eq!(
+            parse_envelope(&replies[0].prompt).unwrap().sender_name,
+            "sup-b"
+        );
     })
     .await
     .unwrap();
@@ -271,7 +314,11 @@ async fn a_peer_message_to_another_repo_is_refused_and_a_resend_is_one_message()
         supervisor(&alpha, "a");
         supervisor(&gamma, "g");
         // Discovery never offers another repo's supervisor ...
-        assert!(resolve_peer_target(&peers_of(&a, "a"), "sup-g").unwrap().is_none());
+        assert!(
+            resolve_peer_target(&peers_of(&a, "a"), "sup-g")
+                .unwrap()
+                .is_none()
+        );
         // ... and the mailbox refuses an addressed send anyway.
         let mailbox = http_mailbox(&a).unwrap();
         let refused = mailbox.send(&PeerSend {
@@ -308,10 +355,7 @@ fn service_for(cas_dir: &Path, agent_id: &str) -> cas::mcp::CasService {
     cas::mcp::CasService::new(core, None)
 }
 
-async fn coordinate(
-    service: &cas::mcp::CasService,
-    request: Value,
-) -> Result<String, String> {
+async fn coordinate(service: &cas::mcp::CasService, request: Value) -> Result<String, String> {
     let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(request).unwrap();
     service
         .coordination(rmcp::handler::server::wrapper::Parameters(request))
@@ -369,7 +413,10 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     )
     .await
     .unwrap();
-    assert!(sent.contains("Message sent to peer supervisor sup-b@"), "{sent}");
+    assert!(
+        sent.contains("Message sent to peer supervisor sup-b@"),
+        "{sent}"
+    );
     assert!(sent.contains("peer message pm_1"), "{sent}");
 
     let bb = b.clone();
@@ -387,11 +434,17 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     )
     .await
     .unwrap();
-    assert!(replied.contains("Reply sent to peer supervisor sup-a@machine-alpha"), "{replied}");
+    assert!(
+        replied.contains("Reply sent to peer supervisor sup-a@machine-alpha"),
+        "{replied}"
+    );
 
-    let status = coordinate(&service_a, json!({"action": "message_status", "id": "pm_1"}))
-        .await
-        .unwrap();
+    let status = coordinate(
+        &service_a,
+        json!({"action": "message_status", "id": "pm_1"}),
+    )
+    .await
+    .unwrap();
     assert!(status.contains("Peer message pm_1: delivered"), "{status}");
 
     let aa = a.clone();

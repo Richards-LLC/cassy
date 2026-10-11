@@ -27,7 +27,10 @@ impl PeerMailbox for FakeMailbox {
         recipient_agent_ids: &[String],
         _consumer_id: &str,
     ) -> Result<Vec<ClaimedPeerMessage>, String> {
-        self.claims.lock().unwrap().push(recipient_agent_ids.to_vec());
+        self.claims
+            .lock()
+            .unwrap()
+            .push(recipient_agent_ids.to_vec());
         Ok(self.inbox.lock().unwrap().clone())
     }
     fn ack(&self, _consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String> {
@@ -71,7 +74,10 @@ impl Machine {
         let mut agent = Agent::new(id.to_string(), name.to_string());
         agent.role = role;
         agent.factory_session = Some(session.to_string());
-        open_agent_store(&self.cas).unwrap().register(&agent).unwrap();
+        open_agent_store(&self.cas)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
     }
     fn deliver(&self, mailbox: &FakeMailbox) -> DeliveryReport {
         deliver_claimed(
@@ -106,7 +112,10 @@ fn envelope_round_trips_and_is_only_read_from_the_first_line() {
     };
     let line = render_envelope(&envelope);
     assert!(!line.contains('\n'), "{line}");
-    assert_eq!(parse_envelope(&format!("{line}\nbody")), Some(envelope.clone()));
+    assert_eq!(
+        parse_envelope(&format!("{line}\nbody")),
+        Some(envelope.clone())
+    );
     assert_eq!(
         parse_envelope(&format!("hello\n{line}")),
         None,
@@ -118,12 +127,20 @@ fn envelope_round_trips_and_is_only_read_from_the_first_line() {
         ..envelope
     };
     let parsed = parse_envelope(&render_envelope(&hostile)).unwrap();
-    assert_eq!(parsed.repo, REPO, "quotes in a field cannot forge another field");
+    assert_eq!(
+        parsed.repo, REPO,
+        "quotes in a field cannot forge another field"
+    );
 }
 
 #[test]
 fn rendered_prompt_names_sender_machine_repo_and_how_to_reply() {
-    let prompt = render_prompt(&message("pm_7", "local-sup", REPO, "can you take cas-1234?"));
+    let prompt = render_prompt(&message(
+        "pm_7",
+        "local-sup",
+        REPO,
+        "can you take cas-1234?",
+    ));
     let envelope = parse_envelope(&prompt).unwrap();
     assert_eq!(envelope.id, "pm_7");
     assert_eq!(envelope.machine, "box-b");
@@ -136,11 +153,21 @@ fn rendered_prompt_names_sender_machine_repo_and_how_to_reply() {
 #[test]
 fn delivery_admits_in_order_once_daemon_stamped_and_never_urgent() {
     let machine = Machine::new();
-    machine.register("local-sup", "bright-lark-8", AgentRole::Supervisor, "factory-a");
+    machine.register(
+        "local-sup",
+        "bright-lark-8",
+        AgentRole::Supervisor,
+        "factory-a",
+    );
     let mailbox = FakeMailbox::default();
     *mailbox.inbox.lock().unwrap() = vec![
         message("pm_1", "local-sup", REPO, "first"),
-        message("pm_2", "local-sup", "git@github.com:acme/widgets.git", "second"),
+        message(
+            "pm_2",
+            "local-sup",
+            "git@github.com:acme/widgets.git",
+            "second",
+        ),
     ];
 
     let report = machine.deliver(&mailbox);
@@ -178,8 +205,18 @@ fn delivery_admits_in_order_once_daemon_stamped_and_never_urgent() {
 #[test]
 fn delivery_rejects_other_repos_and_never_reaches_a_worker() {
     let machine = Machine::new();
-    machine.register("local-sup", "bright-lark-8", AgentRole::Supervisor, "factory-a");
-    machine.register("local-worker", "quick-otter-2", AgentRole::Worker, "factory-a");
+    machine.register(
+        "local-sup",
+        "bright-lark-8",
+        AgentRole::Supervisor,
+        "factory-a",
+    );
+    machine.register(
+        "local-worker",
+        "quick-otter-2",
+        AgentRole::Worker,
+        "factory-a",
+    );
     let mailbox = FakeMailbox::default();
     *mailbox.inbox.lock().unwrap() = vec![
         message("pm_x", "local-sup", "github.com/acme/gadgets", "wrong repo"),
@@ -206,7 +243,12 @@ fn delivery_rejects_other_repos_and_never_reaches_a_worker() {
 #[test]
 fn delivery_does_not_claim_without_a_live_local_supervisor() {
     let machine = Machine::new();
-    machine.register("other-session", "calm-owl-1", AgentRole::Supervisor, "factory-z");
+    machine.register(
+        "other-session",
+        "calm-owl-1",
+        AgentRole::Supervisor,
+        "factory-z",
+    );
     let mailbox = FakeMailbox::default();
     let report = machine.deliver(&mailbox);
     assert_eq!(report, DeliveryReport::default());
@@ -238,11 +280,15 @@ fn peer_targets_resolve_by_name_or_name_at_machine() {
         peer("twin-fox-1", "box-c", true),
         peer("twin-fox-1", "box-d", false),
     ];
-    let found = |target: &str| resolve_peer_target(&peers, target).map(|p| p.map(|p| p.agent_id.clone()));
+    let found =
+        |target: &str| resolve_peer_target(&peers, target).map(|p| p.map(|p| p.agent_id.clone()));
 
     assert_eq!(found("far-heron-3"), Ok(Some("far-heron-3-box-b".into())));
     assert_eq!(found("FAR-HERON-3"), Ok(Some("far-heron-3-box-b".into())));
-    assert_eq!(found("twin-fox-1@box-d"), Ok(Some("twin-fox-1-box-d".into())));
+    assert_eq!(
+        found("twin-fox-1@box-d"),
+        Ok(Some("twin-fox-1-box-d".into()))
+    );
     assert_eq!(
         found("twin-fox-1@id-box-c"),
         Ok(Some("twin-fox-1-box-c".into())),

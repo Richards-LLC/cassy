@@ -312,7 +312,9 @@ pub fn deliver_claimed(
             .filter(|agent| matches!(agent.status, AgentStatus::Active | AgentStatus::Idle))
             .collect(),
         Err(error) => {
-            report.errors.push(format!("could not list local agents: {error}"));
+            report
+                .errors
+                .push(format!("could not list local agents: {error}"));
             return report;
         }
     };
@@ -375,9 +377,10 @@ pub fn deliver_claimed(
                 report.duplicates += 1;
                 acks.push((message.id.clone(), PeerAckOutcome::Delivered));
             }
-            Err(error) => report
-                .errors
-                .push(format!("could not admit peer message {}: {error}", message.id)),
+            Err(error) => report.errors.push(format!(
+                "could not admit peer message {}: {error}",
+                message.id
+            )),
         }
     }
     if !acks.is_empty()
@@ -648,7 +651,10 @@ impl PeerMailbox for HttpPeerMailbox {
             .collect();
         Self::read::<serde_json::Value>(
             "peer message ack",
-            self.post("/ack", serde_json::json!({"consumer_id": consumer_id, "acks": acks})),
+            self.post(
+                "/ack",
+                serde_json::json!({"consumer_id": consumer_id, "acks": acks}),
+            ),
         )
         .map(|_| ())
     }

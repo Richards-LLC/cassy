@@ -649,3 +649,90 @@ describe("earlier reply context (cas-7cb3)", () => {
     expect(view.element.querySelector(".reply-quote")?.textContent).not.toContain("Please check");
   });
 });
+
+describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)", () => {
+  /** A stand-in scroll box: fixed content and box heights, scrollTop clamped like a browser's. */
+  function layout(view: ConversationView, content: { height: number }, box = 200) {
+    let top = 0;
+    Object.defineProperty(view.element, "scrollHeight", { configurable: true, get: () => content.height });
+    Object.defineProperty(view.element, "clientHeight", { configurable: true, get: () => box });
+    Object.defineProperty(view.element, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => { top = Math.max(0, Math.min(value, content.height - box)); },
+    });
+  }
+  function frames() {
+    const queue: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { queue.push(callback); return queue.length; });
+    onTestFinished(() => { vi.unstubAllGlobals(); });
+    return () => { for (const callback of queue.splice(0)) callback(0); };
+  }
+  function longThread() {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element);
+    const jump = view.element.querySelector<HTMLButtonElement>(".conversation-jump")!;
+    return { history, view, jump };
+  }
+  const readTop = (view: ConversationView) => {
+    view.element.scrollTop = 0;
+    view.element.dispatchEvent(new Event("scroll"));
+  };
+
+  // HUB-J9 under load: the reader scrolls up within the two frames that
+  // follow the pin of the newest turn. The scroll was dropped while the pin
+  // was pending, and the pending re-pin then took the reader back down.
+  it("while the pin of the newest turn is still pending", () => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    expect(view.element.scrollTop).toBe(1200);
+    readTop(view);
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    expect(jump.hidden).toBe(false);
+    view.update();
+    expect(view.element.scrollTop, "a later render keeps the reader's place").toBe(0);
+  });
+
+  // The content grew after the last pin without a scroll event (late layout),
+  // so the reader's first scroll up was read as layout and pinned back.
+  it("after the content grew without a scroll of its own", () => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    flush(); flush();
+    content.height = 1460;
+    readTop(view);
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    expect(jump.hidden).toBe(false);
+  });
+
+  // What the guards are for still holds: a layout scroll that leaves the
+  // reader at the tail (content shrank and the box clamped) keeps following.
+  it("but layout that keeps the reader at the tail keeps following", () => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    flush(); flush();
+    content.height = 1360;
+    view.element.scrollTop = view.element.scrollTop;
+    view.element.dispatchEvent(new Event("scroll"));
+    expect(jump.hidden).toBe(true);
+    content.height = 1500;
+    history.reply(reply(15, "answer", "Build finished"), at(10, 15));
+    view.update();
+    expect(view.element.scrollTop).toBe(1300);
+  });
+});

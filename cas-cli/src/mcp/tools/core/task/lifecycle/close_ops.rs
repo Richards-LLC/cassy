@@ -5726,7 +5726,7 @@ impl CasCore {
         if requester.role != cas_types::AgentRole::Worker || requester.factory_session.is_none() {
             return Ok(requester.id);
         }
-        let owner_id = super::supervisor_push::resolve_owning_supervisor(
+        let owner_id = super::supervisor_push::resolve_worker_supervisor(
             agent_store.as_ref(),
             requester.factory_session.as_deref(),
         )
@@ -20790,6 +20790,9 @@ pub(crate) enum LightweightLintOutcome {
     Pass,
     /// Lint found violations — worker must fix before close.
     Fail(String),
+    /// Lint passed, scoped to a fallback branch because the requested parent
+    /// no longer resolves (GH #1171). Carries the warning to report.
+    PassWithFallback(String),
 }
 
 fn target_only_receipt_lint_parent(
@@ -21299,6 +21302,15 @@ pub(crate) fn run_declared_pre_close_hook(
             task_tip: Some(task_tip),
         }),
         LightweightLintOutcome::Fail(message) => Err(message),
+        LightweightLintOutcome::PassWithFallback(warning) => {
+            tracing::warn!(task_id = %task.id, "{warning}");
+            Ok(cas_types::PreCloseHookEvidence {
+                repo_selector: repo_context.repo_selector.clone(),
+                target_branch: repo_context.target_branch.clone(),
+                worktree_branch,
+                task_tip: Some(task_tip),
+            })
+        }
     }
 }
 
@@ -22230,12 +22242,61 @@ fn comment_run_is_commented_out_code(comment_lines: &[String]) -> bool {
     code > prose
 }
 
+/// Whether a lint parent resolves locally or as its remote-tracking ref
+/// (cas-d0c0), using the same rule the scoped lint enforces.
+fn lint_parent_resolves(project_root: &std::path::Path, parent: &str) -> bool {
+    git_ref_exists(project_root, parent)
+        || (!parent.contains('/') && git_ref_exists(project_root, &format!("origin/{parent}")))
+}
+
+/// The branch a scoped lint falls back to when its parent is gone (GH #1171):
+/// the remote's default branch, then a local or remote `main` or `master`.
+fn default_branch_lint_fallback(project_root: &std::path::Path) -> Option<String> {
+    let remote_head = std::process::Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|name| !name.is_empty() && is_safe_git_refname(name));
+    remote_head
+        .into_iter()
+        .chain(["main", "master", "origin/main", "origin/master"].map(str::to_string))
+        .find(|candidate| git_ref_exists(project_root, candidate))
+}
+
 fn run_lightweight_structural_lint_at_tip(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,
     task_tip: &str,
 ) -> LightweightLintOutcome {
     use std::process::Command;
+
+    // GH #1171: a parent epic branch that was merged and deleted (on origin
+    // and locally) used to fail the close outright. Lint against the default
+    // branch instead and say so: the lint still runs, never a silent pass.
+    // With nothing to fall back to, the scoped path below still fails closed.
+    if let Some(parent) = committed_range_parent
+        && is_safe_git_refname(parent)
+        && !lint_parent_resolves(project_root, parent)
+        && let Some(fallback) = default_branch_lint_fallback(project_root)
+        && fallback != parent
+    {
+        let warning = format!(
+            "Structural lint: parent branch `{parent}` no longer resolves (deleted or never \
+             fetched), so the lint was scoped to the default branch `{fallback}` instead."
+        );
+        return match run_lightweight_structural_lint_at_tip(project_root, Some(&fallback), task_tip)
+        {
+            LightweightLintOutcome::Pass | LightweightLintOutcome::PassWithFallback(_) => {
+                LightweightLintOutcome::PassWithFallback(warning)
+            }
+            LightweightLintOutcome::Fail(message) => {
+                LightweightLintOutcome::Fail(format!("{message}\n\n{warning}"))
+            }
+        };
+    }
 
     // Collect the diff text.
     //
@@ -23006,6 +23067,13 @@ mod lightweight_lint_tests {
 
     // --- cas-dc5d: scope lint to worker committed range, not main WIP ------
 
+    /// Commit the staged change of an `init_repo_with_diff` fixture on a
+    /// worker branch, leaving `main` at the base commit.
+    fn commit_all_dc5d(dir: &std::path::Path, message: &str) {
+        git_dc5d(dir, &["checkout", "-q", "-b", "factory/worker"]);
+        git_dc5d(dir, &["commit", "-q", "-m", message]);
+    }
+
     fn git_dc5d(dir: &std::path::Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
@@ -23591,20 +23659,80 @@ pub fn retry() {}
         }
     }
 
-    /// cas-dc5d P2: missing parent ref must Fail with actionable text.
+    /// GH #1171: the close path names the verdict owner with the same
+    /// resolution as `target=supervisor`. A worker whose live supervisor's row
+    /// carries no factory session used to own its own verification dispatch,
+    /// while a second session's supervisor shared the clone.
     #[test]
-    fn lint_scoped_fails_closed_on_missing_parent() {
+    fn verification_dispatch_owner_is_the_workers_own_supervisor_gh_1171() {
+        use cas_types::{Agent, AgentRole};
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).unwrap();
+        let mut supervisor_a = Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        agents.register(&supervisor_a).unwrap();
+        let mut supervisor_b = Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents.register(&supervisor_b).unwrap();
+
+        assert_eq!(
+            core.verification_dispatch_owner("worker-id").expect("owner"),
+            "supervisor-a-id",
+            "the dispatch belongs to the worker's live supervisor, not the worker"
+        );
+    }
+
+    /// GH #1171: a task whose parent epic branch was deleted (merged and
+    /// pruned on origin) could not close: the scoped lint failed with "parent
+    /// branch does not resolve". It now lints against the repository's
+    /// default branch and says so, so the lint still runs (never a silent
+    /// pass) and still catches findings.
+    #[test]
+    fn lint_scoped_falls_back_to_the_default_branch_when_the_parent_is_gone_gh_1171() {
         let dir = init_repo_with_diff("fn ok() {}\n");
-        let out =
-            run_lightweight_structural_lint_with_scope(dir.path(), Some("epic/does-not-exist"));
-        match out {
+        commit_all_dc5d(dir.path(), "feat: clean change");
+        match run_lightweight_structural_lint_with_scope(dir.path(), Some("epic/does-not-exist")) {
+            LightweightLintOutcome::PassWithFallback(warning) => {
+                assert!(warning.contains("epic/does-not-exist"), "{warning}");
+                assert!(warning.contains("main"), "{warning}");
+            }
+            other => panic!("a missing parent must fall back to main, got {other:?}"),
+        }
+
+        let dirty = init_repo_with_diff(COMMENTED_OUT_CODE_6);
+        commit_all_dc5d(dirty.path(), "feat: with dead code");
+        match run_lightweight_structural_lint_with_scope(dirty.path(), Some("epic/does-not-exist")) {
+            LightweightLintOutcome::Fail(msg) => {
+                assert!(msg.contains("commented-out"), "the fallback still lints: {msg}");
+            }
+            other => panic!("findings must still fail after the fallback, got {other:?}"),
+        }
+    }
+
+    /// cas-dc5d P2 still holds when nothing can scope the lint: no parent and
+    /// no default branch fails closed with actionable text.
+    #[test]
+    fn lint_scoped_fails_closed_when_neither_parent_nor_default_branch_resolves() {
+        let dir = init_repo_with_diff("fn ok() {}\n");
+        commit_all_dc5d(dir.path(), "feat: clean change");
+        git_dc5d(dir.path(), &["branch", "-q", "-D", "main"]);
+        match run_lightweight_structural_lint_with_scope(dir.path(), Some("epic/does-not-exist")) {
             LightweightLintOutcome::Fail(msg) => {
                 assert!(
                     msg.contains("does not resolve") || msg.contains("Cannot scope"),
                     "must be actionable, got: {msg}"
                 );
             }
-            other => panic!("missing parent must Fail closed, got {other:?}"),
+            other => panic!("nothing to scope against must Fail closed, got {other:?}"),
         }
     }
 

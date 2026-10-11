@@ -15,6 +15,15 @@ TRAIN = Path(__file__).resolve().with_name("release-train.sh")
 INTEGRATE = TRAIN.with_name("release-integrate.py")
 
 
+def home_release_runs(home):
+    """Files in the fixture's version run dirs under a home's default artifacts
+    root, with size and mtime (cas-df75). The fixtures release v0.0.0, so a
+    leak lands in ~/.cas/artifacts/release/v0.0.0-*."""
+    root = Path(home) / ".cas/artifacts/release"
+    return {str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in sorted(root.glob("v0.0.0-*/**/*")) if path.is_file()}
+
+
 class IntegrationAssembly(unittest.TestCase):
     def setUp(self):
         inherited = {key: value for key, value in os.environ.items()
@@ -28,6 +37,11 @@ class IntegrationAssembly(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("CAS_RELEASE_ARTIFACTS_ROOT", None)
                         if old_artifacts is None else os.environ.__setitem__("CAS_RELEASE_ARTIFACTS_ROOT", old_artifacts))
         os.environ["CAS_RELEASE_ARTIFACTS_ROOT"] = str(Path(self.temp.name) / "artifacts")
+        # cas-df75: no fixture may read or write the real default run dir.
+        real_runs = home_release_runs(Path.home())
+        self.addCleanup(lambda: self.assertEqual(
+            home_release_runs(Path.home()), real_runs,
+            "a fixture wrote under ~/.cas/artifacts/release; use CAS_RELEASE_ARTIFACTS_ROOT"))
         self.root = Path(self.temp.name) / "project"
         self.root.mkdir()
         self.git("init", "-b", "main")
@@ -460,6 +474,28 @@ PY
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
         self.assertEqual(result.stdout.splitlines()[0], "PASS release assembly")
         self.assertIn(self.tip, result.stdout)
+
+    def test_stale_home_run_dir_is_never_read_or_written_cas_df75(self):
+        """A stale assemble.integration.json from another repository in the
+        default run dir (~/.cas/artifacts/release/v0.0.0-project) neither
+        fails the assembly nor gains files: the fixture's artifacts root is
+        used instead."""
+        home = Path(self.temp.name) / "home"
+        stale = home / ".cas/artifacts/release/v0.0.0-project/assemble.integration.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(json.dumps({
+            "repository": "/tmp/elsewhere/project/.git", "tip": "9" * 40, "base": "9" * 40,
+            "mode": "from-main", "reason": "stale", "full_gate_required": True}))
+        before = home_release_runs(home)
+        old_home = os.environ["HOME"]
+        self.addCleanup(os.environ.__setitem__, "HOME", old_home)
+        os.environ["HOME"] = str(home)
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("another repository", result.stderr)
+        self.assertEqual(home_release_runs(home), before)
+        self.assertTrue((Path(os.environ["CAS_RELEASE_ARTIFACTS_ROOT"]) / "v0.0.0-project"
+                         / "interventions.log").is_file())
 
     def test_red_or_pending_sweep_refuses_old_tip(self):
         for status in ["CONFLICT", "FAILED", "RUNNING", "DEFERRED"]:

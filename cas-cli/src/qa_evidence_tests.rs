@@ -2492,20 +2492,40 @@ fn cas_147e_missing_bundle_citation_is_named_not_a_missing_receipt() {
 
     // No receipt either: the receipt really is missing.
     let missing = journeys::check_close_journeys(&ctx, std::slice::from_ref(&reason)).unwrap_err();
-    assert!(missing.problem.contains("missing journey receipt"), "{missing:?}");
-    assert!(missing.command.contains("scripts/journey-eval.sh"), "{missing:?}");
+    assert!(
+        missing.problem.contains("missing journey receipt"),
+        "{missing:?}"
+    );
+    assert!(
+        missing.command.contains("scripts/journey-eval.sh"),
+        "{missing:?}"
+    );
 
     // A valid exact-tip receipt is on disk; only the bundle citation is absent.
     let receipt = write_journey_receipt(&fx, &ids, "affected", |_| {});
     let uncited = journeys::check_close_journeys(&ctx, std::slice::from_ref(&reason)).unwrap_err();
-    assert!(!uncited.problem.contains("missing journey receipt"), "{uncited:?}");
-    assert!(uncited.problem.contains("no qa-bundle cited"), "{uncited:?}");
+    assert!(
+        !uncited.problem.contains("missing journey receipt"),
+        "{uncited:?}"
+    );
+    assert!(
+        uncited.problem.contains("no qa-bundle cited"),
+        "{uncited:?}"
+    );
     assert!(uncited.problem.contains("HUB-J1, HUB-J7"), "{uncited:?}");
     assert!(uncited.problem.contains("qa-bundle: "), "{uncited:?}");
     assert!(!uncited.command.contains("journey-eval"), "{uncited:?}");
-    assert!(uncited.command.contains(&receipt.display().to_string()), "{uncited:?}");
+    assert!(
+        uncited.command.contains(&receipt.display().to_string()),
+        "{uncited:?}"
+    );
     assert!(uncited.command.contains(&fx.head), "{uncited:?}");
-    assert!(uncited.command.contains("only the bundle citation is missing"), "{uncited:?}");
+    assert!(
+        uncited
+            .command
+            .contains("only the bundle citation is missing"),
+        "{uncited:?}"
+    );
 
     // A receipt for another head is not usable: rerun journey-eval.
     write_journey_receipt(&fx, &ids, "affected", |v| {
@@ -2514,7 +2534,10 @@ fn cas_147e_missing_bundle_citation_is_named_not_a_missing_receipt() {
     let stale = journeys::check_close_journeys(&ctx, std::slice::from_ref(&reason)).unwrap_err();
     assert!(stale.problem.contains("no qa-bundle cited"), "{stale:?}");
     assert!(stale.problem.contains("does not bind"), "{stale:?}");
-    assert!(stale.command.contains("scripts/journey-eval.sh"), "{stale:?}");
+    assert!(
+        stale.command.contains("scripts/journey-eval.sh"),
+        "{stale:?}"
+    );
 }
 
 #[test]

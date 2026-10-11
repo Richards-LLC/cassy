@@ -1,7 +1,7 @@
 //! Release-epic integration gate (cas-6f48).
 //!
-//! 3.50.0 found six release blockers only at assembly. The daemon's rolling
-//! integration already runs the full workspace suite and the no-build release
+//! The October 2026 release cut found six blockers only at assembly. The
+//! daemon's rolling integration already runs the full workspace suite and the no-build release
 //! rows on the union of open epics after every `worktree_merge`; what was
 //! missing is a consequence. This module keeps, per epic branch, the last tip
 //! that passed and, while the epic is red, the first merge that broke it:

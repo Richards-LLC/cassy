@@ -21346,7 +21346,6 @@ pub(crate) fn parked_anchor_advance_is_attributable(
     foreign_since: Option<i64>,
     upstream: Option<&str>,
 ) -> bool {
-    let _ = upstream;
     if commit_ids_match(recorded, candidate)
         || !is_safe_git_refname(recorded)
         || !is_safe_git_refname(candidate)
@@ -21354,12 +21353,26 @@ pub(crate) fn parked_anchor_advance_is_attributable(
     {
         return false;
     }
+    // cas-9668: commits already on the delivery's upstream (the epic or
+    // trunk it targets, local or on origin) are not this lane's work. A
+    // worker who merges the epic into the task branch brings them in as the
+    // merge's other parents; they and the merge commit itself stay the
+    // task's delivery tip, whatever the merge message names.
+    let upstream_refs: Vec<String> = upstream
+        .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch))
+        .filter(|branch| !branch.is_empty() && is_safe_git_refname(branch))
+        .map(|branch| {
+            [format!("refs/remotes/origin/{branch}"), format!("refs/heads/{branch}")]
+                .into_iter()
+                .filter(|refname| git_ref_exists(repo_path, refname))
+                .collect()
+        })
+        .unwrap_or_default();
+    let range = format!("{recorded}..{candidate}");
+    let mut args = vec!["log".to_string(), "--format=%ct%x1f%P%x1f%B%x1e".to_string(), range];
+    args.extend(upstream_refs.iter().map(|refname| format!("^{refname}")));
     let Ok(output) = std::process::Command::new("git")
-        .args([
-            "log",
-            "--format=%ct%x1f%B%x1e",
-            &format!("{recorded}..{candidate}"),
-        ])
+        .args(&args)
         .current_dir(repo_path)
         .output()
     else {
@@ -21374,16 +21387,28 @@ pub(crate) fn parked_anchor_advance_is_attributable(
         .split('\u{1e}')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
-            let (epoch, message) = record.trim_start().split_once('\u{1f}')?;
-            Some((epoch.trim().parse::<i64>().ok()?, message))
+            let mut fields = record.trim_start().splitn(3, '\u{1f}');
+            let epoch = fields.next()?.trim().parse::<i64>().ok()?;
+            let parents: Vec<&str> = fields.next()?.split_whitespace().collect();
+            Some((epoch, parents, fields.next()?))
         })
         .collect::<Option<Vec<_>>>()
     else {
         return false;
     };
+    // A merge whose other parents are all on the upstream brings the epic in.
+    let merges_upstream = |parents: &[&str]| {
+        parents.len() > 1
+            && !upstream_refs.is_empty()
+            && parents[1..].iter().all(|parent| {
+                upstream_refs
+                    .iter()
+                    .any(|refname| git_commit_is_ancestor(repo_path, parent, refname))
+            })
+    };
     !commits.is_empty()
-        && commits.iter().all(|(epoch, message)| {
-            !message_claims_other_task(message, Some(task_id))
+        && commits.iter().all(|(epoch, parents, message)| {
+            (merges_upstream(parents) || !message_claims_other_task(message, Some(task_id)))
                 && foreign_since.is_none_or(|since| {
                     *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
                 })

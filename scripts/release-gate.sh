@@ -455,6 +455,22 @@ run_check() {
             return 0
         fi
         printf '  %s\n' "$assembly_pass"
+    elif [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(release-binary-isa|macos-check)$ \
+        && -f "$repo_root/scripts/assembly-proof.py" ]]; then
+        # cas-398c: the factory daemon proves these rows in the background on
+        # a green integration tip, keyed on code input, toolchain, target and
+        # the test-relevant environment. A miss names the differing input and
+        # falls through to the row cache and then a fresh run.
+        local row_pass=''
+        if row_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check-row "$repo_root" "$name" 2>&1)"; then
+            source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$row_pass")"
+            print_result PASS "$name" "$command"
+            printf '  reused %s\n' "$row_pass"
+            printf '%s\n' "$row_pass" >"$log"
+            printf '%s\t%s\t%s\t0\t0\t0\tREUSED\t%s\n' "$name" "$started" "$started" "$source_sha" >>"$row_log_dir/timing.tsv"
+            return 0
+        fi
+        printf '  %s\n' "$row_pass"
     elif [[ -z "$only_rows" && "$no_reuse" == true && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ ]]; then
         printf '  MISS assembly key=implementation reason=full_gate_required\n'
     elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ ]]; then

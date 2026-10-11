@@ -667,6 +667,18 @@ proof and a scrubbed release shell can therefore share one proof, so `--cut`
 reuses the daemon's proof of the same code input. Each receipt's
 `environment_policy` lists the included names and every excluded name with its
 reason; a miss names the differing included variable.
+
+Row proofs (cas-398c) extend the same key to `release-binary-isa` and
+`macos-check`, which depend only on the code input, toolchain and target.
+After a green integration run, the factory daemon calls
+`assembly-proof.py prove-rows` on the integration tip (deferred when the build
+guard reports the host busy; a newer merge cancels it). Each receipt, under
+`.cas/merge-sweeps/row-proofs/`, is keyed on the proof inputs plus the row,
+its target and a digest of the row's tools (cargo, rustc, plus cargo-zigbuild
+and objdump for the ISA audit, or rustup for the Darwin check). A full gate
+runs `assembly-proof.py check-row` before the row cache: a hit records the row
+`REUSED` with its source SHA, and a miss prints the differing key and runs the
+row as before. `--only` and a no-reuse full gate never consume a row proof.
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.

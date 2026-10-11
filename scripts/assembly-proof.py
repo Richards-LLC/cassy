@@ -776,15 +776,179 @@ def prove_owned(root):
         return record, path
 
 
+# cas-398c: release rows that are a pure function of the code input, toolchain
+# and target. The factory daemon proves them in the background on a green
+# integration tip; the cut's gate reuses a matching PASS instead of rebuilding.
+# The code input masks only release prose, member versions and the ledger, so
+# prep's version bump keeps the proof (the ISA audit and the Darwin check do
+# not depend on version literals).
+ROW_PROOF_ROWS = ("release-binary-isa", "macos-check")
+ROW_TARGETS = {"release-binary-isa": "x86_64-unknown-linux-gnu",
+               "macos-check": "aarch64-apple-darwin"}
+
+
+def row_toolchain(root, row, env):
+    """Digest of every tool the row's build or audit runs."""
+    cargo = env.get("CARGO", "cargo")
+    commands = [[cargo, "--version"], ["rustc", "-Vv"]]
+    if row == "release-binary-isa":
+        objdump = "gobjdump" if platform.system() == "Darwin" else "objdump"
+        commands += [["cargo-zigbuild", "--version"], [objdump, "--version"]]
+    else:
+        commands += [[env.get("RUSTUP", "rustup"), "--version"]]
+    outputs = []
+    for command in commands:
+        try:
+            outputs.append(subprocess.run(command, cwd=root, env=env, capture_output=True,
+                                          check=True).stdout)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError(f"{row} toolchain probe {command[0]} failed: {error}") from error
+    return digest(b"\0".join(outputs))
+
+
+def row_inputs(root, row):
+    if row not in ROW_TARGETS:
+        raise ValueError(f"no row proof for {row}")
+    base, env = inputs(root)
+    return dict(base, row=row, target=ROW_TARGETS[row],
+                row_toolchain=row_toolchain(root, row, env)), env
+
+
+def row_receipt_path(root, expected):
+    key = digest(json.dumps(expected, sort_keys=True).encode())
+    return common_dir(root).parent / ".cas/merge-sweeps/row-proofs" / (key + ".json")
+
+
+def row_matching(root, expected, diagnostic=False):
+    path = row_receipt_path(root, expected)
+
+    def miss(key, reason):
+        if diagnostic:
+            print(f"MISS row-proof row={expected['row']} key={key} reason={reason} receipt={path}",
+                  file=sys.stderr)
+        return None
+
+    try:
+        record = json.loads(path.read_text())
+        if record["inputs"] != expected:
+            return miss("inputs", "different")
+        if record["status"] != "PASS":
+            return miss("status", "not_PASS")
+        if not 0 <= time.time() - record["completed_epoch"] <= MAX_AGE:
+            return miss("completed_epoch", "future_or_expired")
+        if git(root, "rev-parse", record["head"] + "^{tree}").decode().strip() != record["tree"]:
+            return miss("head", "tested_tree_differs")
+        if code_input(root, record["head"]) != expected["code_input"]:
+            return miss("code_input", "tested_commit_differs")
+        return record, path
+    except FileNotFoundError:
+        if diagnostic:
+            print(explain_row_miss(root, expected), file=sys.stderr)
+        return None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+        return miss("receipt", "malformed_or_unavailable_object")
+
+
+def explain_row_miss(root, expected):
+    """Name the first differing input of the newest PASS for the same row."""
+    paths = sorted(row_receipt_path(root, expected).parent.glob("*.json"),
+                   key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths[:100]:
+        try:
+            record = json.loads(path.read_text())
+            recorded = record["inputs"]
+            if (record.get("status") != "PASS" or recorded.get("row") != expected["row"]
+                    or recorded.get("repository") != expected.get("repository")):
+                continue
+            for key in expected:
+                if recorded.get(key) != expected[key]:
+                    detail = ""
+                    if key == "environment" and isinstance(record.get("environment_keys"), dict):
+                        current = {name: digest(value.encode())
+                                   for name, value in environment_material(root, test_environment(root)).items()}
+                        prior = record["environment_keys"]
+                        differing = next((name for name in sorted(set(prior) | set(current))
+                                          if prior.get(name) != current.get(name)), None)
+                        if differing:
+                            detail = f" environment_key={differing}"
+                    return (f"MISS row-proof row={expected['row']} key={key} reason=different{detail} "
+                            f"receipt={path}")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return f"MISS row-proof row={expected['row']} key=receipt reason=no_matching_receipt"
+
+
+def run_gate_row(root, row, env, log):
+    """Run one gate row fresh (--only never reuses) and report its PASS."""
+    row_env = proof_target.environment(env, proof_target.identity(root))
+    row_env["CAS_RELEASE_GATE_LOG_DIR"] = str(log.with_suffix("")) + "-rows"
+    with log.open("w") as stream:
+        result = release_scratch.child_run(["bash", str(root / "scripts/release-gate.sh"),
+                                            "0.0.0", "--only", row], cwd=root, env=row_env,
+                                           stdout=stream, stderr=subprocess.STDOUT)
+    return result.returncode == 0 and bool(
+        re.search(r"^PASS " + re.escape(row) + r" ", log.read_text(), re.M))
+
+
+def prove_rows(root, rows=ROW_PROOF_ROWS):
+    """Prove each row once per input key; return {row: PASS|FAIL}."""
+    results = {}
+    for row in rows:
+        expected, env = row_inputs(root, row)
+        path = row_receipt_path(root, expected)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if row_matching(root, expected):
+                results[row] = "PASS"
+                continue
+            head = git(root, "rev-parse", "HEAD").decode().strip()
+            record = {"inputs": expected, "status": "RUNNING", "row": row, "head": head,
+                      "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
+                      "environment_keys": {key: digest(value.encode())
+                                           for key, value in environment_material(root, env).items()},
+                      "environment_policy": environment_policy(root)}
+            write(path, record)
+            log = path.with_suffix(".log")
+            started = time.time()
+            passed = run_gate_row(root, row, env, log)
+            record["wall_s"] = round(time.time() - started, 3)
+            current, _ = row_inputs(root, row)
+            if current != expected or git(root, "rev-parse", "HEAD").decode().strip() != head:
+                record["status"] = "FAIL"
+                write(path, record)
+                raise ValueError(f"{row} inputs changed while the row ran")
+            record["status"] = "PASS" if passed else "FAIL"
+            record["completed_epoch"] = int(time.time())
+            record["log"] = str(log)
+            write(path, record)
+            results[row] = record["status"]
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prove", "check", "input"))
+    parser.add_argument("action", choices=("prove", "check", "input", "prove-rows", "check-row"))
     parser.add_argument("root", type=Path)
+    parser.add_argument("row", nargs="?")
     args = parser.parse_args()
     try:
         root = args.root.resolve()
         if args.action == "input":
             print(code_input(root))
+            return 0
+        if args.action == "prove-rows":
+            results = prove_rows(root)
+            print("row-proofs " + " ".join(f"{row}={status}" for row, status in results.items()))
+            return 0 if all(status == "PASS" for status in results.values()) else 1
+        if args.action == "check-row":
+            expected, _ = row_inputs(root, args.row)
+            found = row_matching(root, expected, diagnostic=True)
+            if not found:
+                return 1
+            record, path = found
+            print(f"PASS row-proof row={args.row} receipt={path} source_sha={record['head']} "
+                  f"tree={record['tree']} code_input={expected['code_input']} target={expected['target']}")
             return 0
         found = prove(root) if args.action == "prove" else matching(root, inputs(root)[0], diagnostic=True)
         if not found:
@@ -799,6 +963,10 @@ def main():
             print("FAIL assembly proof: " + str(exc), file=sys.stderr)
         elif args.action == "check":
             print("MISS assembly key=checkout reason=" + str(exc), file=sys.stderr)
+        elif args.action == "check-row":
+            print(f"MISS row-proof row={args.row} key=checkout reason=" + str(exc), file=sys.stderr)
+        elif args.action == "prove-rows":
+            print("FAIL row proof: " + str(exc), file=sys.stderr)
         return 1
 
 

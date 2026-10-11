@@ -34,6 +34,10 @@ struct IntegrationReceipt {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     no_build: Option<NoBuildReceipt>,
+    /// cas-398c: background proof of release-binary-isa and macos-check for
+    /// this tip (`row-proofs …=PASS`, `FAIL: …` or `DEFERRED: …`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_rows: Option<String>,
     detail: String,
     affected: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -63,6 +67,84 @@ struct HeldEpic {
 struct NoBuildReceipt {
     tip: String,
     rows: std::collections::BTreeMap<String, String>,
+}
+
+/// cas-398c: the repository's proof helper can prove release rows.
+fn row_proofs_supported(worktree: &Path) -> bool {
+    fs::read_to_string(worktree.join("scripts/assembly-proof.py"))
+        .is_ok_and(|helper| helper.contains("prove-rows"))
+}
+
+/// cas-398c: prove release-binary-isa and macos-check for the checked-out
+/// tip, so the cut's gate reuses them. The helper keys each proof on code
+/// input, toolchain, target and test-relevant environment and skips a key it
+/// already proved. A newer merge cancels the run (the sweep's debounce).
+fn run_row_proofs(
+    worktree: &Path,
+    log_path: &Path,
+    settings: &SweepSettings,
+    cancel: &Arc<AtomicBool>,
+) -> Result<String, String> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let log = File::create(log_path).map_err(|error| error.to_string())?;
+    let mut command = Command::new("python3");
+    command
+        .arg(worktree.join("scripts/assembly-proof.py"))
+        .arg("prove-rows")
+        .arg(worktree)
+        .current_dir(worktree)
+        .envs(settings.env.iter())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            log.try_clone().map_err(|error| error.to_string())?,
+        ))
+        .stderr(Stdio::from(log));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid and signal are async-signal-safe before exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) || started.elapsed() >= settings.timeout {
+            terminate_child(&mut child);
+            return Err("row proofs interrupted or timed out".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Err(error) => {
+                terminate_child(&mut child);
+                return Err(error.to_string());
+            }
+        }
+    };
+    let output = fs::read_to_string(log_path).unwrap_or_default();
+    let summary = output
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("row-proofs "))
+        .map(str::to_owned);
+    match summary {
+        Some(line) if status.success() => Ok(line),
+        Some(line) => Err(format!("{line}; log {}", log_path.display())),
+        None => Err(format!(
+            "row proofs exited {status} without a summary; log {}",
+            log_path.display()
+        )),
+    }
 }
 
 /// The repository owns its release row inventory and environment scrub. The
@@ -598,6 +680,7 @@ fn integrate(
         tip: None,
         status: "RUNNING".to_owned(),
         no_build: None,
+        release_rows: None,
         detail: format!(
             "Triggered by {} at {}; {}",
             request.epic_id,
@@ -963,6 +1046,30 @@ fn integrate(
         result
             .summary
             .push_str(&format!("; held for another release: {}", held.join(", ")));
+    }
+    // cas-398c: a green tip also proves the release rows the cut would
+    // otherwise rebuild (release-binary-isa, macos-check), unless the build
+    // guard says the host is busy.
+    if result.status == SweepStatus::Passed
+        && settings.command.is_none()
+        && row_proofs_supported(&worktree)
+    {
+        let guard = crate::factory_build_guard::inspect(cas_dir, &settings_to_config(settings), 1);
+        let outcome = if !guard.violations().is_empty() {
+            format!("DEFERRED: {}", guard.violations().join("; "))
+        } else {
+            let log = shared_cas
+                .join(LOG_DIR)
+                .join(format!("row-proofs-{tip}.log"));
+            match run_row_proofs(&worktree, &log, settings, cancel) {
+                Ok(line) => line,
+                Err(error) => format!("FAIL: {error}"),
+            }
+        };
+        result
+            .summary
+            .push_str(&format!("; release rows: {outcome}"));
+        receipt.release_rows = Some(outcome);
     }
     result.summary = format!("{branch} at {tip}: {}", result.summary);
     result.request = request.clone();
@@ -2802,7 +2909,10 @@ echo 'Summary: 1 passed'
     #[test]
     fn cas_398c_row_proofs_run_through_helper_and_cancel() {
         let repo = fixture();
-        assert!(!row_proofs_supported(repo.path()), "no helper, no row proofs");
+        assert!(
+            !row_proofs_supported(repo.path()),
+            "no helper, no row proofs"
+        );
         let marker = repo.path().join("row-proof-ran");
         let helper = |body: &str| {
             fs::write(

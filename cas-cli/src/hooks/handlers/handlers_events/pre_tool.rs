@@ -110,7 +110,10 @@ fn handle_pre_tool_use_inner(
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
-            .and_then(operator_policy_command_denial)
+            .and_then(|command| {
+                operator_policy_command_denial(command)
+                    .or_else(|| role_env_tampering_denial(command))
+            })
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
@@ -4185,6 +4188,12 @@ fn collect_cas_invocations(command: &str, depth: usize, found: &mut Vec<Vec<Stri
 /// operator write policy through the operator-only CLI.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
     for args in cas_invocations(command) {
+        // cas-3c26: operator-only actions, judged by the CLI parser.
+        if let Some(action) = crate::config::operator_policy::operator_only_cas_invocation(&args) {
+            return Some(format!(
+                "🚫 OPERATOR-ONLY (cas-3c26): {action} is the operator's to do, from their own terminal, never an agent's. Ask the supervisor to request it from the operator."
+            ));
+        }
         let config = args.iter().position(|arg| arg == "config");
         let refused = config.is_some_and(|at| {
             let rest = &args[at + 1..];
@@ -4278,6 +4287,123 @@ fn supervisor_only_mcp_command_denial(command: &str, cas_root: &Path) -> Option<
         };
         if refusal.is_some() {
             return refusal;
+        }
+    }
+    None
+}
+
+/// cas-3c26: the variables Cassy's role gates read. An agent that sets,
+/// unsets or clears them for a command it runs is impersonating another role.
+const ROLE_ENV_NAMES: &[&str] = &["CAS_AGENT_ROLE", "CAS_FACTORY_MODE"];
+
+/// cas-3c26: refuse an agent shell command that changes its own Cassy role
+/// environment: an assignment prefix, `env NAME=`, `env -u NAME`, `env -i`
+/// before `cas`, `export`/`declare -x NAME=` or `unset NAME`.
+fn role_env_tampering_denial(command: &str) -> Option<String> {
+    role_env_tampering_at_depth(command, 0)
+}
+
+fn role_env_denial(what: &str) -> String {
+    format!(
+        "🚫 ROLE SPOOF REFUSED (cas-3c26): {what}. {} tell Cassy which role this agent has; an agent may not set, unset or clear them for the commands it runs. Run the command as you are. Operator-only actions are the operator's to run from their own terminal.",
+        ROLE_ENV_NAMES.join(" and ")
+    )
+}
+
+fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    let role_name = |name: &str| ROLE_ENV_NAMES.contains(&name);
+    let assigned_role = |word: &str| {
+        word.split_once('=')
+            .filter(|(name, _)| is_shell_variable_name(name) && role_name(name))
+            .map(|(name, _)| name.to_string())
+    };
+    for words in shell_statement_words(command) {
+        // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
+        let mut index = 0;
+        while let Some(word) = words.get(index) {
+            let Some((name, _)) = word.split_once('=') else {
+                break;
+            };
+            if !is_shell_variable_name(name) {
+                break;
+            }
+            if role_name(name) {
+                return Some(role_env_denial(&format!("this command assigns {name}")));
+            }
+            index += 1;
+        }
+        let Some(program) = words.get(index) else {
+            continue;
+        };
+        let args = &words[index + 1..];
+        match shell_word_basename(program) {
+            "env" => {
+                let mut clears_all = false;
+                let mut position = 0;
+                while let Some(arg) = args.get(position) {
+                    let unset = if arg == "-u" || arg == "--unset" {
+                        position += 1;
+                        args.get(position).map(String::as_str)
+                    } else if let Some(name) = arg.strip_prefix("--unset=") {
+                        Some(name)
+                    } else if let Some(name) =
+                        arg.strip_prefix("-u").filter(|name| !name.is_empty())
+                    {
+                        Some(name)
+                    } else {
+                        None
+                    };
+                    if let Some(name) = unset {
+                        if role_name(name) {
+                            return Some(role_env_denial(&format!("this command unsets {name}")));
+                        }
+                        position += 1;
+                        continue;
+                    }
+                    if arg == "-i" || arg == "--ignore-environment" || arg == "-" {
+                        clears_all = true;
+                    } else if ENV_VALUE_OPTIONS.contains(&arg.as_str()) {
+                        position += 1;
+                    } else if let Some(name) = assigned_role(arg) {
+                        return Some(role_env_denial(&format!("this command assigns {name}")));
+                    } else if !arg.starts_with('-') && !arg.contains('=') {
+                        if clears_all && shell_word_basename(arg) == "cas" {
+                            return Some(role_env_denial(
+                                "`env -i` runs cas without this agent's role environment",
+                            ));
+                        }
+                        break;
+                    }
+                    position += 1;
+                }
+            }
+            "export" | "declare" | "typeset" | "local" | "readonly" => {
+                if let Some(name) = args.iter().find_map(|arg| assigned_role(arg)) {
+                    return Some(role_env_denial(&format!("this command assigns {name}")));
+                }
+            }
+            "unset" => {
+                if let Some(name) = args.iter().find(|arg| role_name(arg)) {
+                    return Some(role_env_denial(&format!("this command unsets {name}")));
+                }
+            }
+            // Wrappers whose option value is itself a shell command.
+            "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
+                for (position, arg) in args.iter().enumerate() {
+                    let flags_c =
+                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                    if (flags_c || arg == "--command")
+                        && let Some(payload) = args.get(position + 1)
+                        && let Some(denial) = role_env_tampering_at_depth(payload, depth + 1)
+                    {
+                        return Some(denial);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -5584,6 +5710,68 @@ mod workspace_contract_tests {
             "rg 'grant-write' cas-cli/src",
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// cas-3c26: an agent shell cannot pair or authorize a Commander device
+    /// or launch a factory, however the command is wrapped (a PTY wrapper
+    /// included); ordinary hub and factory subcommands stay allowed.
+    #[test]
+    fn cas_3c26_agent_shell_cannot_pair_authorize_or_launch_a_factory() {
+        for command in [
+            "cas hub pair --origin https://commander.example",
+            "cas hub pair --origin https://x --scopes machine:read,pane:input,message:send",
+            "cas hub authorize K7MW-4H2Q --yes",
+            "script -qc 'cas hub pair --origin https://x' /dev/null",
+            "bash -c \"cas hub authorize ABCD-EFGH --yes\"",
+            "nohup cas factory --workers 3",
+            "script -q -c 'cas factory' /dev/null",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("OPERATOR-ONLY (cas-3c26)"), "{denial}");
+        }
+        for allowed in [
+            "cas hub status",
+            "cas factory status",
+            "cas factory worker-status",
+            "git commit -m 'cas hub pair now asks for confirmation'",
+            "rg 'hub pair' cas-cli/src",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// cas-3c26: an agent cannot change the role environment its own commands
+    /// run with, so `CAS_AGENT_ROLE` / `CAS_FACTORY_MODE` gates see the truth.
+    #[test]
+    fn cas_3c26_agent_shell_cannot_spoof_or_drop_its_cassy_role() {
+        for command in [
+            "CAS_AGENT_ROLE=supervisor cas task close cas-1 --supervisor-override",
+            "env CAS_AGENT_ROLE=supervisor cas serve",
+            "env -u CAS_AGENT_ROLE cas update",
+            "env --unset=CAS_AGENT_ROLE cas update",
+            "env --unset CAS_FACTORY_MODE cas factory status",
+            "env -i PATH=/usr/bin cas update",
+            "export CAS_AGENT_ROLE=supervisor",
+            "declare -x CAS_FACTORY_MODE=1",
+            "unset CAS_AGENT_ROLE; cas update",
+            "cd /x && CAS_FACTORY_MODE= cas update",
+            "bash -c 'CAS_AGENT_ROLE=supervisor cas serve'",
+        ] {
+            let denial = role_env_tampering_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("cas-3c26"), "{denial}");
+        }
+        for allowed in [
+            "echo $CAS_AGENT_ROLE",
+            "printenv CAS_AGENT_ROLE",
+            "git commit -m 'CAS_AGENT_ROLE=worker is read by the role gates'",
+            "rg CAS_AGENT_ROLE= cas-cli/src",
+            "env -i PATH=/usr/bin cargo --version",
+            "CAS_PROJECT=x cas task list",
+        ] {
+            assert_eq!(role_env_tampering_denial(allowed), None, "{allowed}");
         }
     }
 

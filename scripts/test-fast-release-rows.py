@@ -168,7 +168,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 17)
+        self.assertEqual(len(proof['rows']), 18)
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):
@@ -198,7 +198,7 @@ class FastRows(unittest.TestCase):
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
                     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
-                    "ci-script-tests-changed"):
+                    "ci-script-tests-changed", "fixture-paths-src"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -302,6 +302,8 @@ sleep 2
              DOCTOR_SNAPSHOT.replace("[OK] database", "[OK] database  [OK] symbol index")),
             ("migration-registry", "cas-cli/src/migration/migrations/m002_second.rs",
              "pub const MIGRATION: Migration = Migration {\n    id: 2,\n};\n"),
+            ("fixture-paths-src", "cas-cli/src/example_tests.rs",
+             '#[test] fn reads() { let _ = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("x"); }\n'),
         ]
         for row, path, body in cases:
             with self.subTest(row=row):
@@ -323,6 +325,8 @@ sleep 2
              VIOLET_SKILL + "Padding line.\n" * 1200),
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            ("fixture-paths-src", "cas-cli/src/example_tests.rs",
+             '#[test] fn reads() { let _ = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent(); }\n'),
         ]
         for row, path, body in cases:
             with self.subTest(row=row):

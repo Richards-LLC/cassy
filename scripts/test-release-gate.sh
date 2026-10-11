@@ -508,7 +508,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed \
+        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"

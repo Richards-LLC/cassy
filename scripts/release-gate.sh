@@ -22,6 +22,7 @@ readonly -a gate_check_ids=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    fixture-paths-src
 )
 
 usage() {
@@ -1520,6 +1521,30 @@ check_migration_registry() {
     python3 scripts/check-migration-registry.py .
 }
 
+# The no-build half of fixture-paths (3.50.0 failed it at assembly). Fast mode
+# scans the lane's changed cas-cli/src Rust files; the full gate scans all.
+check_fixture_paths_src() {
+    if [[ "$fast_rows" != true ]]; then
+        check_src_runtime_manifest_dir_reads
+        return
+    fi
+    local -a changed=()
+    local path hits=''
+    while IFS= read -r path; do
+        [[ "$path" == *.rs && -f "$path" && "$path" != "$src_runtime_manifest_dir_allowlist" ]] && changed+=("$path")
+    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- cas-cli/src)
+    if [[ "${#changed[@]}" -eq 0 ]]; then
+        printf 'fixture-paths-src: no cas-cli/src Rust change\n'
+        return 0
+    fi
+    hits="$(grep -nHE "$src_runtime_manifest_dir_pattern" "${changed[@]}" || true)"
+    if [[ -n "$hits" ]]; then
+        printf 'fixture-paths-src: cas-cli/src test modules read the producer checkout at runtime; use include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
+        return 1
+    fi
+    printf 'fixture-paths-src: no runtime CARGO_MANIFEST_DIR reads in %s changed file(s)\n' "${#changed[@]}"
+}
+
 check_ci_script_tests_changed() (
     if [[ "$fast_rows" != true ]]; then
         printf 'ci-script-tests-changed: the full gate runs every entry in ci-script-tests\n'
@@ -1681,6 +1706,8 @@ run_check migration-registry 'python3 scripts/check-migration-registry.py (every
     check_migration_registry
 run_check ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \
     check_ci_script_tests_changed
+run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src (changed files in fast mode)' \
+    check_fixture_paths_src
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree

@@ -107,6 +107,7 @@ readonly -a gate_rows=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    fixture-paths-src
 )
 
 # Cross-cutting audit hook. The --cut dispatcher marks nested calls with

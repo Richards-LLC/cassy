@@ -44,6 +44,18 @@ struct IntegrationReceipt {
     /// Kept across a RUNNING receipt, so an interrupted run still reports.
     #[serde(default, skip_serializing_if = "is_zero")]
     deferrals: u32,
+    /// cas-ca55: open epics held out because they target another release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    held: Vec<HeldEpic>,
+    /// cas-ca55: `<ref>@<sha>` of a recorded resolution reused for a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HeldEpic {
+    id: String,
+    release: String,
 }
 
 /// Named no-build release rows, tied to the integration commit they ran on.
@@ -244,28 +256,80 @@ fn assemble(
     })
 }
 
+/// Label naming the release an epic ships in (`release:3.51`, `release:next`).
+const RELEASE_LABEL: &str = "release:";
+/// Local git config naming the release being assembled.
+const RELEASE_TARGET_CONFIG: &str = "cas.releaseTarget";
+/// Local git config naming a supervisor-recorded conflict resolution branch.
+const RESOLUTION_CONFIG: &str = "cas.integrationResolution";
+
 /// cas-ca55: the release an epic is targeted at, from its `release:<v>` label.
 fn epic_release(task: &Task) -> Option<&str> {
-    let _ = task;
-    None
+    task.labels
+        .iter()
+        .filter_map(|label| label.strip_prefix(RELEASE_LABEL))
+        .map(str::trim)
+        .find(|release| !release.is_empty())
 }
 
-/// cas-ca55: split out epics targeted at another release than `target`.
-fn hold_other_releases(tasks: Vec<Task>, target: Option<&str>) -> (Vec<Task>, Vec<(String, String)>) {
-    let _ = target;
-    (tasks, Vec::new())
+/// cas-ca55: hold out epics targeted at a release other than the one being
+/// assembled, without renaming their branches. Unlabelled epics always go in.
+/// With no target set, only `release:next` epics are held.
+fn hold_other_releases(
+    tasks: Vec<Task>,
+    target: Option<&str>,
+) -> (Vec<Task>, Vec<(String, String)>) {
+    let mut held = Vec::new();
+    let included = tasks
+        .into_iter()
+        .filter(|task| {
+            let Some(release) = epic_release(task).filter(|_| task.task_type == TaskType::Epic)
+            else {
+                return true;
+            };
+            let other = match target {
+                Some(target) => release != target,
+                None => release == "next",
+            };
+            if other {
+                held.push((task.id.clone(), release.to_owned()));
+            }
+            !other
+        })
+        .collect();
+    (included, held)
+}
+
+fn local_config(root: &Path, key: &str) -> Option<String> {
+    git_output(root, &["config", "--local", "--get", key])
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// cas-ca55: a supervisor-recorded resolution that already contains `base`
-/// and every epic tip.
+/// and every epic tip. The first superset candidate wins; `(label, sha)`.
 fn recorded_resolution(
     root: &Path,
     base: &str,
     epics: &[EpicTip],
     candidates: &[(String, String)],
 ) -> Option<(String, String)> {
-    let _ = (root, base, epics, candidates);
-    None
+    candidates
+        .iter()
+        .find(|(_, tip)| {
+            is_ancestor(root, base, tip)
+                && epics.iter().all(|epic| is_ancestor(root, &epic.tip, tip))
+        })
+        .cloned()
 }
 
 fn open_epics(mut tasks: Vec<Task>) -> Vec<Task> {
@@ -544,6 +608,8 @@ fn integrate(
         test_process_env_scrubbed: super::scrubbed_test_process_identity_names(),
         base_failure: None,
         deferrals: prior_deferrals,
+        held: Vec::new(),
+        resolution: None,
     };
     write_receipt(&receipt_path, &receipt)?;
     // Invalidate an old failed sweep report at the same boundary. A fetch,
@@ -592,6 +658,16 @@ fn integrate(
             }
         }
         tasks.retain(|task| selected.contains(&task.id));
+    } else {
+        // cas-ca55: an explicit recovery selection is authoritative; otherwise
+        // epics targeted at another release stay out while open.
+        let target = local_config(main_root, RELEASE_TARGET_CONFIG);
+        let (included, held) = hold_other_releases(tasks, target.as_deref());
+        tasks = included;
+        receipt.held = held
+            .into_iter()
+            .map(|(id, release)| HeldEpic { id, release })
+            .collect();
     }
     let (epics, already_integrated) = live_open_epics(project_root, &base, tasks)?;
     receipt.epics = epics;
@@ -613,21 +689,48 @@ fn integrate(
     .ok();
     let (tip, prefixes) = match assemble(&worktree, &base, &base_label, &receipt.epics)? {
         Assembly::Conflict { detail, affected } => {
-            receipt.status = "CONFLICT".to_owned();
-            receipt.detail = detail.clone();
-            receipt.affected = affected.clone();
-            receipt.deferrals = 0;
-            write_receipt(&receipt_path, &receipt)?;
-            return Ok(SweepResult {
-                request: request.clone(),
-                status: SweepStatus::Failed,
-                log_path: receipt_path,
-                summary: detail,
-                failures: Vec::new(),
-                integration_epics: affected,
-                base_failure: None,
-                after_deferrals: prior_deferrals,
-            });
+            // cas-ca55: reuse a recorded resolution (the configured resolution
+            // branch, then the published integration tip) that already
+            // contains the base and every epic, instead of failing again.
+            let mut candidates = Vec::new();
+            if let Some(reference) = local_config(main_root, RESOLUTION_CONFIG) {
+                if let Ok(sha) = git_output(
+                    project_root,
+                    &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+                ) {
+                    candidates.push((reference, sha));
+                }
+            }
+            if let Some(prior) = &previous {
+                candidates.push((branch.clone(), prior.clone()));
+            }
+            if let Some((reference, sha)) =
+                recorded_resolution(project_root, &base, &receipt.epics, &candidates)
+            {
+                git_output(&worktree, &["reset", "--hard", &sha])?;
+                receipt.resolution = Some(format!("{reference}@{sha}"));
+                receipt.detail = format!("{detail}; reused recorded resolution {reference}@{sha}");
+                write_receipt(&receipt_path, &receipt)?;
+                // No per-epic prefixes exist for a hand resolution, so a later
+                // failure is attributed to every epic rather than probed.
+                (sha, Vec::new())
+            } else {
+                receipt.status = "CONFLICT".to_owned();
+                receipt.detail = detail.clone();
+                receipt.affected = affected.clone();
+                receipt.deferrals = 0;
+                write_receipt(&receipt_path, &receipt)?;
+                return Ok(SweepResult {
+                    request: request.clone(),
+                    status: SweepStatus::Failed,
+                    log_path: receipt_path,
+                    summary: detail,
+                    failures: Vec::new(),
+                    integration_epics: affected,
+                    base_failure: None,
+                    after_deferrals: prior_deferrals,
+                });
+            }
         }
         Assembly::Clean { tip, prefixes } => (tip, prefixes),
     };
@@ -778,36 +881,59 @@ fn integrate(
                 Err(error) => result.summary.push_str(&format!("; {error}")),
             }
         }
-        match introducing_epic(&prefixes, &mut probe) {
-            Ok(Some(index)) => {
-                result.summary.push_str(&format!(
-                    "; reported failing targets introduced by {}",
-                    receipt.epics[index].id
-                ));
-                affected = receipt.epics[..=index]
-                    .iter()
-                    .map(|epic| epic.id.clone())
-                    .collect();
-            }
-            Ok(None) => {
-                result.summary.push_str(&format!(
-                    "; failing targets also fail on {base_label} (no epic attribution)"
-                ));
-                affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
-                let evidence = BaseFailure {
-                    base: base.clone(),
-                    failing: failed_targets,
-                };
-                base_failure = Some(evidence.clone());
-                result.base_failure = Some(evidence);
-            }
-            Err(error) => result
+        if receipt.resolution.is_some() {
+            // A hand resolution has no per-epic prefixes to probe.
+            result
                 .summary
-                .push_str(&format!("; attribution incomplete: {error}")),
+                .push_str("; recorded resolution reused (no per-epic attribution)");
+            affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
+        } else {
+            match introducing_epic(&prefixes, &mut probe) {
+                Ok(Some(index)) => {
+                    result.summary.push_str(&format!(
+                        "; reported failing targets introduced by {}",
+                        receipt.epics[index].id
+                    ));
+                    affected = receipt.epics[..=index]
+                        .iter()
+                        .map(|epic| epic.id.clone())
+                        .collect();
+                }
+                Ok(None) => {
+                    result.summary.push_str(&format!(
+                        "; failing targets also fail on {base_label} (no epic attribution)"
+                    ));
+                    affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
+                    let evidence = BaseFailure {
+                        base: base.clone(),
+                        failing: failed_targets,
+                    };
+                    base_failure = Some(evidence.clone());
+                    result.base_failure = Some(evidence);
+                }
+                Err(error) => result
+                    .summary
+                    .push_str(&format!("; attribution incomplete: {error}")),
+            }
         }
     }
     // Leave the scratch checkout at the published tip, even after probes.
     git_output(&worktree, &["reset", "--hard", &tip])?;
+    if let Some(resolution) = &receipt.resolution {
+        result
+            .summary
+            .push_str(&format!("; reused recorded resolution {resolution}"));
+    }
+    if !receipt.held.is_empty() {
+        let held: Vec<_> = receipt
+            .held
+            .iter()
+            .map(|epic| format!("{} (release {})", epic.id, epic.release))
+            .collect();
+        result
+            .summary
+            .push_str(&format!("; held for another release: {}", held.join(", ")));
+    }
     result.summary = format!("{branch} at {tip}: {}", result.summary);
     result.request = request.clone();
     if !affected.contains(&request.epic_id) {
@@ -1910,7 +2036,10 @@ exit "$failed"
         let repo = fixture();
         let first = epic(repo.path(), "a", "shared", "first\n");
         let second = epic(repo.path(), "b", "shared", "second\n");
-        git(repo.path(), &["checkout", "-b", "integration/resolved", &first.branch]);
+        git(
+            repo.path(),
+            &["checkout", "-b", "integration/resolved", &first.branch],
+        );
         let _ = Command::new("git")
             .current_dir(repo.path())
             .args(["merge", "--no-edit", &second.tip])
@@ -1918,7 +2047,10 @@ exit "$failed"
             .unwrap();
         fs::write(repo.path().join("shared"), "resolved\n").unwrap();
         git(repo.path(), &["add", "shared"]);
-        git(repo.path(), &["-c", "core.hooksPath=/dev/null", "commit", "--no-edit"]);
+        git(
+            repo.path(),
+            &["-c", "core.hooksPath=/dev/null", "commit", "--no-edit"],
+        );
         let resolved = git(repo.path(), &["rev-parse", "HEAD"]);
         git(repo.path(), &["checkout", "--detach", "main"]);
         let epics = [first.clone(), second.clone()];
@@ -1932,7 +2064,10 @@ exit "$failed"
         );
         // A candidate missing one epic is not a resolution.
         let partial = vec![("epic/a".to_owned(), first.tip.clone())];
-        assert_eq!(recorded_resolution(repo.path(), "main", &epics, &partial), None);
+        assert_eq!(
+            recorded_resolution(repo.path(), "main", &epics, &partial),
+            None
+        );
     }
 
     #[test]

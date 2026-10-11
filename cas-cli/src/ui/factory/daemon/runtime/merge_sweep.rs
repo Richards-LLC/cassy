@@ -1173,7 +1173,20 @@ fn execute_sweep(
         }
     };
     drop(log);
-    let (summary, failures) = summarize_log(&log_path);
+    let (mut summary, mut failures) = summarize_log(&log_path);
+    let mut status = status;
+    // cas-ca55: compile infrastructure with no named test is an environment
+    // blocker with its fix, never a test failure to attribute to an epic.
+    if status == SweepStatus::Failed {
+        if let Some(blocker) = fs::read_to_string(&log_path)
+            .ok()
+            .and_then(|log| environment_blocker(&log, &failures))
+        {
+            status = SweepStatus::SetupFailed;
+            summary = blocker;
+            failures.clear();
+        }
+    }
     SweepResult {
         request,
         status,
@@ -1497,7 +1510,61 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
 /// cas-ca55: a failed run with no named test whose log shows a compile
 /// infrastructure fault (sccache, linker, disk) is an environment blocker.
 fn environment_blocker(log: &str, failures: &[String]) -> Option<String> {
-    let _ = (log, failures);
+    // A named test failure (nextest `FAIL [`, libtest `test x ... FAILED`)
+    // means the build succeeded; that is a test failure, not infrastructure.
+    if failures.iter().any(|line| {
+        line.starts_with("FAIL [") || (line.starts_with("test ") && line.ends_with("FAILED"))
+    }) {
+        return None;
+    }
+    const CLASSES: &[(&str, &[&str], &str)] = &[
+        (
+            "disk",
+            &["No space left on device", "ENOSPC", "Disk quota exceeded"],
+            "free disk space under the target and cache directories, then rerun the sweep",
+        ),
+        (
+            "sccache",
+            &[
+                "sccache: error",
+                "sccache: caused by",
+                "sccache: encountered fatal error",
+            ],
+            "restart or disable sccache (RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=), then rerun the sweep",
+        ),
+        (
+            "linker",
+            &[
+                "linking with `",
+                "collect2: error",
+                "ld.lld: error",
+                "rust-lld: error",
+                "ld: cannot find",
+            ],
+            "check the linker toolchain and free memory/disk on the builder, then rerun the sweep",
+        ),
+        (
+            "memory",
+            &[
+                "signal: 9, SIGKILL",
+                "out of memory",
+                "Cannot allocate memory",
+            ],
+            "lower build parallelism or free memory on the builder, then rerun the sweep",
+        ),
+    ];
+    for (class, needles, fix) in CLASSES {
+        if let Some(evidence) = log
+            .lines()
+            .map(str::trim)
+            .find(|line| needles.iter().any(|needle| line.contains(needle)))
+        {
+            let evidence: String = evidence.chars().take(240).collect();
+            return Some(format!(
+                "environment blocker ({class}): {evidence}; fix: {fix}"
+            ));
+        }
+    }
     None
 }
 
@@ -1871,23 +1938,37 @@ mod tests {
         let sccache = "   Compiling cas v3.50.0\nerror: failed to execute compile\n\
                        sccache: error: Server startup failed: cache storage failed to read\n\
                        error: could not compile `cas` (lib)\n";
-        let (_, failures) = (String::new(), vec!["error: could not compile `cas` (lib) FAILED".to_owned()]);
+        let failures = vec!["error: could not compile `cas` (lib) FAILED".to_owned()];
         let blocker = environment_blocker(sccache, &failures).expect("sccache is infra");
-        assert!(blocker.starts_with("environment blocker (sccache)"), "{blocker}");
+        assert!(
+            blocker.starts_with("environment blocker (sccache)"),
+            "{blocker}"
+        );
         assert!(blocker.contains("fix:"), "{blocker}");
         assert!(!blocker.contains("nextest FAIL"), "{blocker}");
 
         let linker = "error: linking with `cc` failed: exit status: 1\n  = note: collect2: error: ld returned 1 exit status\n";
-        assert!(environment_blocker(linker, &[]).unwrap().starts_with("environment blocker (linker)"));
+        assert!(
+            environment_blocker(linker, &[])
+                .unwrap()
+                .starts_with("environment blocker (linker)")
+        );
         let disk = "error: failed to write target/debug/deps/x.rlib: No space left on device (os error 28)\n";
-        assert!(environment_blocker(disk, &[]).unwrap().starts_with("environment blocker (disk)"));
+        assert!(
+            environment_blocker(disk, &[])
+                .unwrap()
+                .starts_with("environment blocker (disk)")
+        );
 
         // A named test failure is a test failure even when the log mentions infra.
         let named = format!("{sccache}        FAIL [   0.2s] cas tests::broken\n");
         let failures = vec!["FAIL [   0.2s] cas tests::broken".to_owned()];
         assert_eq!(environment_blocker(&named, &failures), None);
         // An ordinary compile error is not infrastructure.
-        assert_eq!(environment_blocker("error[E0308]: mismatched types\n", &[]), None);
+        assert_eq!(
+            environment_blocker("error[E0308]: mismatched types\n", &[]),
+            None
+        );
     }
 
     #[test]

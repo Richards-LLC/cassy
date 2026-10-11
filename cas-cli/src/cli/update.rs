@@ -363,9 +363,23 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Handle schema-only mode
     if args.schema_only || args.dry_run {
         let mut steps = UpdateStepTracker::new(1, !cli.json);
-        return steps.run("Applying schema updates", || {
+        steps.run("Applying schema updates", || {
             run_schema_migrations(args, cli, cas_root)
-        });
+        })?;
+        // GH #1170: `--schema-only` that found no initialized store migrated
+        // nothing. Exiting 0 told scripts the store was current.
+        if args.schema_only
+            && !args.dry_run
+            && !cas_root.is_some_and(crate::store::detect::cas_store_present)
+        {
+            anyhow::bail!(
+                "no initialized Cassy store{}; nothing was migrated. Run `cas init` first.",
+                cas_root
+                    .map(|root| format!(" at {}", root.display()))
+                    .unwrap_or_default()
+            );
+        }
+        return Ok(());
     }
 
     // Handle check mode (includes schema status)

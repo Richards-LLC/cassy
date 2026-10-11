@@ -60,6 +60,7 @@ import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
 import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
 import { WriteGrantState, focusAfterResult, sendWriteGrant } from "./write-grant";
+import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -4479,9 +4480,9 @@ function fleetAnnouncer(): HTMLElement {
   return region;
 }
 
-function fleetAnnounce(text: string): void {
-  const region = fleetAnnouncer();
-  if (region.textContent !== text) region.textContent = text;
+function fleetAnnounce(text: string, options: AnnounceOptions = {}): void {
+  // cas-1380: `repeat` speaks an identical result again (Review grant twice).
+  announceTo(fleetAnnouncer(), text, options);
 }
 
 function syncFleetSelection(): void {
@@ -4574,8 +4575,8 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
         // Typing keeps the field and its caret; only stage changes redraw.
         changed: () => {},
         // cas-5020: a refusal focuses the control that fixes it and is announced.
-        review: () => { writeGrant.review(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : focusAfterResult(writeGrant)); },
-        revoke: () => { writeGrant.askRevoke(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : focusAfterResult(writeGrant)); },
+        review: () => { writeGrant.review(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true }); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : focusAfterResult(writeGrant)); },
+        revoke: () => { writeGrant.askRevoke(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true }); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : focusAfterResult(writeGrant)); },
         cancel: () => { const opener = writeGrant.stage === "confirm-revoke" ? "header:grant-revoke" : "header:grant-review"; writeGrant.cancel(); rerender(opener); },
         confirm: () => { void runWriteGrant(); },
       },
@@ -4594,7 +4595,7 @@ async function runWriteGrant(): Promise<void> {
   fleetFocusNext = "header:grant-go";
   renderStatus(statuses.get(sessionKey(machineId, session)));
   await sending;
-  if (writeGrant.result) fleetAnnounce(writeGrant.result.text);
+  if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true });
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   fleetFocusNext = focusAfterResult(writeGrant, kind);
   renderStatus(statuses.get(sessionKey(machineId, session)));

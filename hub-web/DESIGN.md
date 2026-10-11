@@ -258,9 +258,12 @@ tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
   `cloud_project_id`. That is the same canonical identity sync pushes under
   (config pin, git remote, then folder name), and the hub reports it on
   `/v1/sessions`. With no conversation open, or no identity,
-  `<cloud origin>/explorer`. The cloud origin is
-  `meta[name="cas-explorer-origin"]` in `index.html`, else the operator
-  inbox's reviewed origin. Explorer links back to Commander's origin
+  `<cloud origin>/explorer`. The cloud origin is the operator inbox's
+  reviewed `meta[name="cas-operator-inbox-origin"]`: Explorer is served from
+  the same Cassy Cloud, so the embedded page names no new external origin
+  (the hub's `h4_csp_03` allows only the pairing relay and the inbox) and the
+  link is a plain top-level navigation, with no fetch and no `connect-src`
+  change. Explorer links back to Commander's origin
   (`https://hub.petrastella.io/commander/`).
 - **No credentials in URLs.** The link holds only the origin, the path and
   `project_id`: never a device key, pairing code or fragment, session or

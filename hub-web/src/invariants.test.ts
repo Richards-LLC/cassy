@@ -82,6 +82,9 @@ describe("binding Cassy Cloud browser invariants", () => {
       '<meta name="apple-mobile-web-app-title" content="Cassy" />',
       '<meta name="apple-mobile-web-app-capable" content="yes" />',
     ]) expect(html).toContain(link);
+    // cas-eaa3 (hub h4_csp_03): the switcher reuses the operator inbox's
+    // reviewed cloud origin; the page names no other external origin.
+    expect(html.match(/https:\/\/[^"'\s]+/g)).toEqual(["https://petra-stella-cloud.vercel.app", "https://petra-stella-cloud.vercel.app"]);
     const manifest = JSON.parse(await readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
     expect([manifest.name, manifest.short_name, manifest.display]).toEqual(["Cassy", "Cassy", "standalone"]);
     expect(manifest.icons.map((icon: { src: string; purpose: string }) => `${icon.src} ${icon.purpose}`)).toEqual(expect.arrayContaining([

@@ -88,10 +88,10 @@ applyScheme();
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
-// cas-eaa3: Explorer lives on the cloud origin; index.html names it (reviewed
-// like the other origins), else the operator inbox's cloud origin is used.
-const explorerBase = explorerOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-explorer-origin"]')?.content)
-  ?? explorerOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-operator-inbox-origin"]')?.content);
+// cas-eaa3: Explorer lives on the same Cassy Cloud origin as the operator
+// inbox, so the switcher reuses that reviewed origin: the embedded page names
+// no new external origin (hub h4_csp_03) and the link is a plain navigation.
+const explorerBase = explorerOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-operator-inbox-origin"]')?.content);
 // cas-9b7d: the account's durable operator inbox. It loads on its own, with
 // no machine connection, so retained supervisor messages read on a new
 // device while every hub is off.

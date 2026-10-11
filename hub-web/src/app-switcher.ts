@@ -6,7 +6,7 @@
 // machine name, and the link sends no referrer.
 import { escapeHtml } from "./cloud-brand";
 
-/** The reviewed cloud origin index.html names; also the operator inbox's. */
+/** The reviewed Cassy Cloud origin (index.html's operator inbox origin); Explorer lives there too. */
 export const DEFAULT_EXPLORER_ORIGIN = "https://petra-stella-cloud.vercel.app";
 
 /** Named browsing context, so repeated switches reuse one Explorer tab. */

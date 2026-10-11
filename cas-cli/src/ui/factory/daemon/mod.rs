@@ -97,6 +97,8 @@ struct WsConnection {
     >,
     /// Per-pane dimensions reported by this client (pane_id -> (cols, rows))
     pane_sizes: HashMap<String, (u16, u16)>,
+    /// cas-ca22: the handshake presented this daemon's relay token.
+    relay_trusted: bool,
 }
 
 /// A single pending spawn action (one worker at a time)
@@ -242,6 +244,9 @@ pub struct FactoryDaemon {
     terminal_exchange: runtime::terminal_exchange::TerminalExchange,
     /// Next WebSocket client ID
     next_ws_client_id: usize,
+    /// cas-ca22: this daemon's Commander relay token; only a WebSocket client
+    /// presenting it (the hub relay) may carry `operator_verified`.
+    relay_token: Option<String>,
     /// Per-pane sizes reported by web viewers (pane_id -> (cols, rows))
     web_pane_sizes: HashMap<String, (u16, u16)>,
     /// Native Agent Teams manager for inter-agent messaging.

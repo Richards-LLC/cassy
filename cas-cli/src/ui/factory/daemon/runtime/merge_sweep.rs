@@ -1173,7 +1173,20 @@ fn execute_sweep(
         }
     };
     drop(log);
-    let (summary, failures) = summarize_log(&log_path);
+    let (mut summary, mut failures) = summarize_log(&log_path);
+    let mut status = status;
+    // cas-ca55: compile infrastructure with no named test is an environment
+    // blocker with its fix, never a test failure to attribute to an epic.
+    if status == SweepStatus::Failed {
+        if let Some(blocker) = fs::read_to_string(&log_path)
+            .ok()
+            .and_then(|log| environment_blocker(&log, &failures))
+        {
+            status = SweepStatus::SetupFailed;
+            summary = blocker;
+            failures.clear();
+        }
+    }
     SweepResult {
         request,
         status,
@@ -1492,6 +1505,71 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
         summary = "test runner completed; see sweep log".to_string();
     }
     (summary, failures)
+}
+
+/// cas-ca55: a failed run with no named test whose log shows a compile
+/// infrastructure fault (sccache, linker, disk) is an environment blocker.
+fn environment_blocker(log: &str, failures: &[String]) -> Option<String> {
+    // A named test failure (nextest `FAIL [`, libtest `test x ... FAILED`)
+    // means the build succeeded; that is a test failure, not infrastructure.
+    if failures.iter().any(|line| {
+        line.starts_with("FAIL [") || (line.starts_with("test ") && line.ends_with("FAILED"))
+    }) {
+        return None;
+    }
+    const CLASSES: &[(&str, &[&str], &str)] = &[
+        (
+            "disk",
+            &["No space left on device", "ENOSPC", "Disk quota exceeded"],
+            "free disk space under the target and cache directories, then rerun the sweep",
+        ),
+        (
+            "sccache",
+            &[
+                "sccache: error",
+                "sccache: caused by",
+                "sccache: encountered fatal error",
+            ],
+            // cas-3a29: a shared server started under a since-deleted TMPDIR
+            // fails every compile with "Failed to create temp dir".
+            "restart the sccache server with a stable TMPDIR (`sccache --stop-server; \
+             env TMPDIR=<stable dir> SCCACHE_IDLE_TIMEOUT=0 sccache --start-server`) or \
+             disable it (RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=), then rerun the sweep",
+        ),
+        (
+            "linker",
+            &[
+                "linking with `",
+                "collect2: error",
+                "ld.lld: error",
+                "rust-lld: error",
+                "ld: cannot find",
+            ],
+            "check the linker toolchain and free memory/disk on the builder, then rerun the sweep",
+        ),
+        (
+            "memory",
+            &[
+                "signal: 9, SIGKILL",
+                "out of memory",
+                "Cannot allocate memory",
+            ],
+            "lower build parallelism or free memory on the builder, then rerun the sweep",
+        ),
+    ];
+    for (class, needles, fix) in CLASSES {
+        if let Some(evidence) = log
+            .lines()
+            .map(str::trim)
+            .find(|line| needles.iter().any(|needle| line.contains(needle)))
+        {
+            let evidence: String = evidence.chars().take(240).collect();
+            return Some(format!(
+                "environment blocker ({class}): {evidence}; fix: {fix}"
+            ));
+        }
+    }
+    None
 }
 
 fn append_epic_note(cas_dir: &Path, result: &SweepResult) {
@@ -1855,6 +1933,51 @@ mod tests {
         let (summary, failures) = summarize_log(temp.path());
         assert_eq!(summary, "Summary: 1 failed");
         assert_eq!(failures, vec!["FAIL [ 0.1s] crate::broken"]);
+    }
+
+    /// cas-ca55: a compile-infrastructure failure with no test name is an
+    /// environment blocker with its fix, never a test failure.
+    #[test]
+    fn compile_infra_failure_is_an_environment_blocker_cas_ca55() {
+        let sccache = "   Compiling cas v9.99.0\nerror: failed to execute compile\n\
+                       sccache: error: Server startup failed: cache storage failed to read\n\
+                       error: could not compile `cas` (lib)\n";
+        let failures = vec!["error: could not compile `cas` (lib) FAILED".to_owned()];
+        let blocker = environment_blocker(sccache, &failures).expect("sccache is infra");
+        assert!(
+            blocker.starts_with("environment blocker (sccache)"),
+            "{blocker}"
+        );
+        assert!(blocker.contains("fix:"), "{blocker}");
+        assert!(!blocker.contains("nextest FAIL"), "{blocker}");
+
+        let linker = "error: linking with `cc` failed: exit status: 1\n  = note: collect2: error: ld returned 1 exit status\n";
+        assert!(
+            environment_blocker(linker, &[])
+                .unwrap()
+                .starts_with("environment blocker (linker)")
+        );
+        // cas-3a29: the shared server's TMPDIR was deleted under it.
+        let tmpdir = "error: failed to run `rustc`\nsccache: error: Failed to create temp dir\n";
+        let blocker = environment_blocker(tmpdir, &[]).unwrap();
+        assert!(blocker.contains("sccache --stop-server"), "{blocker}");
+        assert!(blocker.contains("Failed to create temp dir"), "{blocker}");
+        let disk = "error: failed to write target/debug/deps/x.rlib: No space left on device (os error 28)\n";
+        assert!(
+            environment_blocker(disk, &[])
+                .unwrap()
+                .starts_with("environment blocker (disk)")
+        );
+
+        // A named test failure is a test failure even when the log mentions infra.
+        let named = format!("{sccache}        FAIL [   0.2s] cas tests::broken\n");
+        let failures = vec!["FAIL [   0.2s] cas tests::broken".to_owned()];
+        assert_eq!(environment_blocker(&named, &failures), None);
+        // An ordinary compile error is not infrastructure.
+        assert_eq!(
+            environment_blocker("error[E0308]: mismatched types\n", &[]),
+            None
+        );
     }
 
     #[test]

@@ -180,7 +180,12 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
     const panel = writeAccessPanel(document, { state, tasks, on, where: "cas-src on Atlas" });
     const title = panel.querySelector(".write-grant-title")!;
     expect(title.textContent).toBe("Write access outside the worktree");
-    expect(panel.getAttribute("aria-label")).toBe(title.textContent);
+    // cas-68d0 F01: an h3 under the rail's h2, naming the group by reference
+    // instead of repeating the name in aria-label.
+    expect(title.tagName).toBe("H3");
+    expect(panel.hasAttribute("aria-label")).toBe(false);
+    expect(panel.getAttribute("aria-labelledby")).toBe(title.id);
+    expect(title.id).not.toBe("");
     expect(panel.querySelector(".write-grant-lead")?.textContent).toBe("Lets the agents on one task write to a folder outside their worktree until the task closes.");
     expect(panel.querySelector(".write-grant-where")?.textContent).toBe("cas-src on Atlas");
     expect(writeAccessPanel(document, { state, tasks, on }).querySelector(".write-grant-where")).toBeNull();
@@ -193,7 +198,20 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
     container.append(writeAccessPanel(document, { state: filled(), tasks, on, where: "cas-src on Atlas" }));
     presentFleetSheet(container, vi.fn());
     const sheet = container.querySelector("dialog.fleet-action-sheet")!;
-    expect(sheet.getAttribute("aria-label")).toBe("Write access outside the worktree");
+    // cas-68d0 F01: on a phone the dialog takes the heading as its name and
+    // the group inside drops its own, so the name is announced once.
+    const heading = sheet.querySelector(".write-grant-title")!;
+    expect(sheet.hasAttribute("aria-label")).toBe(false);
+    expect(sheet.getAttribute("aria-labelledby")).toBe(heading.id);
+    expect(sheet.querySelector(".write-grant")?.hasAttribute("aria-labelledby")).toBe(false);
+    expect(sheet.querySelector(".write-grant")?.hasAttribute("aria-label")).toBe(false);
+    // Other panels keep their aria-label as the sheet's name.
+    const other = document.createElement("div");
+    document.body.replaceChildren(other);
+    const plain = document.createElement("div"); plain.className = "fleet-ops-panel"; plain.setAttribute("aria-label", "Add worker");
+    other.append(plain);
+    presentFleetSheet(other, vi.fn());
+    expect(other.querySelector("dialog")?.getAttribute("aria-label")).toBe("Add worker");
     expect(sheet.querySelector(".fleet-sheet-close")?.getAttribute("aria-label")).toBe("Close write access");
   });
 });

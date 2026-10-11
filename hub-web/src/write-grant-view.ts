@@ -115,6 +115,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
       box.className = "write-grant-mode";
       box.value = mode;
       box.checked = state.draft.modes.has(mode);
+      box.dataset.fleetFocus = `header:grant-mode:${mode}`;
       box.onchange = () => {
         if (box.checked) state.draft.modes.add(mode);
         else state.draft.modes.delete(mode);
@@ -145,9 +146,8 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   if (state.result) {
     const line = document.createElement("p");
     line.className = `write-grant-result fleet-ops-note fleet-ops-note--${state.result.tone === "ok" ? "ok" : "error"}`;
+    // cas-5020: a status line, never a focus target; focus goes to a control.
     line.setAttribute("role", "status");
-    line.tabIndex = -1;
-    line.dataset.fleetFocus = "header:grant-result";
     // cas-06e8: the task id never breaks at its hyphen.
     const at = state.result.task ? state.result.text.indexOf(state.result.task) : -1;
     if (at < 0) line.textContent = state.result.text;

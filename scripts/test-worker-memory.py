@@ -164,6 +164,9 @@ class AdmissionTests(unittest.TestCase):
     def test_cas_4cb9_weights_follow_shell_and_actual_package_scripts(self):
         cases = [
             (['tsc', '--noEmit'], 1), (['vite', 'build'], 1),
+            (['node', 'scripts/generate-tokens.mjs', '--check'], 1),
+            (['node', 'scripts/build-cassy-tokens.mjs'], 1),
+            (['node', 'scripts/build-cassy-tokens.mjs', '--check'], 1),
             (worker.constrained(['npx', 'vitest', 'run']), 2),
             (['sh', '-c', 'tsc --noEmit && tsc --noEmit -p e2e'], 1),
             (['bash', '-c', 'cd hub-web && npm run typecheck > /tmp/log 2>&1'], 1),

@@ -222,24 +222,30 @@ conversations with your supervisors) and **Explorer** (the cloud's tasks,
 issues and project health). Both carry the same switcher so either one is a
 tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
 
-- **Position.** Directly under the lockup at the top of the conversation list,
-  left-aligned, `--space-3` below it, on desktop and phone. A phone shows the
-  list screen as Commander's home, so the switcher is there and not in the
-  56px thread header. Explorer puts it in the same place under its own lockup.
-  On a landscape phone (`max-height: 30rem`) it joins the lockup's row instead,
-  because that layout has width to spare and no height.
-  An open conversation whose project has a cloud identity also offers
+- **Position.** The lockup at the top of the conversation list is the switch:
+  `button#app-switcher-toggle` holds the mark, the "Cassy Cloud" wordmark and
+  a small `--ink-mid` chevron, is named "Cassy Cloud apps", and gets the
+  `--bg-hover` wash on hover and while open. That puts it in the same place on
+  desktop, phone and landscape at no cost in height or width: the phone list
+  still shows six conversations (HUB-J16), a desktop shows a project's
+  sessions whole (HUB-J14), and the header row still fits at 360px. The
+  dialogs' lockups stay plain. Explorer makes its own header lockup the same
+  switch. An open conversation whose project has a cloud identity also offers
   **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone
   reaches the project's tasks without leaving the thread.
-- **Shape.** `nav.app-switcher` (`aria-label="Cassy Cloud apps"`) holds two
-  segments in a pill track (`--bg-hover` with a hairline `--line-subtle` border).
-  Labels are exactly **Commander** and **Explorer**, in that order in both
-  apps, 13px medium `--font-ui`. Segments are at least 34px tall on desktop
-  and 40px on a phone.
+- **Shape.** The lockup opens `nav#app-switcher` (`aria-label="Cassy Cloud
+  apps"`), a native `popover` anchored under it (CSS anchor positioning,
+  with a fixed top-right fallback). It is an opaque `--bg-panel` card,
+  `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide. It lists
+  two items in this order in both apps: **Commander** ("Conversations with
+  your supervisors") and **Explorer** ("Tasks, issues and project health").
+  Names are 15px semibold and hints 13px `--ink-mid`; each item is at least
+  44px tall. Escape and an outside tap close it, and focus returns to the
+  button.
 - **Current app.** A `span` with `aria-current="page"`: `--bg-active` with a
-  2px `--color-action` outline drawn inside it, like the open conversation's edge.
-  It is never the Send gradient, because it marks a place, not an action.
-  Under forced colours it gets a `CanvasText` outline.
+  2px `--color-action` outline drawn inside it, like the open conversation's
+  edge. It is never the Send gradient, because it marks a place, not an action.
+  Under forced colours the outline is `CanvasText`.
 - **Other app.** An `a` that opens the other app in a named tab
   (`target="cassy-explorer"` here and `target="cassy-commander"` in Explorer),
   so repeated switches reuse one tab and neither app's live state is lost.

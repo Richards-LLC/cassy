@@ -57,14 +57,22 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       const requests = await stubExplorer(page);
       await journey.hub({ machines: [atlas, STUDIO], paired: ["atlas", "studio"], fleet: { [PELICAN]: fleet() } });
       const switcher = page.getByRole("navigation", { name: "Cassy Cloud apps" });
+      const apps = page.getByRole("button", { name: "Cassy Cloud apps" });
+      /** The switcher is a popover under the list header's apps button. */
+      const openApps = async () => {
+        if (!(await switcher.isVisible())) await apps.click();
+        await expect(switcher).toBeVisible();
+      };
       const list = page.getByRole("navigation", { name: "Choose a supervisor" });
       await journey.stage("Commander is the current app", async () => {
         await journey.open();
-        await expect(switcher).toBeVisible();
-        await expect(switcher.locator('[aria-current="page"]')).toHaveText("Commander");
+        await expect(switcher).toBeHidden();
+        await openApps();
+        await expect(switcher.locator('[aria-current="page"] .app-switcher-name')).toHaveText("Commander");
         await expect(switcher.getByRole("link", { name: "Explorer (opens in a new tab)" })).toBeVisible();
       });
       await journey.stage("Switch to Explorer from the list", async () => {
+        await openApps();
         await followToExplorer(page, switcher.getByRole("link", { name: "Explorer (opens in a new tab)" }), requests, EXPLORER_HOME);
         await expect(page.locator(".conversation-list-heading")).toBeVisible();
       });
@@ -74,7 +82,12 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         const link = page.locator("#status-view, .conversation-context").getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
         await expect(link).toBeVisible();
         await followToExplorer(page, link, requests, PROJECT_EXPLORER);
-        if (width === 1280) await expect(switcher.getByRole("link", { name: "Explorer (opens in a new tab)" })).toHaveAttribute("href", PROJECT_EXPLORER);
+        if (width === 1280) {
+          await openApps();
+          await expect(switcher.getByRole("link", { name: "Explorer (opens in a new tab)" })).toHaveAttribute("href", PROJECT_EXPLORER);
+          await page.keyboard.press("Escape");
+          await expect(switcher).toBeHidden();
+        }
       });
       await journey.stage("A project without a cloud identity opens Explorer's home", async () => {
         if (width === 390) {
@@ -84,6 +97,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await list.getByRole("button", { name: /gabber-studio/ }).click();
         await expect(page.getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" })).toHaveCount(0);
         if (width === 390) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+        await openApps();
         await expect(switcher.getByRole("link", { name: "Explorer (opens in a new tab)" })).toHaveAttribute("href", EXPLORER_HOME);
       });
     };

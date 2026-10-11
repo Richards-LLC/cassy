@@ -24,6 +24,15 @@ export function cloudBrand(): string {
   return `<span class="cloud-brand"><img class="cloud-brand-mark" src="${CASSY_MARK_SRC}" alt="" width="32" height="32" decoding="async" draggable="false"><span>Cassy Cloud</span></span>`;
 }
 
+/**
+ * The list header's lockup as the Cassy Cloud apps switch (cas-eaa3): the same
+ * mark and wordmark, plus a chevron, opening the Commander ↔ Explorer popover
+ * (#app-switcher). The lockup is the switch so the header gains no width or row.
+ */
+export function cloudBrandSwitcher(): string {
+  return `<button id="app-switcher-toggle" class="cloud-brand cloud-brand-switch" type="button" popovertarget="app-switcher" aria-label="Cassy Cloud apps" title="Switch between Commander and Explorer"><img class="cloud-brand-mark" src="${CASSY_MARK_SRC}" alt="" width="32" height="32" decoding="async" draggable="false"><span>Cassy Cloud</span><svg class="cloud-brand-chevron" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+}
+
 export function projectBadge(path: string | undefined): string {
   return `<span class="project-badge">${escapeHtml(projectName(path))}</span>`;
 }

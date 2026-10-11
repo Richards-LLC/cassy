@@ -42,12 +42,12 @@ export function explorerUrl(origin: string, projectId?: string | null): string {
   return url.href;
 }
 
-/** The two-app switcher; Commander is the current app. */
+/** The two-app switcher, a popover the list header's lockup opens (cloudBrandSwitcher); Commander is the current app. */
 export function appSwitcherMarkup(href: string | null): string {
   const explorer = href
-    ? `<a class="app-switcher-item" href="${escapeHtml(href)}" target="${EXPLORER_TARGET}" rel="noopener noreferrer" referrerpolicy="no-referrer">Explorer<span class="app-switcher-out" aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>`
-    : '<span class="app-switcher-item" aria-disabled="true" title="Explorer is not configured for this deployment">Explorer</span>';
-  return `<nav class="app-switcher" aria-label="Cassy Cloud apps"><span class="app-switcher-item" aria-current="page">Commander</span>${explorer}</nav>`;
+    ? `<a class="app-switcher-item" href="${escapeHtml(href)}" target="${EXPLORER_TARGET}" rel="noopener noreferrer" referrerpolicy="no-referrer"><span class="app-switcher-name">Explorer</span><span class="app-switcher-out" aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span><span class="app-switcher-hint">Tasks, issues and project health</span></a>`
+    : '<span class="app-switcher-item" aria-disabled="true"><span class="app-switcher-name">Explorer</span><span class="app-switcher-hint">Not configured for this deployment</span></span>';
+  return `<nav id="app-switcher" class="app-switcher" popover aria-label="Cassy Cloud apps"><span class="app-switcher-item" aria-current="page"><span class="app-switcher-name">Commander</span><span class="app-switcher-hint">Conversations with your supervisors</span></span>${explorer}</nav>`;
 }
 
 /** From an open conversation's Tasks & progress: the same project in Explorer (phone and desktop). */

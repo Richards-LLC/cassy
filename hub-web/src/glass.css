@@ -396,7 +396,8 @@ html[data-scheme="dark"] {
   }
   :root .conversation-composer textarea { background: var(--look-glass-strong); border-color: var(--look-glass-line); }
   @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-    :root .conversation-composer { margin: 0 4px 6px; padding-inline: 4px; }
+    /* cas-5072: the floating bar clears a sideways phone's notch bands. */
+    :root .conversation-composer { margin: 0 calc(4px + env(safe-area-inset-right)) 6px calc(4px + env(safe-area-inset-left)); padding-inline: 4px; }
   }
 
   /* Send, the new-session button and every primary action glow violet. */

@@ -2823,8 +2823,19 @@ impl CasService {
             .task_id
             .as_ref()
             .map(|id| {
+                // cas-5f28: a peer on another machine may already hold it;
+                // the worker's start would then be refused.
+                let peer = crate::cloud::peer_claims::peer_hold_for(&self.inner.cas_root, id)
+                    .map(|hold| {
+                        format!(
+                            "\n⚠️  HELD BY A PEER — {} claims {id} until {}. The spawned worker's start will be refused unless the claim is released or the start is forced (force=true); check with them first.",
+                            hold.describe(),
+                            hold.until(),
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}"
+                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}{peer}"
                 )
             })
             .unwrap_or_default();
@@ -6678,8 +6689,28 @@ impl CasService {
 
         // cas-566b: the body is the operator facade the Commander hub also
         // calls; this arm keeps MCP's request parsing and error codes.
+        // cas-5f28: a pinned focus is also a Cassy Cloud claim on the epic,
+        // so a supervisor of this repository on another machine sees it, and
+        // this one is told when such a peer already works it. Never refused.
+        let pinned_epic = (!clear).then(|| epic_id.map(str::to_string)).flatten();
+        let cas_root = self.inner.cas_root.clone();
+        let agent_id = self.inner.get_agent_id().ok();
         focus_epic(&self.inner.cas_root, &factory_session, request)
-            .map(|text| Self::success(text))
+            .map(|text| {
+                let shared = pinned_epic
+                    .zip(agent_id)
+                    .and_then(|(epic, agent)| {
+                        crate::cloud::peer_claims::claim_epic_focus(&cas_root, &epic, &agent)
+                            .map(|hold| {
+                                hold.shared_epic_note(
+                                    &epic,
+                                    &crate::mcp::tools::core::guidance::caller_prefix(),
+                                )
+                            })
+                    })
+                    .unwrap_or_default();
+                Self::success(format!("{text}{shared}"))
+            })
             .map_err(|error| match error {
                 OperationError::Failed(message) => {
                     Self::error(ErrorCode::INTERNAL_ERROR, message)

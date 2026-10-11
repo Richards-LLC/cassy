@@ -1975,6 +1975,16 @@ impl EmbeddedDaemon {
                         }));
                     }
                 }
+
+                // cas-5f28: keep this agent's Cassy Cloud task claims alive
+                // while it works; once it stops, they run out on their own.
+                if succeeded && !terminal && self.cloud_coordinator.read().await.is_some() {
+                    let cas_root = self.config.cas_root.clone();
+                    let agent = id.clone();
+                    drop(tokio::task::spawn_blocking(move || {
+                        crate::cloud::peer_claims::renew_agent_claims_if_due(&cas_root, &agent);
+                    }));
+                }
             }
 
             // Send daemon heartbeat (best-effort, not critical for worker liveness)

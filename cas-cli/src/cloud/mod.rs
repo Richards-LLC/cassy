@@ -20,6 +20,7 @@ mod backfill;
 pub mod comments;
 mod config;
 mod coordinator;
+pub mod peer_claims;
 pub mod device;
 // T5: capability-gated cloud embeddings for distilled knowledge pages.
 pub mod code_embeddings;

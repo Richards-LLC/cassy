@@ -34,6 +34,14 @@ pub struct TaskStartRequest {
     )]
     #[serde(default)]
     pub brief: Option<bool>,
+
+    /// cas-5f28: start even though a peer supervisor of this repository holds
+    /// the task's cloud claim. The override is logged in the start response.
+    #[schemars(
+        description = "Start even though a peer supervisor on another machine holds this task's claim"
+    )]
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 /// Validate and normalize an incoming `execution_note` parameter. Returns

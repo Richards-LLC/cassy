@@ -789,13 +789,14 @@ ROW_TARGETS = {"release-binary-isa": "x86_64-unknown-linux-gnu",
 
 def row_toolchain(root, row, env):
     """Digest of every tool the row's build or audit runs."""
+    # rustc -Vv names the exact toolchain commit, which also fixes the
+    # version of an installed target's standard library. Zig is already an
+    # environment input (ZIG_SHA256 of the resolved binary).
     cargo = env.get("CARGO", "cargo")
     commands = [[cargo, "--version"], ["rustc", "-Vv"]]
     if row == "release-binary-isa":
         objdump = "gobjdump" if platform.system() == "Darwin" else "objdump"
         commands += [["cargo-zigbuild", "--version"], [objdump, "--version"]]
-    else:
-        commands += [[env.get("RUSTUP", "rustup"), "--version"]]
     outputs = []
     for command in commands:
         try:

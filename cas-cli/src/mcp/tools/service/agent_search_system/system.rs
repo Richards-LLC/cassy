@@ -321,52 +321,13 @@ fn parse_proxy_health_cache(json: &str) -> serde_json::Result<serde_json::Value>
         .and_then(serde_json::to_value)
 }
 
-/// cas-0d4f0: refusal for an agent's MCP proxy change that would weaken
-/// `factory.supervisor_only_mcp`: removing or replacing a supervisor-only
-/// server, or adding the same endpoint under another name, which workers
-/// could then call. The operator manages those with `cas mcp` at a terminal.
+// cas-1b94: the supervisor-only MCP rule lives in `config::operator_policy`,
+// shared with the `cas mcp` CLI and the PreToolUse hook.
 #[cfg(feature = "mcp-proxy")]
-fn supervisor_only_proxy_refusal(
-    name: &str,
-    added: Option<&cmcp_core::config::ServerConfig>,
-    existing: &cmcp_core::config::Config,
-    supervisor_only: &[String],
-) -> Option<String> {
-    use cmcp_core::config::ServerConfig;
-    fn endpoint(server: &ServerConfig) -> String {
-        match server {
-            ServerConfig::Stdio { command, args, .. } => format!("{command} {}", args.join(" ")),
-            ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url.clone(),
-        }
-    }
-    let refusal = |what: String| {
-        format!(
-            "🚫 OPERATOR-ONLY (cas-0d4f0): {what}. factory.supervisor_only_mcp keeps it from workers, so only the operator changes it, with `cas mcp add|remove` from their own terminal. Ask the supervisor to request the operator's approval."
-        )
-    };
-    if supervisor_only.iter().any(|only| only == name) {
-        return Some(refusal(format!("'{name}' is a supervisor-only MCP server")));
-    }
-    let added = endpoint(added?);
-    existing
-        .servers
-        .iter()
-        .find(|(existing_name, server)| {
-            supervisor_only.contains(existing_name) && endpoint(server) == added
-        })
-        .map(|(existing_name, _)| {
-            refusal(format!(
-                "'{name}' would reach supervisor-only server '{existing_name}' under another name"
-            ))
-        })
-}
-
-#[cfg(feature = "mcp-proxy")]
-fn supervisor_only_mcp(cas_root: &Path) -> Vec<String> {
-    crate::config::Config::load(cas_root)
-        .map(|config| config.factory().worker_policy.supervisor_only_mcp)
-        .unwrap_or_default()
-}
+use crate::config::operator_policy::{
+    supervisor_only_mcp_names as supervisor_only_mcp,
+    supervisor_only_mcp_refusal as supervisor_only_proxy_refusal,
+};
 
 impl CasService {
     pub(in crate::mcp::tools::service) async fn system_version(
@@ -930,7 +891,7 @@ impl CasService {
 
 #[cfg(all(test, feature = "mcp-proxy"))]
 mod cas_0d4f0_tests {
-    use super::supervisor_only_proxy_refusal;
+    use crate::config::operator_policy::supervisor_only_mcp_refusal as supervisor_only_proxy_refusal;
     use cmcp_core::config::{Config, ServerConfig};
 
     fn stdio(command: &str) -> ServerConfig {

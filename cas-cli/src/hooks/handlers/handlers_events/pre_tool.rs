@@ -110,7 +110,24 @@ fn handle_pre_tool_use_inner(
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str())
-            .and_then(operator_policy_command_denial)
+            .and_then(|command| {
+                operator_policy_command_denial(command)
+                    .or_else(|| role_env_tampering_denial(command))
+            })
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+    // cas-1b94: agent `cas mcp add|remove|import` cannot remove, replace or
+    // alias a supervisor-only MCP server (the proxy_add rule, cas-0d4f0).
+    #[cfg(feature = "mcp-proxy")]
+    if tool_name == "Bash"
+        && let Some(root) = cas_root
+        && let Some(reason) = input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .and_then(|command| supervisor_only_mcp_command_denial(command, root))
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
@@ -4113,15 +4130,18 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
     ))
 }
 
-/// cas-3147: refusal for an agent shell command that would change the
-/// operator write policy through the operator-only CLI.
-fn operator_policy_command_denial(command: &str) -> Option<String> {
-    operator_policy_command_denial_at_depth(command, 0)
+/// The arguments of every `cas` invocation in a shell command, however
+/// wrapped (`nohup`, `xargs`, `bash -c '…'`, …), in order. Shared by the
+/// operator-only command checks (cas-3147, cas-0d4f0, cas-1b94).
+fn cas_invocations(command: &str) -> Vec<Vec<String>> {
+    let mut found = Vec::new();
+    collect_cas_invocations(command, 0, &mut found);
+    found
 }
 
-fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Option<String> {
+fn collect_cas_invocations(command: &str, depth: usize, found: &mut Vec<Vec<String>>) {
     if depth > 3 {
-        return None;
+        return;
     }
     for words in shell_statement_words(command) {
         let Some(mut index) = executable_word_index(&words) else {
@@ -4148,48 +4168,242 @@ fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Optio
                         let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
                         if (flags_c || arg == "--command")
                             && let Some(payload) = args.get(position + 1)
-                            && let Some(denial) =
-                                operator_policy_command_denial_at_depth(payload, depth + 1)
                         {
-                            return Some(denial);
+                            collect_cas_invocations(payload, depth + 1, found);
                         }
                     }
                     break;
                 }
                 "cas" => {
-                    let config = args.iter().position(|arg| arg == "config");
-                    let refused = config.is_some_and(|at| {
-                        let rest = &args[at + 1..];
-                        rest.first().is_some_and(|sub| sub == "grant-write" || sub == "revoke-write")
-                            || (rest.first().is_some_and(|sub| sub == "set")
-                                && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
-                    });
-                    // cas-0d4f0: security-relevant keys, set or reset.
-                    let guarded_key = config.and_then(|at| {
-                        let rest = &args[at + 1..];
-                        rest.first()
-                            .filter(|sub| *sub == "set" || *sub == "reset")
-                            .and_then(|_| rest.get(1))
-                            .filter(|key| {
-                                key.as_str() != "factory.write_roots"
-                                    && crate::config::operator_policy::is_operator_only_config_key(key)
-                            })
-                    });
-                    if let Some(key) = guarded_key {
-                        return Some(format!(
-                            "🚫 OPERATOR-ONLY (cas-0d4f0): {key} relaxes a Cassy guard, so only the operator changes it, from their own terminal, never an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set {key} …` themselves. Ordinary keys stay settable with `cas config set`."
-                        ));
-                    }
-                    if refused {
-                        return Some(
-                            "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."
-                                .to_string(),
-                        );
-                    }
+                    found.push(args.to_vec());
                     break;
                 }
                 _ => break,
             }
+        }
+    }
+}
+
+/// cas-3147: refusal for an agent shell command that would change the
+/// operator write policy through the operator-only CLI.
+fn operator_policy_command_denial(command: &str) -> Option<String> {
+    for args in cas_invocations(command) {
+        // cas-3c26: operator-only actions, judged by the CLI parser.
+        if let Some(action) = crate::config::operator_policy::operator_only_cas_invocation(&args) {
+            return Some(format!(
+                "🚫 OPERATOR-ONLY (cas-3c26): {action} is the operator's to do, from their own terminal, never an agent's. Ask the supervisor to request it from the operator."
+            ));
+        }
+        let config = args.iter().position(|arg| arg == "config");
+        let refused = config.is_some_and(|at| {
+            let rest = &args[at + 1..];
+            rest.first()
+                .is_some_and(|sub| sub == "grant-write" || sub == "revoke-write")
+                || (rest.first().is_some_and(|sub| sub == "set")
+                    && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
+        });
+        // cas-0d4f0: security-relevant keys, set or reset.
+        let guarded_key = config.and_then(|at| {
+            let rest = &args[at + 1..];
+            rest.first()
+                .filter(|sub| *sub == "set" || *sub == "reset")
+                .and_then(|_| rest.get(1))
+                .filter(|key| {
+                    key.as_str() != "factory.write_roots"
+                        && crate::config::operator_policy::is_operator_only_config_key(key)
+                })
+        });
+        if let Some(key) = guarded_key {
+            return Some(format!(
+                "🚫 OPERATOR-ONLY (cas-0d4f0): {key} relaxes a Cassy guard, so only the operator changes it, from their own terminal, never an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set {key} …` themselves. Ordinary keys stay settable with `cas config set`."
+            ));
+        }
+        if refused {
+            return Some(
+                "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+/// cas-1b94: refusal for an agent's Bash `cas mcp add|remove|import` that
+/// would remove, replace or alias a `factory.supervisor_only_mcp` server, by
+/// the rule `proxy_add`/`proxy_remove` apply (cas-0d4f0). Ordinary servers
+/// stay manageable; `cas mcp import --force` is refused while any
+/// supervisor-only server is configured, since it may overwrite one.
+#[cfg(feature = "mcp-proxy")]
+fn supervisor_only_mcp_command_denial(command: &str, cas_root: &Path) -> Option<String> {
+    use crate::config::operator_policy::{supervisor_only_mcp_names, supervisor_only_mcp_refusal};
+    let mut only: Option<Vec<String>> = None;
+    for args in cas_invocations(command) {
+        let Some(at) = args.iter().position(|arg| arg == "mcp") else {
+            continue;
+        };
+        let rest = &args[at + 1..];
+        let Some(sub) = rest.first() else { continue };
+        let only = only.get_or_insert_with(|| supervisor_only_mcp_names(cas_root));
+        if only.is_empty() {
+            return None;
+        }
+        let load = |scope: &str| {
+            let path = match scope {
+                "user" | "global" => cmcp_core::config::Scope::User.config_path().ok(),
+                _ => Some(cas_root.join("proxy.toml")),
+            };
+            path.and_then(|path| cmcp_core::config::Config::load_from(&path).ok())
+                .unwrap_or_default()
+        };
+        let refusal = match sub.as_str() {
+            "remove" | "rm" => {
+                let mut scope = "local".to_string();
+                let mut name = None;
+                let mut words = rest[1..].iter();
+                while let Some(word) = words.next() {
+                    match word.as_str() {
+                        "-s" | "--scope" => scope = words.next().cloned().unwrap_or(scope),
+                        flag if flag.starts_with('-') => {}
+                        value => name = name.or(Some(value.to_string())),
+                    }
+                }
+                name.and_then(|name| supervisor_only_mcp_refusal(&name, None, &load(&scope), only))
+            }
+            "add" => crate::cli::mcp_cmd::parse_add_args(&rest[1..])
+                .ok()
+                .and_then(|parsed| {
+                    supervisor_only_mcp_refusal(
+                        &parsed.name,
+                        Some(&parsed.server_config),
+                        &load(&parsed.scope),
+                        only,
+                    )
+                }),
+            "import" if rest.iter().any(|arg| arg == "--force") => Some(format!(
+                "🚫 OPERATOR-ONLY (cas-0d4f0): `cas mcp import --force` may overwrite a supervisor-only MCP server ({}). factory.supervisor_only_mcp keeps those from workers, so only the operator runs it, from their own terminal. Ask the supervisor to request the operator's approval.",
+                only.join(", ")
+            )),
+            _ => None,
+        };
+        if refusal.is_some() {
+            return refusal;
+        }
+    }
+    None
+}
+
+/// cas-3c26: the variables Cassy's role gates read. An agent that sets,
+/// unsets or clears them for a command it runs is impersonating another role.
+const ROLE_ENV_NAMES: &[&str] = &["CAS_AGENT_ROLE", "CAS_FACTORY_MODE"];
+
+/// cas-3c26: refuse an agent shell command that changes its own Cassy role
+/// environment: an assignment prefix, `env NAME=`, `env -u NAME`, `env -i`
+/// before `cas`, `export`/`declare -x NAME=` or `unset NAME`.
+fn role_env_tampering_denial(command: &str) -> Option<String> {
+    role_env_tampering_at_depth(command, 0)
+}
+
+fn role_env_denial(what: &str) -> String {
+    format!(
+        "🚫 ROLE SPOOF REFUSED (cas-3c26): {what}. {} tell Cassy which role this agent has; an agent may not set, unset or clear them for the commands it runs. Run the command as you are. Operator-only actions are the operator's to run from their own terminal.",
+        ROLE_ENV_NAMES.join(" and ")
+    )
+}
+
+fn role_env_tampering_at_depth(command: &str, depth: usize) -> Option<String> {
+    if depth > 3 {
+        return None;
+    }
+    let role_name = |name: &str| ROLE_ENV_NAMES.contains(&name);
+    let assigned_role = |word: &str| {
+        word.split_once('=')
+            .filter(|(name, _)| is_shell_variable_name(name) && role_name(name))
+            .map(|(name, _)| name.to_string())
+    };
+    for words in shell_statement_words(command) {
+        // Assignment prefixes: `CAS_AGENT_ROLE=supervisor cas …`.
+        let mut index = 0;
+        while let Some(word) = words.get(index) {
+            let Some((name, _)) = word.split_once('=') else {
+                break;
+            };
+            if !is_shell_variable_name(name) {
+                break;
+            }
+            if role_name(name) {
+                return Some(role_env_denial(&format!("this command assigns {name}")));
+            }
+            index += 1;
+        }
+        let Some(program) = words.get(index) else {
+            continue;
+        };
+        let args = &words[index + 1..];
+        match shell_word_basename(program) {
+            "env" => {
+                let mut clears_all = false;
+                let mut position = 0;
+                while let Some(arg) = args.get(position) {
+                    let unset = if arg == "-u" || arg == "--unset" {
+                        position += 1;
+                        args.get(position).map(String::as_str)
+                    } else if let Some(name) = arg.strip_prefix("--unset=") {
+                        Some(name)
+                    } else if let Some(name) =
+                        arg.strip_prefix("-u").filter(|name| !name.is_empty())
+                    {
+                        Some(name)
+                    } else {
+                        None
+                    };
+                    if let Some(name) = unset {
+                        if role_name(name) {
+                            return Some(role_env_denial(&format!("this command unsets {name}")));
+                        }
+                        position += 1;
+                        continue;
+                    }
+                    if arg == "-i" || arg == "--ignore-environment" || arg == "-" {
+                        clears_all = true;
+                    } else if ENV_VALUE_OPTIONS.contains(&arg.as_str()) {
+                        position += 1;
+                    } else if let Some(name) = assigned_role(arg) {
+                        return Some(role_env_denial(&format!("this command assigns {name}")));
+                    } else if !arg.starts_with('-') && !arg.contains('=') {
+                        if clears_all && shell_word_basename(arg) == "cas" {
+                            return Some(role_env_denial(
+                                "`env -i` runs cas without this agent's role environment",
+                            ));
+                        }
+                        break;
+                    }
+                    position += 1;
+                }
+            }
+            "export" | "declare" | "typeset" | "local" | "readonly" => {
+                if let Some(name) = args.iter().find_map(|arg| assigned_role(arg)) {
+                    return Some(role_env_denial(&format!("this command assigns {name}")));
+                }
+            }
+            "unset" => {
+                if let Some(name) = args.iter().find(|arg| role_name(arg)) {
+                    return Some(role_env_denial(&format!("this command unsets {name}")));
+                }
+            }
+            // Wrappers whose option value is itself a shell command.
+            "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
+                for (position, arg) in args.iter().enumerate() {
+                    let flags_c =
+                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                    if (flags_c || arg == "--command")
+                        && let Some(payload) = args.get(position + 1)
+                        && let Some(denial) = role_env_tampering_at_depth(payload, depth + 1)
+                    {
+                        return Some(denial);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -4891,6 +5105,71 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-1b94: an agent's Bash `cas mcp add|remove|import` cannot remove,
+    /// replace or alias a supervisor-only MCP server, however wrapped; the
+    /// rule is the one `proxy_add`/`proxy_remove` apply, and ordinary servers
+    /// stay manageable.
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn cas_1b94_agent_shell_cannot_remove_or_alias_supervisor_only_mcp_servers() {
+        let root = tempfile::tempdir().expect("cas root");
+        std::fs::write(
+            root.path().join("config.toml"),
+            "[factory]\nsupervisor_only_mcp = [\"vercel\"]\n",
+        )
+        .expect("config");
+        std::fs::write(
+            root.path().join("proxy.toml"),
+            "[servers.vercel]\ntransport = \"http\"\nurl = \"https://mcp.vercel.com\"\n\n[servers.docs]\ntransport = \"http\"\nurl = \"https://docs.example/mcp\"\n",
+        )
+        .expect("proxy config");
+        for command in [
+            "cas mcp remove vercel",
+            "cas mcp remove -s local vercel",
+            "cas mcp add vercel https://other.example/mcp",
+            "cas mcp add deploys https://mcp.vercel.com",
+            "bash -c 'cas mcp add --transport http deploys https://mcp.vercel.com'",
+            "nohup /usr/local/bin/cas mcp remove vercel",
+            "cas mcp import --from claude --force",
+        ] {
+            let denial = supervisor_only_mcp_command_denial(command, root.path())
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(
+                denial.contains("supervisor-only") && denial.contains("operator"),
+                "{denial}"
+            );
+        }
+        for allowed in [
+            "cas mcp remove docs",
+            "cas mcp add search https://search.example/mcp",
+            "cas mcp list",
+            "cas mcp import --from claude",
+            "rg 'cas mcp remove vercel' docs",
+        ] {
+            assert_eq!(
+                supervisor_only_mcp_command_denial(allowed, root.path()),
+                None,
+                "{allowed}"
+            );
+        }
+
+        // The PreToolUse hook applies it to an agent's Bash call.
+        let input = bash_input("cas mcp remove vercel", root.path());
+        let output = handle_pre_tool_use_inner(&input, Some(root.path())).expect("hook");
+        let rendered = serde_json::to_string(&output).expect("serialize");
+        assert!(
+            rendered.contains("deny") && rendered.contains("supervisor-only"),
+            "{rendered}"
+        );
+
+        // Nothing is supervisor-only: nothing to refuse.
+        let open = tempfile::tempdir().expect("cas root");
+        assert_eq!(
+            supervisor_only_mcp_command_denial("cas mcp remove vercel", open.path()),
+            None
+        );
+    }
+
     /// cas-0d4f0: no agent tool call writes a Cassy config file directly,
     /// whatever its role; other files under `.cas/` and other config.toml
     /// files are untouched by this rule.
@@ -5431,6 +5710,68 @@ mod workspace_contract_tests {
             "rg 'grant-write' cas-cli/src",
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// cas-3c26: an agent shell cannot pair or authorize a Commander device
+    /// or launch a factory, however the command is wrapped (a PTY wrapper
+    /// included); ordinary hub and factory subcommands stay allowed.
+    #[test]
+    fn cas_3c26_agent_shell_cannot_pair_authorize_or_launch_a_factory() {
+        for command in [
+            "cas hub pair --origin https://commander.example",
+            "cas hub pair --origin https://x --scopes machine:read,pane:input,message:send",
+            "cas hub authorize K7MW-4H2Q --yes",
+            "script -qc 'cas hub pair --origin https://x' /dev/null",
+            "bash -c \"cas hub authorize ABCD-EFGH --yes\"",
+            "nohup cas factory --workers 3",
+            "script -q -c 'cas factory' /dev/null",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("OPERATOR-ONLY (cas-3c26)"), "{denial}");
+        }
+        for allowed in [
+            "cas hub status",
+            "cas factory status",
+            "cas factory worker-status",
+            "git commit -m 'cas hub pair now asks for confirmation'",
+            "rg 'hub pair' cas-cli/src",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// cas-3c26: an agent cannot change the role environment its own commands
+    /// run with, so `CAS_AGENT_ROLE` / `CAS_FACTORY_MODE` gates see the truth.
+    #[test]
+    fn cas_3c26_agent_shell_cannot_spoof_or_drop_its_cassy_role() {
+        for command in [
+            "CAS_AGENT_ROLE=supervisor cas task close cas-1 --supervisor-override",
+            "env CAS_AGENT_ROLE=supervisor cas serve",
+            "env -u CAS_AGENT_ROLE cas update",
+            "env --unset=CAS_AGENT_ROLE cas update",
+            "env --unset CAS_FACTORY_MODE cas factory status",
+            "env -i PATH=/usr/bin cas update",
+            "export CAS_AGENT_ROLE=supervisor",
+            "declare -x CAS_FACTORY_MODE=1",
+            "unset CAS_AGENT_ROLE; cas update",
+            "cd /x && CAS_FACTORY_MODE= cas update",
+            "bash -c 'CAS_AGENT_ROLE=supervisor cas serve'",
+        ] {
+            let denial = role_env_tampering_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("cas-3c26"), "{denial}");
+        }
+        for allowed in [
+            "echo $CAS_AGENT_ROLE",
+            "printenv CAS_AGENT_ROLE",
+            "git commit -m 'CAS_AGENT_ROLE=worker is read by the role gates'",
+            "rg CAS_AGENT_ROLE= cas-cli/src",
+            "env -i PATH=/usr/bin cargo --version",
+            "CAS_PROJECT=x cas task list",
+        ] {
+            assert_eq!(role_env_tampering_denial(allowed), None, "{allowed}");
         }
     }
 

@@ -631,9 +631,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. Open Write access on the current task — "Write access…" opens a panel titled "Write access outside the worktree", saying it lets the task's agents write to a folder outside their worktree until the task closes, on the first task in progress, with create and edit allowed and delete not; on a phone the sheet names the conversation and machine ("cas-src on Atlas") and its close button is "Close write access"
+1. Open Write access on the current task — "Write access…" opens a panel under a level-3 heading "Write access outside the worktree" (announced once, by the group or the phone sheet), saying it lets the task's agents write to a folder outside their worktree until the task closes, on the first task in progress, with create and edit allowed and delete not; on a phone the sheet names the conversation and machine ("cas-src on Atlas") and its close button is "Close write access"
 2. An incomplete grant says what is missing — Review grant with no folder says to enter one, and nothing is sent
-3. Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder with the task id unbroken, is shown and announced; Folder and Reason clear, so one more click cannot resend the grant
+3. Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder with the task id unbroken, is shown and announced; Folder and Reason clear, so one more click cannot resend the grant; at 1280×844 the receipt sits in view clear of the rail's bottom fade
 4. Revoke it after confirming — Revoke… asks to revoke every grant for the task; confirming says how many were removed
 5. A pairing without factory:manage — Write access… is disabled, and its line reads "Write access: … Needs the Stop and restart workers and sessions permission. Add it in Paired machines."
 

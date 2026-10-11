@@ -60,11 +60,25 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(panel.getByRole("checkbox", { name: "delete" })).not.toBeChecked();
       });
       await journey.stage("An incomplete grant says what is missing", async () => {
+        const missing = "Enter the folder to grant, as an absolute path or ~/…";
+        // cas-1380: record what the live region says, as a screen reader hears it.
+        await announcer.evaluate((region) => {
+          const heard: string[] = [];
+          (window as unknown as { heardGrant: string[] }).heardGrant = heard;
+          new MutationObserver(() => { if (region.textContent) heard.push(region.textContent); })
+            .observe(region, { childList: true, characterData: true, subtree: true });
+        });
+        const heard = () => page.evaluate(() => (window as unknown as { heardGrant: string[] }).heardGrant);
         await panel.getByRole("button", { name: "Review grant" }).click();
-        await expect(rail.locator(".write-grant-result")).toHaveText("Enter the folder to grant, as an absolute path or ~/…");
+        await expect(rail.locator(".write-grant-result")).toHaveText(missing);
         // cas-5020: focus goes to the field that is missing, not the line.
         await expect(panel.getByRole("textbox", { name: "Folder" })).toBeFocused();
-        await expect(announcer).toHaveText("Enter the folder to grant, as an absolute path or ~/…");
+        await expect(announcer).toHaveText(missing);
+        await expect.poll(heard, { message: "a first refusal is announced once" }).toEqual([missing]);
+        // cas-1380: the same refusal again is announced again.
+        await panel.getByRole("button", { name: "Review grant" }).click();
+        await expect.poll(heard, { message: "a repeated refusal is announced again" }).toEqual([missing, missing]);
+        await expect(announcer).toHaveText(missing);
         expect(hub.writeGrants).toHaveLength(0);
       });
       await journey.stage("Review, confirm and see the receipt", async () => {

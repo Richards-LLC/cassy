@@ -4061,70 +4061,203 @@ fn factory_write_decision(
     }
 }
 
-/// cas-3147: refusal for an agent shell command that would change the
-/// operator write policy through the operator-only CLI.
+/// The refusal for an agent shell command that would change write roots or
+/// grants (cas-3147, GH #1182).
+const OPERATOR_POLICY_COMMAND_DENIAL: &str = "🚫 OPERATOR-ONLY (cas-3147, GH #1182): write roots and per-task write grants can only be changed by the operator, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` (from their terminal or as `! cas …` in a pane) or `cas config grant-write …` themselves.";
+
+/// cas-3147, GH #1182: refusal for an agent shell command that would change
+/// the operator write policy. Setting roots no longer refuses agent
+/// environment in the CLI, so this hook is the gate. Two layers:
+///
+/// 1. Structural: every statement is unwrapped through command wrappers
+///    (`timeout`, `nice`, `nohup`, `env`, `command`, `exec`, `stdbuf`,
+///    `setsid`, `xargs`, `time`, `chrt`, `ionice`, `sudo`, `flock`, leading
+///    `VAR=val`), `$(which cas)` style substitutions count as `cas`, and
+///    `sh -c` / `eval` payloads are inspected recursively.
+/// 2. Textual catch-all: a command whose text names `factory.write_roots`
+///    together with a standalone `set` word, or `grant-write` /
+///    `revoke-write`, is refused unless every statement is a read-only
+///    command (grep, cat, git log, `cas config get`, …). This covers
+///    interpreters (`python -c`, `perl -e`, heredocs) the structural pass
+///    cannot read.
+///
+/// Guardrail-grade: a command hidden in a script file the agent runs, or
+/// assembled at run time, is out of reach of a tool-call hook.
 fn operator_policy_command_denial(command: &str) -> Option<String> {
-    operator_policy_command_denial_at_depth(command, 0)
+    let normalized = normalize_cas_substitutions(command);
+    (operator_policy_command_structural(&normalized, 0) || operator_policy_command_textual(command))
+        .then(|| OPERATOR_POLICY_COMMAND_DENIAL.to_string())
 }
 
-fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Option<String> {
-    if depth > 3 {
-        return None;
+/// Replace command substitutions that resolve the `cas` binary
+/// (`$(which cas)`, `$(command -v cas)`, `$(type -P cas)`, backticks) with
+/// `cas`, so the structural pass sees `cas` as the executable.
+fn normalize_cas_substitutions(command: &str) -> String {
+    static SUBSTITUTION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    SUBSTITUTION
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"\$\(\s*(?:which|command\s+-[vV]|type\s+-[pP])\s+cas\s*\)|`\s*(?:which|command\s+-[vV]|type\s+-[pP])\s+cas\s*`"#,
+            )
+            .expect("valid cas substitution pattern")
+        })
+        .replace_all(command, "cas")
+        .into_owned()
+}
+
+/// Options taking a separate value, for each wrapper the structural pass
+/// unwraps. Words starting with `-` and numeric or duration words (`30`,
+/// `1.5m`) are skipped generically.
+fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
+    match wrapper {
+        "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+        "nice" => &["-n", "--adjustment"],
+        "xargs" => &[
+            "-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args", "--max-procs",
+            "--delimiter", "--arg-file", "--max-lines", "--replace", "--eof",
+        ],
+        "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
+        "ionice" => &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata"],
+        "exec" => &["-a"],
+        "time" => &["-f", "--format", "-o", "--output"],
+        "flock" => &["-w", "--timeout", "-E", "--conflict-exit-code"],
+        "doas" => &["-u", "-C"],
+        _ => &[],
     }
-    for words in shell_statement_words(command) {
-        let Some(mut index) = executable_word_index(&words) else {
-            continue;
-        };
-        loop {
-            let name = shell_word_basename(&words[index]);
-            let args = &words[index + 1..];
-            match name {
-                // Wrappers that run their remaining words as the command.
-                "setsid" | "nohup" | "nice" | "time" | "exec" | "xargs" | "stdbuf" | "ionice" => {
-                    let Some(next) = args.iter().position(|arg| !arg.starts_with('-')) else {
-                        break;
-                    };
-                    let rest = &words[index + 1 + next..];
-                    let Some(offset) = executable_word_index(rest) else {
-                        break;
-                    };
-                    index += 1 + next + offset;
+}
+
+const COMMAND_WRAPPERS: &[&str] = &[
+    "timeout", "nice", "nohup", "setsid", "time", "exec", "xargs", "stdbuf", "ionice", "chrt",
+    "flock", "doas", "builtin", "unbuffer",
+];
+
+/// The index of the command a wrapper chain runs, or `None` when the
+/// statement has no command word.
+fn unwrapped_command_index(words: &[String]) -> Option<usize> {
+    let mut index = executable_word_index(words)?;
+    for _ in 0..16 {
+        let name = shell_word_basename(&words[index]);
+        if !COMMAND_WRAPPERS.contains(&name) {
+            return Some(index);
+        }
+        let value_options = wrapper_value_options(name);
+        let mut next = index + 1;
+        // `flock FILE cmd` and `timeout DURATION cmd` take one positional.
+        let mut positional = matches!(name, "flock" | "timeout");
+        while next < words.len() {
+            let word = words[next].as_str();
+            if word == "--" {
+                next += 1;
+                break;
+            }
+            if value_options.contains(&word) {
+                next += 2;
+            } else if word.starts_with('-') || is_duration_word(word) {
+                if is_duration_word(word) && !word.starts_with('-') {
+                    positional = false;
                 }
-                // Wrappers whose option value is itself a shell command.
-                "sh" | "bash" | "zsh" | "dash" | "script" | "su" | "runuser" => {
-                    for (position, arg) in args.iter().enumerate() {
-                        let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
-                        if (flags_c || arg == "--command")
-                            && let Some(payload) = args.get(position + 1)
-                            && let Some(denial) =
-                                operator_policy_command_denial_at_depth(payload, depth + 1)
-                        {
-                            return Some(denial);
-                        }
-                    }
-                    break;
-                }
-                "cas" => {
-                    let config = args.iter().position(|arg| arg == "config");
-                    let refused = config.is_some_and(|at| {
-                        let rest = &args[at + 1..];
-                        rest.first().is_some_and(|sub| sub == "grant-write" || sub == "revoke-write")
-                            || (rest.first().is_some_and(|sub| sub == "set")
-                                && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
-                    });
-                    if refused {
-                        return Some(
-                            "🚫 OPERATOR-ONLY (cas-3147, GH #1182): write roots and per-task write grants can only be changed by the operator, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` (from their terminal or as `! cas …` in a pane) or `cas config grant-write …` themselves."
-                                .to_string(),
-                        );
-                    }
-                    break;
-                }
-                _ => break,
+                next += 1;
+            } else if positional {
+                positional = false;
+                next += 1;
+            } else {
+                break;
             }
         }
+        let rest = words.get(next..)?;
+        index = next + executable_word_index(rest)?;
     }
-    None
+    Some(index)
+}
+
+/// `30`, `1.5`, `30s`, `2m`: a number or `timeout` duration.
+fn is_duration_word(word: &str) -> bool {
+    let digits = word.trim_end_matches(['s', 'm', 'h', 'd']);
+    !digits.is_empty() && digits.parse::<f64>().is_ok()
+}
+
+fn operator_policy_command_structural(command: &str, depth: usize) -> bool {
+    if depth > 3 {
+        return false;
+    }
+    for words in shell_statement_words(command) {
+        let Some(index) = unwrapped_command_index(&words) else {
+            continue;
+        };
+        let name = shell_word_basename(&words[index]);
+        let args = &words[index + 1..];
+        let refused = match name {
+            // Wrappers whose option value is itself a shell command.
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
+                args.iter().enumerate().any(|(position, arg)| {
+                    let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                    (flags_c || arg == "--command")
+                        && args.get(position + 1).is_some_and(|payload| {
+                            operator_policy_command_structural(payload, depth + 1)
+                        })
+                })
+            }
+            "eval" => operator_policy_command_structural(&args.join(" "), depth + 1),
+            "cas" => {
+                let config = args.iter().position(|arg| arg == "config");
+                config.is_some_and(|at| {
+                    let rest = &args[at + 1..];
+                    rest.first().is_some_and(|sub| sub == "grant-write" || sub == "revoke-write")
+                        || (rest.first().is_some_and(|sub| sub == "set")
+                            && rest.get(1).is_some_and(|key| key == "factory.write_roots"))
+                })
+            }
+            _ => false,
+        };
+        if refused {
+            return true;
+        }
+    }
+    false
+}
+
+/// The textual catch-all: the command names the write-roots key with a
+/// standalone `set`, or a grant command, and runs anything that is not a
+/// read-only command.
+fn operator_policy_command_textual(command: &str) -> bool {
+    static SET_WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let set_word = SET_WORD.get_or_init(|| {
+        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)").expect("valid set pattern")
+    });
+    let names_policy = (command.contains("factory.write_roots") && set_word.is_match(command))
+        || command.contains("grant-write")
+        || command.contains("revoke-write");
+    if !names_policy {
+        return false;
+    }
+    let statements = shell_statement_words(command);
+    statements.is_empty() || !statements.iter().all(|words| read_only_statement(words))
+}
+
+/// A statement that only reads or prints: it cannot change the policy by
+/// itself (a printed command piped into a shell has the shell as another,
+/// non-read-only statement).
+fn read_only_statement(words: &[String]) -> bool {
+    let Some(index) = unwrapped_command_index(words) else {
+        return true;
+    };
+    let args = &words[index + 1..];
+    match shell_word_basename(&words[index]) {
+        "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "cat" | "less" | "more" | "head"
+        | "tail" | "wc" | "sort" | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd"
+        | "true" | "false" | "test" | "[" | "set" => true,
+        "git" => args
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .is_some_and(|sub| {
+                matches!(sub.as_str(), "log" | "show" | "grep" | "diff" | "status" | "blame" | "commit")
+            }),
+        "cas" => args.iter().position(|arg| arg == "config").is_some_and(|at| {
+            args.get(at + 1)
+                .is_some_and(|sub| matches!(sub.as_str(), "get" | "describe" | "list" | "search" | "docs"))
+        }),
+        _ => false,
+    }
 }
 
 /// cas-3147: files a Bash command edits in place without naming them as a
@@ -5303,6 +5436,66 @@ mod workspace_contract_tests {
             "cas config set factory.prompt_retention_days 7",
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// GH #1182 QA round 1: the CLI no longer refuses agent environment, so
+    /// the hook must refuse the operator-only commands however they are
+    /// wrapped, substituted, evaluated or run from an interpreter, while
+    /// read-only commands that merely mention them stay allowed.
+    #[test]
+    fn gh_1182_agent_shell_cannot_run_wrapped_operator_policy_commands() {
+        for command in [
+            "timeout 30 env -i PATH=/usr/bin HOME=/home/u /abs/path/cas config set factory.write_roots \"~/Downloads\"",
+            "timeout 30 cas config set factory.write_roots /etc",
+            "timeout -s KILL --foreground 5m cas config set factory.write_roots /x",
+            "nice -n 10 cas config set factory.write_roots /x",
+            "nice -5 cas config set factory.write_roots /x",
+            "nohup cas config set factory.write_roots /x &",
+            "env -u CLAUDECODE FOO=1 cas config set factory.write_roots /x",
+            "command cas config set factory.write_roots /x",
+            "exec -a x cas config set factory.write_roots /x",
+            "stdbuf -o L cas config set factory.write_roots /x",
+            "stdbuf -oL cas config set factory.write_roots /x",
+            "setsid -w cas config set factory.write_roots /x",
+            "echo /x | xargs -I{} cas config set factory.write_roots {}",
+            "xargs -n 1 cas config grant-write --task cas-1 --path",
+            "time -p cas config set factory.write_roots /x",
+            "chrt -f 10 cas config set factory.write_roots /x",
+            "ionice -c 3 cas config set factory.write_roots /x",
+            "flock -w 5 /tmp/lock cas config revoke-write --task cas-1",
+            "FOO=1 BAR=2 cas config set factory.write_roots /x",
+            "$(which cas) config set factory.write_roots /x",
+            "$(command -v cas) config set factory.write_roots /x",
+            "`which cas` config set factory.write_roots /x",
+            "eval 'cas config set factory.write_roots /x'",
+            "eval \"timeout 3 cas config set factory.write_roots /x\"",
+            "sh -c 'nice cas config set factory.write_roots /x'",
+            "bash -lc \"eval 'cas config set factory.write_roots /x'\"",
+            "python3 -c 'import subprocess; subprocess.run([\"cas\", \"config\", \"set\", \"factory.write_roots\", \"/x\"])'",
+            "perl -e 'system(\"cas config set factory.write_roots /x\")'",
+            "python3 - <<'EOF'\nimport os\nos.system('cas config set factory.write_roots /x')\nEOF",
+            "echo 'cas config set factory.write_roots /x' | sh",
+            "node -e 'require(\"child_process\").execSync(\"cas config grant-write --task t --path /x --reason r\")'",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
+        }
+        for allowed in [
+            "cas config get factory.write_roots",
+            "timeout 10 cas config get factory.write_roots",
+            "grep -rn \"config set factory.write_roots\" docs",
+            "rg -n 'cas config set factory.write_roots' cas-cli/src | head -20",
+            "cd docs && grep -rn 'grant-write' .",
+            "git log --oneline -5 --grep 'factory.write_roots set'",
+            "git commit -m 'document cas config set factory.write_roots'",
+            "set -e; cas config get factory.write_roots",
+            "cas config set factory.note_max_chars 1800",
+            "cat CHANGELOG.md | grep -n 'set factory.write_roots'",
+            "python3 -c 'print(1)'",
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
         }

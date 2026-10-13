@@ -14,8 +14,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `factory.worker_credential_env`, `qa.evidence_gate`, `qa.independent_pass`
   and `release.claude_account_allowlist` can only be changed by the operator
   at a terminal. `cas config set`, `reset`, `import`, `edit` and the config
-  TUI refuse a change from inside an agent session, using the same checks as
-  `factory.write_roots`. Ordinary keys stay settable.
+  TUI refuse a change from inside an agent session or without a terminal.
+  Ordinary keys stay settable. Write roots keep their 3.50.1 rule: the
+  operator's `! cas config set` of them works from an agent pane.
 - The PreToolUse hook refuses agent shell commands that set or reset those
   keys, and refuses every direct agent write, edit, copy, move or delete of
   `.cas/config.toml` (or `config.yaml`), the global Cassy config and
@@ -64,6 +65,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   so the cloud can scope them to the project (petra-stella-cloud#151).
 - `cas status` no longer lists its own session as a peer. Claims and
   discovery name a machine the same way.
+
+## [3.50.1] - 2026-10-13
+
+### Changed — write roots by project (#1182)
+
+- Project write roots are a normal project setting: `[factory] write_roots`
+  in `.cas/config.toml`. `cas config set factory.write_roots
+  "~/Downloads,/mnt/models"` sets them and `""` clears them; `cas config list`
+  and `cas config get factory.write_roots` show them. Each root lets that
+  project's supervisor and workers create, edit, rename and delete files
+  beneath it; the `path:modes` form is gone (per-task grants keep modes).
+  Agents in other projects are unaffected.
+- The operator's own `! cas config set factory.write_roots …` inside an agent
+  pane now works: setting roots no longer needs a terminal or a typed
+  `ALLOW`, and no longer refuses agent environment. It still refuses inside a
+  factory worker cgroup. Agents cannot widen roots: the tool-call hook refuses
+  the command, and any agent write, edit, rename or delete of
+  `.cas/config.toml` or `.cas/config.yaml`; MCP and the config editor refuse
+  the key and `cas config import` keeps the current value. No root admits any
+  project's `.cas/config.*` or `.cas/operator/`.
+- The hook also catches the command behind wrappers (`timeout`, `env -i`,
+  `nice`, `nohup`, `xargs`, `stdbuf`, `flock`, …), `$(which cas)`, `sh -c`
+  and `eval`, and refuses any command that names `factory.write_roots` with
+  `set` (or `grant-write` / `revoke-write`) unless it only reads, which covers
+  `python -c`, `perl -e` and heredocs. This is a guardrail, not a security
+  boundary: a command hidden in a script file the agent runs is out of reach
+  of a tool-call hook.
+- Unsafe roots are refused when set: `/`, `$HOME` and its ancestors, the
+  project root, anything containing or inside the project's `.cas/`, a `..`
+  component, or a symlink that resolves to one of these.
+- Roots that 3.50.0 stored in `.cas/operator/write-policy.toml` are still
+  honoured and move into `config.toml` the next time roots are set. Per-task
+  grants (`cas config grant-write`, Commander) are unchanged.
 
 ## [3.50.0] - 2026-10-10
 

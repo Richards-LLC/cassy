@@ -105,7 +105,8 @@ def estimate(command, cwd=None, depth=0):
         if script == 'run-verified-tests.mjs' and args[1:2] == ['vitest']:
             # This entry point enforces maxWorkers=2 itself.
             return 2 * host_memory.GIB
-        if script == 'generate-tokens.mjs':
+        # hub-web's token generators are small single-process file transforms.
+        if script in ('generate-tokens.mjs', 'build-cassy-tokens.mjs'):
             return host_memory.GIB
     if name == 'vitest' and not any(arg == '-w' or arg.startswith(('--watch', '--browser')) for arg in args):
         cap = None

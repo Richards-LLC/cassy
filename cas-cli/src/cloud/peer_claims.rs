@@ -625,6 +625,7 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
             // still claimed for this repository, and nothing is lost.
             Acquire::LocalHolder(_) => {}
             Acquire::PeerHolds(hold) | Acquire::StalePeer(hold) => {
+                notify_claim_lost(cas_root, agents.as_ref(), me.as_ref(), agent_id, &task_id, &hold);
                 report.conflicts.push((task_id, hold));
             }
             Acquire::Unavailable(error) => {
@@ -634,6 +635,85 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
         }
     }
     report
+}
+
+/// Tell the supervisor that owns `agent_id` (the agent itself when it is
+/// not a worker) that a peer took its claim on `task_id` (cas-0078). The
+/// local lease no longer keeps that peer off the task, so the work must stop
+/// or be coordinated. One notice per task, peer and agent: renewal finds the
+/// same conflict every pass, and the queue key dedupes it.
+fn notify_claim_lost(
+    cas_root: &Path,
+    agents: &dyn crate::store::AgentStore,
+    me: Option<&crate::types::Agent>,
+    agent_id: &str,
+    task_id: &str,
+    hold: &PeerHold,
+) {
+    let Some(me) = me else {
+        return;
+    };
+    let session = me
+        .factory_session
+        .clone()
+        .filter(|session| !session.trim().is_empty());
+    let target = if me.role == crate::types::AgentRole::Worker {
+        match crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+            agents,
+            session.as_deref(),
+        ) {
+            Some(owner) => owner.name,
+            None => {
+                tracing::warn!(task = %task_id, agent = %agent_id, "claim lost to a peer, and no owning supervisor to tell");
+                return;
+            }
+        }
+    } else {
+        me.name.clone()
+    };
+    let machine = hold
+        .holder
+        .as_ref()
+        .map(|holder| holder.machine.as_str())
+        .unwrap_or("an unknown machine");
+    let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+    let prompt = format!(
+        "⚠️  PEER CLAIM LOST — claim on {task_id} lost to {peer}@{machine}; stop work or coordinate. \
+         {holder} holds the Cassy Cloud claim until {until}, so {mine}'s local lease no longer keeps \
+         that session off {task_id}. Ask them: {prefix}coordination action=message target={peer} \
+         summary=\"{task_id}\" message=\"...\"",
+        peer = hold.name(),
+        holder = hold.describe(),
+        until = hold.until(),
+        mine = me.name,
+    );
+    let summary = format!("Claim on {task_id} lost to {}", hold.name());
+    let key = format!("peer-claim-lost:{task_id}:{}:{agent_id}", hold.agent_id);
+    let queue = match crate::store::open_prompt_queue_store(cas_root) {
+        Ok(queue) => queue,
+        Err(error) => {
+            tracing::warn!(task = %task_id, %error, "could not open the queue for the lost-claim notice");
+            return;
+        }
+    };
+    match queue.enqueue_idempotent(
+        "peer-claims",
+        &target,
+        &prompt,
+        session.as_deref(),
+        Some(&summary),
+        Some(cas_store::NotificationPriority::High),
+        &key,
+        Some(&cas_store::QueueOrigin::Daemon),
+    ) {
+        Ok(cas_store::EnqueueIdempotentResult::Created(_)) => {
+            crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
+        }
+        Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
+        Err(error) => {
+            tracing::warn!(task = %task_id, %error, "could not queue the lost-claim notice");
+        }
+    }
 }
 
 /// How often the daemon heartbeat renews an agent's claims. Claims last a

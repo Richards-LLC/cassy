@@ -1988,7 +1988,8 @@ impl EmbeddedDaemon {
                             return;
                         };
                         // cas-0078: a claim this agent lost and a peer took
-                        // cannot be taken back; say so where it is visible.
+                        // cannot be taken back. Renewal queued a notice to
+                        // the owning supervisor; the log keeps a trace.
                         for (task, hold) in &report.conflicts {
                             tracing::warn!(
                                 task = %task,

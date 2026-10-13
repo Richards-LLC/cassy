@@ -588,20 +588,57 @@ async fn cas_a19b_known_peer_names_mailbox_failure() {
     })
     .await
     .unwrap();
-    Mock::given(method("POST"))
-        .and(path("/api/peer-messages"))
-        .respond_with(ResponseTemplate::new(401))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    let error = coordinate(&service_for(&alpha.cas_dir, "a"), json!({
+    for (status, cause) in [
+        (401, "unauthorized"),
+        (404, "recipient_not_found"),
+        (403, "sender_not_owned"),
+        (409, "dedupe_key_conflict"),
+        (400, "invalid_project"),
+        (400, "invalid_in_reply_to"),
+        (400, "invalid_request"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/api/peer-messages"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({"error": cause})))
+            .with_priority(1)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let error = coordinate(&service_for(&alpha.cas_dir, "a"), json!({
         "action": "message", "target": "sup-b", "summary": "hold staging", "message": "hold staging"
     })).await.unwrap_err();
+        assert!(
+            error.contains(&status.to_string())
+                && error.contains(cause)
+                && error.contains("sup-b@prowl"),
+            "{error}"
+        );
+        assert!(inbox(&alpha.cas_dir).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn cas_a19b_status_404_names_visibility_without_claiming_delivery() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
+    let machine = TestMachine::new("soundwave");
+    seed_project(&machine, &server.uri(), "github.com/acme/widgets");
+    let root = machine.cas_dir.clone();
+    tokio::task::spawn_blocking(move || supervisor_at(&root, "soundwave", "a"))
+        .await
+        .unwrap();
+    let error = coordinate(
+        &service_for(&machine.cas_dir, "a"),
+        json!({
+            "action": "message_status", "id": "pm_404"
+        }),
+    )
+    .await
+    .unwrap_err();
     assert!(
-        error.contains("401") && error.contains("sup-b@prowl"),
+        error.contains("pm_404") && error.contains("not visible"),
         "{error}"
     );
-    assert!(inbox(&alpha.cas_dir).is_empty());
 }
 
 #[tokio::test]

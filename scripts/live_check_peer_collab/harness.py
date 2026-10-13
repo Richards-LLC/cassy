@@ -209,6 +209,11 @@ def run_pane():
     server.bind(str(sock_path))
     server.listen(8)
     log.write(f"[harness] control socket {sock_path}\n")
+    # The factory injects into a pane only once it has printed something
+    # (cas-mux Pane::ready_for_injection: total_bytes_received > 0), as
+    # Claude Code does when it draws its UI. Say we are ready.
+    sys.stdout.write(f"cas live-check harness {agent} ready\r\n")
+    sys.stdout.flush()
     stop = threading.Event()
 
     def handle(conn):
@@ -462,6 +467,20 @@ def cmd_task_import(args):
     print(json.dumps({"ok": True, "columns": len(keep)}))
 
 
+def cmd_queue_find(args):
+    """Prompt-queue rows on this machine whose body or summary contains
+    `--token` (the peer mailbox enqueues delivered peer messages here)."""
+    db = _db(args.run_dir)
+    columns = [row[1] for row in db.execute("PRAGMA table_info(prompt_queue)")]
+    wanted = [c for c in ("id", "source", "target", "summary", "created_at", "factory_session",
+                          "highest_stage", "processed_at", "dedupe_key") if c in columns]
+    rows = db.execute(
+        f"SELECT {', '.join(wanted)} FROM prompt_queue WHERE prompt LIKE ? OR summary LIKE ? ORDER BY id",
+        (f"%{args.token}%", f"%{args.token}%"),
+    ).fetchall()
+    print(json.dumps({"ok": True, "rows": [dict(zip(wanted, row)) for row in rows]}))
+
+
 def cmd_spawn_count(args):
     db = _db(args.run_dir)
     total = db.execute("SELECT COUNT(*) FROM spawn_queue").fetchone()[0]
@@ -517,6 +536,10 @@ def machine_main(argv):
     export.add_argument("--run-dir", required=True)
     export.add_argument("--task-id", required=True)
     export.set_defaults(func=cmd_task_export)
+    queue_find = sub.add_parser("queue-find")
+    queue_find.add_argument("--run-dir", required=True)
+    queue_find.add_argument("--token", required=True)
+    queue_find.set_defaults(func=cmd_queue_find)
     task_import = sub.add_parser("task-import")
     task_import.add_argument("--run-dir", required=True)
     task_import.set_defaults(func=cmd_task_import)
@@ -528,6 +551,7 @@ def machine_main(argv):
 
 MACHINE_COMMANDS = {
     "setup", "launch", "sweep", "remove", "spawn-count", "task-export", "task-import", "installed-cas",
+    "queue-find",
 }
 
 

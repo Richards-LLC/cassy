@@ -144,7 +144,9 @@ class Machine:
 class Run:
     def __init__(self, args):
         self.args = args
-        self.rid = args.run_id or datetime.now().strftime("%m%d%H%M") + secrets.token_hex(2)
+        # Short: macOS limits Unix socket paths to 104 bytes, and the factory's
+        # socket lives at <run dir>/home/.cas/factory-<session>.gui.sock.
+        self.rid = args.run_id or secrets.token_hex(3)
         self.stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.receipts = Path(args.receipts_dir or default_receipts_root()) / self.stamp
         self.receipts.mkdir(parents=True, exist_ok=True)
@@ -156,11 +158,11 @@ class Run:
         self.canonical = args.canonical_id or f"github.com/petrastella-live-check/peer-collab-{self.rid}"
         self.remote = f"https://{self.canonical}.git"
         self.names = {
-            "a": f"sup-soundwave-{self.rid[-4:]}",
-            "b": f"sup-prowl-{self.rid[-4:]}",
-            "bw": f"wkr-prowl-{self.rid[-4:]}",
+            "a": f"sup-soundwave-{self.rid}",
+            "b": f"sup-prowl-{self.rid}",
+            "bw": f"wkr-prowl-{self.rid}",
         }
-        self.sessions = {"a": f"live-{self.rid}-a", "b": f"live-{self.rid}-b"}
+        self.sessions = {"a": f"lc-{self.rid}-a", "b": f"lc-{self.rid}-b"}
         self.standin = None
         self.endpoint = args.cloud_url
         self.results = []
@@ -403,24 +405,22 @@ class Run:
         return task_id
 
     def step_claim_refused(self, evidence, notes):
+        # Supervisors may not `task start` a non-epic task; `task action=claim`
+        # is their lease, and it claims in the cloud the same way (cas-5f28).
         task_id = self.shared_task(evidence)
         self.ctx["task_id"] = task_id
-        started = self.a.tool(self.names["a"], "task", action="start", id=task_id)
-        evidence["soundwave_start"] = started
-        if started.get("is_error"):
-            claimed = self.a.tool(self.names["a"], "task", action="claim", id=task_id)
-            evidence["soundwave_claim"] = claimed
-            notes.append("task start was refused for the supervisor; used task action=claim")
-            if claimed.get("is_error"):
-                raise StepFailed(f"soundwave could not take {task_id}: {claimed.get('text', '')[:300]}")
-        refused = self.b.tool(self.names["b"], "task", action="start", id=task_id)
-        evidence["prowl_start"] = refused
+        claimed = self.a.tool(self.names["a"], "task", action="claim", id=task_id)
+        evidence["soundwave_claim"] = claimed
+        if claimed.get("is_error"):
+            raise StepFailed(f"soundwave could not claim {task_id}: {claimed.get('text', '')[:300]}")
+        refused = self.b.tool(self.names["b"], "task", action="claim", id=task_id)
+        evidence["prowl_claim"] = refused
         text = refused.get("text", "")
-        if "HELD BY A PEER" not in text or self.names["a"] not in text:
-            raise StepFailed(f"prowl's start of {task_id} was not refused naming {self.names['a']}: {text[:400]}")
         if self.standin:
             state = self.standin_admin("GET", "/__standin/state")
             evidence["cloud_locks"] = {k: v for k, v in state["locks"].items() if k.startswith(task_id)}
+        if "HELD BY A PEER" not in text or self.names["a"] not in text:
+            raise StepFailed(f"prowl's claim of {task_id} was not refused naming {self.names['a']}: {text[:400]}")
 
     def step_spawn_refused(self, evidence, notes):
         task_id = self.ctx.get("task_id") or self.shared_task(evidence)
@@ -437,6 +437,32 @@ class Run:
         return machine.tool(agent, "coordination", action="message", target=target, summary=summary,
                             message=body, **extra)
 
+    def queued_rows(self, machine, token):
+        return machine.call("queue-find", "--run-dir", machine.run_dir, "--token", token)["rows"]
+
+    def delivered_locally(self, machine, agent, sender, token, evidence_key, evidence):
+        """Wait until the recipient machine's daemon has claimed `token` from
+        the cloud mailbox and enqueued it for `agent` (the peer-mailbox
+        delivery contract); return the local notification id.
+
+        Whether the factory then types it into the pane depends on the
+        harness looking idle (pane silence and transcript evidence that only a
+        real Claude Code produces), so the inbox and pane are recorded as
+        evidence only."""
+        def probe():
+            rows = [row for row in self.queued_rows(machine, token)
+                    if row.get("target") == agent and str(row.get("source", "")).startswith(f"peer:{sender}")]
+            return bool(rows), rows
+
+        rows = self.wait_for(f"{token} in {machine.label}'s queue for {agent}", probe,
+                             self.args.delivery_timeout)
+        evidence[evidence_key] = rows
+        inbox = machine.tool(agent, "coordination", action="inbox_poll", notification_id=rows[0]["id"])
+        evidence[f"{evidence_key}_inbox_poll"] = {"has_token": token in inbox.get("text", ""),
+                                                  "text": inbox.get("text", "")[:600]}
+        evidence[f"{evidence_key}_in_pane"] = token in machine.pane(agent)
+        return rows[0]["id"]
+
     def step_message_reply_status(self, evidence, notes):
         a, b = self.names["a"], self.names["b"]
         ping = f"live-check-ping-{self.rid}-{secrets.token_hex(3)}"
@@ -447,25 +473,14 @@ class Run:
             raise StepFailed(f"the message did not go via Cassy Cloud: {sent.get('text', '')[:400]}")
         peer_message = match.group(1)
         evidence["peer_message_id"] = peer_message
-        self.wait_for(f"{ping} in {b}'s pane",
-                      lambda: (ping in self.b.pane(b), None), self.args.delivery_timeout)
-        inbox = self.b.tool(b, "coordination", action="inbox_poll")
-        evidence["prowl_inbox"] = inbox
-        notification = None
-        for block in inbox.get("text", "").split("**["):
-            if ping in block:
-                found = re.match(r"(\d+)\]", block)
-                notification = int(found.group(1)) if found else None
-        if notification is None:
-            notes.append("ping not found in prowl's inbox_poll; replying without in_reply_to")
+        notification = self.delivered_locally(self.b, b, a, ping, "prowl_delivery", evidence)
         pong = f"live-check-pong-{self.rid}-{secrets.token_hex(3)}"
-        extra = {"in_reply_to": notification} if notification is not None else {}
-        reply = self.message(self.b, b, a, f"pong {pong}", f"{pong}: reply to {ping}", **extra)
+        reply = self.message(self.b, b, a, f"pong {pong}", f"{pong}: reply to {ping}",
+                             in_reply_to=notification)
         evidence["reply"] = reply
         if reply.get("is_error") or "Cassy Cloud" not in reply.get("text", ""):
             raise StepFailed(f"the reply did not go via Cassy Cloud: {reply.get('text', '')[:400]}")
-        self.wait_for(f"{pong} in {a}'s pane",
-                      lambda: (pong in self.a.pane(a), None), self.args.delivery_timeout)
+        self.delivered_locally(self.a, a, b, pong, "soundwave_delivery", evidence)
 
         def delivered():
             status = self.a.tool(a, "coordination", action="message_status", id=peer_message)
@@ -479,7 +494,8 @@ class Run:
         reply = self.message(self.a, self.names["a"], target, "unknown target", "live check")
         evidence["reply"] = reply
         text = reply.get("text", "")
-        if not reply.get("is_error") or "queued" in text.lower():
+        queued = re.search(r"\bqueued\b|will deliver", text, re.IGNORECASE)
+        if not reply.get("is_error") or queued:
             raise StepFailed(f"a message to unknown {target} was not an immediate error: {text[:300]}")
 
     def step_no_route_to_peer_worker(self, evidence, notes):
@@ -543,7 +559,7 @@ class Run:
     def restart_prowl(self, evidence, key):
         swept = self.b.call("sweep", "--run-dir", self.b.run_dir, "--kill")
         evidence[f"{key}_stop"] = {"stopped": len(swept["found"]), "left": swept["left"]}
-        self.sessions["b"] = f"{self.sessions['b']}-r"
+        self.sessions["b"] = f"{self.sessions['b']}r"
         return swept
 
     def step_offline_catchup(self, evidence, notes):
@@ -555,17 +571,20 @@ class Run:
         ]
         self.launch(self.b, self.sessions["b"], b, [self.names["bw"]])
 
-        def caught_up():
-            pane = self.b.pane(b)
-            counts = {token: pane.count(token) for token in tokens}
-            return all(count >= 1 for count in counts.values()), counts
+        def counts():
+            return {token: len([row for row in self.queued_rows(self.b, token)
+                                if row.get("target") == b]) for token in tokens}
 
-        self.wait_for("both offline messages in prowl's pane", caught_up, self.args.delivery_timeout + 30)
-        time.sleep(20)  # one more poll interval: a duplicate would land now
-        pane = self.b.pane(b)
-        counts = {token: pane.count(token) for token in tokens}
-        evidence["occurrences"] = counts
-        duplicates = {token: count for token, count in counts.items() if count != 1}
+        def caught_up():
+            current = counts()
+            return all(count >= 1 for count in current.values()), current
+
+        self.wait_for("both offline messages queued for prowl's supervisor", caught_up,
+                      self.args.delivery_timeout + 30)
+        time.sleep(20)  # one more mailbox poll: a duplicate would land now
+        final = counts()
+        evidence["queued_occurrences"] = final
+        duplicates = {token: count for token, count in final.items() if count != 1}
         if duplicates:
             raise StepFailed(f"offline messages were not delivered exactly once: {duplicates}")
 
@@ -576,10 +595,15 @@ class Run:
         self.restart_prowl(evidence, "prowl")
         self.launch(self.b, self.sessions["b"], self.names["b"], [self.names["bw"]])
 
+        session = self.sessions["b"]
+
         def listed():
+            # The restarted supervisor, not its stale earlier registration:
+            # the peer line must carry the new session.
             view = self.peers_text(self.a, self.names["a"])
-            line = next((l for l in view.splitlines() if self.names["b"] in l), "")
-            return (line and "[live]" in line), view
+            line = next((l for l in view.splitlines()
+                         if self.names["b"] in l and f"session {session} " in l + " "), "")
+            return bool(line) and "[live]" in line, view
 
         evidence["soundwave_peers"] = self.wait_for(
             "prowl's supervisor live again after two failed registrations", listed, 150, interval=10)
@@ -702,7 +726,7 @@ def parse_args(argv):
              "SessionStart registers the agent in the cloud. Use only to exercise later steps while "
              "the eager-registration gap blocks cloud presence; recorded in every receipt.")
     parser.add_argument("--discovery-timeout", type=int, default=90)
-    parser.add_argument("--delivery-timeout", type=int, default=75)
+    parser.add_argument("--delivery-timeout", type=int, default=90)
     parser.add_argument("--worker-quiet-secs", type=int, default=35)
     return parser.parse_args(argv)
 

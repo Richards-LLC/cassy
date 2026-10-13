@@ -356,7 +356,13 @@ impl PeerClaims {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenewReport {
     pub renewed: usize,
+    /// Claims that were lost (released or expired in the cloud) and taken
+    /// again.
+    pub reacquired: usize,
     pub failed: usize,
+    /// Claims a peer took while this agent's was lost: the task and its new
+    /// holder.
+    pub conflicts: Vec<(String, PeerHold)>,
 }
 
 /// Renew the cloud claims of every task and epic `agent_id` holds a local

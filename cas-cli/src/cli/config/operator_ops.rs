@@ -1,9 +1,13 @@
-//! Operator-only write roots and per-task write grants (cas-3147, GH #1169).
+//! Operator-only write roots and per-task write grants (cas-3147, GH #1169,
+//! GH #1182).
 //!
-//! These commands write `.cas/operator/write-policy.toml`. Each one first
-//! refuses any agent context (see [`operator_context_refusal`]) and then asks
-//! the operator to confirm at the terminal. The PreToolUse hook separately
-//! refuses agent tool calls that run these commands or write the file.
+//! `cas config set factory.write_roots` writes `[factory] write_roots` in the
+//! project's `.cas/config.toml`; it refuses only a factory worker cgroup, so
+//! the operator's `! cas …` inside an agent pane works. The grant commands
+//! write `.cas/operator/write-policy.toml`; they refuse any agent context (see
+//! [`operator_context_refusal`]) and ask the operator to confirm at the
+//! terminal. The PreToolUse hook refuses agent tool calls that run these
+//! commands or write either file.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -11,7 +15,8 @@ use std::path::Path;
 use crate::cli::Cli;
 use crate::config::operator_policy::{
     InvocationContext, load_operator_policy, operator_context_refusal, operator_policy_path,
-    parse_modes, parse_write_roots, resolve_operator_path, save_operator_policy,
+    parse_modes, parse_project_write_roots, resolve_operator_path, resolve_project_write_root,
+    save_operator_policy,
 };
 
 /// `cas config grant-write`: a one-off write grant bound to one open task.
@@ -90,55 +95,146 @@ fn record_event(cas_root: &Path, event: &str, fields: &[(&str, &str)]) {
     let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(cas_root, event, fields);
 }
 
-/// `cas config set factory.write_roots <value>`.
+/// `cas config set factory.write_roots <value>` (GH #1182).
+///
+/// Writes `[factory] write_roots` in the project's `.cas/config.toml`. The
+/// operator usually runs this as `! cas …` inside an agent pane, which
+/// carries agent environment and has no terminal, so the only refusal here is
+/// a factory worker cgroup; agents running it as a tool call are refused by
+/// the PreToolUse hook. Roots left in the cas-3147 operator policy file are
+/// moved into config.toml (an empty value clears both).
 pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    require_operator()?;
-    let roots = parse_write_roots(value, cas_root)?;
-    let listed = if roots.is_empty() {
-        "  (none: clears every project write root)".to_string()
-    } else {
-        roots
-            .iter()
-            .map(|root| {
-                let modes = root.modes.iter().map(|mode| format!("{mode:?}").to_lowercase()).collect::<Vec<_>>().join("+");
-                format!("  {} ({modes})", root.path.display())
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    confirm(
-        &format!("Project write roots for agents in this project will become:\n{listed}"),
-        "ALLOW",
-    )?;
-    let mut policy = load_operator_policy(cas_root)?;
-    policy.roots = roots;
-    save_operator_policy(cas_root, &policy)?;
-    let paths = policy.roots.iter().map(|root| root.path.display().to_string()).collect::<Vec<_>>().join(",");
-    record_event(cas_root, "operator_write_roots_set", &[("roots", paths.as_str())]);
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let change = set_project_write_roots(value, cas_root, &cgroup)?;
+    let config_path = cas_root.join("config.toml").display().to_string();
     if cli.json {
-        println!("{}", serde_json::json!({"key": "factory.write_roots", "roots": policy.roots.iter().map(|r| r.path.display().to_string()).collect::<Vec<_>>()}));
+        println!(
+            "{}",
+            serde_json::json!({
+                "key": "factory.write_roots",
+                "old_value": change.previous,
+                "new_value": change.stored,
+                "migrated_from_operator_policy": change.migrated,
+                "dropped_from_operator_policy": change.dropped,
+                "path": config_path,
+            })
+        );
+        return Ok(());
+    }
+    if change.stored.is_empty() {
+        println!("Cleared factory.write_roots in .cas/config.toml");
     } else {
-        println!("Set factory.write_roots in {}", operator_policy_path(cas_root).display());
+        println!("Set factory.write_roots in .cas/config.toml.");
+        println!("Agents may create, edit and delete files beneath:");
+        for root in &change.stored {
+            println!("  {root}");
+        }
+    }
+    if !change.migrated.is_empty() {
+        println!("Moved from .cas/operator/write-policy.toml:");
+        for path in &change.migrated {
+            println!("  {path}");
+        }
+    }
+    if !change.dropped.is_empty() {
+        eprintln!("Dropped legacy roots that are no longer allowed:");
+        for entry in &change.dropped {
+            eprintln!("  {entry}");
+        }
     }
     Ok(())
 }
 
-/// `cas config get factory.write_roots`: read-only view of the policy file.
+/// What `cas config set factory.write_roots` changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteRootsChange {
+    pub previous: Vec<String>,
+    pub stored: Vec<String>,
+    /// Roots moved from the cas-3147 operator policy file into config.toml.
+    pub migrated: Vec<String>,
+    /// Legacy roots that no longer pass validation, with the reason.
+    pub dropped: Vec<String>,
+}
+
+/// Validate `value`, migrate legacy roots and write `[factory] write_roots`
+/// to `cas_root/config.toml`. `cgroup` is the caller's `/proc/self/cgroup`;
+/// a factory worker or server cgroup is refused.
+pub(crate) fn set_project_write_roots(
+    value: &str,
+    cas_root: &Path,
+    cgroup: &str,
+) -> anyhow::Result<WriteRootsChange> {
+    if let Some(refusal) = crate::config::operator_policy::worker_cgroup_refusal(cgroup) {
+        anyhow::bail!(refusal);
+    }
+    let mut roots = parse_project_write_roots(value, cas_root)?;
+    let clearing = roots.is_empty();
+
+    // Migrate legacy cas-3147 roots out of the operator policy file; an empty value
+    // clears them too. Grants stay in the file.
+    let mut legacy = load_operator_policy(cas_root)?;
+    let mut migrated = Vec::new();
+    let mut dropped = Vec::new();
+    if !clearing {
+        for root in &legacy.roots {
+            match resolve_project_write_root(&root.path.display().to_string(), cas_root) {
+                Ok(path) if !roots.contains(&path) => {
+                    migrated.push(path.display().to_string());
+                    roots.push(path);
+                }
+                Ok(_) => {}
+                Err(error) => dropped.push(format!("{} ({error})", root.path.display())),
+            }
+        }
+    }
+
+    let mut config = crate::config::Config::load(cas_root)?;
+    let previous = config.factory().write_roots;
+    let stored: Vec<String> = roots.iter().map(|root| root.display().to_string()).collect();
+    config.set_factory_write_roots(stored.clone());
+    config.save(cas_root)?;
+
+    if !legacy.roots.is_empty() {
+        legacy.roots.clear();
+        if legacy.grants.is_empty() {
+            match std::fs::remove_file(operator_policy_path(cas_root)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            save_operator_policy(cas_root, &legacy)?;
+        }
+    }
+
+    let joined = stored.join(",");
+    record_event(cas_root, "operator_write_roots_set", &[("roots", joined.as_str())]);
+    Ok(WriteRootsChange { previous, stored, migrated, dropped })
+}
+
+/// `cas config get factory.write_roots`: the config.toml value, plus a
+/// note on stderr for roots still honoured from the cas-3147 operator policy file.
 pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let policy = load_operator_policy(cas_root)?;
-    let describe = |modes: &std::collections::BTreeSet<_>| {
-        modes.iter().map(|mode: &crate::config::operator_policy::OperatorWriteMode| format!("{mode:?}").to_lowercase()).collect::<Vec<_>>().join("+")
-    };
+    let config = crate::config::Config::load(cas_root)?;
+    let roots = config.factory().write_roots;
+    let legacy: Vec<String> = load_operator_policy(cas_root)
+        .map(|policy| policy.roots.iter().map(|root| root.path.display().to_string()).collect())
+        .unwrap_or_default();
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&policy)?);
+        println!(
+            "{}",
+            serde_json::json!({"key": "factory.write_roots", "value": roots, "legacy_operator_policy_roots": legacy})
+        );
         return Ok(());
     }
-    let roots = policy
-        .roots
-        .iter()
-        .map(|root| format!("{}:{}", root.path.display(), describe(&root.modes)))
-        .collect::<Vec<_>>();
     println!("{}", roots.join(","));
+    if !legacy.is_empty() {
+        eprintln!("note: also honoured from .cas/operator/write-policy.toml:");
+        for root in &legacy {
+            eprintln!("  {root}");
+        }
+        eprintln!("`cas config set factory.write_roots` moves them into config.toml.");
+    }
     Ok(())
 }
 
@@ -210,6 +306,10 @@ mod tests {
     use super::*;
     use crate::cli::config::read_ops::set_config_value;
     use crate::config::Config;
+    use crate::config::operator_policy::{
+        OperatorWriteGrant, OperatorWriteMode, OperatorWritePolicy, OperatorWriteRoot,
+    };
+    use crate::test_support::TestEnvGuard;
 
     fn agent() -> InvocationContext {
         InvocationContext {
@@ -280,4 +380,198 @@ mod tests {
                 .is_ok()
         );
     }
+
+    /// The cgroup of an operator's terminal tab or the supervisor's pane.
+    const PANE_CGROUP: &str =
+        "0::/user.slice/user@1000.service/app.slice/app-org.kde.konsole-1.scope/tab(2).scope";
+
+    /// An operator `! cas …` inside an agent pane: agent environment, no
+    /// terminal (the test harness has none either).
+    fn operator_in_agent_pane() -> TestEnvGuard {
+        let mut env = TestEnvGuard::temp_home();
+        for (key, value) in [
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            ("CAS_AGENT_ROLE", "supervisor"),
+            ("CAS_SESSION_ID", "sess-1"),
+            ("CAS_FACTORY_MODE", "1"),
+        ] {
+            env.set(key, value);
+        }
+        env
+    }
+
+    /// GH #1182 acceptance 3: the operator's `! cas config set
+    /// factory.write_roots` from a pane with agent env and no TTY succeeds,
+    /// writes config.toml with canonical paths, `get`/`list` show it, and an
+    /// empty value clears it.
+    #[test]
+    fn gh_1182_operator_pane_sets_and_clears_write_roots_in_config_toml() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/a");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let downloads = home.join("Downloads");
+        let models = home.join("mnt-models");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::os::unix::fs::symlink(&models, home.join("models-link")).unwrap();
+
+        let change = set_project_write_roots(
+            &format!("~/Downloads, {}", home.join("models-link").display()),
+            &cas_root,
+            PANE_CGROUP,
+        )
+        .expect("the operator's pane command succeeds");
+        let expected = vec![downloads.display().to_string(), models.display().to_string()];
+        assert_eq!(change.stored, expected, "`~` expands and symlinks resolve");
+        assert!(change.previous.is_empty());
+
+        let text = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        assert!(text.contains("write_roots"), "{text}");
+        let config = crate::config::Config::load(&cas_root).unwrap();
+        assert_eq!(config.factory().write_roots, expected);
+        assert_eq!(config.get("factory.write_roots"), Some(expected.join(",")));
+        let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
+        assert_eq!(listed.get("factory.write_roots"), Some(&expected.join(",")));
+        let cli = <Cli as clap::Parser>::parse_from(["cas", "config", "get", "factory.write_roots"]);
+        execute_get_write_roots(&cli, &cas_root).unwrap();
+
+        let change = set_project_write_roots("", &cas_root, PANE_CGROUP).unwrap();
+        assert_eq!(change.previous, expected);
+        assert!(change.stored.is_empty());
+        assert!(crate::config::Config::load(&cas_root).unwrap().factory().write_roots.is_empty());
+        let text = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        assert!(!text.contains("write_roots"), "{text}");
+    }
+
+    /// GH #1182: setting roots refuses inside a factory worker (or server)
+    /// cgroup, and refuses unsafe roots without touching config.toml.
+    #[test]
+    fn gh_1182_set_refuses_worker_cgroups_and_unsafe_roots() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/a");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::fs::create_dir_all(cas_root.join("worktrees")).unwrap();
+        let before = std::fs::read_to_string(cas_root.join("config.toml")).ok();
+
+        for cgroup in [
+            "0::/user.slice/app.slice/tab(2).scope/cas-worker-cassy-agile-raven-93-golden-finch-99",
+            "0::/user.slice/app.slice/cas-server-cassy-daemon",
+        ] {
+            let error = set_project_write_roots("~/Downloads", &cas_root, cgroup).unwrap_err().to_string();
+            assert!(error.contains("cgroup"), "{error}");
+        }
+        std::os::unix::fs::symlink(&home, home.join("home-link")).unwrap();
+        for unsafe_root in [
+            "/".to_string(),
+            "~".to_string(),
+            home.display().to_string(),
+            home.parent().unwrap().display().to_string(),
+            "relative/dir".to_string(),
+            "~/Downloads/../Downloads".to_string(),
+            home.join("home-link").display().to_string(),
+            project.display().to_string(),
+            cas_root.display().to_string(),
+            cas_root.join("worktrees").display().to_string(),
+            home.join("missing").display().to_string(),
+            "~/Downloads:create+edit".to_string(),
+        ] {
+            assert!(
+                set_project_write_roots(&unsafe_root, &cas_root, PANE_CGROUP).is_err(),
+                "{unsafe_root} must be refused"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(cas_root.join("config.toml")).ok(), before);
+    }
+
+    /// GH #1182 acceptance 6: setting roots moves legacy cas-3147 roots out of the
+    /// operator policy file into config.toml and keeps per-task grants there;
+    /// a file left with only roots is removed.
+    #[test]
+    fn gh_1182_set_migrates_legacy_roots_and_keeps_grants() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/a");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let legacy_root = home.join("soundwave-config/docs/requests");
+        let granted = home.join("granted");
+        let downloads = home.join("Downloads");
+        for dir in [&legacy_root, &granted, &downloads] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let grant = OperatorWriteGrant {
+            task: "cas-1".into(),
+            path: granted.clone(),
+            modes: [OperatorWriteMode::Create].into_iter().collect(),
+            reason: "INGEST".into(),
+            granted_at: "2026-10-13T00:00:00Z".into(),
+            granted_by: Some("operator-cli".into()),
+        };
+        save_operator_policy(
+            &cas_root,
+            &OperatorWritePolicy {
+                roots: vec![OperatorWriteRoot {
+                    path: legacy_root.clone(),
+                    modes: [OperatorWriteMode::Create].into_iter().collect(),
+                }],
+                grants: vec![grant.clone()],
+            },
+        )
+        .unwrap();
+
+        let change = set_project_write_roots("~/Downloads", &cas_root, PANE_CGROUP).unwrap();
+        assert_eq!(change.migrated, vec![legacy_root.display().to_string()]);
+        assert_eq!(
+            change.stored,
+            vec![downloads.display().to_string(), legacy_root.display().to_string()]
+        );
+        let policy = load_operator_policy(&cas_root).unwrap();
+        assert!(policy.roots.is_empty(), "roots left the legacy file");
+        assert_eq!(policy.grants, vec![grant], "grants are unchanged");
+
+        // A legacy file holding only roots is removed once they move.
+        save_operator_policy(
+            &cas_root,
+            &OperatorWritePolicy {
+                roots: vec![OperatorWriteRoot {
+                    path: legacy_root.clone(),
+                    modes: [OperatorWriteMode::Edit].into_iter().collect(),
+                }],
+                grants: Vec::new(),
+            },
+        )
+        .unwrap();
+        set_project_write_roots("~/Downloads", &cas_root, PANE_CGROUP).unwrap();
+        assert!(!operator_policy_path(&cas_root).exists());
+    }
+
+    /// GH #1182: `cas config import` never changes write roots.
+    #[test]
+    fn gh_1182_config_import_keeps_current_write_roots() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let cas_root = crate::store::init_cas_dir(&home.join("projects/a")).unwrap();
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        set_project_write_roots("~/Downloads", &cas_root, PANE_CGROUP).unwrap();
+        let forged = home.join("forged.yaml");
+        std::fs::write(&forged, "factory:\n  write_roots:\n    - /\n  note_max_chars: 1700\n").unwrap();
+        let cli = <Cli as clap::Parser>::parse_from([
+            "cas",
+            "config",
+            "import",
+            forged.to_str().unwrap(),
+            "--force",
+        ]);
+        let Some(crate::cli::Commands::Config(crate::cli::config::ConfigCommands::Import(args))) = &cli.command else {
+            panic!("import args");
+        };
+        crate::cli::config::io_ops::execute_import(args, &cli, &cas_root).unwrap();
+        let config = crate::config::Config::load(&cas_root).unwrap();
+        assert_eq!(config.factory().note_max_chars, 1700, "other keys import");
+        assert_eq!(config.factory().write_roots, vec![home.join("Downloads").display().to_string()]);
+    }
+
 }

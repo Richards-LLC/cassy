@@ -1451,10 +1451,8 @@ impl CasService {
             )));
         }
 
-        // Refuse CAS-generated row-source labels before any queue write. Plain
-        // names are deliberately allowed through: a supervisor may address a
-        // worker before registration, and the queue-before-register path
-        // reports that honestly until the worker appears.
+        // Refuse CAS-generated row-source labels before any queue write.
+        // Unregistered names may wait only for a matching pending local spawn.
         let resolved_target_agent = {
             use crate::store::open_agent_store;
             open_agent_store(&self.inner.cas_root)
@@ -1495,6 +1493,15 @@ impl CasService {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
+            ));
+        }
+
+        if !target_is_registered
+            && !self.message_target_has_pending_spawn(&resolved_target, factory_session.as_deref())?
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!("no supervisor or worker named {resolved_target} in this project or its peers. Nothing was enqueued."),
             ));
         }
 
@@ -4897,7 +4904,7 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     #[test]
-    fn plain_unregistered_names_remain_queue_before_register_targets() {
+    fn plain_names_are_distinct_from_reserved_row_sources() {
         for target in [
             "",
             "  ",

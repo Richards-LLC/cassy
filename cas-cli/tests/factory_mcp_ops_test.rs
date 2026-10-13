@@ -7881,6 +7881,9 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     // addressed to a worker name the supervisor already knows (e.g. from an
     // explicit spawn_workers worker_names= request) before the daemon has
     // finished spawning it.
+    env.spawn_queue()
+        .enqueue_spawn(1, &["not-born-yet".to_string()], true, None, None, None)
+        .expect("pending local spawn");
 
     let req = coord_msg("message", "not-born-yet", "start with task cas-abc1", None);
     let result = env.service.coordination(Parameters(req)).await;

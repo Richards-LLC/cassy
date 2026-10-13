@@ -10647,12 +10647,26 @@ mod tests {
         let selected = queue
             .peek_for_targets(&valid_targets, Some("factory-session"), 10)
             .unwrap();
-        let selected_ids: Vec<i64> = selected.iter().map(|row| row.id).collect();
+        let selected_ids: Vec<i64> = selected
+            .iter()
+            .filter(|row| row.target == "wise-raven-21")
+            .map(|row| row.id)
+            .collect();
         assert_eq!(
             selected_ids,
             vec![live],
-            "the daemon must inject only this session's live row"
+            "the reused worker must receive only this session's live row"
         );
+        assert!(selected.iter().all(|row| row.id != ancient));
+        assert_eq!(selected.len(), 2, "live worker row plus sender notice");
+        let notice = selected
+            .iter()
+            .find(|row| row.source == "delivery-watchdog")
+            .expect("stale quarantine notifies the supervisor sender");
+        assert_eq!(notice.target, "supervisor");
+        assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(notice.prompt.contains(&format!("Message {ancient} to wise-raven-21")));
+        assert!(notice.prompt.contains("stale queue item"));
     }
 
     /// cas-d047 / GH #70 at the daemon boundary: a message the worker already

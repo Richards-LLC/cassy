@@ -68,7 +68,10 @@ fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
             assert_eq!(peers[0]["supervisor"]["agent_id"], "b");
         } else {
             assert!(text.contains("1 peer supervisor"), "{args:?}: {text}");
-            assert!(!text.contains("sup-a") && !text.contains("sup-local-session"), "{text}");
+            assert!(
+                !text.contains("sup-a") && !text.contains("sup-local-session"),
+                "{text}"
+            );
         }
     }
 }
@@ -81,7 +84,13 @@ fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
     let PeerDiscovery::Found { peers, .. } = discover_peers(&alpha.cas_dir, None).unwrap() else {
         panic!("expected project peer discovery");
     };
-    assert_eq!(peers.iter().map(|p| p.agent_id.as_str()).collect::<Vec<_>>(), ["b"]);
+    assert_eq!(
+        peers
+            .iter()
+            .map(|p| p.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b"]
+    );
 }
 
 #[test]

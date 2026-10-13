@@ -115,7 +115,9 @@ If the caller's account identity is unknown, the report says so. JSON includes
 `claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
 is authoritative only when visibility is `same_account`. The viewer account
 comes from the token-owned agent list, independently of caller session lookup.
-Operator CLI self-exclusion uses the same session/ancestor-PID lookup as status.
+Operator CLI identity uses the same session/ancestor-PID lookup as status.
+Peer discovery also excludes every agent registered in this project's local
+agent store, so a plain terminal never counts this clone's supervisors as peers.
 
 ## Adding Features
 

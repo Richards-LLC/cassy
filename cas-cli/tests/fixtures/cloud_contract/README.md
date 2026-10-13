@@ -30,6 +30,7 @@ teardown calls.
 
 Values are normalised, and equal values share one placeholder, so relations
 survive normalisation:
+
 - `<agent-a>`, `<agent-b>`, `<agent-c>`: the scratch agents
 - `<project>`: the throwaway canonical id
 - `<task-key-1>`, `<task-key-2>`: claim keys
@@ -64,6 +65,7 @@ request body is elided as `{"_oversized_body_bytes": N}`.
 
 The handoff text (`cloud-contract-2026-10-13.md`) and production differ, and
 the fixtures record production:
+
 - **Claim 409:** the body keeps the legacy envelope `status: "conflict"`,
   `result: null`, `lock: null`. Its `agent_id` names the holder, as
   `owner_agent_id` does.

@@ -713,6 +713,35 @@ mod tests {
         assert!(error.contains("operator"), "{error}");
     }
 
+    /// GH #1182: setting project roots refuses only a factory worker or
+    /// server cgroup, never the agent environment or missing terminal of the
+    /// operator's `! cas …` in a pane; the hook skips hand-edited entries that
+    /// are unsafe or do not resolve.
+    #[test]
+    fn gh_1182_project_roots_refuse_worker_cgroups_and_skip_unsafe_entries() {
+        assert_eq!(worker_cgroup_refusal("0::/user.slice/app.slice/app-org.kde.konsole-1.scope/tab(2).scope"), None);
+        assert!(worker_cgroup_refusal("0::/user.slice/tab(2).scope/cas-worker-cassy-a-b").is_some());
+        assert!(worker_cgroup_refusal("0::/user.slice/cas-server-cassy-daemon").is_some());
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CLAUDECODE", "1");
+        let home = env.home().to_path_buf();
+        let cas_root = home.join("projects/a/.cas");
+        let models = home.join("models");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        let configured = [
+            "~/models".to_string(),
+            models.display().to_string(),
+            "/".to_string(),
+            home.display().to_string(),
+            home.join("projects/a").display().to_string(),
+            cas_root.display().to_string(),
+            home.join("missing").display().to_string(),
+        ];
+        assert_eq!(effective_project_write_roots(&configured, &cas_root), vec![models]);
+    }
+
     /// cas-ab04: the shared grant path validates the task and path, records
     /// who granted it (a Commander device id), notes it on the task, refuses
     /// closed tasks and empty reasons, and revoke removes it with a note.

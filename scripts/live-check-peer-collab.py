@@ -23,10 +23,17 @@ stand-in (live_check_peer_collab/standin_cloud.py) is started on this host's
 tailnet address. Tokens are passed on stdin and written 0600, never printed
 or put on a command line.
 
-Steps whose client code is not merged are reported `pending`, never passed;
-`--merged cas-XXXX,...` runs them for real once their code is in the binary.
-Exit status: 0 when no step failed (passed or pending), 1 when any step failed
-or errored, 2 on a setup/teardown failure.
+Before anything is created, a preflight probes both binaries (`cas --version`
+and feature markers, see harness.py FEATURE_MARKERS). A step whose feature is
+missing from either binary is reported `pending`, never passed; once both
+binaries carry it, the step runs for real. Binaries at different commits are
+refused unless --allow-mixed.
+
+Exit status: 0 when no step failed (passed, pending or skipped); 1 when a step
+failed or errored; 2 on a configuration error (missing token or binary, mixed
+binaries, unknown step), a setup failure, an unclean teardown or a changed
+installed cas; 128+N when signal N (SIGINT, SIGTERM, SIGHUP) stopped the run.
+A signal still tears down everything the run created on both hosts.
 
 Example (stand-in):
   scripts/live-check-peer-collab.py \\
@@ -45,6 +52,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -56,9 +64,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 HELPER_DIR = HERE / "live_check_peer_collab"
 
-# Step -> the task whose client code it needs. Steps whose task is not in
-# --merged are reported pending (cas-daa0 AC2).
-PENDING_BY_DEFAULT = {
+# Step -> the task whose client code it needs. A step is pending unless the
+# preflight probe finds that task's feature in both binaries (cas-937a5 F03).
+STEP_REQUIRES = {
     "peer_detail": "cas-559c",
     "spawn_refused": "cas-0078",
     "unknown_name": "cas-a19b",
@@ -87,6 +95,18 @@ def utc():
 
 class StepFailed(Exception):
     pass
+
+
+class ConfigError(Exception):
+    """A usage or configuration problem found before anything is created (exit 2)."""
+
+
+class Interrupted(BaseException):
+    """SIGTERM or SIGHUP: like KeyboardInterrupt, it unwinds into teardown."""
+
+    def __init__(self, signum):
+        super().__init__(signal.Signals(signum).name)
+        self.signum = signum
 
 
 class StepSkipped(Exception):
@@ -154,11 +174,15 @@ class Run:
         self.stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.receipts = Path(args.receipts_dir or default_receipts_root()) / self.stamp
         self.receipts.mkdir(parents=True, exist_ok=True)
-        self.merged = {item.strip() for item in (args.merged or "").split(",") if item.strip()}
         self.steps = [s.strip() for s in args.steps.split(",")] if args.steps else STEP_ORDER
         unknown = [s for s in self.steps if s not in STEP_ORDER]
         if unknown:
-            raise SystemExit(f"unknown step(s): {unknown}; known: {STEP_ORDER}")
+            raise ConfigError(f"unknown step(s): {unknown}; known: {STEP_ORDER}")
+        self.features = {}
+        self.probes = {}
+        self.machines = ()
+        self._tokens = None
+        self._torn_down = False
         self.canonical = args.canonical_id or f"github.com/petrastella-live-check/peer-collab-{self.rid}"
         self.remote = f"https://{self.canonical}.git"
         self.names = {
@@ -211,10 +235,16 @@ class Run:
         if self.args.cloud_url:
             def read(path_arg, env):
                 if path_arg:
-                    return Path(path_arg).read_text().strip()
+                    try:
+                        value = Path(path_arg).read_text().strip()
+                    except OSError as error:
+                        raise ConfigError(f"cannot read token file {path_arg}: {error}") from error
+                    if not value:
+                        raise ConfigError(f"token file {path_arg} is empty")
+                    return value
                 value = os.environ.get(env, "").strip()
                 if not value:
-                    raise SystemExit(f"--cloud-url needs a device token: --token-file-* or {env}")
+                    raise ConfigError(f"--cloud-url needs a device token: --token-file-a/-b or {env}")
                 return value
 
             return read(self.args.token_file_a, "LIVE_CHECK_TOKEN_A"), read(
@@ -269,12 +299,43 @@ class Run:
         with urllib.request.urlopen(request, timeout=15) as response:
             return json.loads(response.read())
 
-    def setup(self):
+    def preflight(self):
+        """Everything that can be checked before the run creates anything:
+        tokens, both binaries and what they can do (cas-937a5 F02, F03)."""
+        self._tokens = self.tokens()
+        local = Path(self.args.binary)
+        if not (local.is_file() and os.access(local, os.X_OK)):
+            raise ConfigError(f"--binary {local} is not an executable file")
         self.resolve_machines()
+        for machine in self.machines:
+            try:
+                probe = machine_stream(machine, "probe", "--binary", machine.binary)
+            except Exception as error:
+                raise ConfigError(f"{machine.label}: cannot probe {machine.binary}: {error}") from error
+            if not probe.get("ok") or not probe.get("commit"):
+                raise ConfigError(f"{machine.label}: {machine.binary} did not report a version: {probe}")
+            self.probes[machine.label] = probe
+        commits = {label: probe["commit"] for label, probe in self.probes.items()}
+        mixed = len(set(commits.values())) > 1
+        if mixed and not self.args.allow_mixed:
+            raise ConfigError(
+                f"the binaries are at different commits ({', '.join(f'{k} {v}' for k, v in commits.items())}); "
+                "rebuild both at one commit, or pass --allow-mixed")
+        self.features = {
+            feature: all(probe["features"].get(feature) for probe in self.probes.values())
+            for feature in set(STEP_REQUIRES.values())
+        }
+        self.write("preflight.json", {"probes": self.probes, "mixed": mixed,
+                                      "allow_mixed": self.args.allow_mixed, "features": self.features})
+        self.log(f"preflight: {', '.join(f'{k} {v}' for k, v in commits.items())}"
+                 f"{' (mixed, allowed)' if mixed else ''}; features present on both: "
+                 f"{sorted(k for k, v in self.features.items() if v) or 'none'}")
+
+    def setup(self):
         for machine in self.machines:
             machine.versions_before = machine_call_installed(machine)
         self.versions["installed_before"] = {m.label: m.versions_before for m in self.machines}
-        token_a, token_b = self.tokens()
+        token_a, token_b = self._tokens
         for machine in self.machines:
             machine.sh(["mkdir", "-p", machine.run_dir])
             machine.put(HELPER_DIR / "harness.py", machine.helper)
@@ -321,23 +382,27 @@ class Run:
 
     def run_steps(self):
         for index, step in enumerate(self.steps, 1):
-            requires = PENDING_BY_DEFAULT.get(step)
-            pending = requires is not None and requires not in self.merged
+            requires = STEP_REQUIRES.get(step)
+            pending = requires is not None and not self.features.get(requires, False)
             receipt = {"step": step, "index": index, "requires": requires, "started_at": utc(),
                        "evidence": {}, "notes": []}
+            if requires:
+                receipt["probe"] = {label: probe["features"].get(requires)
+                                    for label, probe in self.probes.items()}
             if self.args.workaround_eager_registration:
                 receipt["notes"].append(
                     "DIAGNOSTIC RUN: --workaround-eager-registration started cas serve without "
                     "CAS_SESSION_ID; a real harness passes it, so this is not a faithful pass")
             if pending and not self.args.try_pending:
                 receipt.update(status="pending",
-                               detail=f"client code for {requires} is not merged; not executed")
+                               detail=f"{requires} client code is not in both binaries "
+                                      f"(probe {receipt['probe']}); not executed")
             else:
                 try:
                     getattr(self, f"step_{step}")(receipt["evidence"], receipt["notes"])
                     receipt["status"] = "pending" if pending else "pass"
                     if pending:
-                        receipt["detail"] = f"{requires} not merged: executed for observation only, never a pass"
+                        receipt["detail"] = f"{requires} not in both binaries: executed for observation only, never a pass"
                         receipt["observed"] = "would pass"
                 except StepSkipped as skipped:
                     receipt["status"] = "pending" if pending else "skipped"
@@ -346,7 +411,7 @@ class Run:
                     receipt["status"] = "pending" if pending else "fail"
                     receipt["detail"] = str(failure)
                     if pending:
-                        receipt["observed"] = f"fails as expected before {requires}: {failure}"
+                        receipt["observed"] = f"fails as expected without {requires}: {failure}"
                 except Exception as error:
                     receipt["status"] = "pending" if pending else "error"
                     receipt["detail"] = f"{type(error).__name__}: {error}"
@@ -393,22 +458,34 @@ class Run:
         if self.names["bw"] not in text:
             raise StepFailed("peer detail does not list prowl's worker")
 
-    def shared_task(self, evidence, task_type="task", title=None):
-        """Create a task on soundwave and replicate its row to prowl (the
-        stand-in has no sync; on the real cloud this still pins one id)."""
-        title = title or f"live-check {self.rid} {task_type}"
+    def create_task(self, evidence, key, task_type="task", title=None, epic=None):
+        title = title or f"live-check {self.rid} {key}"
+        extra = {"epic": epic} if epic else {}
         created = self.a.tool(self.names["a"], "task", action="create", title=title, task_type=task_type,
-                              priority=3, risk="none", description="cas-daa0 live check scratch task")
-        evidence[f"create_{task_type}"] = created
+                              priority=3, risk="none", description="live check scratch task", **extra)
+        evidence[f"create_{key}"] = created
         match = re.search(r"\b(cas-[0-9a-f]{4,})\b", created.get("text", ""))
         if created.get("is_error") or not match:
-            raise StepFailed(f"task create failed: {created.get('text', '')[:300]}")
-        task_id = match.group(1)
-        exported = self.a.call("task-export", "--run-dir", self.a.run_dir, "--task-id", task_id)
+            raise StepFailed(f"task create ({key}) failed: {created.get('text', '')[:300]}")
+        return match.group(1)
+
+    def replicate(self, evidence, ids):
+        """Copy task rows (and the dependency rows among them) from soundwave
+        to prowl: the stand-in has no sync; on the real cloud this still pins
+        the ids."""
+        exported = self.a.call("task-export", "--run-dir", self.a.run_dir, "--task-id", ",".join(ids))
         if not exported["ok"]:
-            raise StepFailed(f"{task_id} not found in soundwave's store")
-        self.b.call("task-import", "--run-dir", self.b.run_dir, input=json.dumps(exported["task"]))
-        evidence[f"replicated_{task_type}"] = {"id": task_id, "method": "runner sqlite copy soundwave->prowl"}
+            raise StepFailed(f"not found in soundwave's store: {exported['missing']}")
+        imported = self.b.call("task-import", "--run-dir", self.b.run_dir,
+                               input=json.dumps({"tasks": exported["tasks"],
+                                                 "dependencies": exported["dependencies"]}))
+        evidence.setdefault("replicated", []).append(
+            {"ids": ids, "dependencies": imported["dependencies"],
+             "method": "runner sqlite copy soundwave->prowl"})
+
+    def shared_task(self, evidence, task_type="task", title=None):
+        task_id = self.create_task(evidence, task_type, task_type=task_type, title=title)
+        self.replicate(evidence, [task_id])
         return task_id
 
     def step_claim_refused(self, evidence, notes):
@@ -539,28 +616,62 @@ class Run:
             raise StepFailed("; ".join(problems))
 
     def step_epic_split(self, evidence, notes):
-        notes.append("driver follows the cas-4736 design note (factory action=epic_split); "
-                     "update it if the merged API differs")
-        epic = self.shared_task(evidence, task_type="epic", title=f"live-check {self.rid} split epic")
-        proposed = self.a.tool(self.names["a"], "factory", action="epic_split", epic=epic,
-                               peer=self.names["b"], mine="runner half A", theirs="runner half B")
+        """cas-4736's `factory action=epic_split`: propose `id=<epic>
+        target=<peer> mine= theirs=`; the peer answers `id=<split>
+        decision=accept`; the proposer may `decision=cancel`; no arguments
+        lists. Each side then refuses the other's share."""
+        a, b = self.names["a"], self.names["b"]
+        epic = self.create_task(evidence, "epic", task_type="epic", title=f"live-check {self.rid} split epic")
+        kids = [self.create_task(evidence, f"child{i}", epic=epic) for i in range(1, 7)]
+        self.replicate(evidence, [epic, *kids])
+        mine, theirs = kids[0:2], kids[2:4]
+
+        def split_id(reply):
+            found = re.search(r"\b(split-[0-9a-f]{8})\b", reply.get("text", ""))
+            return found.group(1) if found else None
+
+        proposed = self.a.tool(a, "factory", action="epic_split", id=epic, target=b,
+                               mine=",".join(mine), theirs=",".join(theirs))
         evidence["propose"] = proposed
-        split = re.search(r"\b((?:split|es)[-_][A-Za-z0-9_-]+)", proposed.get("text", ""))
+        split = split_id(proposed)
         if proposed.get("is_error") or not split:
-            raise StepFailed(f"epic_split propose failed: {proposed.get('text', '')[:300]}")
-        accepted = self.b.tool(self.names["b"], "factory", action="epic_split", accept=split.group(1))
+            raise StepFailed(f"propose failed: {proposed.get('text', '')[:400]}")
+
+        def in_queue(machine, recipient):
+            def probe():
+                rows = [r for r in self.queued_rows(machine, split) if r.get("target") == recipient]
+                return bool(rows), rows
+            return probe
+
+        evidence["proposal_delivered"] = self.wait_for(
+            f"{split} proposal in prowl's queue", in_queue(self.b, b), self.args.delivery_timeout)
+        accepted = self.b.tool(b, "factory", action="epic_split", id=split, decision="accept")
         evidence["accept"] = accepted
-        if accepted.get("is_error") or "accept" not in accepted.get("text", "").lower():
-            raise StepFailed(f"accept failed: {accepted.get('text', '')[:300]}")
-        second = self.a.tool(self.names["a"], "factory", action="epic_split", epic=epic,
-                             peer=self.names["b"], mine="again A", theirs="again B")
-        evidence["propose_again"] = second
-        split2 = re.search(r"\b((?:split|es)[-_][A-Za-z0-9_-]+)", second.get("text", ""))
-        if not split2:
-            raise StepFailed("second proposal failed")
-        cancelled = self.a.tool(self.names["a"], "factory", action="epic_split", cancel=split2.group(1))
+        if accepted.get("is_error") or "accepted epic split" not in accepted.get("text", "").lower():
+            raise StepFailed(f"accept failed: {accepted.get('text', '')[:400]}")
+        evidence["answer_delivered"] = self.wait_for(
+            f"{split} answer in soundwave's queue", in_queue(self.a, a), self.args.delivery_timeout)
+
+        def listed_accepted():
+            listing = self.a.tool(a, "factory", action="epic_split")
+            line = next((l for l in listing.get("text", "").splitlines() if split in l), "")
+            return "accepted" in line.lower(), listing
+
+        evidence["list"] = self.wait_for(f"{split} listed accepted on soundwave", listed_accepted, 60)
+        gate = self.b.tool(b, "task", action="claim", id=mine[0])
+        evidence["prowl_claims_soundwaves_share"] = gate
+        if split not in gate.get("text", ""):
+            raise StepFailed(f"prowl's claim of {mine[0]} (soundwave's share) was not refused "
+                             f"naming {split}: {gate.get('text', '')[:300]}")
+        second = self.a.tool(a, "factory", action="epic_split", id=epic, target=b,
+                             mine=kids[4], theirs=kids[5])
+        evidence["propose_second"] = second
+        split2 = split_id(second)
+        if second.get("is_error") or not split2:
+            raise StepFailed(f"second proposal failed: {second.get('text', '')[:300]}")
+        cancelled = self.a.tool(a, "factory", action="epic_split", id=split2, decision="cancel")
         evidence["cancel"] = cancelled
-        if cancelled.get("is_error") or "cancel" not in cancelled.get("text", "").lower():
+        if cancelled.get("is_error") or "cancelled epic split" not in cancelled.get("text", "").lower():
             raise StepFailed(f"cancel failed: {cancelled.get('text', '')[:300]}")
 
     def restart_prowl(self, evidence, key):
@@ -618,6 +729,16 @@ class Run:
     # ---- teardown -------------------------------------------------------
 
     def teardown(self):
+        """Idempotent; ignores further SIGINT/SIGTERM/SIGHUP so a second
+        signal cannot abort cleanup half way (cas-937a5 F01)."""
+        if self._torn_down:
+            return self.teardown_report
+        self._torn_down = True
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(signum, signal.SIG_IGN)
+            except (ValueError, OSError):
+                pass
         report = {}
         for machine in getattr(self, "machines", ()):
             entry = {}
@@ -668,19 +789,24 @@ class Run:
         return report
 
 
-def machine_call_installed(machine):
-    """Installed cas fingerprint, read with the machine's own helper copy if
-    present, else with this file's copy streamed over stdin."""
+def machine_stream(machine, *args, timeout=180):
+    """Run a harness.py subcommand on `machine` with this checkout's copy
+    streamed over stdin (works before the run directory exists)."""
     script = (HELPER_DIR / "harness.py").read_text()
-    result = machine.sh([machine.python, "-", "installed-cas"], input=script, timeout=180)
+    result = machine.sh([machine.python, "-", *args], input=script, timeout=timeout)
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def machine_call_installed(machine):
+    """Installed cas fingerprint (version and sha256)."""
+    return machine_stream(machine, "installed-cas")
 
 
 def tailnet_ip():
     result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True)
     address = result.stdout.strip().splitlines()[0] if result.returncode == 0 and result.stdout.strip() else ""
     if not address:
-        raise SystemExit("no tailnet address; pass --standin-bind")
+        raise ConfigError("no tailnet address; pass --standin-bind")
     return address
 
 
@@ -693,13 +819,13 @@ def free_port(bind):
                 return port
             except OSError:
                 continue
-    raise SystemExit("no free port for the stand-in")
+    raise RuntimeError("no free port for the stand-in")
 
 
 def default_receipts_root():
     roots = sorted(Path.home().glob(".cas/artifacts/cassy-*"))
     if len(roots) != 1:
-        raise SystemExit("cannot pick the artifacts root; pass --receipts-dir")
+        raise ConfigError("cannot pick the artifacts root; pass --receipts-dir")
     return roots[0] / "cas-8ca9" / "live"
 
 
@@ -720,7 +846,8 @@ def parse_args(argv):
     parser.add_argument("--standin-bind", help="stand-in bind address (default: this host's tailnet IPv4)")
     parser.add_argument("--standin-port", type=int)
     parser.add_argument("--canonical-id", help="shared repo identity (default: a fresh per-run id)")
-    parser.add_argument("--merged", help="comma list of task ids whose client code is in the binaries")
+    parser.add_argument("--allow-mixed", action="store_true",
+                        help="run even when the two binaries report different commits")
     parser.add_argument("--try-pending", action="store_true",
                         help="also execute pending steps and record what they do (still reported pending)")
     parser.add_argument("--steps", help=f"comma subset of: {','.join(STEP_ORDER)}")
@@ -738,16 +865,45 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
+def install_signal_handlers():
+    """SIGTERM and SIGHUP unwind like SIGINT, so `finally: teardown()` runs."""
+    def handler(signum, _frame):
+        raise Interrupted(signum)
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, handler)
+
+
 def main(argv=None):
     args = parse_args(argv)
-    run = Run(args)
+    install_signal_handlers()
+    try:
+        run = Run(args)
+    except ConfigError as error:
+        print(f"live-check: {error}", file=sys.stderr)
+        return 2
     run.log(f"run {run.rid}: receipts {run.receipts}")
+    try:
+        run.preflight()
+    except ConfigError as error:
+        run.log(f"configuration error: {error}")
+        run.write("summary.json", {"run_id": run.rid, "config_error": str(error),
+                                   "probes": run.probes, "finished_at": utc()})
+        return 2
+    except (Interrupted, KeyboardInterrupt) as stop:
+        run.log(f"interrupted during preflight: {stop}; nothing was created")
+        return 128 + getattr(stop, "signum", signal.SIGINT)
     setup_error = None
+    stopped_by = None
     try:
         run.setup()
         run.run_steps()
+    except Interrupted as stop:
+        setup_error, stopped_by = f"interrupted by {stop}", stop.signum
+        run.log(f"{setup_error}: tearing down")
     except KeyboardInterrupt:
-        setup_error = "interrupted"
+        setup_error, stopped_by = "interrupted by SIGINT", signal.SIGINT
+        run.log(f"{setup_error}: tearing down")
     except Exception as error:
         setup_error = f"{type(error).__name__}: {error}"
         run.log(f"setup failed: {setup_error}")
@@ -773,7 +929,9 @@ def main(argv=None):
         "passed": [s for s, v in statuses.items() if v == "pass"],
         "failed": [s for s, v in statuses.items() if v in ("fail", "error")],
         "skipped": [s for s, v in statuses.items() if v == "skipped"],
-        "pending": {s: PENDING_BY_DEFAULT.get(s) for s, v in statuses.items() if v == "pending"},
+        "pending": {s: STEP_REQUIRES.get(s) for s, v in statuses.items() if v == "pending"},
+        "probes": run.probes,
+        "features_on_both": run.features,
         "setup_error": setup_error,
         "diagnostic_workaround_eager_registration": args.workaround_eager_registration,
         "teardown_clean": clean,
@@ -783,6 +941,8 @@ def main(argv=None):
     run.write("summary.json", summary)
     run.log(json.dumps({k: summary[k] for k in ("steps", "pending", "teardown_clean",
                                                  "installed_cas_unchanged", "setup_error")}))
+    if stopped_by:
+        return 128 + int(stopped_by)
     if setup_error or not clean or not unchanged:
         return 2
     return 1 if summary["failed"] else 0

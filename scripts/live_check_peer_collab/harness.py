@@ -446,25 +446,79 @@ def _db(run_dir, readonly=True):
 
 
 def cmd_task_export(args):
+    """Task rows (and the dependency rows among them) for --task-id ids."""
+    import sqlite3
     db = _db(args.run_dir)
-    db.row_factory = __import__("sqlite3").Row
-    row = db.execute("SELECT * FROM tasks WHERE id = ?", (args.task_id,)).fetchone()
-    print(json.dumps({"ok": row is not None, "task": dict(row) if row else None}))
+    db.row_factory = sqlite3.Row
+    ids = [i for i in args.task_id.split(",") if i]
+    marks = ",".join("?" for _ in ids)
+    tasks = [dict(r) for r in db.execute(f"SELECT * FROM tasks WHERE id IN ({marks})", ids)]
+    deps = [dict(r) for r in db.execute(
+        f"SELECT * FROM dependencies WHERE from_id IN ({marks}) AND to_id IN ({marks})", ids + ids)]
+    found = {t["id"] for t in tasks}
+    print(json.dumps({"ok": found == set(ids), "missing": sorted(set(ids) - found),
+                      "tasks": tasks, "dependencies": deps,
+                      # Back-compat: a single exported task.
+                      "task": tasks[0] if len(tasks) == 1 else None}))
+
+
+def _insert_rows(db, table, rows):
+    columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+    for row in rows:
+        keep = [column for column in columns if column in row]
+        db.execute(
+            f"INSERT OR REPLACE INTO {table} ({', '.join(keep)}) VALUES ({', '.join('?' for _ in keep)})",
+            [row[column] for column in keep],
+        )
+    return len(rows)
 
 
 def cmd_task_import(args):
-    """Insert a task row exported from the other machine (the stand-in cloud
-    has no sync, so the runner replicates the shared task)."""
-    task = json.loads(sys.stdin.read())
+    """Insert task rows (and their dependency rows) exported from the other
+    machine: the stand-in cloud has no sync, so the runner replicates the
+    shared tasks. Accepts {"tasks": [...], "dependencies": [...]} or one task."""
+    payload = json.loads(sys.stdin.read())
+    tasks = payload.get("tasks") if isinstance(payload, dict) and "tasks" in payload else [payload]
+    deps = payload.get("dependencies", []) if isinstance(payload, dict) else []
     db = _db(args.run_dir, readonly=False)
-    columns = [row[1] for row in db.execute("PRAGMA table_info(tasks)")]
-    keep = [column for column in columns if column in task]
-    db.execute(
-        f"INSERT OR REPLACE INTO tasks ({', '.join(keep)}) VALUES ({', '.join('?' for _ in keep)})",
-        [task[column] for column in keep],
-    )
+    count = _insert_rows(db, "tasks", tasks)
+    dep_count = _insert_rows(db, "dependencies", deps) if deps else 0
     db.commit()
-    print(json.dumps({"ok": True, "columns": len(keep)}))
+    print(json.dumps({"ok": True, "tasks": count, "dependencies": dep_count}))
+
+
+# cas-937a5 (F03): what a binary can do, read from the binary itself. Each
+# feature is present when every marker (a user-facing string literal of its
+# client code) is in the executable, so a step can never be labelled active
+# for a build that lacks its code, or pending for one that has it.
+FEATURE_MARKERS = {
+    "cas-559c": [b"Claims not visible (different account)"],
+    "cas-0078": [b"cloud claim renewal failed; claiming again"],
+    "cas-a19b": [b"through Cassy Cloud: no token", b"is not visible to this account (or does not exist)"],
+    "cas-4736": [b"accepted epic split", b"decision must be accept, reject or cancel"],
+    "cas-13c7": [b"Peer mailbox: not receiving"],
+    "cas-f707": [b"Cloud presence: registered"],
+}
+
+
+def probe_binary(binary):
+    import mmap
+    import re as _re
+
+    version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=60)
+    text = version.stdout.strip()
+    match = _re.search(r"\(([0-9a-f]{7,40})\b", text)
+    features = {}
+    with open(binary, "rb") as handle:
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            for feature, markers in FEATURE_MARKERS.items():
+                features[feature] = all(data.find(marker) != -1 for marker in markers)
+    return {"ok": version.returncode == 0, "version": text, "commit": match.group(1) if match else None,
+            "features": features}
+
+
+def cmd_probe(args):
+    print(json.dumps(probe_binary(os.path.expanduser(args.binary))))
 
 
 def cmd_queue_find(args):
@@ -532,6 +586,9 @@ def machine_main(argv):
         if name == "sweep":
             command.add_argument("--kill", action="store_true")
         command.set_defaults(func=func)
+    probe = sub.add_parser("probe")
+    probe.add_argument("--binary", required=True)
+    probe.set_defaults(func=cmd_probe)
     export = sub.add_parser("task-export")
     export.add_argument("--run-dir", required=True)
     export.add_argument("--task-id", required=True)
@@ -551,7 +608,7 @@ def machine_main(argv):
 
 MACHINE_COMMANDS = {
     "setup", "launch", "sweep", "remove", "spawn-count", "task-export", "task-import", "installed-cas",
-    "queue-find",
+    "queue-find", "probe",
 }
 
 

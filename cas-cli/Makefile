@@ -223,6 +223,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
+	cd .. && python3 scripts/test-live-check-peer-collab.py
 	cd .. && python3 scripts/test-hub-web-gate.py
 	cd .. && python3 scripts/test-release-portable.py
 	cd .. && ./scripts/test-workflow-run-interpolation.sh

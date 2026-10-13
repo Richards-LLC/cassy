@@ -89,6 +89,24 @@ silently reintroduce fixed bugs.
 
 ## Adding Features
 
+### Peer work awareness
+
+`coordination action=peers detail=true` shows each peer supervisor's machine,
+factory session, epic focus, active task claims, live workers and registered
+branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
+implies detail. `json=true` returns the full report without truncation.
+The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
+`--json` accepting the same filters and output contract.
+
+Claims are scoped to the repository's canonical identity. Their titles and task
+status come from this checkout's synced task store when available; an unsynced
+task remains visible by ID. Claim age is time since the lease's last renewal.
+Only active, unexpired claims count. Live workers have an active/idle heartbeat
+within five minutes and must match both the peer's factory session and machine.
+A missing branch is shown as unknown. Worker details are read-only: these rows
+do not register remote workers locally or make them message or spawn targets.
+Cloud failures are reported as unavailable, never as an empty claim list.
+
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.
 
 **New MCP tool**: Add handler in `cas-cli/src/mcp/tools/core/` (data tools) or `cas-cli/src/mcp/tools/service/` (orchestration tools). Request types go in `cas-cli/src/mcp/tools/types/`. Register in the tool list via the `CasService` impl.

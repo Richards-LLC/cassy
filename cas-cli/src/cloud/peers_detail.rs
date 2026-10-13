@@ -214,7 +214,8 @@ pub fn discover_peer_report(
     }
     if detail {
         let locks = coordinator.list_locks()?;
-        let tasks = crate::store::open_task_store(cas_root)?;
+        // Awareness must not run the cloud outbox's repair-on-open writer.
+        let tasks = crate::store::open_task_store_local(cas_root)?;
         report.peers =
             assemble_peer_details(supervisors, &agents, &locks, &aliases, tasks.as_ref(), now);
     } else {

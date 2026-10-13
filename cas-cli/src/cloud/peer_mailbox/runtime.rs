@@ -37,7 +37,7 @@ pub fn mailbox_status_section(root: &Path, session: Option<&str>) -> String {
                 "Peer mailbox: receiving.\n".into()
             } else {
                 format!(
-                    "Peer mailbox: not receiving: {} (retrying with backoff, at most 30s).\n",
+                    "Peer mailbox: not receiving: {}\nRetry: automatic with backoff, at most 30s.\n",
                     health.cause
                 )
             }

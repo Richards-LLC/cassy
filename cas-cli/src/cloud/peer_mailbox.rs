@@ -420,6 +420,7 @@ pub fn send_to_peer(
         body,
         summary,
         in_reply_to,
+        &format!("{}@{}", peer.name, peer.machine),
     )
 }
 
@@ -430,6 +431,7 @@ fn send_raw(
     body: &str,
     summary: Option<&str>,
     in_reply_to: Option<&str>,
+    recipient_label: &str,
 ) -> Result<SendReceipt, PeerSendError> {
     let project_id =
         crate::cloud::resolve_canonical_id(cas_root).ok_or_else(|| PeerSendError::Failed {
@@ -447,7 +449,7 @@ fn send_raw(
             in_reply_to: in_reply_to.map(str::to_string),
             dedupe_key: String::new(),
         },
-        recipient_agent_id,
+        recipient_label,
     )
 }
 
@@ -497,6 +499,7 @@ pub fn reply_to_peer_row(
         body,
         summary,
         Some(&envelope.id),
+        &format!("{}@{}", envelope.sender_name, envelope.machine),
     )
     .map_err(|error| error.to_string())?;
     queue

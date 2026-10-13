@@ -45,7 +45,11 @@ pub(super) fn enqueue_and_send(
     // Refuse before persisting: no login means no retry promise.
     http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
     let sender = crate::store::open_agent_store(root)
-        .and_then(|agents| agents.get(&message.sender_agent_id))
+        .and_then(|agents| {
+            agents
+                .get(&message.sender_agent_id)
+                .map_err(crate::CasError::from)
+        })
         .map_err(|e| failed(e, None))?;
     let result = (|| -> anyhow::Result<i64> {
         let mut conn = connection(root)?;
@@ -74,7 +78,7 @@ pub(super) fn enqueue_and_send(
 /// Retry one persisted logical send; every HTTP attempt uses its original key.
 /// Normal callers rely on the daemon's automatic retry, rather than this API.
 pub fn retry_peer_send(root: &Path, id: i64) -> Result<SendReceipt, PeerSendError> {
-    match attempt(root, id, chrono::Utc::now().timestamp()).map_err(|e| failed(e, None))? {
+    match attempt(root, id, chrono::Utc::now().timestamp()).map_err(|e| failed(e, Some(id)))? {
         Some(result) => result,
         None => Err(failed(
             format!("peer-outbox:{id} is not due or is terminal; inspect message_status"),

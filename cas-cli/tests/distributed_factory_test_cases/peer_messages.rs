@@ -175,6 +175,15 @@ fn tick(cas_dir: &Path, id: &str) -> DeliveryReport {
         .tick_blocking()
 }
 
+fn inbox(cas_dir: &Path) -> Vec<cas::store::QueuedPrompt> {
+    let mut rows = open_prompt_queue_store(cas_dir)
+        .unwrap()
+        .peek_all(100)
+        .unwrap();
+    rows.sort_by_key(|row| row.id);
+    rows
+}
+
 async fn daemon_poll(
     poller: &mut cas::cloud::peer_mailbox::PeerMailboxPoller,
     now: std::time::Instant,
@@ -712,6 +721,65 @@ async fn cas_13c7_auth_failure_does_not_retry_and_nonfactory_recipient_is_typed_
                 .unwrap(),
             1,
             "no retry row while logged out"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cas_13c7_ack_checks_each_result_and_claim_denial_is_visible() {
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/ack"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"results":[{"id":"pm_1","status":409}]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/peer-messages/pm_1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":"pm_1","status":"leased","attempts":2})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"messages":[],"denied":["github.com/acme/widgets"]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let machine = TestMachine::new("machine-alpha");
+        seed_project(&machine, &endpoint, "github.com/acme/widgets");
+        supervisor(&machine, "a");
+        let mailbox = http_mailbox(&machine.cas_dir).unwrap();
+        let error = mailbox
+            .ack(
+                "same-consumer",
+                &[(
+                    "pm_1".into(),
+                    cas::cloud::peer_mailbox::PeerAckOutcome::Delivered,
+                )],
+            )
+            .unwrap_err();
+        assert!(error.contains("409") && error.contains("leased"), "{error}");
+        let report = tick(&machine.cas_dir, "a");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("denied") && e.contains("github.com/acme/widgets")),
+            "{report:?}"
         );
     })
     .await

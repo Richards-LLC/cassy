@@ -38,11 +38,31 @@ pub struct PeerWorker {
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerDetail {
     pub supervisor: Peer,
+    pub user_id: Option<String>,
+    pub team_id: Option<String>,
+    pub project_id: Option<String>,
+    pub claims_visibility: ClaimsVisibility,
     pub branch: Option<String>,
     /// Includes supervisor and worker claims, even if a worker is stale.
     pub claims: Vec<PeerClaim>,
     /// Live workers only, within the peer's machine and factory session.
     pub workers: Vec<PeerWorker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimsVisibility {
+    SameAccount,
+    DifferentAccount,
+    Unknown,
+}
+
+fn claims_visibility(viewer: Option<&str>, owner: Option<&AgentInfo>) -> ClaimsVisibility {
+    match (viewer, owner.and_then(|a| a.user_id.as_deref())) {
+        (Some(viewer), Some(owner)) if viewer == owner => ClaimsVisibility::SameAccount,
+        (Some(_), Some(_)) => ClaimsVisibility::DifferentAccount,
+        _ => ClaimsVisibility::Unknown,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,10 +90,25 @@ fn heartbeat_age(agent: &AgentInfo, now: DateTime<Utc>) -> Option<i64> {
 
 /// Require both a session and a machine boundary: session names alone can
 /// collide across clones. Agents without enough identity are not guessed in.
-fn belongs_to_peer(agent: &AgentInfo, peer: &Peer, aliases: &[String]) -> bool {
+fn belongs_to_peer(
+    agent: &AgentInfo,
+    peer: &Peer,
+    owner: Option<&AgentInfo>,
+    aliases: &[String],
+) -> bool {
     meta(agent, peers::META_ROLE) == Some("worker")
         && agent.status != "shutdown"
         && peer.session.is_some()
+        && owner.is_none_or(|owner| {
+            owner
+                .user_id
+                .as_ref()
+                .is_none_or(|id| agent.user_id.as_ref() == Some(id))
+                && owner
+                    .team_id
+                    .as_ref()
+                    .is_none_or(|id| agent.team_id.as_ref() == Some(id))
+        })
         && meta(agent, peers::META_FACTORY_SESSION) == peer.session.as_deref()
         && match (&agent.machine_id, &peer.machine_id) {
             (Some(worker_machine), Some(peer_machine)) => worker_machine == peer_machine,
@@ -98,17 +133,21 @@ pub fn assemble_peer_details(
     locks: &[TaskLease],
     aliases: &[String],
     tasks: &dyn TaskStore,
+    viewer_user_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Vec<PeerDetail> {
     supervisors
         .into_iter()
         .map(|supervisor| {
+            let owner = agents.iter().find(|a| a.id == supervisor.agent_id);
+            let visibility = claims_visibility(viewer_user_id, owner);
             let members: Vec<_> = agents
                 .iter()
-                .filter(|agent| belongs_to_peer(agent, &supervisor, aliases))
+                .filter(|agent| belongs_to_peer(agent, &supervisor, owner, aliases))
                 .collect();
             let mut claims: Vec<_> = locks
                 .iter()
+                .filter(|_| visibility == ClaimsVisibility::SameAccount)
                 .filter(|lock| lock.status == LeaseStatus::Active && lock.expires_at > now)
                 .filter(|lock| {
                     lock.agent_id == supervisor.agent_id
@@ -156,6 +195,10 @@ pub fn assemble_peer_details(
                 .map(str::to_string);
             PeerDetail {
                 supervisor,
+                user_id: owner.and_then(|a| a.user_id.clone()),
+                team_id: owner.and_then(|a| a.team_id.clone()),
+                project_id: owner.and_then(|a| a.project_id.clone()),
+                claims_visibility: visibility,
                 branch,
                 claims,
                 workers,
@@ -200,6 +243,9 @@ pub fn discover_peer_report(
         .with_canonical_id(Some(repo.to_string()))
         .with_timeout(peers::DISCOVERY_TIMEOUT);
     let agents = coordinator.list_agent_infos()?;
+    let viewer_user_id = self_id
+        .and_then(|id| agents.iter().find(|a| a.id == id))
+        .and_then(|a| a.user_id.as_deref());
     let now = Utc::now();
     let mut supervisors = peers::repo_peers(&agents, repo, &aliases, self_id, now);
     if let Some(selected) = selected {
@@ -213,15 +259,49 @@ pub fn discover_peer_report(
         supervisors = vec![peer.clone()];
     }
     if detail {
-        let locks = coordinator.list_locks()?;
+        // Team discovery can expose another account's agents, but locks are
+        // account-private. Do not query them when no selected peer is visible.
+        let locks = if supervisors.iter().any(|peer| {
+            claims_visibility(
+                viewer_user_id,
+                agents.iter().find(|a| a.id == peer.agent_id),
+            ) == ClaimsVisibility::SameAccount
+        }) {
+            coordinator.list_locks()?
+        } else {
+            Vec::new()
+        };
         // Awareness must not run the cloud outbox's repair-on-open writer.
         let tasks = crate::store::open_task_store_local(cas_root)?;
-        report.peers =
-            assemble_peer_details(supervisors, &agents, &locks, &aliases, tasks.as_ref(), now);
+        report.peers = assemble_peer_details(
+            supervisors,
+            &agents,
+            &locks,
+            &aliases,
+            tasks.as_ref(),
+            viewer_user_id,
+            now,
+        );
     } else {
         report.peers = supervisors
             .into_iter()
             .map(|supervisor| PeerDetail {
+                user_id: agents
+                    .iter()
+                    .find(|a| a.id == supervisor.agent_id)
+                    .and_then(|a| a.user_id.clone()),
+                team_id: agents
+                    .iter()
+                    .find(|a| a.id == supervisor.agent_id)
+                    .and_then(|a| a.team_id.clone()),
+                project_id: agents
+                    .iter()
+                    .find(|a| a.id == supervisor.agent_id)
+                    .and_then(|a| a.project_id.clone()),
+                claims_visibility: claims_visibility(
+                    viewer_user_id,
+                    agents.iter().find(|a| a.id == supervisor.agent_id),
+                ),
                 supervisor,
                 branch: None,
                 claims: Vec::new(),
@@ -315,10 +395,16 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 "  Branch  {}",
                 detail.branch.as_deref().unwrap_or("unknown")
             ));
-            line(format!(
-                "  Claims  {} | age since renewal (s)",
-                detail.claims.len()
-            ));
+            match detail.claims_visibility {
+                ClaimsVisibility::SameAccount => line(format!(
+                    "  Claims  {} | age since renewal (s)",
+                    detail.claims.len()
+                )),
+                ClaimsVisibility::DifferentAccount => {
+                    line("  Claims not visible (different account)".into())
+                }
+                ClaimsVisibility::Unknown => line("  Claims not visible (account unknown)".into()),
+            }
             for claim in &detail.claims {
                 line(format!(
                     "    {:>5} {} [{}]",
@@ -347,14 +433,12 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .map(|c| c.task_id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                line(format!(
-                    "      Tasks {}",
-                    if task_ids.is_empty() {
-                        "none"
-                    } else {
-                        &task_ids
-                    }
-                ));
+                let task_label = match detail.claims_visibility {
+                    ClaimsVisibility::SameAccount if task_ids.is_empty() => "none",
+                    ClaimsVisibility::SameAccount => &task_ids,
+                    _ => "not visible",
+                };
+                line(format!("      Tasks {task_label}"));
             }
         }
     }

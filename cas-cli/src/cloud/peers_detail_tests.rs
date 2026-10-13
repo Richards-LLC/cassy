@@ -9,7 +9,7 @@ fn agent(id: &str, role: &str, session: &str, machine: &str, repo: &str, age: i6
         "id": id, "name": id, "agent_type": "worker", "status": "active",
         "pid": null, "session_id": null, "machine_id": machine,
         "last_heartbeat": (Utc::now() - Duration::seconds(age)).to_rfc3339(),
-        "active_tasks": 0,
+        "active_tasks": 0, "user_id": "test-user", "team_id": "test-team", "project_id": "test-project",
         "metadata": {"role": role, "factory_session": session, "canonical_id": repo,
                      "hostname": machine, "focus": "cas-epic", "branch": format!("factory/{id}")}
     }))
@@ -72,6 +72,7 @@ fn cas_559c_details_enforce_repo_machine_session_liveness_and_active_leases() {
         &locks,
         &[],
         tasks.as_ref(),
+        Some("test-user"),
         Utc::now(),
     );
     assert_eq!(details.len(), 1);
@@ -127,6 +128,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
             &[],
             &[],
             tasks.as_ref(),
+            Some("test-user"),
             Utc::now(),
         ),
         error: None,
@@ -187,4 +189,27 @@ async fn cas_559c_list_locks_sends_canonical_id_and_surfaces_failure() {
         error.to_string().contains("503") && error.to_string().contains("claims unavailable"),
         "{error}"
     );
+}
+
+#[test]
+fn cas_559c_missing_account_identity_never_means_zero_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
+    let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
+    let report = PeerReport {
+        canonical_id: Some(REPO.into()),
+        detail: true,
+        status: "ready".into(),
+        error: None,
+        peers: assemble_peer_details(peers, &agents, &[], &[], tasks.as_ref(), None, Utc::now()),
+    };
+    assert_eq!(report.peers[0].claims_visibility, ClaimsVisibility::Unknown);
+    let text = render_peer_report(&report, 80, true);
+    assert!(
+        text.contains("Claims not visible (account unknown)"),
+        "{text}"
+    );
+    assert!(!text.contains("Claims  0"), "{text}");
 }

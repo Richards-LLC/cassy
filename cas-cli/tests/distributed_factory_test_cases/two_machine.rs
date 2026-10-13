@@ -23,6 +23,51 @@ use super::fake_cloud::FakeCloud;
 const WIDGETS: &str = "github.com/acme/widgets";
 
 #[tokio::test]
+async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    {
+        let mut state = cloud.state.lock().unwrap();
+        for id in ["b", "bw"] {
+            state.agents.get_mut(id).unwrap()["user_id"] = serde_json::json!("other-user");
+        }
+    }
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    for json in [true, false] {
+        let request = serde_json::from_value(
+            serde_json::json!({"action":"peers", "peer":"sup-b", "json":json}),
+        )
+        .unwrap();
+        let result = service
+            .coordination(rmcp::handler::server::wrapper::Parameters(request))
+            .await
+            .unwrap();
+        let text = &result.content[0].as_text().unwrap().text;
+        if json {
+            let report: serde_json::Value = serde_json::from_str(text).unwrap();
+            let peer = &report["peers"][0];
+            assert_eq!(peer["claims_visibility"], "different_account");
+            assert_eq!(peer["user_id"], "other-user");
+            assert_eq!(peer["team_id"], "test-team");
+            assert_eq!(peer["workers"].as_array().unwrap().len(), 1);
+        } else {
+            assert!(
+                text.contains("Claims not visible (different account)"),
+                "{text}"
+            );
+            assert!(text.contains("Tasks not visible"), "{text}");
+            assert!(
+                !text.contains("Claims  0") && !text.contains("Tasks none"),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importing_workers() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();

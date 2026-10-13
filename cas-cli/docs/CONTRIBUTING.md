@@ -87,9 +87,7 @@ silently reintroduce fixed bugs.
 - If you previously installed via `cargo install cas` or a distro package,
   remove those copies so only `~/.local/bin/cas` remains.
 
-## Adding Features
-
-### Peer work awareness
+## Peer work awareness
 
 `coordination action=peers detail=true` shows each peer supervisor's machine,
 factory session, epic focus, active task claims, live workers and registered
@@ -106,6 +104,13 @@ within five minutes and must match both the peer's factory session and machine.
 A missing branch is shown as unknown. Worker details are read-only: these rows
 do not register remote workers locally or make them message or spawn targets.
 Cloud failures are reported as unavailable, never as an empty claim list.
+Cloud locks are private to one user account: a team peer on another account shows
+`Claims not visible (different account)` and worker tasks as `not visible`.
+If the caller's account identity is unknown, the report says so. JSON includes
+`claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
+is authoritative only when visibility is `same_account`.
+
+## Adding Features
 
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.
 

@@ -7,8 +7,10 @@
 //!
 //! - [`register_now`] pushes the registration and records the outcome.
 //! - [`tick`] runs on every daemon heartbeat: it registers when the agent
-//!   has no record, its last attempt failed and the backoff ran out, or its
-//!   epic focus changed; otherwise it heartbeats, and a heartbeat the cloud
+//!   has no record, or its last attempt failed and the backoff ran out;
+//!   otherwise it heartbeats with the agent's project, epic focus, branch
+//!   and factory session in the body (merged by the cloud, so a changed
+//!   focus or branch shows on the next beat), and a heartbeat the cloud
 //!   refuses with 404 or 401 registers again.
 //! - The outcome is persisted per agent under `.cas/cloud_presence/`, so
 //!   `coordination action=peers`, `worker_status` and `cas status` show it
@@ -61,9 +63,12 @@ pub struct PresenceRecord {
     /// Earliest time the next registration attempt is due while failing.
     #[serde(default)]
     pub next_retry_at: Option<DateTime<Utc>>,
-    /// The epic focus carried by the last accepted registration.
+    /// The epic focus carried by the last accepted registration or beat.
     #[serde(default)]
     pub focus: Option<String>,
+    /// The branch carried by the last accepted registration or beat.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// What one [`tick`] did.
@@ -73,7 +78,7 @@ pub enum TickAction {
     Registered,
     /// The cloud refused a heartbeat as unknown; registered again.
     Reregistered,
-    /// Heartbeat accepted.
+    /// Heartbeat accepted (with the current focus and branch).
     Heartbeat,
     /// The attempt failed; the record carries the cause.
     Failed(String),
@@ -135,6 +140,72 @@ pub fn current_focus(agent: &Agent) -> Option<String> {
         .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
 }
 
+/// The directory `agent` works in: its registered clone path, else the
+/// project root that holds `cas_root`.
+fn work_dir(cas_root: &Path, agent: &Agent) -> PathBuf {
+    agent
+        .metadata
+        .get("clone_path")
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cas_root.parent().unwrap_or(cas_root).to_path_buf())
+}
+
+/// The branch checked out in `dir`, read from git's `HEAD` without running
+/// git (a worktree's `.git` file is followed). `None` when `dir` is not a
+/// checkout or `HEAD` is detached.
+pub fn checked_out_branch(dir: &Path) -> Option<String> {
+    let dot_git = dir.join(".git");
+    let git_dir = if dot_git.is_file() {
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        let target = pointer.trim().strip_prefix("gitdir:")?.trim();
+        let target = PathBuf::from(target);
+        if target.is_absolute() {
+            target
+        } else {
+            dir.join(target)
+        }
+    } else {
+        dot_git
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref:")
+        .map(str::trim)
+        .map(|reference| reference.strip_prefix("refs/heads/").unwrap_or(reference))
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
+/// The branch `agent` registers with (cas-f707).
+pub fn current_branch(cas_root: &Path, agent: &Agent) -> Option<String> {
+    checked_out_branch(&work_dir(cas_root, agent))
+}
+
+/// The heartbeat body's metadata: project binding, focus, branch and factory
+/// session. Focus and branch are always sent (empty when none) so a cleared
+/// one clears in the cloud too; the project binding and session are sent
+/// only when known, since omitting them keeps what the cloud has.
+pub fn heartbeat_metadata(
+    coordinator: &CloudCoordinator,
+    agent: &Agent,
+    focus: Option<&str>,
+    branch: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    use crate::cloud::peers::{META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
+    let mut metadata = serde_json::Map::new();
+    if let Some(canonical_id) = coordinator.canonical_id() {
+        metadata.insert(META_CANONICAL_ID.into(), canonical_id.into());
+    }
+    metadata.insert(META_FOCUS.into(), focus.unwrap_or_default().into());
+    metadata.insert(META_BRANCH.into(), branch.unwrap_or_default().into());
+    if let Some(session) = agent.factory_session.as_deref().filter(|s| !s.is_empty()) {
+        metadata.insert(META_FACTORY_SESSION.into(), session.into());
+    }
+    metadata
+}
+
 fn failing(
     previous: Option<&PresenceRecord>,
     agent_id: &str,
@@ -155,6 +226,7 @@ fn failing(
         registered_at: previous.and_then(|record| record.registered_at),
         next_retry_at: Some(now + backoff_after(failures)),
         focus: previous.and_then(|record| record.focus.clone()),
+        branch: previous.and_then(|record| record.branch.clone()),
     }
 }
 
@@ -168,8 +240,10 @@ pub fn register_now(
 ) -> PresenceRecord {
     let previous = load(cas_root, &agent.id);
     let focus = current_focus(agent);
+    let branch = current_branch(cas_root, agent);
     let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT);
-    let record = match coordinator.register_with_focus(agent, focus.as_deref()) {
+    let record = match coordinator.register_with_presence(agent, focus.as_deref(), branch.as_deref())
+    {
         Ok(_) => PresenceRecord {
             agent_id: agent.id.clone(),
             state: PresenceState::Registered,
@@ -179,6 +253,7 @@ pub fn register_now(
             registered_at: Some(now),
             next_retry_at: None,
             focus,
+            branch,
         },
         Err(error) => failing(previous.as_ref(), &agent.id, error.to_string(), now),
     };
@@ -197,7 +272,8 @@ pub fn ensure_registered(
     match load(cas_root, &agent.id) {
         Some(record)
             if record.state == PresenceState::Registered
-                && record.focus == current_focus(agent) =>
+                && record.focus == current_focus(agent)
+                && record.branch == current_branch(cas_root, agent) =>
         {
             record
         }
@@ -225,11 +301,24 @@ pub fn tick(
         }
         return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
     }
-    if record.focus != current_focus(agent) {
-        return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
-    }
-    match coordinator.heartbeat_presence(&agent.id) {
-        Ok(_) => TickAction::Heartbeat,
+    let focus = current_focus(agent);
+    let branch = current_branch(cas_root, agent);
+    let metadata = heartbeat_metadata(coordinator, agent, focus.as_deref(), branch.as_deref());
+    match coordinator.heartbeat_presence(&agent.id, Some(&metadata)) {
+        Ok(_) => {
+            if record.focus != focus || record.branch != branch {
+                save(
+                    cas_root,
+                    &PresenceRecord {
+                        focus,
+                        branch,
+                        last_attempt_at: now,
+                        ..record
+                    },
+                );
+            }
+            TickAction::Heartbeat
+        }
         Err(HeartbeatError::NotRegistered { .. }) => outcome(
             register_now(coordinator, cas_root, agent, now),
             TickAction::Reregistered,
@@ -288,8 +377,9 @@ pub fn render_line(record: Option<&PresenceRecord>, now: DateTime<Utc>) -> Strin
     };
     match record.state {
         PresenceState::Registered => format!(
-            "Cloud presence: registered (focus {}, registered {} ago)\n",
+            "Cloud presence: registered (focus {}, branch {}, registered {} ago)\n",
             record.focus.as_deref().unwrap_or("-"),
+            record.branch.as_deref().unwrap_or("-"),
             age(record
                 .registered_at
                 .map(|at| (now - at).num_seconds())
@@ -339,6 +429,7 @@ mod tests {
             registered_at: None,
             next_retry_at: Some(now + chrono::Duration::seconds(30)),
             focus: None,
+            branch: None,
         };
         let line = render_line(Some(&record), now);
         assert!(
@@ -353,11 +444,36 @@ mod tests {
             registered_at: Some(now),
             next_retry_at: None,
             focus: Some("cas-571d".into()),
+            branch: Some("epic/x".into()),
             ..record
         };
         assert!(
             render_line(Some(&registered), now)
-                .starts_with("Cloud presence: registered (focus cas-571d"),
+                .starts_with("Cloud presence: registered (focus cas-571d, branch epic/x"),
         );
+    }
+
+    #[test]
+    fn cas_f707_branch_is_read_from_head_and_follows_a_worktree_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/epic/same-repo\n").unwrap();
+        assert_eq!(checked_out_branch(&repo).as_deref(), Some("epic/same-repo"));
+
+        let worktree = dir.path().join("wt");
+        let gitdir = repo.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/factory/fierce-cheetah-73\n").unwrap();
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert_eq!(
+            checked_out_branch(&worktree).as_deref(),
+            Some("factory/fierce-cheetah-73")
+        );
+
+        std::fs::write(gitdir.join("HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        assert_eq!(checked_out_branch(&worktree), None, "detached HEAD has no branch");
+        assert_eq!(checked_out_branch(dir.path()), None, "not a checkout");
     }
 }

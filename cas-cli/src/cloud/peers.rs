@@ -5,10 +5,12 @@
 //! registry back: the live supervisors of this repo other than the caller,
 //! with machine, factory session, epic focus and heartbeat age.
 //!
-//! The cloud scopes agents by user only (`GET /api/agents`), so the repo
-//! filter is applied here, on the identity each supervisor registered in its
-//! metadata. Its `status` column is only swept daily, so liveness comes from
-//! `last_heartbeat`, not from `status`.
+//! The list is asked for this project (`GET /api/agents?project=<id>`,
+//! cloud PR #153, which also returns teammates' agents on a team project).
+//! The repo filter is still applied here, on the identity each supervisor
+//! registered in its metadata, so an older server that ignores `project`
+//! gives the same answer. Liveness needs a recent `last_heartbeat` and a
+//! `status` other than `stale`.
 //!
 //! Peers are read-only (cas-604d): nothing here spawns, messages, claims or
 //! writes a peer into a local store or roster.
@@ -31,6 +33,9 @@ pub const META_FOCUS: &str = "focus";
 pub const META_FACTORY_SESSION: &str = "factory_session";
 /// Metadata key carrying the machine's hostname, for display.
 pub const META_HOSTNAME: &str = "hostname";
+/// Metadata key carrying the branch checked out where the agent works
+/// (cas-f707). Optional; empty when unknown or detached.
+pub const META_BRANCH: &str = "branch";
 
 /// A peer is live while its last heartbeat is at most this old. Matches the
 /// local supervisor liveness window in `worker_status`.
@@ -137,7 +142,8 @@ pub fn repo_peers(
                 focus: meta(agent, META_FOCUS),
                 last_heartbeat,
                 heartbeat_age_secs,
-                live: heartbeat_age_secs <= PEER_LIVE_SECS,
+                // The cloud computes `stale` live (cloud PR #153).
+                live: heartbeat_age_secs <= PEER_LIVE_SECS && agent.status != "stale",
             })
         })
         .collect();

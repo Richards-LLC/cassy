@@ -8,6 +8,7 @@ use cas_types::Task;
 use std::path::{Path, PathBuf};
 use crate::cloud::presence::{self, PresenceState};
 use crate::cloud::{CloudConfig, PROJECT_SCOPE_KEY};
+use crate::cloud::peers::{META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
 use crate::store::init_cas_dir;
 use crate::test_support::TestEnvGuard;
 use serde_json::{Value, json};
@@ -27,11 +28,14 @@ struct Registry {
     registrations: Vec<Value>,
     list_queries: Vec<String>,
     heartbeats: Vec<(String, u16)>,
+    /// The `metadata` body of every heartbeat, in order.
+    heartbeat_metadata: Vec<Value>,
 }
 
-/// The `/api/agents` routes of Cassy Cloud, with state: register upserts,
-/// heartbeat answers 404 for an agent it does not know, list returns what
-/// was registered.
+/// The `/api/agents` routes of Cassy Cloud as shipped (cloud PR #153), with
+/// state: register upserts; heartbeat answers 404 for an agent it does not
+/// know and merges a `{"metadata": {...}}` body; list returns what was
+/// registered, filtered by `?project=`.
 #[derive(Clone, Default)]
 struct FakeCloud(Arc<Mutex<Registry>>);
 
@@ -74,7 +78,21 @@ impl Respond for FakeCloud {
                 state
                     .list_queries
                     .push(request.url.query().unwrap_or_default().to_string());
-                let agents: Vec<Value> = state.agents.values().cloned().collect();
+                let project = request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "project")
+                    .map(|(_, value)| value.to_string());
+                let agents: Vec<Value> = state
+                    .agents
+                    .values()
+                    .filter(|agent| {
+                        project.as_deref().is_none_or(|project| {
+                            agent["metadata"][META_CANONICAL_ID].as_str() == Some(project)
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 ResponseTemplate::new(200).set_body_json(json!({"agents": agents}))
             }
             ("POST", heartbeat) if heartbeat.ends_with("/heartbeat") => {
@@ -82,9 +100,20 @@ impl Respond for FakeCloud {
                     .trim_start_matches("/api/agents/")
                     .trim_end_matches("/heartbeat")
                     .to_string();
+                let patch = serde_json::from_slice::<Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body.get("metadata").cloned());
+                if let Some(patch) = &patch {
+                    state.heartbeat_metadata.push(patch.clone());
+                }
                 match state.agents.get_mut(&id) {
                     Some(agent) => {
                         agent["last_heartbeat"] = json!(now);
+                        if let Some(Value::Object(patch)) = patch {
+                            for (key, value) in patch {
+                                agent["metadata"][key] = value;
+                            }
+                        }
                         let agent = agent.clone();
                         state.heartbeats.push((id, 200));
                         ResponseTemplate::new(200).set_body_json(agent)
@@ -253,16 +282,25 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
         "{shown}"
     );
 
-    // Every registration and list call carries the project scope.
+    // Every registration and list call carries the project scope; every
+    // heartbeat re-binds the project and carries the factory session.
     let state = fx.cloud.state();
     for registration in &state.registrations {
         assert_eq!(registration[PROJECT_SCOPE_KEY], json!(REPO), "{registration}");
+        assert_eq!(registration["metadata"][META_CANONICAL_ID], json!(REPO));
+        assert_eq!(registration["metadata"][META_FACTORY_SESSION], json!(SESSION));
+    }
+    assert!(!state.heartbeat_metadata.is_empty());
+    for beat in &state.heartbeat_metadata {
+        assert_eq!(beat[META_CANONICAL_ID], json!(REPO), "{beat}");
+        assert_eq!(beat[META_FACTORY_SESSION], json!(SESSION), "{beat}");
+        assert_eq!(beat[META_FOCUS], json!("cas-571d"), "{beat}");
     }
     assert!(
         state
             .list_queries
             .iter()
-            .all(|query| query.contains("canonical_id=github.com%2Facme%2Fwidgets")),
+            .all(|query| query.contains("project=github.com%2Facme%2Fwidgets")),
         "{:?}",
         state.list_queries
     );
@@ -334,21 +372,102 @@ async fn cas_f707_focus_epic_refreshes_the_registered_focus() {
     assert_eq!(record.state, PresenceState::Registered);
     assert_eq!(record.focus, None, "a cleared focus is pushed too");
 
-    let focuses: Vec<Option<String>> = fx
-        .cloud
-        .state()
+    let state = fx.cloud.state();
+    let focuses: Vec<Option<String>> = state
         .registrations
         .iter()
         .map(|body| body["metadata"]["focus"].as_str().map(str::to_string))
         .collect();
     assert_eq!(
         focuses,
-        vec![
-            Some("cas-old-epic".to_string()),
-            Some("cas-new-epic".to_string()),
-            None
-        ]
+        vec![Some("cas-old-epic".to_string()), Some("cas-new-epic".to_string())]
     );
+    // The heartbeat carried the cleared focus; the cloud merged it.
+    assert_eq!(state.heartbeat_metadata.last().unwrap()[META_FOCUS], json!(""));
+    drop(state);
+    assert_eq!(peer_ids(&fx.cas_root, "someone-else"), vec![(me.to_string(), None)]);
+}
+
+/// The real factory sequence (daring-eagle-74's repro at c25f0e3db): `cas
+/// serve` registers the supervisor eagerly from CAS_SESSION_ID and hands the
+/// id to its daemon, then the harness's SessionStart arrives for the same
+/// session. Exactly one cloud registration must result, carrying the project
+/// and factory session; a later heartbeat 404 registers again.
+#[tokio::test]
+async fn cas_f707_eager_supervisor_then_session_start_registers_once() {
+    let (mut fx, daemon) = fixture("cas-571d").await;
+    fx._env.set("CAS_AGENT_ROLE", "supervisor");
+    let me = "sup-f707-factory";
+    let daemon = Arc::new(daemon);
+    let core = crate::mcp::server::CasCore::with_daemon(
+        fx.cas_root.clone(),
+        None,
+        Some(Arc::clone(&daemon)),
+    );
+
+    // mcp/server/runtime.rs eager registration: the row, then set_agent_id.
+    core.register_agent(me.to_string(), "zen-viper-42".to_string(), None)
+        .unwrap();
+    daemon.set_agent_id(me.to_string()).await;
+    daemon.await_cloud_presence().await;
+    let agent = crate::store::open_agent_store(&fx.cas_root)
+        .unwrap()
+        .get(me)
+        .unwrap();
+    assert_eq!(agent.role, AgentRole::Supervisor);
+
+    // The harness's SessionStart for the same session.
+    session_start(&daemon, me, "zen-viper-42").await;
+    daemon.await_cloud_presence().await;
+
+    {
+        let state = fx.cloud.state();
+        assert_eq!(state.registrations.len(), 1, "{:?}", state.registrations);
+        let body = &state.registrations[0];
+        assert_eq!(body["id"], json!(me));
+        assert_eq!(body[PROJECT_SCOPE_KEY], json!(REPO));
+        assert_eq!(body["metadata"][META_CANONICAL_ID], json!(REPO));
+        assert_eq!(body["metadata"][META_FACTORY_SESSION], json!(SESSION));
+        assert_eq!(body["metadata"]["role"], json!("supervisor"));
+    }
+    assert_eq!(
+        peer_ids(&fx.cas_root, "someone-else"),
+        vec![(me.to_string(), Some("cas-571d".to_string()))]
+    );
+
+    // The cloud loses it: the next heartbeat's 404 registers it again.
+    fx.cloud.state().agents.clear();
+    heartbeat_tick(&daemon).await;
+    assert_eq!(fx.cloud.state().heartbeats.last(), Some(&(me.to_string(), 404)));
+    assert_eq!(fx.cloud.state().registrations.len(), 2);
+    assert_eq!(peer_ids(&fx.cas_root, "someone-else").len(), 1);
+}
+
+#[tokio::test]
+async fn cas_f707_branch_is_registered_and_refreshed_on_the_heartbeat() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    // The project root (the parent of .cas) is a checkout on an epic branch.
+    let root = fx.cas_root.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/epic/same-repo\n").unwrap();
+    let me = "sup-f707-branch";
+    session_start(&daemon, me, "branch-sup").await;
+    assert_eq!(
+        fx.cloud.state().registrations[0]["metadata"][META_BRANCH],
+        json!("epic/same-repo")
+    );
+
+    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/factory/next\n").unwrap();
+    heartbeat_tick(&daemon).await;
+    let record = presence::load(&fx.cas_root, me).unwrap();
+    assert_eq!(record.branch.as_deref(), Some("factory/next"));
+    let state = fx.cloud.state();
+    assert_eq!(state.registrations.len(), 1, "a branch change rides the heartbeat");
+    assert_eq!(
+        state.heartbeat_metadata.last().unwrap()[META_BRANCH],
+        json!("factory/next")
+    );
+    assert_eq!(state.agents[me]["metadata"][META_BRANCH], json!("factory/next"));
 }
 
 #[tokio::test]

@@ -57,12 +57,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   every 5 minutes. A heartbeat the cloud refuses with 404 or 401 registers
   the agent again.
 - Was: the epic focus peers saw was frozen at SessionStart. Now
-  `focus_epic` pushes it, and the heartbeat re-pushes any focus change.
+  `focus_epic` pushes it, and every heartbeat carries the agent's project,
+  epic focus, branch and factory session, so a change shows within 30 s.
+- Registrations carry the branch checked out where the agent works
+  (`metadata.branch`).
+- Was: a project with `cloud.auto_sync` off never registered its agents,
+  even though its peer discovery and claims used the cloud. Now presence
+  follows the project's Cassy Cloud login.
 - `coordination action=peers`, `worker_status` and `cas status` open with
   this agent's own state: `Cloud presence: registered` or
   `Cloud presence: failing: <cause>`.
-- Agent list, registration and claim calls carry the repo's `canonical_id`,
-  so the cloud can scope them to the project (petra-stella-cloud#151).
+- Peer discovery asks the cloud for this project
+  (`GET /api/agents?project=<canonical id>`), which also returns teammates'
+  agents on a team project. A peer the cloud reports `stale` is shown stale.
 - `cas status` no longer lists its own session as a peer. Claims and
   discovery name a machine the same way.
 

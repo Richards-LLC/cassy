@@ -141,6 +141,8 @@ fn lock_json(task: &str) -> serde_json::Value {
 #[tokio::test]
 async fn cas_f707_register_list_and_claim_calls_carry_the_canonical_id() {
     assert_eq!(PROJECT_SCOPE_KEY, "canonical_id");
+    // Production's discovery parameter (cloud PR #153).
+    assert_eq!(PROJECT_QUERY_KEY, "project");
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/agents/register"))
@@ -159,7 +161,7 @@ async fn cas_f707_register_list_and_claim_calls_carry_the_canonical_id() {
         .await;
     Mock::given(method("GET"))
         .and(path("/api/agents"))
-        .and(query_param(PROJECT_SCOPE_KEY, REPO))
+        .and(query_param(PROJECT_QUERY_KEY, REPO))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": "success",
             "agents": [agent_json("sup-1")],
@@ -280,7 +282,7 @@ async fn cas_f707_heartbeat_404_and_401_mean_register_again() {
     let endpoint = server.uri();
     let outcomes = tokio::task::spawn_blocking(move || {
         let coord = coordinator(&endpoint);
-        ["gone", "foreign", "busy"].map(|id| coord.heartbeat_presence(id).unwrap_err())
+        ["gone", "foreign", "busy"].map(|id| coord.heartbeat_presence(id, None).unwrap_err())
     })
     .await
     .unwrap();

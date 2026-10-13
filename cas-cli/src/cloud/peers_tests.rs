@@ -243,3 +243,12 @@ fn cas_f707_claims_and_discovery_name_this_machine_the_same_way() {
     let peers = repo_peers(&[registered], REPO, &[], None, now());
     assert_eq!(peers[0].machine, holder.machine);
 }
+
+#[test]
+fn cas_f707_a_peer_the_cloud_reports_stale_is_not_live() {
+    let mut stale = supervisor("sup-stale", REPO, 5);
+    stale.status = "stale".to_string();
+    let peers = repo_peers(&[stale, supervisor("sup-live", REPO, 5)], REPO, &[], None, now());
+    let live: Vec<(&str, bool)> = peers.iter().map(|p| (p.agent_id.as_str(), p.live)).collect();
+    assert_eq!(live, [("sup-live", true), ("sup-stale", false)]);
+}

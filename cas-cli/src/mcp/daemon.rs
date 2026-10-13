@@ -376,12 +376,12 @@ impl EmbeddedDaemon {
             None
         };
 
-        // Initialize cloud coordinator for real-time agent registration
-        let cloud_coordinator = if config.cloud_sync_enabled {
-            init_cloud_coordinator(&config.cas_root)
-        } else {
-            None
-        };
+        // Cloud coordinator for agent presence (registration + heartbeat).
+        // cas-f707: it follows the project's login, not `cloud.auto_sync`:
+        // peer discovery and task claims reach the cloud whenever the
+        // project is logged in, so its agents must be registered there too,
+        // or peers cannot see them and their claims read as stale.
+        let cloud_coordinator = init_cloud_coordinator(&config.cas_root);
 
         // Initialize code watcher if code indexing is enabled
         let code_watcher = if config.index_code {

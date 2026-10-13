@@ -16,12 +16,16 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Short timeout for non-critical requests (heartbeats)
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The one wire key that scopes agent and claim calls to a project
-/// (petra-stella-cloud#151, cas-f707): a top-level body field on register,
-/// claim, release and renew, and a query parameter on `GET /api/agents`.
-/// Its value is the repo's canonical id. Servers that predate #151 ignore
-/// it and the client keeps filtering on `metadata.canonical_id`.
+/// The body field that scopes register and claim calls to a project
+/// (petra-stella-cloud#151, cas-f707). Its value is the repo's canonical id.
+/// Production (cloud PR #153) resolves registrations through
+/// `metadata.canonical_id` and ignores this field on claims; it stays as a
+/// harmless explicit scope.
 pub const PROJECT_SCOPE_KEY: &str = "canonical_id";
+
+/// The query parameter that scopes `GET /api/agents` (and other project
+/// lists) to a project: `?project=<canonical id or alias>` (cloud PR #153).
+pub const PROJECT_QUERY_KEY: &str = "project";
 
 /// A heartbeat the cloud refused or could not take (cas-f707).
 #[derive(Debug)]
@@ -197,11 +201,12 @@ impl CloudCoordinator {
         body
     }
 
-    /// `request` with the [`PROJECT_SCOPE_KEY`] query parameter, when this
-    /// coordinator has a canonical id (cas-f707).
-    fn project_query(&self, request: ureq::Request) -> ureq::Request {
+    /// `request` with the [`PROJECT_QUERY_KEY`] query parameter, when this
+    /// coordinator has a canonical id (cas-f707). Shared by every project
+    /// list call.
+    pub(crate) fn project_query(&self, request: ureq::Request) -> ureq::Request {
         match self.canonical_id.as_deref() {
-            Some(canonical_id) => request.query(PROJECT_SCOPE_KEY, canonical_id),
+            Some(canonical_id) => request.query(PROJECT_QUERY_KEY, canonical_id),
             None => request,
         }
     }
@@ -220,16 +225,30 @@ impl CloudCoordinator {
         agent: &Agent,
         focus: Option<&str>,
     ) -> Result<AgentInfo, CasError> {
+        self.register_with_presence(agent, focus, None)
+    }
+
+    /// [`Self::register_with_focus`] plus the branch checked out where the
+    /// agent works, as `metadata.branch` (cas-f707).
+    pub fn register_with_presence(
+        &mut self,
+        agent: &Agent,
+        focus: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<AgentInfo, CasError> {
         let url = format!("{}/api/agents/register", self.config.endpoint);
 
         let factory_id = std::env::var("CAS_FACTORY_ID").ok();
         let machine = crate::cloud::peers::machine_label();
-        let metadata = crate::cloud::peers::identity_metadata(
+        let mut metadata = crate::cloud::peers::identity_metadata(
             agent,
             self.canonical_id.as_deref(),
             focus,
             Some(machine.as_str()),
         );
+        if let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) {
+            metadata.insert(crate::cloud::peers::META_BRANCH.to_string(), branch.to_string());
+        }
         let response = ureq::post(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
@@ -567,7 +586,7 @@ impl CloudCoordinator {
     /// Heartbeat a specific agent (cas-e477). Each daemon heartbeats its own
     /// agent, not whichever agent this coordinator registered last.
     pub fn heartbeat_agent(&self, agent_id: &str) -> Result<AgentInfo, CasError> {
-        self.heartbeat_presence(agent_id).map_err(|error| match error {
+        self.heartbeat_presence(agent_id, None).map_err(|error| match error {
             HeartbeatError::Failed(error) => error,
             not_registered => CasError::Other(not_registered.to_string()),
         })
@@ -575,13 +594,25 @@ impl CloudCoordinator {
 
     /// [`Self::heartbeat_agent`] with the refusal that means "register
     /// again" (404 or 401) kept apart from other failures (cas-f707).
-    pub fn heartbeat_presence(&self, agent_id: &str) -> Result<AgentInfo, HeartbeatError> {
+    /// `metadata`, when given, is sent as `{"metadata": {...}}` and merged by
+    /// the cloud: it re-binds the project and refreshes focus and branch on
+    /// every beat (cloud PR #153).
+    pub fn heartbeat_presence(
+        &self,
+        agent_id: &str,
+        metadata: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<AgentInfo, HeartbeatError> {
         let url = format!("{}/api/agents/{}/heartbeat", self.config.endpoint, agent_id);
 
-        let response = ureq::post(&url)
+        let request = ureq::post(&url)
             .timeout(HEARTBEAT_TIMEOUT)
-            .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
+            .set("Authorization", &format!("Bearer {}", self.token()));
+        let response = match metadata {
+            Some(metadata) => request
+                .set("Content-Type", "application/json")
+                .send_json(serde_json::json!({ "metadata": metadata })),
+            None => request.call(),
+        };
 
         match response {
             Ok(resp) => {

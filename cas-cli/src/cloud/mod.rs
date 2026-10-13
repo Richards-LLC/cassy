@@ -90,7 +90,9 @@ pub use project_aliases::{
     select_alias_record,
 };
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
-pub use coordinator::{AgentInfo, CloudCoordinator, HeartbeatError, PROJECT_SCOPE_KEY};
+pub use coordinator::{
+    AgentInfo, CloudCoordinator, HeartbeatError, PROJECT_QUERY_KEY, PROJECT_SCOPE_KEY,
+};
 pub use device::DeviceConfig;
 pub use embed_drain::{
     CodeVectorDrain, DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history,

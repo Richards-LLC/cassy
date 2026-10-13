@@ -221,7 +221,7 @@ pub fn discover_peers(
 /// HTTP round trip per page, [`DISCOVERY_TIMEOUT`] each); a failure is
 /// reported in the section, never raised.
 pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
-    match discover_peers(cas_root, self_id) {
+    let mut section = match discover_peers(cas_root, self_id) {
         Ok(PeerDiscovery::Found {
             canonical_id,
             peers,
@@ -233,7 +233,19 @@ pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
              match peers by (set [project] canonical_id or a git origin).\n"
             .to_string(),
         Err(error) => format!("Peers: Cassy Cloud lookup failed: {error}\n"),
-    }
+    };
+    let session = self_id.and_then(|id| {
+        crate::store::open_agent_store(cas_root)
+            .ok()?
+            .get(id)
+            .ok()?
+            .factory_session
+    });
+    section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+        cas_root,
+        session.as_deref(),
+    ));
+    section
 }
 
 /// How long [`peers_section_cached`] reuses a lookup.

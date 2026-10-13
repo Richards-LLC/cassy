@@ -3058,25 +3058,45 @@ impl SqlitePromptQueueStore {
     /// origin identifies the sender even when source="supervisor" and the
     /// failed message belongs to a different recipient factory session.
     fn notify_abandoned_sender_in_tx(tx: &Connection, prompt_id: i64) -> Result<()> {
-        let original = tx.query_row(
-            "SELECT source, target, factory_session, origin_agent_id, origin_kind,
+        let original = tx
+            .query_row(
+                "SELECT source, target, factory_session, origin_agent_id, origin_kind,
                     COALESCE(last_pending_detail, last_pending_reason, 'undeliverable')
              FROM prompt_queue WHERE id = ? AND highest_stage = 'abandoned'
                AND source <> 'delivery-watchdog'",
-            params![prompt_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?)),
-        ).optional()?;
-        let Some((mut sender, target, mut session, origin_id, origin_kind, reason)) = original else {
+                params![prompt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((mut sender, target, mut session, origin_id, origin_kind, reason)) = original
+        else {
             return Ok(());
         };
         if origin_kind.as_deref() == Some("registered_agent") {
             (sender, session) = Self::abandonment_recipient_in_tx(
-                tx, origin_id.as_deref(), &sender, session.as_deref(),
+                tx,
+                origin_id.as_deref(),
+                &sender,
+                session.as_deref(),
             )?;
         }
-        Self::insert_abandonment_notice_in_tx(tx, &sender, session.as_deref(), &prompt_id.to_string(), &target, &reason)
+        Self::insert_abandonment_notice_in_tx(
+            tx,
+            &sender,
+            session.as_deref(),
+            &prompt_id.to_string(),
+            &target,
+            &reason,
+        )
     }
 
     fn abandonment_recipient_in_tx(
@@ -3086,30 +3106,35 @@ impl SqlitePromptQueueStore {
         stored_session: Option<&str>,
     ) -> Result<(String, Option<String>)> {
         let has_agents = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
-                [], |row| row.get::<_, bool>(0),
-            )?;
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
         if has_agents {
-            if let Some(sender) = tx.query_row(
-                "SELECT name, factory_session FROM agents
+            if let Some(sender) = tx
+                .query_row(
+                    "SELECT name, factory_session FROM agents
                  WHERE id = ? AND status IN ('active', 'idle')",
-                params![sender_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            ).optional()?
+                    params![sender_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
             {
                 return Ok(sender);
             }
             // Prefer an explicitly re-registered sender with the same name
             // and session, then the project's current supervisor.
-            if let Some(supervisor) = tx.query_row(
-                "SELECT name, factory_session FROM agents
+            if let Some(supervisor) = tx
+                .query_row(
+                    "SELECT name, factory_session FROM agents
                  WHERE status IN ('active', 'idle')
                    AND ((name = ?1 AND factory_session IS ?2) OR role = 'supervisor')
                  ORDER BY (name = ?1 AND factory_session IS ?2) DESC, last_heartbeat DESC, id
                  LIMIT 1",
-                params![stored_name, stored_session],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            ).optional()?
+                    params![stored_name, stored_session],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
             {
                 return Ok(supervisor);
             }
@@ -3127,7 +3152,8 @@ impl SqlitePromptQueueStore {
         recipient: &str,
         reason: &str,
     ) -> Result<()> {
-        let notice = format!("Message {message_id} to {recipient} was abandoned as undeliverable: {reason}");
+        let notice =
+            format!("Message {message_id} to {recipient} was abandoned as undeliverable: {reason}");
         tx.execute(
             "INSERT OR IGNORE INTO prompt_queue
                 (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
@@ -6098,17 +6124,27 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let (sender, session) = Self::abandonment_recipient_in_tx(
-                &tx, Some(sender_agent_id), sender_name, sender_session,
+                &tx,
+                Some(sender_agent_id),
+                sender_name,
+                sender_session,
             )?;
-            let reason = format!("{reason}\nOriginal sender: {sender_name} (session {})", sender_session.unwrap_or("none"));
+            let reason = format!(
+                "{reason}\nOriginal sender: {sender_name} (session {})",
+                sender_session.unwrap_or("none")
+            );
             Self::insert_abandonment_notice_in_tx(
-                &tx, &sender, session.as_deref(), &format!("peer-outbox:{outbox_id}"), recipient, &reason,
+                &tx,
+                &sender,
+                session.as_deref(),
+                &format!("peer-outbox:{outbox_id}"),
+                recipient,
+                &reason,
             )?;
             tx.commit()?;
             Ok(())
         })
     }
-
     fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -6365,15 +6401,17 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let detail = format!(
                 "expired by explicit queue remediation (older_than_secs={older_than_secs})"
             );
-            let ids = tx.prepare_cached(
-                "UPDATE prompt_queue
+            let ids = tx
+                .prepare_cached(
+                    "UPDATE prompt_queue
                  SET processed_at = COALESCE(processed_at, ?),
                      highest_stage = 'abandoned',
                      last_pending_reason = 'abandoned_unknown_target',
                      last_pending_detail = ?,
                      next_attempt_at = NULL
                  WHERE processed_at IS NULL AND created_at < ? RETURNING id",
-            )?.query_map(params![now, detail, cutoff], |row| row.get::<_, i64>(0))?
+                )?
+                .query_map(params![now, detail, cutoff], |row| row.get::<_, i64>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             for id in &ids {
                 Self::notify_abandoned_sender_in_tx(&tx, *id)?;
@@ -6382,7 +6420,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             Ok(ids.len())
         })
     }
-
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -6425,7 +6462,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             Ok(stale)
         })
     }
-
     fn abandon_ineligible_session_targets(
         &self,
         targets: &[&str],
@@ -6465,10 +6501,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     .iter()
                     .map(|target| Box::new((*target).to_string()) as Box<dyn rusqlite::ToSql>),
             );
-            let ids = tx.prepare_cached(&sql)?.query_map(
-                rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
-                |row| row.get::<_, i64>(0),
-            )?.collect::<std::result::Result<Vec<_>, _>>()?;
+            let ids = tx
+                .prepare_cached(&sql)?
+                .query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
+                    |row| row.get::<_, i64>(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             for id in &ids {
                 Self::notify_abandoned_sender_in_tx(&tx, *id)?;
             }
@@ -6476,7 +6515,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             Ok(ids.len())
         })
     }
-
     fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
         if older_than_secs <= 0 {
             return Err(StoreError::Other(

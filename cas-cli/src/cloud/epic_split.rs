@@ -351,6 +351,57 @@ pub fn ingest(
     })
 }
 
+/// How a split message left this side.
+enum Sent {
+    /// Cassy Cloud accepted it: `(peer message id, status)`.
+    Now(String, String),
+    /// The cloud did not answer, but the message is in the peer outbox and
+    /// the factory daemon retries it with the same key. It will arrive, so
+    /// the split stands.
+    Queued(String),
+}
+
+impl Sent {
+    fn describe(&self) -> String {
+        match self {
+            Sent::Now(id, status) => format!("peer message {id}, {status}"),
+            Sent::Queued(why) => format!("not sent yet: {why}"),
+        }
+    }
+}
+
+/// Classify a send: a refusal the outbox will not retry is an error.
+fn sent(
+    result: Result<peer_mailbox::SendReceipt, peer_mailbox::PeerSendError>,
+) -> Result<Sent, String> {
+    match result {
+        Ok(receipt) => Ok(Sent::Now(receipt.id, receipt.status)),
+        Err(peer_mailbox::PeerSendError::Failed { cause, retry }) if !retry.is_empty() => {
+            Ok(Sent::Queued(format!("{cause}{retry}")))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Send a split message to the split's peer, by agent id.
+fn send_to_split_peer(
+    cas_root: &Path,
+    caller: &Caller,
+    split: &EpicSplit,
+    body: &str,
+    summary: &str,
+) -> Result<Sent, String> {
+    sent(peer_mailbox::send_raw(
+        cas_root,
+        &caller.id,
+        &split.peer_agent_id,
+        body,
+        Some(summary),
+        split.message_id.as_deref(),
+        &format!("{}@{}", split.peer_name, split.peer_machine),
+    ))
+}
+
 /// The registered supervisor acting.
 #[derive(Debug, Clone)]
 pub struct Caller {
@@ -586,15 +637,15 @@ pub fn propose(
         theirs.join(", "),
         split.expires_at.format("%H:%M UTC"),
     );
-    let receipt = match peer_mailbox::send_raw(
+    let delivery = match sent(peer_mailbox::send_to_peer(
         cas_root,
         &caller.id,
-        &peer.agent_id,
+        &peer,
         &body,
         Some(&format!("epic split proposal {id} for {epic_id}")),
         None,
-    ) {
-        Ok(receipt) => receipt,
+    )) {
+        Ok(delivery) => delivery,
         Err(error) => {
             rollback("the proposal could not be sent");
             return Err(format!(
@@ -604,14 +655,13 @@ pub fn propose(
         }
     };
     let mut out = format!(
-        "Proposed epic split {id} of {epic_id} to {}@{} (peer message {}, {}).\n\
+        "Proposed epic split {id} of {epic_id} to {}@{} ({}).\n\
          You took (claimed in Cassy Cloud): {}\n\
          Offered to {}: {}\n\
          Until they answer, starting their share here is refused. The proposal expires at {}.",
         peer.name,
         peer.machine,
-        receipt.id,
-        receipt.status,
+        delivery.describe(),
         mine.join(", "),
         peer.name,
         theirs.join(", "),
@@ -679,18 +729,19 @@ pub fn answer(
             split.epic_id,
             reason.map(|reason| format!(": {reason}")).unwrap_or_default()
         );
-        let sent = peer_mailbox::send_raw(
+        let delivery = send_to_split_peer(
             cas_root,
-            &caller.id,
-            &split.peer_agent_id,
+            caller,
+            &split,
             &body,
-            Some(&format!("rejected epic split {id}")),
-            split.message_id.as_deref(),
+            &format!("rejected epic split {id}"),
         );
-        return Ok(match sent {
-            Ok(receipt) => format!(
-                "Rejected epic split {id}; told {}@{} (peer message {}).",
-                split.peer_name, split.peer_machine, receipt.id
+        return Ok(match delivery {
+            Ok(delivery) => format!(
+                "Rejected epic split {id}; told {}@{} ({}).",
+                split.peer_name,
+                split.peer_machine,
+                delivery.describe()
             ),
             Err(error) => format!(
                 "Rejected epic split {id} here, but {}@{} could not be told ({error}); their proposal lapses at {}.",
@@ -727,23 +778,22 @@ pub fn answer(
         split.mine.join(", "),
         split.theirs.join(", "),
     );
-    match peer_mailbox::send_raw(
+    match send_to_split_peer(
         cas_root,
-        &caller.id,
-        &split.peer_agent_id,
+        caller,
+        &split,
         &body,
-        Some(&format!("accepted epic split {id}")),
-        split.message_id.as_deref(),
+        &format!("accepted epic split {id}"),
     ) {
-        Ok(receipt) => {
+        Ok(delivery) => {
             let mut out = format!(
-                "Accepted epic split {id} of {} with {}@{} (peer message {}).\n\
+                "Accepted epic split {id} of {} with {}@{} ({}).\n\
                  You took (claimed in Cassy Cloud): {}\n\
                  {} keeps: {} — starting those here is refused.",
                 split.epic_id,
                 split.peer_name,
                 split.peer_machine,
-                receipt.id,
+                delivery.describe(),
                 split.mine.join(", "),
                 split.peer_name,
                 split.theirs.join(", "),
@@ -824,15 +874,19 @@ pub fn cancel(
         split.epic_id,
         reason.map(|reason| format!(": {reason}")).unwrap_or_default()
     );
-    let told = match peer_mailbox::send_raw(
+    let told = match send_to_split_peer(
         cas_root,
-        &caller.id,
-        &split.peer_agent_id,
+        caller,
+        &split,
         &body,
-        Some(&format!("cancelled epic split {id}")),
-        split.message_id.as_deref(),
+        &format!("cancelled epic split {id}"),
     ) {
-        Ok(receipt) => format!("told {}@{} (peer message {})", split.peer_name, split.peer_machine, receipt.id),
+        Ok(delivery) => format!(
+            "told {}@{} ({})",
+            split.peer_name,
+            split.peer_machine,
+            delivery.describe()
+        ),
         Err(error) => format!(
             "but {}@{} could not be told ({error}); message them, or their side still refuses your share",
             split.peer_name, split.peer_machine

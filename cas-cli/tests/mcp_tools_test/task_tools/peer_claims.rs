@@ -202,6 +202,40 @@ impl FakeCloud {
         self.state.lock().unwrap().locks.keys().cloned().collect()
     }
 
+    /// The holder's claim was renewed long ago (its daemon stopped), though
+    /// it has not run out yet.
+    fn stop_renewing(&self, task_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        for (key, lock) in state.locks.iter_mut() {
+            if key.starts_with(&format!("{task_id}~")) {
+                lock.renewed_at = Utc::now() - Duration::minutes(20);
+            }
+        }
+    }
+
+    /// The claim was lost: released or expired server-side.
+    fn drop_lock(&self, task_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        for (key, lock) in state.locks.iter_mut() {
+            if key.starts_with(&format!("{task_id}~")) {
+                lock.status = "released".into();
+            }
+        }
+    }
+
+    /// `agent_id` now holds the claim (it took it while ours was lost).
+    fn give_to(&self, task_id: &str, agent_id: &str, reason: Option<String>) {
+        let mut state = self.state.lock().unwrap();
+        for (key, lock) in state.locks.iter_mut() {
+            if key.starts_with(&format!("{task_id}~")) {
+                lock.agent_id = agent_id.to_string();
+                lock.status = "active".into();
+                lock.renewed_at = Utc::now();
+                lock.claim_reason = reason.clone();
+            }
+        }
+    }
+
     /// The holder died: its last renewal ran out.
     fn age_out(&self, task_id: &str) {
         let mut state = self.state.lock().unwrap();
@@ -529,12 +563,207 @@ async fn a_claim_whose_holder_is_not_a_live_agent_is_stale() {
     for m in [&alpha, &bravo] {
         m.put_task("cas-p010", TaskType::Task);
     }
-    // alpha claims, but its daemon never registered (or long stopped).
+    // alpha claims, but its daemon never registered (or long stopped), and
+    // nothing has renewed the claim for longer than a peer stays live.
     start(&alpha.core, "cas-p010", false).await.unwrap();
+    cloud.stop_renewing("cas-p010");
     let taken = start(&bravo.core, "cas-p010", false)
         .await
         .expect("a claim nobody keeps alive does not block");
     assert!(taken.contains("alpha-sup"), "{taken}");
     assert!(taken.contains("STALE PEER CLAIM"), "{taken}");
     assert!(taken.contains("not seen alive"), "{taken}");
+}
+
+/// cas-0078 (e): a holder whose cloud registration failed is not listed, but
+/// its claim was just renewed. The renewal is itself a liveness signal, so the
+/// peer is refused rather than told the claim is stale.
+#[tokio::test]
+async fn an_unregistered_holder_with_a_fresh_renewal_still_refuses() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
+    for m in [&alpha, &bravo] {
+        m.put_task("cas-pe11", TaskType::Task);
+    }
+    // alpha never registered with Cassy Cloud, but it holds a fresh claim.
+    start(&alpha.core, "cas-pe11", false).await.unwrap();
+    let refused = start(&bravo.core, "cas-pe11", false)
+        .await
+        .expect_err("a claim renewed within the live window is a live claim");
+    assert!(refused.contains("HELD BY A PEER"), "{refused}");
+    assert!(refused.contains("alpha-sup"), "{refused}");
+    assert_eq!(cloud.active_lock("cas-pe11").unwrap().1.agent_id, alpha.agent_id);
+}
+
+async fn claim(core: &CasCore, id: &str) -> Result<String, String> {
+    core.cas_task_claim(Parameters(TaskClaimRequest {
+        task_id: id.to_string(),
+        duration_secs: 600,
+        reason: None,
+    }))
+    .await
+    .map(extract_text)
+    .map_err(|error| error.message.to_string())
+}
+
+/// cas-0078 (a): a second agent of the same database whose local lease is
+/// refused never takes the cloud claim. The original holder keeps it, so a
+/// peer on another machine is still refused.
+#[tokio::test]
+async fn a_refused_local_claim_leaves_the_cloud_claim_with_its_holder() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
+    for m in [&alpha, &bravo] {
+        m.put_task("cas-pa01", TaskType::Task);
+    }
+    cloud.live(&alpha, "alpha-sup");
+    start(&alpha.core, "cas-pa01", false).await.expect("alpha starts");
+    // The task row is unassigned again (e.g. edited), but alpha's lease stands.
+    let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-pa01").unwrap();
+    task.assignee = None;
+    task.status = TaskStatus::Open;
+    open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
+
+    let delta = alpha.second_agent("delta-sup");
+    let refused = start(&delta, "cas-pa01", false)
+        .await
+        .expect_err("the local lease refuses delta");
+    assert!(refused.contains("locked by"), "{refused}");
+    let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused start");
+    assert_eq!(lock.agent_id, alpha.agent_id, "{refused}");
+
+    let claimed = claim(&delta, "cas-pa01").await.unwrap_or_else(|error| error);
+    assert!(claimed.contains("already claimed"), "{claimed}");
+    let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused claim");
+    assert_eq!(lock.agent_id, alpha.agent_id, "{claimed}");
+
+    let peer = start(&bravo.core, "cas-pa01", false)
+        .await
+        .expect_err("a peer is still refused");
+    assert!(peer.contains("HELD BY A PEER"), "{peer}");
+    assert!(peer.contains("alpha-sup"), "{peer}");
+}
+
+/// cas-0078 (b): renewal re-acquires a claim that was lost, and reports a
+/// conflict, naming the holder, when a peer took it meanwhile.
+#[tokio::test]
+async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
+    for m in [&alpha, &bravo] {
+        m.put_task("cas-pb01", TaskType::Task);
+    }
+    cloud.live(&alpha, "alpha-sup");
+    cloud.live(&bravo, "bravo-sup");
+    start(&alpha.core, "cas-pb01", false).await.unwrap();
+
+    cloud.drop_lock("cas-pb01");
+    let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    let (_, lock) = cloud.active_lock("cas-pb01").expect("renewal re-acquires the lost claim");
+    assert_eq!(lock.agent_id, alpha.agent_id, "{report:?}");
+    assert_eq!(report.reacquired, 1, "{report:?}");
+
+    let reason = serde_json::json!({"v": 1, "kind": "task", "name": "bravo-sup",
+        "machine": "host-b", "project": PROJECT})
+    .to_string();
+    cloud.give_to("cas-pb01", &bravo.agent_id, Some(reason));
+    let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    assert_eq!(report.conflicts.len(), 1, "{report:?}");
+    let (task, hold) = &report.conflicts[0];
+    assert_eq!(task, "cas-pb01");
+    assert_eq!(hold.name(), "bravo-sup", "{}", hold.describe());
+    assert_eq!(cloud.active_lock("cas-pb01").unwrap().1.agent_id, bravo.agent_id);
+}
+
+fn factory_service(m: &Machine) -> cas::mcp::CasService {
+    let core = CasCore::with_daemon(m.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing(m.agent_id.clone());
+    cas::mcp::CasService::new(core, None)
+}
+
+async fn factory(
+    service: &cas::mcp::CasService,
+    request: serde_json::Value,
+) -> Result<String, String> {
+    let request: cas_mcp::types::FactoryRequest =
+        serde_json::from_value(request).expect("a valid factory request");
+    service
+        .factory_request(Parameters(request))
+        .await
+        .map(extract_text)
+        .map_err(|error| error.message.to_string())
+}
+
+/// cas-0078 (c): a pinned focus claims the epic in the cloud, renewal keeps
+/// that claim alive while the focus stands, and clearing the focus releases it.
+#[tokio::test]
+async fn the_focus_claim_renews_while_focused_and_releases_on_clear() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let session = format!("peer-focus-{}", std::process::id());
+    env.set("CAS_FACTORY_SESSION", &session);
+    let path = cas::ui::factory::metadata_path(&session);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let metadata =
+        cas::ui::factory::create_metadata(&session, 12345, "supervisor", &[], None, None, None);
+    std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    alpha.put_task("cas-pf01", TaskType::Epic);
+    cloud.live(&alpha, "alpha-sup");
+    let service = factory_service(&alpha);
+
+    let pinned = factory(&service, serde_json::json!({"action": "focus_epic", "id": "cas-pf01"}))
+        .await
+        .expect("focus pins");
+    let (_, before) = cloud.active_lock("cas-pf01").expect("the focus is claimed");
+    assert_eq!(before.agent_id, alpha.agent_id, "{pinned}");
+
+    let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+    let (_, after) = cloud.active_lock("cas-pf01").expect("the focus claim stays");
+    assert_eq!(after.renewal_count, before.renewal_count + 1, "{report:?}");
+
+    let cleared = factory(&service, serde_json::json!({"action": "focus_epic", "clear": true}))
+        .await
+        .expect("focus clears");
+    assert!(cloud.active_lock("cas-pf01").is_none(), "clearing releases the claim: {cleared}");
+}
+
+/// cas-0078 (d): a spawn on a task a live peer holds is refused, naming the
+/// holder, before any spawn queue row exists.
+#[tokio::test]
+async fn a_spawn_on_a_peer_claimed_task_is_refused_before_queueing() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
+    for m in [&alpha, &bravo] {
+        m.put_task("cas-ps01", TaskType::Task);
+    }
+    cloud.live(&alpha, "alpha-sup");
+    start(&alpha.core, "cas-ps01", false).await.unwrap();
+
+    let service = factory_service(&bravo);
+    let refused = factory(
+        &service,
+        serde_json::json!({"action": "spawn_workers", "count": 1, "task_id": "cas-ps01"}),
+    )
+    .await
+    .expect_err("a peer-held task is not spawned");
+    assert!(refused.contains("HELD BY A PEER"), "{refused}");
+    assert!(refused.contains("alpha-sup"), "{refused}");
+    assert!(refused.contains("force=true"), "{refused}");
+    let queued = cas::store::open_spawn_queue_store(&bravo.cas_dir).unwrap().peek(10).unwrap();
+    assert!(queued.is_empty(), "nothing is queued: {queued:?}");
 }

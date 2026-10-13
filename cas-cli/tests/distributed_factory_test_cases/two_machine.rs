@@ -35,6 +35,56 @@ fn operator_cli(machine: &TestMachine, args: &[&str]) -> std::process::Command {
 }
 
 #[test]
+fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    register(
+        &alpha,
+        "local-session",
+        "sup-local-session",
+        AgentRole::Supervisor,
+        "local-session",
+        "cas-local",
+    );
+    // No local agent has this operator process as an ancestor. Both local
+    // supervisors still belong to this project rather than its peer list.
+    for agent in alpha.agent_store().list(None).unwrap() {
+        assert_eq!(agent.pid, None);
+    }
+    for args in [
+        vec!["peers", "--json"],
+        vec!["peers", "--detail", "--json"],
+        vec!["peers"],
+        vec!["peers", "--detail"],
+    ] {
+        let result = operator_cli(&alpha, &args).output().unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let text = String::from_utf8(result.stdout).unwrap();
+        if args.contains(&"--json") {
+            let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let peers = report["peers"].as_array().unwrap();
+            assert_eq!(peers.len(), 1, "{args:?}: {text}");
+            assert_eq!(peers[0]["supervisor"]["agent_id"], "b");
+        } else {
+            assert!(text.contains("1 peer supervisor"), "{args:?}: {text}");
+            assert!(!text.contains("sup-a") && !text.contains("sup-local-session"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    let PeerDiscovery::Found { peers, .. } = discover_peers(&alpha.cas_dir, None).unwrap() else {
+        panic!("expected project peer discovery");
+    };
+    assert_eq!(peers.iter().map(|p| p.agent_id.as_str()).collect::<Vec<_>>(), ["b"]);
+}
+
+#[test]
 fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();

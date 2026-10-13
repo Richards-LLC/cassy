@@ -104,8 +104,14 @@ impl PeerMailboxRuntime {
         // An outbound error must not prevent this daemon claiming inbound mail.
         let outbox_error = outbox::tick(&self.cas_dir, &self.factory_session).err();
         let run = || -> Result<DeliveryReport, String> {
-            let mailbox =
-                http_mailbox(&self.cas_dir).ok_or("not logged in to Cassy Cloud (`cas login`)")?;
+            let config = crate::cloud::CloudConfig::load_from_cas_dir(&self.cas_dir)
+                .map_err(|error| format!("could not load cloud config: {error}"))?;
+            let token = config
+                .token
+                .as_deref()
+                .filter(|token| !token.is_empty())
+                .ok_or("not logged in to Cassy Cloud (`cas login`)")?;
+            let mailbox = HttpPeerMailbox::new(&config.endpoint, token);
             let canonical_id = crate::cloud::resolve_canonical_id(&self.cas_dir)
                 .ok_or("project has no canonical id")?;
             let queue = crate::store::open_prompt_queue_store(&self.cas_dir)

@@ -631,9 +631,35 @@ async fn cas_13c7_automatic_retry_keeps_logical_send_key_and_identical_sends_dis
                 .unwrap()
                 .contains(": pending")
         );
-        PeerMailboxRuntime::start(&alpha.cas_dir, "factory-a")
+        // Competing daemon consumers share a project outbox; its atomic row
+        // lease permits one HTTP retry even when both observe a due send.
+        let mut second_supervisor = Agent::new("second-local".into(), "sup-second".into());
+        second_supervisor.role = AgentRole::Supervisor;
+        second_supervisor.factory_session = Some("other-session".into());
+        open_agent_store(&alpha.cas_dir)
             .unwrap()
-            .tick_blocking();
+            .register(&second_supervisor)
+            .unwrap();
+        std::thread::scope(|scope| {
+            for session in ["factory-a", "other-session"] {
+                let root = &alpha.cas_dir;
+                scope.spawn(move || {
+                    let report = PeerMailboxRuntime::start(root, session)
+                        .unwrap()
+                        .tick_blocking();
+                    assert!(report.errors.is_empty(), "{report:?}");
+                });
+            }
+        });
+        assert_eq!(
+            conn.query_row(
+                "SELECT attempts FROM peer_message_outbox WHERE id=1",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            2
+        );
         let sent = outbox_status_text(&alpha.cas_dir, "peer-outbox:1")
             .unwrap()
             .unwrap();
@@ -679,8 +705,12 @@ async fn cas_13c7_outbox_expires_once_and_notifies_sender_after_restart() {
             [chrono::Utc::now().timestamp() - OUTBOX_TTL_SECS - 1],
         )
         .unwrap();
+        let agents = open_agent_store(&alpha.cas_dir).unwrap();
+        let mut sender = agents.get("a").unwrap();
+        sender.factory_session = Some("restarted-session".into());
+        agents.update(&sender).unwrap();
         for _ in 0..2 {
-            let report = PeerMailboxRuntime::start(&alpha.cas_dir, "factory-a")
+            let report = PeerMailboxRuntime::start(&alpha.cas_dir, "restarted-session")
                 .unwrap()
                 .tick_blocking();
             assert!(report.errors.is_empty(), "{report:?}");

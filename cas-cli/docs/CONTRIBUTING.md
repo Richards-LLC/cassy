@@ -1352,7 +1352,13 @@ file, the default contract is unchanged. The layers are:
 - `Config::set` refuses the key, so MCP, the config TUI and `cas config reset`
   cannot set roots, and `cas config import` keeps the current value;
 - PreToolUse refuses any agent Bash call of these commands, even when wrapped
-  by `env`, `sudo`, `setsid`, `sh -c` or `script -c`, and any agent write,
+  by `timeout`, `env`, `nice`, `nohup`, `xargs`, `stdbuf`, `flock`, `sudo`,
+  `setsid`, `$(which cas)`, `eval`, `sh -c` or `script -c`. It also refuses
+  any command that names `factory.write_roots` with `set` (or `grant-write` /
+  `revoke-write`) unless every statement only reads (`grep`, `cat`, `git
+  log`, `cas config get`, …), which covers `python -c`, `perl -e` and
+  heredocs. A command hidden in a script file the agent runs is out of
+  reach of a tool-call hook. It also refuses any agent write,
   edit, delete or rename of the project's `.cas/config.toml`,
   `.cas/config.yaml` or anything under `.cas/operator/` (file tools,
   redirections, `tee`, `cp`, `mv`, `sed -i`, `perl -i`, `rm`). Agents change

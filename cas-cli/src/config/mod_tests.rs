@@ -1045,6 +1045,11 @@ fn factory_write_roots_are_operator_only_gh_1182() {
     let temp = TempDir::new().unwrap();
     let mut config = Config::default();
     assert_eq!(config.get("factory.write_roots").as_deref(), Some(""));
+    assert_eq!(
+        meta::registry().get("factory.write_roots").unwrap().examples(),
+        vec!["~/Downloads,/mnt/models"],
+        "QA F04: describe shows a real example, not item1,item2,item3"
+    );
     let error = config.set("factory.write_roots", "/tmp").unwrap_err().to_string();
     assert!(error.contains("operator"), "{error}");
     assert!(config.factory().write_roots.is_empty());

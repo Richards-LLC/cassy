@@ -21,13 +21,20 @@
 //!    [`operator_context_refusal`] and a typed confirmation.
 //! 3. The PreToolUse hook is the gate against agents: it refuses agent tool
 //!    calls that run these commands, or that write `.cas/config.toml`,
-//!    `.cas/config.yaml` or anything under `.cas/operator/`.
+//!    `.cas/config.yaml` or anything under `.cas/operator/`. It unwraps
+//!    command wrappers (`timeout`, `env`, `nice`, `xargs`, …), `$(which cas)`
+//!    substitutions, `sh -c` and `eval`, and refuses any non-read-only
+//!    command whose text names `factory.write_roots` with `set`, or
+//!    `grant-write` / `revoke-write` (covering `python -c`, `perl -e` and
+//!    heredocs).
 //!
 //! This is guardrail-grade, not security-grade. The operator and the agents
 //! share a Unix user, so the PreToolUse hook (layer 3) is the actual gate
-//! against agents; the CLI checks are defence in depth. An agent that
-//! deliberately hides a same-user write outside its tool calls is out of
-//! reach; a hard boundary needs agents under a separate Unix user.
+//! against agents; the CLI checks are defence in depth. A tool-call hook sees
+//! only the command text: a `cas config set factory.write_roots` hidden in a
+//! script file the agent runs, or assembled at run time, is out of its reach,
+//! as is any same-user write made outside tool calls. A hard boundary needs
+//! agents under a separate Unix user.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

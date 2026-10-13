@@ -206,6 +206,7 @@ async fn daemon_poll(
 #[tokio::test]
 async fn cas_13c7_daemon_recovers_when_login_arrives_after_startup() {
     use cas::cloud::peer_mailbox::{PeerMailboxPoller, mailbox_status_section};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
     let endpoint = server.uri();
     let alpha = TestMachine::new("machine-alpha");
@@ -249,6 +250,35 @@ async fn cas_13c7_daemon_recovers_when_login_arrives_after_startup() {
     assert_eq!(report.delivered, 1, "{report:?}");
     assert!(inbox(&b)[0].prompt.ends_with("late login delivery"));
     assert!(mailbox_status_section(&b, Some("factory-b")).contains(": receiving."));
+    let service = service_for(&b, "b");
+    let peers_text = coordinate(&service, json!({"action":"peers"}))
+        .await
+        .unwrap();
+    assert!(
+        peers_text.contains("Peer mailbox: receiving."),
+        "{peers_text}"
+    );
+    for summary in [false, true] {
+        let req =
+            serde_json::from_value(json!({"action":"worker_status","summary":summary})).unwrap();
+        let result = service
+            .factory_request(rmcp::handler::server::wrapper::Parameters(req))
+            .await
+            .unwrap();
+        let text = result
+            .content
+            .iter()
+            .filter_map(|c| match &c.raw {
+                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Peer mailbox: receiving."),
+            "summary={summary}: {text}"
+        );
+    }
     tokio::task::spawn_blocking(move || {
         assert_eq!(
             http_mailbox(&a)

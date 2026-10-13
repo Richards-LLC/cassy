@@ -3723,6 +3723,11 @@ impl CasService {
                     )
                 })
                 .unwrap_or_default();
+            let mailbox_session=factory_session.clone().or_else(|| {
+                self.inner.get_registered_agent_id_read_only().ok().and_then(|id|store.get(&id).ok()).and_then(|agent|agent.factory_session)
+            });
+            let mailbox_health=crate::cloud::peer_mailbox::mailbox_status_section(&self.inner.cas_root,mailbox_session.as_deref());
+            let health=format!("{health}{mailbox_health}");
             return Ok(Self::success(if health.is_empty() {
                 summary
             } else {

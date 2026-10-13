@@ -230,7 +230,7 @@ impl CasService {
         factory_session: Option<&str>,
     ) -> Result<bool, McpError> {
         crate::store::open_spawn_queue_store(&self.inner.cas_root)
-            .and_then(|store| store.has_pending_spawn(target, factory_session))
+            .and_then(|store| Ok(store.has_pending_spawn(target, factory_session)?))
             .map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,

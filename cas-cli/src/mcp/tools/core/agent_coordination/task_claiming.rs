@@ -196,6 +196,17 @@ impl CasCore {
         // cas-5f28: mirror the claim into Cassy Cloud first; a peer on another
         // machine that holds this task refuses the claim before anything here
         // changes. Epics are shared: their overlap is only reported.
+        // cas-4736: a child the peer took under a binding epic split.
+        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(hold.refusal(
+                    &req.task_id,
+                    &crate::mcp::tools::core::guidance::caller_prefix(),
+                )),
+                data: None,
+            });
+        }
         let peer_note = match crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root) {
             Some(claims) => {
                 use crate::cloud::peer_claims::{Acquire, ClaimKind};

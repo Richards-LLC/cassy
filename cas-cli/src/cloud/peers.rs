@@ -221,6 +221,14 @@ pub fn discover_peers(
 /// HTTP round trip per page, [`DISCOVERY_TIMEOUT`] each); a failure is
 /// reported in the section, never raised.
 pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
+    let mut text = discovery_section(cas_root, self_id);
+    // cas-4736: the epic splits agreed with peers, read fresh from this
+    // database.
+    text.push_str(&crate::cloud::epic_split::render_splits(cas_root));
+    text
+}
+
+fn discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
     match discover_peers(cas_root, self_id) {
         Ok(PeerDiscovery::Found {
             canonical_id,
@@ -254,15 +262,18 @@ pub fn peers_section_cached(cas_root: &Path, self_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(&key))
         && at.elapsed() < PEERS_CACHE_TTL
     {
-        return text.clone();
+        return format!(
+            "{text}{}",
+            crate::cloud::epic_split::render_splits(cas_root)
+        );
     }
-    let text = peers_section(cas_root, self_id);
+    let text = discovery_section(cas_root, self_id);
     CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(key, (std::time::Instant::now(), text.clone()));
-    text
+    format!("{text}{}", crate::cloud::epic_split::render_splits(cas_root))
 }
 
 #[cfg(test)]

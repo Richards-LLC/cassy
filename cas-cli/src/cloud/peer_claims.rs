@@ -345,6 +345,24 @@ impl PeerClaims {
         Ok(true)
     }
 
+    /// The agent holding the active claim on `task_id`, if any.
+    pub fn holder(&self, task_id: &str) -> Result<Option<String>, CasError> {
+        Ok(self
+            .coordinator("peer-claims-reader")?
+            .get_lock(&self.key(task_id))?
+            .map(|lock| lock.agent_id))
+    }
+
+    /// Release the claim on `task_id` only when `agent_id` itself holds it
+    /// (never another agent's, local or not). Returns whether it released.
+    pub fn release_held_by(&self, task_id: &str, agent_id: &str) -> Result<bool, CasError> {
+        if self.holder(task_id)?.as_deref() != Some(agent_id) {
+            return Ok(false);
+        }
+        self.coordinator(agent_id)?.release(&self.key(task_id))?;
+        Ok(true)
+    }
+
     pub fn renew(&self, task_id: &str, agent_id: &str, duration_secs: u32) -> Result<(), CasError> {
         self.coordinator(agent_id)?
             .renew(&self.key(task_id), duration_secs)
@@ -384,6 +402,9 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
             }
         }
     }
+    // cas-4736: a supervisor's share of a binding epic split is claimed by
+    // the supervisor itself, without a local lease.
+    report.renewed += crate::cloud::epic_split::renew_split_claims(cas_root, &claims, agent_id, duration);
     report
 }
 

@@ -2329,7 +2329,22 @@ impl CasService {
         // epic-present behaviour is unchanged.
         let mut task_id_authorization: Option<Result<(), String>> = None;
         let mut stale_assignee_notice = String::new();
+        let mut split_spawn_note = String::new();
         if let Some(ref task_id) = req.task_id {
+            // cas-4736: never pre-assign a child the peer took under a
+            // binding epic split, unless forced.
+            if let Some(hold) =
+                crate::cloud::epic_split::split_hold_for(&self.inner.cas_root, task_id)
+            {
+                let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+                if !req.force.unwrap_or(false) {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        hold.refusal(task_id, &prefix),
+                    ));
+                }
+                split_spawn_note = hold.override_note(task_id, &prefix);
+            }
             let requested_worker_count = if worker_names.is_empty() {
                 count
             } else {
@@ -2835,7 +2850,7 @@ impl CasService {
                     })
                     .unwrap_or_default();
                 format!(
-                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}{peer}"
+                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}{split_spawn_note}{peer}"
                 )
             })
             .unwrap_or_default();

@@ -1998,6 +1998,21 @@ impl CasCore {
         // Cassy Cloud claim first, so a peer's live claim refuses this start
         // before anything changes. Not logged in, or no repository id: no
         // peers to see, nothing said.
+        // cas-4736: a child the peer took under a binding epic split is
+        // refused unless forced. Local, so it holds with the cloud down.
+        let split_note = match crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
+            Some(hold) => {
+                let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+                if !req.force.unwrap_or(false) {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        hold.refusal(&req.id, &prefix),
+                    ));
+                }
+                hold.override_note(&req.id, &prefix)
+            }
+            None => String::new(),
+        };
         let peer_claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root);
         let agent_name = agent_store
             .get(&agent_id)
@@ -2006,6 +2021,7 @@ impl CasCore {
         let is_local_agent = |id: &str| agent_store.get(id).is_ok();
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
+        peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         if let Some(claims) = peer_claims.as_ref() {
             use crate::cloud::peer_claims::{Acquire, ClaimKind};

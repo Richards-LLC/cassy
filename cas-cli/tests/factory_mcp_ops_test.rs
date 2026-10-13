@@ -513,6 +513,10 @@ fn factory_req(action: &str) -> FactoryRequest {
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 
@@ -581,6 +585,10 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 
@@ -6620,6 +6628,10 @@ fn coord_msg(
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 

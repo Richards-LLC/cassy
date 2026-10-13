@@ -193,7 +193,7 @@ class PreflightTest(unittest.TestCase):
 
         def fake_stream(machine, *argv, timeout=180):
             commit = commits[machine.label]
-            return {"ok": True, "commit": commit, "version": f"cas 3.50.1 ({commit} 2026-10-13)",
+            return {"ok": True, "commit": commit, "version": f"cas 0.0.0-fixture ({commit} 2026-10-13)",
                     "features": (features or {}).get(machine.label, {})}
 
         live_check.machine_stream = fake_stream
@@ -243,7 +243,7 @@ class ProbeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = Path(tmp) / "cas"
             markers = b"\n".join(b"# " + marker for marker in harness.FEATURE_MARKERS["cas-4736"])
-            fake.write_bytes(b"#!/bin/sh\necho 'cas 3.50.1 (abc1234 2026-10-13)'\nexit 0\n" + markers + b"\n")
+            fake.write_bytes(b"#!/bin/sh\necho 'cas 0.0.0-fixture (abc1234 2026-10-13)'\nexit 0\n" + markers + b"\n")
             fake.chmod(0o755)
             probe = harness.probe_binary(str(fake))
         self.assertEqual(probe["commit"], "abc1234")

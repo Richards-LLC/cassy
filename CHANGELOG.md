@@ -68,6 +68,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   registration.
 - The peers section fits an 80-column terminal: each peer takes two short
   lines, and status lines wrap.
+- `cas status --verbose` draws its section rules in ASCII when the locale is
+  not UTF-8 (`LC_ALL=C`) (cas-867a).
 - `coordination action=peers`, `worker_status` and `cas status` open with
   this agent's own state: `Cloud presence: registered` or
   `Cloud presence: failing: <cause>`.

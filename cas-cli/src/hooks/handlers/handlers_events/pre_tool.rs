@@ -5441,6 +5441,48 @@ mod workspace_contract_tests {
         }
     }
 
+    /// GH #1182 QA F02: a write root admits changes strictly beneath it;
+    /// the root directory itself cannot be deleted, renamed away or
+    /// overwritten through it, even with delete permitted.
+    #[cfg(unix)]
+    #[test]
+    fn gh_1182_write_root_never_admits_the_root_itself() {
+        use super::super::write_roots::WriteMode;
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, managed, _outside) = write_roots_fixture(fixture.path());
+        std::fs::create_dir_all(managed.join("sub")).unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let policy = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit, WriteMode::Delete], None);
+        let no_tasks = std::collections::HashSet::new();
+        let decide = |command: String| {
+            factory_write_decision(&bash_input(&command, &worktree), &None, None, false, Some(worktree.as_path()), &policy, &no_tasks)
+        };
+        let root = managed.display().to_string();
+        for command in [
+            format!("rm -rf {root}"),
+            format!("rm -rf {root}/"),
+            format!("rm -rf {root}/sub/.."),
+            format!("rmdir {root}"),
+            format!("mv {root} {}/moved", managed.join("sub").display()),
+        ] {
+            assert!(
+                matches!(decide(command.clone()), FactoryWriteDecision::Denied(_)),
+                "{command} must not delete or rename the root itself"
+            );
+        }
+        for command in [format!("rm -rf {root}/sub"), format!("rm {root}/existing.md")] {
+            assert!(
+                matches!(decide(command.clone()), FactoryWriteDecision::AllowedByRoot(_)),
+                "{command} beneath the root is admitted"
+            );
+        }
+    }
+
     /// GH #1182 QA round 1: the CLI no longer refuses agent environment, so
     /// the hook must refuse the operator-only commands however they are
     /// wrapped, substituted, evaluated or run from an interpreter, while

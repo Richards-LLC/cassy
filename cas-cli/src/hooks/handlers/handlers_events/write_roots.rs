@@ -99,10 +99,13 @@ impl WritePolicy {
                 // A root that cannot be resolved (missing, dangling symlink)
                 // admits nothing. Containment is judged on resolved paths, so
                 // `..` and symlinks inside the root cannot escape it.
+                // Strictly beneath the root: the root directory itself is
+                // never deleted, renamed or overwritten through it (GH #1182
+                // QA F02).
                 && root
                     .path
                     .canonicalize()
-                    .is_ok_and(|canonical| resolved.starts_with(canonical))
+                    .is_ok_and(|canonical| resolved.starts_with(&canonical) && resolved != canonical)
         })
     }
 

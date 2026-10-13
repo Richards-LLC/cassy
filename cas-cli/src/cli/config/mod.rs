@@ -21,7 +21,7 @@ pub enum ConfigCommands {
     /// Get a config value
     Get(ConfigGetArgs),
 
-    /// Set a config value (see `factory.write_roots` below)
+    /// Set a config value (write roots: `cas config set --help`)
     Set(ConfigSetArgs),
 
     /// List all config options

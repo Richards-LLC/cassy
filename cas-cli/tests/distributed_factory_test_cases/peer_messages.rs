@@ -170,16 +170,32 @@ fn supervisor_at(cas_dir: &Path, machine_name: &str, id: &str) {
 
 /// One recipient-daemon tick for supervisor `id`'s session.
 fn tick(cas_dir: &Path, id: &str) -> DeliveryReport {
-    let canonical = cas::cloud::resolve_canonical_id(cas_dir).unwrap();
-    deliver_claimed(
-        &http_mailbox(cas_dir).expect("logged-in project has a mailbox"),
-        open_prompt_queue_store(cas_dir).unwrap().as_ref(),
-        open_agent_store(cas_dir).unwrap().as_ref(),
-        &canonical,
-        &[],
-        &format!("factory-{id}"),
-        &format!("consumer-{id}"),
-    )
+    cas::cloud::peer_mailbox::PeerMailboxRuntime::start(cas_dir, &format!("factory-{id}"))
+        .expect("mailbox runtime survives missing startup credentials")
+        .tick_blocking()
+}
+
+#[tokio::test]
+async fn cas_13c7_daemon_recovers_when_login_arrives_after_startup() {
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let alpha = TestMachine::new("machine-alpha");
+        let beta = TestMachine::new("machine-beta");
+        let runtime = cas::cloud::peer_mailbox::PeerMailboxRuntime::start(&beta.cas_dir, "factory-b")
+            .expect("late login must not permanently disable receiving");
+        assert!(!runtime.tick_blocking().errors.is_empty());
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+        let peers = peers_of(&alpha.cas_dir, "a");
+        let receipt = send_to_peer(&alpha.cas_dir, "a", &peers[0], "late login delivery", None, None).unwrap();
+        let report = runtime.tick_blocking();
+        assert_eq!(report.delivered, 1, "{report:?}");
+        assert!(inbox(&beta.cas_dir)[0].prompt.ends_with("late login delivery"));
+        assert_eq!(http_mailbox(&alpha.cas_dir).unwrap().status(&receipt.id).unwrap().status, "delivered");
+    }).await.unwrap();
 }
 
 fn inbox(cas_dir: &Path) -> Vec<cas::store::QueuedPrompt> {

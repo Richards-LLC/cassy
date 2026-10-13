@@ -377,11 +377,17 @@ impl EmbeddedDaemon {
         };
 
         // Cloud coordinator for agent presence (registration + heartbeat).
-        // cas-f707: it follows the project's login, not `cloud.auto_sync`:
-        // peer discovery and task claims reach the cloud whenever the
-        // project is logged in, so its agents must be registered there too,
-        // or peers cannot see them and their claims read as stale.
-        let cloud_coordinator = init_cloud_coordinator(&config.cas_root);
+        // cas-f707: an explicit `cloud.auto_sync = false` opts the project
+        // out, so agent names, hostnames and branches stay on the machine
+        // (peers then show "Cloud presence: disabled"); otherwise it follows
+        // the project's login.
+        let cloud_coordinator = if config.cloud_sync_enabled
+            && !crate::cloud::presence::opted_out(&config.cas_root)
+        {
+            init_cloud_coordinator(&config.cas_root)
+        } else {
+            None
+        };
 
         // Initialize code watcher if code indexing is enabled
         let code_watcher = if config.index_code {

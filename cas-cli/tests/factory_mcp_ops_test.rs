@@ -3725,6 +3725,64 @@ async fn test_worker_status_scopes_agents_to_factory_session() {
     );
 }
 
+/// cas-f707: a failing cloud registration makes the supervisor invisible
+/// to its peers, so the fast `worker_status` poll says so (and stays quiet
+/// while registered).
+#[tokio::test]
+async fn cas_f707_worker_status_summary_flags_a_failing_cloud_presence() {
+    use cas::cloud::presence::{self, PresenceRecord, PresenceState};
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    async fn summary(env: &FactoryTestEnv) -> String {
+        let mut request = factory_req("worker_status");
+        request.summary = Some(true);
+        get_text(
+            &env.service
+                .factory_request(Parameters(request))
+                .await
+                .expect("worker_status summary should succeed"),
+        )
+    }
+
+    let quiet = summary(&env).await;
+    assert!(!quiet.contains("Cloud presence"), "{quiet}");
+
+    let now = chrono::Utc::now();
+    let failing = PresenceRecord {
+        agent_id: "test-supervisor-id".to_string(),
+        state: PresenceState::Failing,
+        cause: Some("Failed to register agent (503): registry unavailable".to_string()),
+        failures: 2,
+        last_attempt_at: now,
+        registered_at: None,
+        next_retry_at: Some(now + chrono::Duration::seconds(30)),
+        focus: None,
+        branch: None,
+    };
+    presence::save(&env.cas_root, &failing);
+    let flagged = summary(&env).await;
+    assert!(
+        flagged.contains(
+            "Cloud presence: failing: Failed to register agent (503): registry unavailable (2 failed attempts"
+        ),
+        "{flagged}"
+    );
+
+    presence::save(
+        &env.cas_root,
+        &PresenceRecord {
+            state: PresenceState::Registered,
+            cause: None,
+            failures: 0,
+            registered_at: Some(now),
+            next_retry_at: None,
+            ..failing
+        },
+    );
+    let registered = summary(&env).await;
+    assert!(!registered.contains("Cloud presence"), "{registered}");
+}
+
 #[tokio::test]
 async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);

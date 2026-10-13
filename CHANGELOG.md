@@ -61,9 +61,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   epic focus, branch and factory session, so a change shows within 30 s.
 - Registrations carry the branch checked out where the agent works
   (`metadata.branch`).
-- Was: a project with `cloud.auto_sync` off never registered its agents,
-  even though its peer discovery and claims used the cloud. Now presence
-  follows the project's Cassy Cloud login.
+- A project that sets `cloud.auto_sync = false` keeps its agents out of the
+  registry. Agent names, hostnames and branches stay on the machine. `peers`
+  then says `Cloud presence: disabled (cloud.auto_sync=false)` and explains
+  that discovery is one-way. `worker_status --summary` flags a failing
+  registration.
 - `coordination action=peers`, `worker_status` and `cas status` open with
   this agent's own state: `Cloud presence: registered` or
   `Cloud presence: failing: <cause>`.

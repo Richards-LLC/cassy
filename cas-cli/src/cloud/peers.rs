@@ -249,14 +249,23 @@ pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
 /// (cas-f707). Empty when the caller is unknown or the project does not
 /// reach Cassy Cloud.
 fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
-    let Some(self_id) = self_id else {
-        return String::new();
-    };
     let logged_in = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
         .is_ok_and(|config| config.is_logged_in());
     if !logged_in || crate::cloud::resolve_canonical_id(cas_root).is_none() {
         return String::new();
     }
+    // An explicit `cloud.auto_sync = false` keeps this project's agents out
+    // of the registry; discovery still reads it, so it is one-way.
+    if crate::cloud::presence::opted_out(cas_root) {
+        return format!(
+            "{}Peers: discovery is one-way: this project still lists peers that \
+             registered, but they cannot see its supervisors.\n",
+            crate::cloud::presence::DISABLED_LINE
+        );
+    }
+    let Some(self_id) = self_id else {
+        return String::new();
+    };
     let record = crate::cloud::presence::load(cas_root, self_id);
     crate::cloud::presence::render_line(record.as_ref(), Utc::now())
 }

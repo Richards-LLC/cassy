@@ -118,7 +118,8 @@ pub fn load(cas_root: &Path, agent_id: &str) -> Option<PresenceRecord> {
         .filter(|record| record.agent_id == agent_id)
 }
 
-fn save(cas_root: &Path, record: &PresenceRecord) {
+/// Persist `record` as its agent's presence (written atomically).
+pub fn save(cas_root: &Path, record: &PresenceRecord) {
     let path = record_path(cas_root, &record.agent_id);
     let write = || -> std::io::Result<()> {
         std::fs::create_dir_all(path.parent().unwrap_or(cas_root))?;
@@ -335,9 +336,28 @@ pub fn tick(
     }
 }
 
+/// Whether the project explicitly opted out of cloud sync
+/// (`cloud.auto_sync = false`). Then its agents are not registered: agent
+/// names, hostnames, branches and focus never leave the machine. Unset means
+/// on (the default).
+pub fn opted_out(cas_root: &Path) -> bool {
+    crate::config::Config::load(cas_root)
+        .ok()
+        .and_then(|config| config.cloud)
+        .is_some_and(|cloud| !cloud.auto_sync)
+}
+
+/// The presence line for a project that opted out.
+pub const DISABLED_LINE: &str = "Cloud presence: disabled (cloud.auto_sync=false): this \
+     project's agents are not registered with Cassy Cloud.\n";
+
 /// The project's cloud coordinator (its own cloud config, scoped to its
-/// canonical id), or `None` when the project is not logged in.
+/// canonical id), or `None` when the project is not logged in or opted out
+/// of cloud sync.
 pub fn project_coordinator(cas_root: &Path) -> Option<CloudCoordinator> {
+    if opted_out(cas_root) {
+        return None;
+    }
     let config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
     if !config.is_logged_in() {
         return None;

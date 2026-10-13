@@ -496,3 +496,54 @@ async fn cas_f707_a_failing_registration_waits_out_its_backoff() {
     let shown = crate::cloud::peers::peers_section(&fx.cas_root, Some(me));
     assert!(shown.contains("2 failed attempts, next retry in"), "{shown}");
 }
+
+/// An explicit `cloud.auto_sync = false` keeps the project's agents out of
+/// the registry, says so, and calls discovery one-way; turning it back on
+/// (the default) registers again.
+#[tokio::test]
+async fn cas_f707_auto_sync_false_opts_out_of_presence_and_says_so() {
+    let (fx, _) = fixture("cas-571d").await;
+    let set_auto_sync = |value: &str| {
+        let mut config = crate::config::Config::load(&fx.cas_root).unwrap();
+        config.set("cloud.auto_sync", value).unwrap();
+        config.save(&fx.cas_root).unwrap();
+    };
+    set_auto_sync("false");
+    // The daemon as `cas serve` builds it for this project.
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: fx.cas_root.clone(),
+        index_code: false,
+        cloud_sync_enabled: false,
+        ..Default::default()
+    });
+    let me = "sup-f707-optout";
+    session_start(&daemon, me, "private-sup").await;
+    heartbeat_tick(&daemon).await;
+    assert!(presence::push_agent(&fx.cas_root, me).is_none());
+    {
+        let state = fx.cloud.state();
+        assert!(state.registrations.is_empty(), "{:?}", state.registrations);
+        assert!(state.heartbeats.is_empty(), "{:?}", state.heartbeats);
+    }
+    let shown = crate::cloud::peers::peers_section(&fx.cas_root, Some(me));
+    assert!(
+        shown.starts_with("Cloud presence: disabled (cloud.auto_sync=false)"),
+        "{shown}"
+    );
+    assert!(shown.contains("discovery is one-way"), "{shown}");
+    // `cas status` without a known caller says the same.
+    let anonymous = crate::cloud::peers::peers_section(&fx.cas_root, None);
+    assert!(anonymous.starts_with("Cloud presence: disabled"), "{anonymous}");
+
+    // Back on: the default path registers.
+    set_auto_sync("true");
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: fx.cas_root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    session_start(&daemon, me, "private-sup").await;
+    assert_eq!(fx.cloud.state().registrations.len(), 1);
+    let shown = crate::cloud::peers::peers_section(&fx.cas_root, Some(me));
+    assert!(shown.starts_with("Cloud presence: registered"), "{shown}");
+}

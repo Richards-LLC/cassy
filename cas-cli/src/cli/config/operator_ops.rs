@@ -81,7 +81,7 @@ fn record_event(cas_root: &Path, event: &str, fields: &[(&str, &str)]) {
 /// operator usually runs this as `! cas …` inside an agent pane, which
 /// carries agent environment and has no terminal, so the only refusal here is
 /// a factory worker cgroup; agents running it as a tool call are refused by
-/// the PreToolUse hook. Roots left in the 3.50.0 operator policy file are
+/// the PreToolUse hook. Roots left in the cas-3147 operator policy file are
 /// moved into config.toml (an empty value clears both).
 pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
@@ -123,7 +123,7 @@ pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -
 pub(crate) struct WriteRootsChange {
     pub previous: Vec<String>,
     pub stored: Vec<String>,
-    /// Roots moved from the 3.50.0 operator policy file into config.toml.
+    /// Roots moved from the cas-3147 operator policy file into config.toml.
     pub migrated: Vec<String>,
     /// Legacy roots that no longer pass validation, with the reason.
     pub dropped: Vec<String>,
@@ -143,7 +143,7 @@ pub(crate) fn set_project_write_roots(
     let mut roots = parse_project_write_roots(value, cas_root)?;
     let clearing = roots.is_empty();
 
-    // Migrate 3.50.0 roots out of the operator policy file; an empty value
+    // Migrate legacy cas-3147 roots out of the operator policy file; an empty value
     // clears them too. Grants stay in the file.
     let mut legacy = load_operator_policy(cas_root)?;
     let mut migrated = Vec::new();
@@ -186,7 +186,7 @@ pub(crate) fn set_project_write_roots(
 }
 
 /// `cas config get factory.write_roots`: the config.toml value, plus a
-/// note on stderr for roots still honoured from the 3.50.0 operator file.
+/// note on stderr for roots still honoured from the cas-3147 operator policy file.
 pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = crate::config::Config::load(cas_root)?;
     let roots = config.factory().write_roots;
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(cas_root.join("config.toml")).ok(), before);
     }
 
-    /// GH #1182 acceptance 6: setting roots moves 3.50.0 roots out of the
+    /// GH #1182 acceptance 6: setting roots moves legacy cas-3147 roots out of the
     /// operator policy file into config.toml and keeps per-task grants there;
     /// a file left with only roots is removed.
     #[test]

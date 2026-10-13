@@ -4221,7 +4221,7 @@ fn apply_patch_write_targets_with_modes(
 /// call, and the task IDs whose grants apply. Project roots come from the
 /// project's `.cas/config.toml` `[factory] write_roots` (this `cas_root` is
 /// the owning project's, also for a worker in an isolated worktree), unioned
-/// with roots still left in the 3.50.0 operator policy file. A grant applies
+/// with roots still left in the cas-3147 operator policy file. A grant applies
 /// while its task is open: to the worker holding the task's lease, and to the
 /// supervisor. An unreadable policy file fails closed to "no legacy roots or
 /// grants". The project's config files and the policy directory stay

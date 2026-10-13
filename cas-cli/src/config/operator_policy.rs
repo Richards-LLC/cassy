@@ -13,7 +13,7 @@
 //!    config editor, reset) refuses the key and `cas config import` keeps the
 //!    current value. Per-task grants stay in `.cas/operator/write-policy.toml`,
 //!    written only by `cas config grant-write` and the hub. Roots left in that
-//!    file by 3.50.0 are still honoured until `cas config set
+//!    file by cas-3147 are still honoured until `cas config set
 //!    factory.write_roots` migrates them.
 //! 2. The operator's own `! cas config set …` inside an agent pane carries
 //!    agent environment and no terminal, so setting roots refuses only a
@@ -291,7 +291,7 @@ pub fn resolve_operator_path(raw: &str, cas_root: &Path) -> anyhow::Result<PathB
     Ok(canonical)
 }
 
-/// The 3.50.0 entry format, superseded by [`parse_project_write_roots`]
+/// The legacy path:modes format, superseded by [`parse_project_write_roots`]
 /// (GH #1182); kept for the cas-3147 resolution tests.
 #[cfg(test)]
 /// Parse `cas config set factory.write_roots` values: comma-separated
@@ -364,7 +364,7 @@ pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<
 
 /// Parse `cas config set factory.write_roots` values (GH #1182): a
 /// comma-separated list of directories. Each root permits create, edit and
-/// delete beneath it, so the `path:modes` suffix of 3.50.0 is refused. An
+/// delete beneath it, so the legacy `path:modes` suffix is refused. An
 /// empty value clears the roots. Duplicates are dropped, order is kept.
 pub fn parse_project_write_roots(value: &str, cas_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut roots: Vec<PathBuf> = Vec::new();

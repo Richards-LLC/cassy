@@ -210,7 +210,7 @@ pub struct ConfigEditArgs {
 pub fn execute_subcommand(cmd: &ConfigCommands, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
         // GH #1182: write roots are operator-only. `set` validates every path
-        // and migrates 3.50.0 roots; `get` also notes legacy roots.
+        // and migrates legacy cas-3147 roots; `get` also notes legacy roots.
         ConfigCommands::Get(args) if args.key == "factory.write_roots" => {
             operator_ops::execute_get_write_roots(cli, cas_root)
         }

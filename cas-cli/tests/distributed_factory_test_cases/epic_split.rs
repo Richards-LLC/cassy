@@ -278,9 +278,21 @@ async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
         .unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
 
-    // Each starts its own share.
+    // cas-0078 no-theft: every refused start, claim and spawn left the real
+    // holders' cloud claims exactly where they were.
+    for child in PROWL_TAKES {
+        assert_eq!(cloud_holder(&cloud, child).as_deref(), Some("pr"), "{child}");
+    }
+    for child in SOUNDWAVE_TAKES {
+        assert_eq!(cloud_holder(&cloud, child).as_deref(), Some("sw"), "{child}");
+    }
+
+    // Each starts its own share: the worker wins its local lease and only
+    // then takes its own supervisor's split claim (take_from_local).
     soundwave.start("cas-a1", false).await.unwrap();
     prowl.start("cas-d1", false).await.unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
+    assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), Some("pr-w"));
 
     // Force takes a child anyway, visibly.
     let forced = soundwave.start("cas-d3", true).await.unwrap();
@@ -391,4 +403,68 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     }
     // The gate lifts with the proposal.
     soundwave.start("cas-a3", false).await.unwrap();
+}
+
+/// cas-0078 no-theft for split claims: a split never takes a cloud claim from
+/// the agent that holds it. A child one's own worker already works stays
+/// that worker's when the supervisor proposes it, a refused start on the
+/// other side leaves it alone, and cancelling releases only the supervisor's
+/// own split claims, never its worker's.
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_never_takes_a_claim_from_its_holder() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+
+    // soundwave's worker already works cas-a1.
+    soundwave.start("cas-a1", false).await.unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
+
+    let proposed = soundwave
+        .factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1,cas-a2", "theirs": "cas-d1"}))
+        .await
+        .unwrap();
+    let id = split_id(&proposed);
+    assert_eq!(
+        cloud_holder(&cloud, "cas-a1").as_deref(),
+        Some("sw-w"),
+        "proposing never moves the worker's claim to the supervisor"
+    );
+    assert_eq!(cloud_holder(&cloud, "cas-a2").as_deref(), Some("sw"));
+
+    assert_eq!(prowl.tick().await.delivered, 1);
+    prowl
+        .factory(json!({"id": id, "decision": "accept"}))
+        .await
+        .unwrap();
+    assert_eq!(soundwave.tick().await.delivered, 1);
+
+    // prowl's refused start and claim of soundwave's children take nothing.
+    for child in ["cas-a1", "cas-a2"] {
+        let refused = prowl.start(child, false).await.unwrap_err();
+        assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+    }
+    let refused = prowl.claim("cas-a2").await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
+    assert_eq!(cloud_holder(&cloud, "cas-a2").as_deref(), Some("sw"));
+    assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), Some("pr"));
+
+    // soundwave cancels: its own split claim goes, its worker's stays, and
+    // prowl's is untouched.
+    let cancelled = soundwave
+        .factory(json!({"id": id, "decision": "cancel"}))
+        .await
+        .unwrap();
+    assert!(cancelled.contains("released 1 of your own claim"), "{cancelled}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
+    assert_eq!(cloud_holder(&cloud, "cas-a2"), None);
+    assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), Some("pr"));
+    assert_eq!(prowl.tick().await.delivered, 1);
+    assert_eq!(
+        cloud_holder(&cloud, "cas-d1").as_deref(),
+        Some("pr"),
+        "receiving the cancel never releases prowl's claim"
+    );
 }

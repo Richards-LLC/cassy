@@ -59,9 +59,20 @@ pub(crate) fn execute_import(
     let content = std::fs::read_to_string(&args.file)?;
 
     // Try to parse as YAML first, then JSON
-    let imported_config: Config = serde_yaml::from_str(&content)
+    let mut imported_config: Config = serde_yaml::from_str(&content)
         .or_else(|_| serde_json::from_str(&content))
         .map_err(|e| anyhow::anyhow!("Failed to parse config file: {e}"))?;
+    // GH #1182: write roots are operator-only and change only through
+    // `cas config set factory.write_roots`; an import keeps the current value.
+    let current_roots = current_config.factory().write_roots;
+    if imported_config.factory().write_roots != current_roots {
+        eprintln!(
+            "note: factory.write_roots is not imported; the operator sets it with `cas config set factory.write_roots`"
+        );
+    }
+    if imported_config.factory.is_some() || !current_roots.is_empty() {
+        imported_config.set_factory_write_roots(current_roots);
+    }
 
     if args.dry_run {
         // Show what would change

@@ -1,12 +1,13 @@
 //! Operator-granted write roots for the factory workspace contract (cas-3147,
-//! GH #1169).
+//! GH #1169, GH #1182).
 //!
 //! The contract normally sanctions only the worktree, the task artifacts root,
 //! the scratch root and the harness scratchpad. An operator may add directories
-//! outside them: project-wide roots, or a one-off grant bound to one task. Each
-//! root names the operations it permits (create, edit, delete). This module only
-//! matches a resolved path against the policy; who may write the policy is
-//! decided elsewhere.
+//! outside them: project-wide roots (`[factory] write_roots` in the project's
+//! `.cas/config.toml`, each permitting create, edit and delete), or a one-off
+//! grant bound to one task with its own modes. This module only matches a
+//! resolved path against the policy; who may write the policy is decided
+//! elsewhere.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,26 @@ impl WriteMode {
     }
 }
 
+/// The paths of a project that no agent may write (GH #1182): the operator
+/// policy directory and the config files that hold the write roots.
+pub(crate) fn protected_policy_paths(cas_root: &Path) -> Vec<PathBuf> {
+    vec![
+        cas_root.join("operator"),
+        cas_root.join("config.toml"),
+        cas_root.join("config.yaml"),
+    ]
+}
+
+/// Whether `path` is any project's Cassy config or operator policy:
+/// `…/.cas/config.toml`, `…/.cas/config.yaml` or under `…/.cas/operator/`.
+pub(crate) fn is_cas_policy_path(path: &Path) -> bool {
+    let components: Vec<_> = path.components().map(|component| component.as_os_str()).collect();
+    components.windows(2).any(|pair| {
+        pair[0] == ".cas"
+            && (pair[1] == "config.toml" || pair[1] == "config.yaml" || pair[1] == "operator")
+    })
+}
+
 /// A directory outside the default sanctioned set, with its permitted modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WriteRoot {
@@ -45,10 +66,11 @@ pub(crate) struct WriteRoot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WritePolicy {
     pub roots: Vec<WriteRoot>,
-    /// Directories no agent may write, whatever the roots say: the operator
-    /// policy itself (`.cas/operator/`).
+    /// Paths no agent may write, whatever the roots say: the operator policy
+    /// (`.cas/operator/`) and the project config that holds the roots
+    /// (`.cas/config.toml`, and the legacy `.cas/config.yaml` it merges).
     pub protected: Vec<PathBuf>,
-    /// The operator policy file exists. Only then are in-place edits
+    /// Project write roots are configured, or the operator policy file exists. Only then are in-place edits
     /// (`sed -i`, `perl -i`) and rename sources judged under the contract;
     /// without it the default contract is exactly as before (cas-3147).
     pub configured: bool,
@@ -67,6 +89,11 @@ impl WritePolicy {
         mode: WriteMode,
         task_ids: &HashSet<String>,
     ) -> Option<&WriteRoot> {
+        // No root ever admits a Cassy policy file, including another
+        // project's, so one project's roots cannot widen another's.
+        if is_cas_policy_path(resolved) {
+            return None;
+        }
         self.in_effect(task_ids).find(|root| {
             root.modes.contains(&mode)
                 // A root that cannot be resolved (missing, dangling symlink)

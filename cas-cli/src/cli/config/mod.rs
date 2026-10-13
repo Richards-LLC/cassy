@@ -21,9 +21,11 @@ pub enum ConfigCommands {
     /// Get a config value
     Get(ConfigGetArgs),
 
-    /// Set a config value. `factory.write_roots` is operator-only and
-    /// guardrail-grade, not security-grade: it is written to
-    /// .cas/operator/write-policy.toml and refused inside agent sessions.
+    /// Set a config value. `factory.write_roots "<dir>,<dir>"` names
+    /// directories outside the worktree where this project's agents may
+    /// create, edit and delete files; it is stored in .cas/config.toml, an
+    /// empty value clears it, and only the operator can change it (agents are
+    /// refused by Cassy's tool-call hook; guardrail-grade, not security-grade).
     Set(ConfigSetArgs),
 
     /// List all config options
@@ -70,6 +72,9 @@ pub struct ConfigGetArgs {
 }
 
 #[derive(Parser)]
+#[command(
+    after_help = "Project write roots (operator only):\n  cas config set factory.write_roots \"~/Downloads,/mnt/models\"\n  cas config set factory.write_roots \"\"   # clear\nStored in .cas/config.toml as [factory] write_roots. Each root lets this project's supervisor and workers create, edit and delete files beneath it. Paths are canonicalized; /, $HOME, its ancestors, the project root and anything containing or inside .cas are refused. Run it from your terminal or as `! cas config set …` in an agent pane; agents' own tool calls are refused, and it refuses inside a factory worker cgroup. Guardrail-grade, not security-grade: agents share your Unix user."
+)]
 pub struct ConfigSetArgs {
     /// Config key to set
     pub key: String,
@@ -204,7 +209,8 @@ pub struct ConfigEditArgs {
 /// cas_root is resolved once at CLI entry point and passed here.
 pub fn execute_subcommand(cmd: &ConfigCommands, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
-        // cas-3147: write roots live in the operator policy file, not config.toml.
+        // GH #1182: write roots are operator-only. `set` validates every path
+        // and migrates 3.50.0 roots; `get` also notes legacy roots.
         ConfigCommands::Get(args) if args.key == "factory.write_roots" => {
             operator_ops::execute_get_write_roots(cli, cas_root)
         }

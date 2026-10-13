@@ -2003,19 +2003,46 @@ impl CasCore {
             .get(&agent_id)
             .map(|agent| agent.name)
             .unwrap_or_else(|_| agent_id.clone());
-        let is_local_agent = |id: &str| agent_store.get(id).is_ok();
+        // cas-0078: every cloud round trip below runs off the async runtime,
+        // all of them within one bounded budget.
+        let peer_budget = crate::cloud::peer_claims::PeerBudget::default();
+        let local_agents = std::sync::Arc::new(crate::cloud::peer_claims::local_agent_ids(
+            agent_store.as_ref(),
+        ));
         let cloud_duration = lease_duration.clamp(1, 3600) as u32;
         let mut peer_notes = elsewhere_note;
         let mut cloud_claimed = false;
+        // cas-0078: another agent of this database holds the cloud claim. It
+        // moves here only if this start wins the local lease below.
+        let mut cloud_local_holder: Option<String> = None;
+        let task_claim_kind = if task.task_type == crate::types::TaskType::Epic {
+            crate::cloud::peer_claims::ClaimKind::Epic
+        } else {
+            crate::cloud::peer_claims::ClaimKind::Task
+        };
         if let Some(claims) = peer_claims.as_ref() {
             use crate::cloud::peer_claims::{Acquire, ClaimKind};
-            let kind = if task.task_type == crate::types::TaskType::Epic {
-                ClaimKind::Epic
-            } else {
-                ClaimKind::Task
+            let kind = task_claim_kind;
+            let answer = {
+                let (claims, id, agent, name, local) = (
+                    claims.clone(),
+                    req.id.clone(),
+                    agent_id.clone(),
+                    agent_name.clone(),
+                    std::sync::Arc::clone(&local_agents),
+                );
+                peer_budget
+                    .run(move || {
+                        claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                            local.contains(holder)
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(Acquire::Unavailable)
             };
-            match claims.acquire(&req.id, kind, &agent_id, &agent_name, cloud_duration, &is_local_agent) {
+            match answer {
                 Acquire::Claimed => cloud_claimed = true,
+                Acquire::LocalHolder(holder) => cloud_local_holder = Some(holder),
                 // Peers share epics; the overlap is worth knowing, not a block.
                 Acquire::PeerHolds(hold) if kind == ClaimKind::Epic => {
                     peer_notes.push_str(&shared_epic_note(&req.id, &hold));
@@ -2078,9 +2105,14 @@ impl CasCore {
                             .get(&held_by)
                             .map(|a| format!("{} ({})", a.name, held_by))
                             .unwrap_or_else(|_| held_by.clone());
-                        if cloud_claimed {
-                            // The local lease refused; leave no cloud claim behind.
-                            crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.id);
+                        if cloud_claimed && let Some(claims) = peer_claims.clone() {
+                            // The local lease refused; leave no claim of this
+                            // agent's behind. A claim another agent holds was
+                            // never touched (cas-0078).
+                            let (id, agent) = (req.id.clone(), agent_id.clone());
+                            let _ = peer_budget
+                                .run(move || claims.release_own(&id, &agent))
+                                .await;
                         }
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
@@ -2099,22 +2131,63 @@ impl CasCore {
                     None
                 }
             };
+        // cas-0078: this start won the local lease, so a cloud claim another
+        // agent of this database holds now moves here.
+        if claim_info.is_some()
+            && let (Some(claims), Some(holder)) = (peer_claims.clone(), cloud_local_holder.take())
+        {
+            let (id, agent, name) = (req.id.clone(), agent_id.clone(), agent_name.clone());
+            let kind = task_claim_kind;
+            let _ = peer_budget
+                .run(move || claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration))
+                .await;
+        }
         // cas-5f28: a standard agent's start also focuses the parent epic
         // (claimed locally below). Mirror that focus, and say when a peer on
-        // another machine already works the same epic.
+        // another machine already works the same epic. A claim another agent
+        // of this database holds stays with it; renewal moves it to whoever
+        // holds the epic's local lease (cas-0078).
         if !is_worker && let Some(claims) = peer_claims.as_ref() {
-            for dep in task_store.get_dependencies(&req.id).unwrap_or_default() {
-                if dep.dep_type != crate::types::DependencyType::ParentChild {
-                    continue;
-                }
-                let Ok(parent) = task_store.get(&dep.to_id) else { continue };
-                if parent.task_type != crate::types::TaskType::Epic {
-                    continue;
-                }
+            let parents: Vec<String> = task_store
+                .get_dependencies(&req.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|dep| dep.dep_type == crate::types::DependencyType::ParentChild)
+                .filter_map(|dep| task_store.get(&dep.to_id).ok())
+                .filter(|parent| parent.task_type == crate::types::TaskType::Epic)
+                .map(|parent| parent.id)
+                .collect();
+            if !parents.is_empty() {
                 use crate::cloud::peer_claims::{Acquire, ClaimKind};
-                match claims.acquire(&parent.id, ClaimKind::Epic, &agent_id, &agent_name, cloud_duration, &is_local_agent) {
-                    Acquire::PeerHolds(hold) => peer_notes.push_str(&shared_epic_note(&parent.id, &hold)),
-                    Acquire::Claimed | Acquire::StalePeer(_) | Acquire::Unavailable(_) => {}
+                let (claims, agent, name, local) = (
+                    claims.clone(),
+                    agent_id.clone(),
+                    agent_name.clone(),
+                    std::sync::Arc::clone(&local_agents),
+                );
+                let answers = peer_budget
+                    .run(move || {
+                        parents
+                            .into_iter()
+                            .map(|parent| {
+                                let answer = claims.acquire(
+                                    &parent,
+                                    ClaimKind::Epic,
+                                    &agent,
+                                    &name,
+                                    cloud_duration,
+                                    &|holder| local.contains(holder),
+                                );
+                                (parent, answer)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .unwrap_or_default();
+                for (parent, answer) in answers {
+                    if let Acquire::PeerHolds(hold) = answer {
+                        peer_notes.push_str(&shared_epic_note(&parent, &hold));
+                    }
                 }
             }
         }

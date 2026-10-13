@@ -15,7 +15,9 @@ use crate::types::{LeaseStatus, TaskLease};
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerClaim {
     pub task_id: String,
+    pub lock_key: String,
     pub agent_id: String,
+    pub agent_name: Option<String>,
     pub title: Option<String>,
     /// Status from this project's synced task store, when available.
     pub status: Option<String>,
@@ -108,6 +110,23 @@ fn heartbeat_age(agent: &AgentInfo, now: DateTime<Utc>) -> Option<i64> {
         .map(|at| (now - at.with_timezone(&Utc)).num_seconds().max(0))
 }
 
+/// Cloud task keys carry a repository hash. Only unwrap keys from this
+/// identity/alias class; legacy unscoped task IDs retain their spelling.
+fn task_id_for_peer<'a>(key: &'a str, peer: &Peer, aliases: &[String]) -> Option<&'a str> {
+    let Some((task_id, suffix)) = key.rsplit_once('~') else {
+        return Some(key);
+    };
+    if suffix.len() != 8 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(key);
+    }
+    aliases
+        .iter()
+        .map(String::as_str)
+        .chain(peer.canonical_id.as_deref())
+        .any(|repo| super::peer_claims::claim_key(repo, task_id) == key)
+        .then_some(task_id)
+}
+
 /// Require both a session and a machine boundary: session names alone can
 /// collide across clones. Agents without enough identity are not guessed in.
 fn belongs_to_peer(
@@ -173,17 +192,23 @@ pub fn assemble_peer_details(
                     lock.agent_id == supervisor.agent_id
                         || members.iter().any(|m| m.id == lock.agent_id)
                 })
-                .map(|lock| {
-                    let task = tasks.get(&lock.task_id).ok();
-                    PeerClaim {
-                        task_id: lock.task_id.clone(),
+                .filter_map(|lock| {
+                    let task_id = task_id_for_peer(&lock.task_id, &supervisor, aliases)?;
+                    let task = tasks.get(task_id).ok();
+                    Some(PeerClaim {
+                        task_id: task_id.to_string(),
+                        lock_key: lock.task_id.clone(),
                         agent_id: lock.agent_id.clone(),
+                        agent_name: agents
+                            .iter()
+                            .find(|a| a.id == lock.agent_id)
+                            .map(|a| a.name.clone()),
                         title: task.as_ref().map(|t| t.title.clone()),
                         status: task.map(|t| t.status.to_string()),
                         age_secs: (now - lock.renewed_at).num_seconds().max(0),
                         renewed_at: lock.renewed_at,
                         expires_at: lock.expires_at,
-                    }
+                    })
                 })
                 .collect();
             claims.sort_by(|a, b| a.task_id.cmp(&b.task_id).then(a.agent_id.cmp(&b.agent_id)));
@@ -253,13 +278,24 @@ pub fn discover_peer_report(
         .into_iter()
         .chain(std::iter::once(repo.to_string()))
         .collect();
-    let coordinator = super::CloudCoordinator::new(config)?
+    let coordinator = super::CloudCoordinator::new(config.clone())?
         .with_canonical_id(Some(repo.to_string()))
         .with_timeout(peers::DISCOVERY_TIMEOUT);
     let agents = coordinator.list_agent_infos()?;
-    let viewer_user_id = self_id
-        .and_then(|id| agents.iter().find(|a| a.id == id))
-        .and_then(|a| a.user_id.as_deref());
+    // Without project= the server returns only agents owned by this token.
+    // Never infer account authority from a project-visible self row: it may
+    // be absent (operator CLI) or belong to another team member.
+    let own_agents = super::CloudCoordinator::new(config)?
+        .with_timeout(peers::DISCOVERY_TIMEOUT)
+        .list_agent_infos()?;
+    let own_users: std::collections::BTreeSet<_> = own_agents
+        .iter()
+        .filter_map(|a| a.user_id.as_deref())
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    let viewer_user_id = (own_users.len() == 1)
+        .then(|| own_users.first().copied())
+        .flatten();
     let now = Utc::now();
     let mut supervisors = peers::repo_peers(&agents, repo, &aliases, self_id, now);
     if let Some(selected) = selected {
@@ -377,9 +413,10 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         line(format!("  {error}"));
     } else {
         let live = report.peers.iter().filter(|p| p.supervisor.live).count();
+        let count = report.peers.len();
         line(format!(
-            "[OK] {} peer supervisors | {live} live",
-            report.peers.len()
+            "[OK] {count} peer supervisor{} | {live} live",
+            if count == 1 { "" } else { "s" }
         ));
         line(format!(
             "Repo {}",
@@ -427,9 +464,15 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     "    {:>5} {} [{}]",
                     claim.age_secs,
                     claim.task_id,
-                    claim.status.as_deref().unwrap_or("claimed")
+                    claim
+                        .status
+                        .as_deref()
+                        .unwrap_or("claimed; title not synced")
                 ));
-                line(format!("          Owner {}", claim.agent_id));
+                line(format!(
+                    "          Owner {}",
+                    claim.agent_name.as_deref().unwrap_or("unknown agent")
+                ));
                 if let Some(title) = &claim.title {
                     line(format!("          {title}"));
                 }

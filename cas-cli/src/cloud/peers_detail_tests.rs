@@ -140,9 +140,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         for width in [80, 120] {
             let text = render_peer_report(&report, width, ascii);
             assert!(
-                text.starts_with(
-                    "[OK] 1 peer supervisors | 1 live\nRepo github.com/acme/widgets\n"
-                ),
+                text.starts_with("[OK] 1 peer supervisor | 1 live\nRepo github.com/acme/widgets\n"),
                 "{text}"
             );
             assert!(
@@ -283,6 +281,9 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
     let owner_id = "22b34bda-18a6-4be1-a107-b90ad96f6fa7";
     let mut owner = agent(owner_id, "worker", "factory-b", "beta", REPO, 1);
     owner.name = "qa-worker".into();
+    owner
+        .metadata
+        .insert("branch".into(), "factory/qa-worker".into());
     let agents = vec![
         agent("sup", "supervisor", "factory-b", "beta", REPO, 1),
         owner,

@@ -17,9 +17,7 @@ pub struct PeersArgs {
 pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()> {
     use crate::cloud::peers_detail::{ascii_terminal, discover_peer_report, render_peer_report};
     // Read-only identity resolution: never register the CLI as an agent.
-    let self_id = std::env::var("CAS_SESSION_ID")
-        .ok()
-        .filter(|id| !id.trim().is_empty())
+    let self_id = crate::cloud::peers::cli_self_id(cas_root)
         .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok());
     let report = discover_peer_report(
         cas_root,

@@ -26,6 +26,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `.cas/config.toml` or `.cas/config.yaml`; MCP and the config editor refuse
   the key and `cas config import` keeps the current value. No root admits any
   project's `.cas/config.*` or `.cas/operator/`.
+- The hook also catches the command behind wrappers (`timeout`, `env -i`,
+  `nice`, `nohup`, `xargs`, `stdbuf`, `flock`, …), `$(which cas)`, `sh -c`
+  and `eval`, and refuses any command that names `factory.write_roots` with
+  `set` (or `grant-write` / `revoke-write`) unless it only reads, which covers
+  `python -c`, `perl -e` and heredocs. This is a guardrail, not a security
+  boundary: a command hidden in a script file the agent runs is out of reach
+  of a tool-call hook.
 - Unsafe roots are refused when set: `/`, `$HOME` and its ancestors, the
   project root, anything containing or inside the project's `.cas/`, a `..`
   component, or a symlink that resolves to one of these.

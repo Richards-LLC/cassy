@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — write roots by project (#1182)
+
+- Project write roots are a normal project setting: `[factory] write_roots`
+  in `.cas/config.toml`. `cas config set factory.write_roots
+  "~/Downloads,/mnt/models"` sets them and `""` clears them; `cas config list`
+  and `cas config get factory.write_roots` show them. Each root lets that
+  project's supervisor and workers create, edit, rename and delete files
+  beneath it; the `path:modes` form is gone (per-task grants keep modes).
+  Agents in other projects are unaffected.
+- The operator's own `! cas config set factory.write_roots …` inside an agent
+  pane now works: setting roots no longer needs a terminal or a typed
+  `ALLOW`, and no longer refuses agent environment. It still refuses inside a
+  factory worker cgroup. Agents cannot widen roots: the tool-call hook refuses
+  the command, and any agent write, edit, rename or delete of
+  `.cas/config.toml` or `.cas/config.yaml`; MCP and the config editor refuse
+  the key and `cas config import` keeps the current value. No root admits any
+  project's `.cas/config.*` or `.cas/operator/`.
+- Unsafe roots are refused when set: `/`, `$HOME` and its ancestors, the
+  project root, anything containing or inside the project's `.cas/`, a `..`
+  component, or a symlink that resolves to one of these.
+- Roots that 3.50.0 stored in `.cas/operator/write-policy.toml` are still
+  honoured and move into `config.toml` the next time roots are set. Per-task
+  grants (`cas config grant-write`, Commander) are unchanged.
+
 ## [3.50.0] - 2026-10-10
 
 ### Changed — many agents on one machine (#1165)

@@ -1,4 +1,4 @@
-//! Operator-only write policy (cas-3147, GH #1169).
+//! Operator-only write policy (cas-3147, GH #1169, GH #1182).
 //!
 //! Project write roots and one-off per-task write grants widen the factory
 //! workspace contract, so only the human operator may set them. Agents run as
@@ -6,14 +6,22 @@
 //! level (see the cas-3147 decision note). The policy is therefore guarded in
 //! layers:
 //!
-//! 1. It lives in its own file, `.cas/operator/write-policy.toml`, never in
-//!    `config.toml`, so `Config::set`, the config TUI and any MCP path that
-//!    reaches them cannot write it.
-//! 2. Only `cas config set factory.write_roots` and `cas config grant-write`
-//!    write the file, and only after [`operator_context_refusal`] finds no
-//!    agent context and the operator retypes the path at a terminal.
-//! 3. The PreToolUse workspace contract refuses every agent tool call that
-//!    writes under `.cas/operator/` or runs those two commands.
+//! 1. Project write roots live in the project's `.cas/config.toml` as
+//!    `[factory] write_roots` (GH #1182), so `cas config list` shows them.
+//!    Only `cas config set factory.write_roots` writes them, through
+//!    [`parse_project_write_roots`]; the generic `Config::set` (MCP, the
+//!    config editor, reset) refuses the key and `cas config import` keeps the
+//!    current value. Per-task grants stay in `.cas/operator/write-policy.toml`,
+//!    written only by `cas config grant-write` and the hub. Roots left in that
+//!    file by cas-3147 are still honoured until `cas config set
+//!    factory.write_roots` migrates them.
+//! 2. The operator's own `! cas config set …` inside an agent pane carries
+//!    agent environment and no terminal, so setting roots refuses only a
+//!    factory worker cgroup ([`worker_cgroup_refusal`]). Grants keep the full
+//!    [`operator_context_refusal`] and a typed confirmation.
+//! 3. The PreToolUse hook is the gate against agents: it refuses agent tool
+//!    calls that run these commands, or that write `.cas/config.toml`,
+//!    `.cas/config.yaml` or anything under `.cas/operator/`.
 //!
 //! This is guardrail-grade, not security-grade. The operator and the agents
 //! share a Unix user, so the PreToolUse hook (layer 3) is the actual gate
@@ -283,6 +291,9 @@ pub fn resolve_operator_path(raw: &str, cas_root: &Path) -> anyhow::Result<PathB
     Ok(canonical)
 }
 
+/// The legacy path:modes format, superseded by [`parse_project_write_roots`]
+/// (GH #1182); kept for the cas-3147 resolution tests.
+#[cfg(test)]
 /// Parse `cas config set factory.write_roots` values: comma-separated
 /// `path[:modes]` entries, for example `~/a:create+edit,~/b`. Each path must
 /// exist; it is resolved to a canonical absolute path. `""` clears the roots.
@@ -307,6 +318,104 @@ pub fn parse_write_roots(value: &str, cas_root: &Path) -> anyhow::Result<Vec<Ope
             })
         })
         .collect()
+}
+
+/// Resolve one `[factory] write_roots` entry (GH #1182): `~` expanded,
+/// absolute, no `..` component, existing and canonical (so a symlink is
+/// judged by where it points), and none of: `/`, `$HOME` or an ancestor of
+/// it, the project root, or anything that contains or lies inside the
+/// project's `.cas/` (so `.cas/config.toml` is never under a root).
+pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<PathBuf> {
+    let raw = raw.trim();
+    if Path::new(raw)
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        anyhow::bail!("write root `{raw}` must not contain `..`; name the directory directly");
+    }
+    let canonical = resolve_operator_path(raw, cas_root)?;
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| home.canonicalize().ok())
+        && home.starts_with(&canonical)
+    {
+        anyhow::bail!(
+            "write root `{}` contains your home directory; name the folders inside it",
+            canonical.display()
+        );
+    }
+    let cas_dir = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+    if cas_dir.starts_with(&canonical) {
+        anyhow::bail!(
+            "write root `{}` contains this project's Cassy directory ({}); name a directory outside the project",
+            canonical.display(),
+            cas_dir.display()
+        );
+    }
+    if canonical.starts_with(&cas_dir) {
+        anyhow::bail!(
+            "write root `{}` is inside this project's Cassy directory ({})",
+            canonical.display(),
+            cas_dir.display()
+        );
+    }
+    Ok(canonical)
+}
+
+/// Parse `cas config set factory.write_roots` values (GH #1182): a
+/// comma-separated list of directories. Each root permits create, edit and
+/// delete beneath it, so the legacy `path:modes` suffix is refused. An
+/// empty value clears the roots. Duplicates are dropped, order is kept.
+pub fn parse_project_write_roots(value: &str, cas_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for entry in value.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+        if let Some((_, modes)) = entry.rsplit_once(':')
+            && !modes.is_empty()
+            && parse_modes(modes).is_ok()
+        {
+            anyhow::bail!(
+                "write root `{entry}`: roots no longer take modes; each root permits create, edit and delete. Use a one-off `cas config grant-write` for narrower access"
+            );
+        }
+        let root = resolve_project_write_root(entry, cas_root)?;
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
+}
+
+/// The project write roots in effect for the PreToolUse hook (GH #1182):
+/// `[factory] write_roots` from the project's config.toml, each re-checked
+/// with [`resolve_project_write_root`]. A hand-edited entry that is unsafe or
+/// does not resolve admits nothing and is skipped with a warning.
+pub fn effective_project_write_roots(configured: &[String], cas_root: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for raw in configured {
+        match resolve_project_write_root(raw, cas_root) {
+            Ok(root) if !roots.contains(&root) => roots.push(root),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(root = %raw, %error, "ignoring factory.write_roots entry");
+            }
+        }
+    }
+    roots
+}
+
+/// Why this process may not set project write roots (GH #1182): only when
+/// it runs inside a Cassy factory worker or server cgroup. The operator's
+/// `! cas config set …` in an agent pane carries agent environment and no
+/// terminal, so neither is a refusal here; the PreToolUse hook refuses the
+/// same command when an agent runs it as a tool call.
+pub fn worker_cgroup_refusal(cgroup: &str) -> Option<String> {
+    cgroup
+        .split(['/', '\n'])
+        .any(|part| part.starts_with("cas-worker-") || part.starts_with("cas-server-"))
+        .then(|| {
+            "refused: this process runs inside a Cassy factory worker cgroup. Write roots are operator-only; run `cas config set factory.write_roots …` from your own terminal or the supervisor's pane."
+                .to_string()
+        })
 }
 
 /// Environment variables only an agent session carries (cas-3147).
@@ -372,11 +481,7 @@ pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
             "refused: this process descends from an agent or Cassy server ({program}). Write roots and grants are operator-only; run the command yourself from your own terminal."
         ));
     }
-    if context
-        .cgroup
-        .split('/')
-        .any(|part| part.starts_with("cas-worker-") || part.starts_with("cas-server-"))
-    {
+    if worker_cgroup_refusal(&context.cgroup).is_some() {
         return Some(
             "refused: this process runs inside a Cassy factory worker cgroup. Write roots and grants are operator-only; run the command yourself from your own terminal."
                 .to_string(),
@@ -606,6 +711,35 @@ mod tests {
         let mut config = crate::config::Config::default();
         let error = config.set("factory.write_roots", "/tmp").unwrap_err().to_string();
         assert!(error.contains("operator"), "{error}");
+    }
+
+    /// GH #1182: setting project roots refuses only a factory worker or
+    /// server cgroup, never the agent environment or missing terminal of the
+    /// operator's `! cas …` in a pane; the hook skips hand-edited entries that
+    /// are unsafe or do not resolve.
+    #[test]
+    fn gh_1182_project_roots_refuse_worker_cgroups_and_skip_unsafe_entries() {
+        assert_eq!(worker_cgroup_refusal("0::/user.slice/app.slice/app-org.kde.konsole-1.scope/tab(2).scope"), None);
+        assert!(worker_cgroup_refusal("0::/user.slice/tab(2).scope/cas-worker-cassy-a-b").is_some());
+        assert!(worker_cgroup_refusal("0::/user.slice/cas-server-cassy-daemon").is_some());
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CLAUDECODE", "1");
+        let home = env.home().to_path_buf();
+        let cas_root = home.join("projects/a/.cas");
+        let models = home.join("models");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        let configured = [
+            "~/models".to_string(),
+            models.display().to_string(),
+            "/".to_string(),
+            home.display().to_string(),
+            home.join("projects/a").display().to_string(),
+            cas_root.display().to_string(),
+            home.join("missing").display().to_string(),
+        ];
+        assert_eq!(effective_project_write_roots(&configured, &cas_root), vec![models]);
     }
 
     /// cas-ab04: the shared grant path validates the task and path, records

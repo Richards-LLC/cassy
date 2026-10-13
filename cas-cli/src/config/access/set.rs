@@ -1,6 +1,14 @@
 use crate::config::*;
 
 impl Config {
+    /// GH #1182: replace `[factory] write_roots`. Only the operator CLI path
+    /// (`cas config set factory.write_roots`) calls this, after resolving
+    /// every entry with `operator_policy::parse_project_write_roots`;
+    /// [`Config::set`] refuses the key.
+    pub(crate) fn set_factory_write_roots(&mut self, roots: Vec<String>) {
+        self.factory.get_or_insert_with(FactoryConfig::default).write_roots = roots;
+    }
+
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), MemError> {
         // "(default)" is the seed sentinel used for fields whose default is
         // not a single literal value (llm.harness/model/reasoning_effort —
@@ -1273,11 +1281,14 @@ impl Config {
                     Some(value.to_string())
                 };
             }
-            // cas-3147: operator-only, kept outside config.toml entirely.
+            // GH #1182: operator-only. Stored in config.toml, but written only
+            // by `cas config set factory.write_roots` through
+            // `set_factory_write_roots`, which validates every path. This
+            // generic setter (MCP, the config editor, reset) never widens it.
             "factory.write_roots" => {
                 return Err(MemError::Other(
-                    "factory.write_roots is operator-only and is not stored in config.toml. \
-                     Run `cas config set factory.write_roots <paths>` yourself from your own terminal."
+                    "factory.write_roots is operator-only: agents, the config editor and MCP cannot change it. \
+                     The operator runs `cas config set factory.write_roots \"<dir>,<dir>\"` (an empty value clears it)."
                         .to_string(),
                 ));
             }

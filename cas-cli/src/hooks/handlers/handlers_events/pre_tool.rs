@@ -3918,7 +3918,7 @@ fn factory_write_decision(
             .then(|| FactoryWriteViolation {
                 evaluated_path: raw_path.to_string(),
                 resolved_path: resolved,
-                matched_rule: "the operator write policy is operator-only",
+                matched_rule: "the operator write policy and project config are operator-only",
             })
     };
     let Some(tool_input) = input.tool_input.as_ref() else {
@@ -3962,6 +3962,17 @@ fn factory_write_decision(
             }
         }
     }
+    // GH #1182: NotebookEdit names its file `notebook_path`; the protected
+    // policy files are refused for it too. (The default contract judges only
+    // `file_path`/`path`, unchanged here.)
+    if tool == "NotebookEdit"
+        && let Some(violation) = tool_input
+            .get("notebook_path")
+            .and_then(|value| value.as_str())
+            .and_then(|path| protected_violation(path, false))
+    {
+        return FactoryWriteDecision::Denied(violation);
+    }
     let targets: Vec<(String, Option<WriteMode>)> = match tool {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
             .get("file_path")
@@ -3973,14 +3984,20 @@ fn factory_write_decision(
             let Some(command) = tool_input.get("command").and_then(|value| value.as_str()) else {
                 return FactoryWriteDecision::Allowed;
             };
-            // cas-3147 (GH #1169 item 4): once the operator has a policy file,
-            // in-place edits and rename sources are judged like any other
-            // write. Without one the default contract stays as it was.
-            let in_place = if policy.configured {
-                bash_in_place_edit_targets(command)
-            } else {
-                Vec::new()
-            };
+            // cas-3147 (GH #1169 item 4): once the operator has configured
+            // roots, in-place edits and rename sources are judged like any
+            // other write. Without them the default contract stays as it
+            // was, except that the protected policy files are never edited
+            // in place or renamed (GH #1182).
+            let mut in_place = bash_in_place_edit_targets(command);
+            for raw_path in &in_place {
+                if let Some(violation) = protected_violation(raw_path, false) {
+                    return FactoryWriteDecision::Denied(violation);
+                }
+            }
+            if !policy.configured {
+                in_place.clear();
+            }
             bash_write_targets(command)
                 .into_iter()
                 .map(|path| (path, None))
@@ -4097,7 +4114,7 @@ fn operator_policy_command_denial_at_depth(command: &str, depth: usize) -> Optio
                     });
                     if refused {
                         return Some(
-                            "🚫 OPERATOR-ONLY (cas-3147): write roots and per-task write grants can only be changed by the operator from their own terminal, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` or `cas config grant-write …` themselves."
+                            "🚫 OPERATOR-ONLY (cas-3147, GH #1182): write roots and per-task write grants can only be changed by the operator, never by an agent. Ask the supervisor to request the operator's approval; the operator runs `cas config set factory.write_roots …` (from their terminal or as `! cas …` in a pane) or `cas config grant-write …` themselves."
                                 .to_string(),
                         );
                     }
@@ -4200,12 +4217,15 @@ fn apply_patch_write_targets_with_modes(
         .collect()
 }
 
-/// cas-3147: the operator write policy in effect for this hook call, and the
-/// task IDs whose grants apply. Roots come only from the operator policy
-/// file, never from config.toml. A grant applies while its task is open: to
-/// the worker holding the task's lease, and to the supervisor. An unreadable
-/// policy file fails closed to "no roots", but the policy directory stays
-/// protected.
+/// cas-3147, GH #1182: the operator write policy in effect for this hook
+/// call, and the task IDs whose grants apply. Project roots come from the
+/// project's `.cas/config.toml` `[factory] write_roots` (this `cas_root` is
+/// the owning project's, also for a worker in an isolated worktree), unioned
+/// with roots still left in the cas-3147 operator policy file. A grant applies
+/// while its task is open: to the worker holding the task's lease, and to the
+/// supervisor. An unreadable policy file fails closed to "no legacy roots or
+/// grants". The project's config files and the policy directory stay
+/// protected whatever is configured.
 fn operator_write_policy_for(
     cas_root: &Path,
     stores: &mut ToolHookStores<'_>,
@@ -4224,24 +4244,37 @@ fn operator_write_policy_for(
             })
             .collect()
     };
+    let configured_roots = stores.config().factory().write_roots;
     let mut policy = WritePolicy {
-        roots: Vec::new(),
-        protected: vec![cas_root.join("operator")],
-        configured: crate::config::operator_policy::operator_policy_path(cas_root).exists(),
+        roots: crate::config::operator_policy::effective_project_write_roots(&configured_roots, cas_root)
+            .into_iter()
+            .map(|path| WriteRoot {
+                path,
+                modes: [WriteMode::Create, WriteMode::Edit, WriteMode::Delete].into_iter().collect(),
+                task_id: None,
+            })
+            .collect(),
+        protected: super::write_roots::protected_policy_paths(cas_root),
+        configured: !configured_roots.is_empty()
+            || crate::config::operator_policy::operator_policy_path(cas_root).exists(),
     };
     let mut task_ids = std::collections::HashSet::new();
     let operator = match load_operator_policy(cas_root) {
         Ok(operator) => operator,
         Err(error) => {
-            tracing::warn!(%error, "operator write policy unreadable; no write roots apply");
+            tracing::warn!(%error, "operator write policy unreadable; no legacy roots or grants apply");
             return (policy, task_ids);
         }
     };
-    policy.roots.extend(operator.roots.iter().map(|root| WriteRoot {
-        path: root.path.clone(),
-        modes: modes(&root.modes),
-        task_id: None,
-    }));
+    for root in &operator.roots {
+        if !policy.roots.iter().any(|existing| existing.path == root.path) {
+            policy.roots.push(WriteRoot {
+                path: root.path.clone(),
+                modes: modes(&root.modes),
+                task_id: None,
+            });
+        }
+    }
     if operator.grants.is_empty() {
         return (policy, task_ids);
     }
@@ -4315,7 +4348,7 @@ fn factory_workspace_contract_denial_with_roots(
         return denial;
     }
     format!(
-        "{denial} Operator write roots in effect: {}. Only the operator can add roots or grants.",
+        "{denial} Operator write roots in effect: {}. Only the operator can add roots (`cas config set factory.write_roots`) or grants.",
         roots.join("; ")
     )
 }
@@ -5126,11 +5159,12 @@ mod workspace_contract_tests {
         }
     }
 
-    /// cas-3147: the hook takes roots and grants only from the operator
-    /// policy file (a `[factory.write_roots]` table in config.toml is
-    /// ignored), applies a grant to the supervisor and to the worker holding
-    /// the task, drops it once the task closes, and always protects the
-    /// policy directory.
+    /// cas-3147, updated for GH #1182: the hook unions project roots from
+    /// config.toml `[factory] write_roots` (all modes) with roots left in the
+    /// operator policy file, applies a grant to the supervisor and to the
+    /// worker holding the task, drops it once the task closes, and always
+    /// protects the policy directory and the project config files. (Before
+    /// GH #1182 this asserted that config.toml roots were ignored.)
     #[test]
     fn cas_3147_hook_policy_comes_from_the_operator_file_and_ends_at_task_close() {
         use crate::config::operator_policy::{
@@ -5141,11 +5175,13 @@ mod workspace_contract_tests {
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
         let managed = project.path().canonicalize().unwrap().join("managed");
         let granted = project.path().canonicalize().unwrap().join("granted");
+        let configured = project.path().canonicalize().unwrap().join("configured");
         std::fs::create_dir_all(&managed).unwrap();
         std::fs::create_dir_all(&granted).unwrap();
+        std::fs::create_dir_all(&configured).unwrap();
         std::fs::write(
             cas_root.join("config.toml"),
-            format!("[factory.write_roots]\npaths = [\"{}\"]\n", granted.display()),
+            format!("[factory]\nwrite_roots = [\"{}\"]\n", configured.display()),
         )
         .unwrap();
         let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
@@ -5174,8 +5210,13 @@ mod workspace_contract_tests {
 
         let mut stores = ToolHookStores::new(&cas_root);
         let (policy, supervisor_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, true);
-        assert_eq!(policy.protected, vec![cas_root.join("operator")]);
-        assert_eq!(policy.roots.len(), 2, "the file's root and grant, not config.toml: {policy:?}");
+        let protected = vec![cas_root.join("operator"), cas_root.join("config.toml"), cas_root.join("config.yaml")];
+        assert_eq!(policy.protected, protected);
+        assert!(policy.configured);
+        assert_eq!(policy.roots.len(), 3, "config.toml's root, the file's root and grant: {policy:?}");
+        assert!(policy.roots.iter().any(|root| root.path == configured
+            && root.task_id.is_none()
+            && root.modes.len() == 3), "a config.toml root permits create, edit and delete: {policy:?}");
         assert!(policy.roots.iter().any(|root| root.path == managed && root.task_id.is_none()));
         assert!(policy.roots.iter().any(|root| root.path == granted && root.task_id.as_deref() == Some("cas-1169a")));
         assert!(supervisor_tasks.contains("cas-1169a"), "the supervisor uses an open task's grant");
@@ -5188,7 +5229,7 @@ mod workspace_contract_tests {
         let (closed, closed_tasks) = operator_write_policy_for(&cas_root, &mut stores, &input, true);
         assert!(closed_tasks.is_empty(), "a grant ends when its task closes");
         assert!(closed.roots.iter().all(|root| root.task_id.is_none()), "{closed:?}");
-        assert_eq!(closed.protected, vec![cas_root.join("operator")]);
+        assert_eq!(closed.protected, protected);
     }
 
     /// cas-3147 review: with no operator policy file, in-place edits and
@@ -5264,6 +5305,224 @@ mod workspace_contract_tests {
             "rg 'grant-write' cas-cli/src",
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    /// GH #1182 acceptance 4: with no write roots configured, no agent
+    /// (worker or supervisor) can write the project's `.cas/config.toml` or
+    /// `.cas/config.yaml` through any file tool or shell write, edit, rename
+    /// or delete, so it cannot widen its own roots. Reading the file and
+    /// `cas config set` for other keys stay allowed.
+    #[cfg(unix)]
+    #[test]
+    fn gh_1182_agents_cannot_write_the_project_config() {
+        use super::super::write_roots::{WritePolicy, protected_policy_paths};
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let main = root.join("main");
+        let cas_root = main.join(".cas");
+        let worktree = cas_root.join("worktrees/brisk-otter-7");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[factory]\n").unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let unconfigured = WritePolicy {
+            roots: Vec::new(),
+            protected: protected_policy_paths(&cas_root),
+            configured: false,
+        };
+        let no_tasks = std::collections::HashSet::new();
+        for file in ["config.toml", "config.yaml"] {
+            let absolute = cas_root.join(file).display().to_string();
+            let relative = format!(".cas/{file}");
+            for (case, absolute_input, relative_input) in [
+                ("Write", serde_json::json!({"file_path": absolute, "content": "[factory]\nwrite_roots = [\"/\"]"}), serde_json::json!({"file_path": relative, "content": "x"})),
+                ("Edit", serde_json::json!({"file_path": absolute, "old_string": "[factory]", "new_string": "[factory]\nwrite_roots = [\"/x\"]"}), serde_json::json!({"file_path": relative, "old_string": "a", "new_string": "b"})),
+                ("MultiEdit", serde_json::json!({"file_path": absolute, "edits": []}), serde_json::json!({"file_path": relative, "edits": []})),
+                ("NotebookEdit", serde_json::json!({"notebook_path": absolute, "new_source": "x"}), serde_json::json!({"notebook_path": relative, "new_source": "x"})),
+                ("apply_patch", serde_json::json!({"command": format!("*** Begin Patch\n*** Update File: {absolute}\n@@\n+x\n*** End Patch")}), serde_json::json!({"command": format!("*** Begin Patch\n*** Update File: {relative}\n@@\n+x\n*** End Patch")})),
+            ] {
+                for supervisor in [false, true] {
+                    for (input, cwd) in [(&absolute_input, &worktree), (&relative_input, &main)] {
+                        if cwd == &main && !supervisor {
+                            continue;
+                        }
+                        let input = tool_input(case, input.clone(), cwd);
+                        let decision = factory_write_decision(&input, &None, None, supervisor, Some(cwd.as_path()), &unconfigured, &no_tasks);
+                        let FactoryWriteDecision::Denied(violation) = decision else {
+                            panic!("{case} {file} (supervisor={supervisor}, cwd={}) must be refused: {decision:?}", cwd.display());
+                        };
+                        assert!(violation.matched_rule.contains("operator-only"), "{case}: {violation:?}");
+                    }
+                }
+            }
+            let commands = |target: &str| {
+                vec![
+                    format!("echo 'write_roots = [\"/\"]' > {target}"),
+                    format!("printf x >> {target}"),
+                    format!("echo x | tee -a {target}"),
+                    format!("cp /tmp/forged.toml {target}"),
+                    format!("mv /tmp/forged.toml {target}"),
+                    format!("sed -i 's/a/b/' {target}"),
+                    format!("perl -pi -e 's/a/b/' {target}"),
+                    format!("mv {target} /tmp/old-config"),
+                    format!("rm -f {target}"),
+                ]
+            };
+            for supervisor in [false, true] {
+                // The supervisor works in the main checkout with relative
+                // paths; a worker reaches the file by its absolute path.
+                let (cwd, target) = if supervisor { (&main, &relative) } else { (&worktree, &absolute) };
+                for command in commands(target) {
+                    let decision = factory_write_decision(&bash_input(&command, cwd), &None, None, supervisor, Some(cwd.as_path()), &unconfigured, &no_tasks);
+                    let FactoryWriteDecision::Denied(violation) = decision else {
+                        panic!("{command} (supervisor={supervisor}) must be refused: {decision:?}");
+                    };
+                    assert!(violation.matched_rule.contains("operator-only"), "{command}: {violation:?}");
+                }
+            }
+        }
+        for allowed in [
+            "cat .cas/config.toml",
+            "grep write_roots .cas/config.toml",
+            "cas config set factory.note_max_chars 1800",
+            "cp .cas/config.toml src/config-copy.toml",
+        ] {
+            assert_eq!(
+                factory_write_decision(&bash_input(allowed, &main), &None, None, true, Some(main.as_path()), &unconfigured, &no_tasks),
+                FactoryWriteDecision::Allowed,
+                "{allowed}"
+            );
+        }
+    }
+
+    /// GH #1182: no write root ever admits a Cassy config or operator policy
+    /// file, even another project's that lies under the root.
+    #[cfg(unix)]
+    #[test]
+    fn gh_1182_write_roots_never_admit_any_projects_cas_policy_files() {
+        use super::super::write_roots::WriteMode;
+        let fixture = tempfile::tempdir().unwrap();
+        let (_root, home, worktree, managed, _outside) = write_roots_fixture(fixture.path());
+        let other_cas = managed.join("other-project/.cas");
+        std::fs::create_dir_all(other_cas.join("operator")).unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.remove("CAS_CLONE_PATH");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let policy = root_policy(&managed, &[WriteMode::Create, WriteMode::Edit, WriteMode::Delete], None);
+        let no_tasks = std::collections::HashSet::new();
+        for path in [
+            other_cas.join("config.toml"),
+            other_cas.join("config.yaml"),
+            other_cas.join("operator/write-policy.toml"),
+        ] {
+            let input = tool_input("Write", serde_json::json!({"file_path": path.display().to_string(), "content": "x"}), &worktree);
+            assert!(
+                matches!(
+                    factory_write_decision(&input, &None, None, false, Some(worktree.as_path()), &policy, &no_tasks),
+                    FactoryWriteDecision::Denied(_)
+                ),
+                "{} must not be admitted by a root",
+                path.display()
+            );
+        }
+        let ordinary = tool_input("Write", serde_json::json!({"file_path": managed.join("other-project/README.md").display().to_string(), "content": "x"}), &worktree);
+        assert!(matches!(
+            factory_write_decision(&ordinary, &None, None, false, Some(worktree.as_path()), &policy, &no_tasks),
+            FactoryWriteDecision::AllowedByRoot(_)
+        ));
+    }
+
+    /// GH #1182 acceptance 1 and 2, through the real PreToolUse handler with
+    /// two Cassy roots: `[factory] write_roots` in project A's config.toml
+    /// lets A's worker (in its isolated worktree) and A's supervisor create,
+    /// edit, rename and delete under the root; a write outside it is refused
+    /// and the refusal lists A's roots. Project B, with no key, is still
+    /// refused the same writes.
+    #[cfg(unix)]
+    #[test]
+    fn gh_1182_config_write_roots_admit_only_their_own_projects_agents() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let downloads = home.join("Downloads");
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let project_a = home.join("projects/a");
+        let project_b = home.join("projects/b");
+        let cas_a = crate::store::init_cas_dir(&project_a).unwrap();
+        let cas_b = crate::store::init_cas_dir(&project_b).unwrap();
+        let mut config = crate::config::Config::load(&cas_a).unwrap();
+        config.set_factory_write_roots(vec![downloads.display().to_string()]);
+        config.save(&cas_a).unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "gh-1182");
+
+        let mut decide = |cas_root: &Path, project: &Path, role: &str, input: HookInput| -> (String, String) {
+            let worktree = cas_root.join("worktrees/brisk-otter-7");
+            std::fs::create_dir_all(&worktree).unwrap();
+            env.set("CAS_AGENT_ROLE", role);
+            env.set("CAS_AGENT_NAME", format!("{role}-gh-1182"));
+            let cwd = if role == "worker" {
+                env.set("CAS_CLONE_PATH", &worktree);
+                worktree
+            } else {
+                env.remove("CAS_CLONE_PATH");
+                project.to_path_buf()
+            };
+            let input = HookInput {
+                cwd: cwd.display().to_string(),
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some(role.to_string()),
+                ..input
+            };
+            let output = handle_pre_tool_use(&input, Some(cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        let d = |name: &str| downloads.join(name).display().to_string();
+        for role in ["worker", "supervisor"] {
+            std::fs::write(downloads.join("existing.md"), "x").unwrap();
+            std::fs::write(downloads.join("old.md"), "x").unwrap();
+            let admitted = [
+                ("create", tool_input("Write", serde_json::json!({"file_path": d("x"), "content": "x"}), &home)),
+                ("edit", tool_input("Edit", serde_json::json!({"file_path": d("existing.md"), "old_string": "x", "new_string": "y"}), &home)),
+                ("rename", bash_input(&format!("mv {} {}", d("existing.md"), d("renamed.md")), &home)),
+                ("delete", bash_input(&format!("rm {}", d("old.md")), &home)),
+            ];
+            for (case, input) in &admitted {
+                let (decision, reason) = decide(&cas_a, &project_a, role, input.clone());
+                assert_ne!(decision, "deny", "project A {role} {case} must be admitted: {reason}");
+                if role == "supervisor" && *case == "delete" {
+                    // A supervisor may already delete under /tmp (cas-cf4f),
+                    // where this fixture's HOME lives.
+                    continue;
+                }
+                let (decision, reason) = decide(&cas_b, &project_b, role, input.clone());
+                assert_eq!(decision, "deny", "project B {role} {case} has no roots and stays refused: {reason}");
+            }
+            let outside = tool_input("Write", serde_json::json!({"file_path": elsewhere.join("x").display().to_string(), "content": "x"}), &home);
+            let (decision, reason) = decide(&cas_a, &project_a, role, outside);
+            assert_eq!(decision, "deny", "{role}: outside the root is refused");
+            assert!(reason.contains(&downloads.display().to_string()), "{role}: the refusal lists the roots: {reason}");
+            let config_write = tool_input("Edit", serde_json::json!({"file_path": cas_a.join("config.toml").display().to_string(), "old_string": "a", "new_string": "b"}), &home);
+            let (decision, reason) = decide(&cas_a, &project_a, role, config_write);
+            assert_eq!(decision, "deny", "{role}: config.toml is never writable: {reason}");
         }
     }
 

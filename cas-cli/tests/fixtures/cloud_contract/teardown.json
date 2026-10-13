@@ -1,0 +1,456 @@
+{
+  "schema": 1,
+  "group": "teardown",
+  "captured_on": "2026-10-13",
+  "endpoint": "https://petra-stella-cloud.vercel.app",
+  "capture_script": "scripts/cloud-contract-capture.py",
+  "exchanges": [
+    {
+      "group": "teardown",
+      "name": "release_bt1~47925a1c_a",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "release_bt1~47925a1c_b",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "release_bt2~47925a1c_a",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "release_bt2~47925a1c_b",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "ack_claimed",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/peer-messages/ack",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "consumer_id": "<consumer>",
+          "acks": [
+            {
+              "id": "<uuid-5>",
+              "outcome": "delivered"
+            },
+            {
+              "id": "<uuid-6>",
+              "outcome": "delivered"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "results": [
+            {
+              "id": "<uuid-5>",
+              "status": 409
+            },
+            {
+              "id": "<uuid-6>",
+              "status": 409
+            }
+          ]
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "claim_leftovers",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/peer-messages/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "project_ids": [
+            "<project>"
+          ],
+          "recipient_agent_ids": [
+            "<agent-a>",
+            "<agent-b>"
+          ],
+          "consumer_id": "<consumer>",
+          "max": 50,
+          "lease_secs": 30
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "messages": [],
+          "denied": []
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "shutdown_a",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/<agent-a>/shutdown",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "released_locks": 0
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "shutdown_b",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/<agent-b>/shutdown",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "released_locks": 0
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "shutdown_c",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/<agent-c>/shutdown",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "released_locks": 0
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "verify_locks",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents/locks",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "locks": []
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "verify_agents",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-b>",
+              "name": "cc-<run>-sup-b",
+              "agent_type": "primary",
+              "status": "shutdown",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-5>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "shutdown",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-c>",
+              "name": "cc-<run>-idle",
+              "agent_type": "primary",
+              "status": "shutdown",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-1>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": null,
+          "next_cursor_id": null,
+          "next_sort_cursor": null
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "verify_nothing_queued",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/peer-messages/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "project_ids": [
+            "<project>"
+          ],
+          "recipient_agent_ids": [
+            "<agent-a>",
+            "<agent-b>"
+          ],
+          "consumer_id": "<consumer>",
+          "max": 50,
+          "lease_secs": 30
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "messages": [],
+          "denied": []
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "verify_message_1",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "GET",
+        "path": "/api/peer-messages/<uuid-5>",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "<uuid-5>",
+          "status": "delivered",
+          "delivered_at": "<ts-18>",
+          "attempts": 1
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "verify_message_2",
+      "note": null,
+      "expect": null,
+      "request": {
+        "method": "GET",
+        "path": "/api/peer-messages/<uuid-6>",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "<uuid-6>",
+          "status": "delivered",
+          "delivered_at": "<ts-18>",
+          "attempts": 1
+        }
+      }
+    },
+    {
+      "group": "teardown",
+      "name": "verification",
+      "note": "computed by the capture script",
+      "expect": null,
+      "request": null,
+      "response": {
+        "status": null,
+        "body": {
+          "no_scratch_locks": true,
+          "all_agents_shutdown": true,
+          "nothing_queued": true,
+          "messages_terminal": true,
+          "credential_copy_deleted": true
+        }
+      }
+    }
+  ]
+}

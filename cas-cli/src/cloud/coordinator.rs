@@ -144,6 +144,8 @@ struct AgentsPage {
     next_cursor: Option<String>,
     #[serde(default)]
     next_cursor_id: Option<String>,
+    #[serde(default)]
+    next_sort_cursor: Option<String>,
 }
 
 /// Agents per page; the server caps `limit` at 500.
@@ -681,7 +683,7 @@ impl CloudCoordinator {
     /// [`MAX_AGENT_PAGES`].
     pub fn list_agent_infos(&self) -> Result<Vec<AgentInfo>, CasError> {
         let mut agents = Vec::new();
-        let mut cursor: Option<(String, String)> = None;
+        let mut cursor: Option<(String, String, Option<String>)> = None;
         for _ in 0..MAX_AGENT_PAGES {
             let mut request = self.project_query(
                 ureq::get(&format!("{}/api/agents", self.config.endpoint))
@@ -689,8 +691,11 @@ impl CloudCoordinator {
                     .set("Authorization", &format!("Bearer {}", self.token()))
                     .query("limit", &AGENT_PAGE_LIMIT.to_string()),
             );
-            if let Some((at, id)) = &cursor {
+            if let Some((at, id, sort)) = &cursor {
                 request = request.query("cursor", at).query("cursor_id", id);
+                if let Some(sort) = sort {
+                    request = request.query("sort_cursor", sort);
+                }
             }
             let page: AgentsPage = match request.call() {
                 Ok(resp) => resp
@@ -708,7 +713,7 @@ impl CloudCoordinator {
             };
             agents.extend(page.agents);
             match (page.next_cursor, page.next_cursor_id) {
-                (Some(at), Some(id)) => cursor = Some((at, id)),
+                (Some(at), Some(id)) => cursor = Some((at, id, page.next_sort_cursor)),
                 _ => return Ok(agents),
             }
         }

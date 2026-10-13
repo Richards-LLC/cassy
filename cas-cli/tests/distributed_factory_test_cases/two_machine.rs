@@ -23,6 +23,87 @@ use super::fake_cloud::FakeCloud;
 const WIDGETS: &str = "github.com/acme/widgets";
 
 #[tokio::test]
+async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    let records = alpha.cas_dir.join("cloud_presence");
+    std::fs::create_dir_all(&records).unwrap();
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    for state in ["registered", "failing"] {
+        std::fs::write(
+            records.join("a.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "agent_id": "a", "state": state, "cause": "registration unavailable", "failures": 2,
+                "last_attempt_at": chrono::Utc::now(), "registered_at": chrono::Utc::now(),
+                "next_retry_at": null, "focus": "cas-alpha", "branch": "factory/sup-a"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for json in [false, true] {
+            let request = serde_json::from_value(
+                serde_json::json!({"action":"peers", "detail":true, "json":json}),
+            )
+            .unwrap();
+            let result = service
+                .coordination(rmcp::handler::server::wrapper::Parameters(request))
+                .await
+                .unwrap();
+            let text = &result.content[0].as_text().unwrap().text;
+            if json {
+                let report: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(report["cloud_presence"]["state"], state);
+                assert_eq!(report["cloud_presence"]["focus"], "cas-alpha");
+                assert!(
+                    report["cloud_presence_message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(state)
+                );
+                assert!(
+                    report["mailbox_status"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Peer mailbox:")
+                );
+            } else {
+                assert!(
+                    text.starts_with(&format!("Cloud presence: {state}")),
+                    "{text}"
+                );
+                let peers_at = text.find("[OK]").unwrap();
+                let mailbox_at = text.find("Peer mailbox:").unwrap();
+                assert!(peers_at < mailbox_at, "{text}");
+                if state == "failing" {
+                    assert!(text.contains("registration unavailable"), "{text}");
+                }
+            }
+        }
+    }
+    std::fs::write(
+        alpha.cas_dir.join("config.toml"),
+        format!("[project]\ncanonical_id=\"{WIDGETS}\"\n[cloud]\nauto_sync=false\n"),
+    )
+    .unwrap();
+    let request =
+        serde_json::from_value(serde_json::json!({"action":"peers", "detail":true})).unwrap();
+    let result = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .starts_with("Cloud presence: disabled (cloud.auto_sync=false)")
+    );
+}
+
+#[tokio::test]
 async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();

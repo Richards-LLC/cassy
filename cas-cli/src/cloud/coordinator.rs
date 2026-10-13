@@ -48,6 +48,12 @@ pub struct AgentInfo {
     pub active_tasks: u32,
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub team_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// Response from task claim
@@ -721,6 +727,9 @@ mod tests {
             last_heartbeat: "2026-01-04T21:55:00Z".to_string(),
             active_tasks: 3,
             metadata: Default::default(),
+            user_id: None,
+            team_id: None,
+            project_id: None,
         };
 
         let agent = agent_info_to_agent(info);

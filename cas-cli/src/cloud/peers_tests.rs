@@ -32,6 +32,9 @@ fn info(
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        user_id: None,
+        team_id: None,
+        project_id: None,
     }
 }
 

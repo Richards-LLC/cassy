@@ -268,7 +268,7 @@ pub(crate) fn execute_describe(
                 "advanced": meta.advanced,
                 "requires_feature": meta.requires_feature,
                 "constraint": format_constraint(&meta.constraint),
-                "examples": meta.value_type.examples()
+                "examples": meta.examples()
             });
             println!("{}", serde_json::to_string_pretty(&json)?);
         } else {
@@ -305,7 +305,7 @@ pub(crate) fn execute_describe(
 
             fmt.newline()?;
             fmt.write_raw("Examples:    ")?;
-            fmt.write_muted(&meta.value_type.examples().join(", "))?;
+            fmt.write_muted(&meta.examples().join(", "))?;
             fmt.newline()?;
 
             if meta.advanced {

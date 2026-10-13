@@ -213,3 +213,4 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
   - Either side ends it with `decision=cancel`. That releases only your own claims and tells the peer; the peer's claims stay.
   - `epic_split` with no arguments, `coordination action=peers` and the Peers section of `worker_status` list the splits.
   - Neither side claims, releases or spawns for the other.
+  - Cassy Cloud shows claims only within one user account. A peer on another account cannot see your claims, but the split refusal still holds on both sides, because each database records the agreement.

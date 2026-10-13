@@ -207,25 +207,46 @@ impl CasCore {
                 data: None,
             });
         }
-        let peer_note = match crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root) {
+        // cas-0078: a claim another agent of this database holds is left with
+        // it until the local lease below decides, and every round trip runs
+        // off the async runtime within one budget.
+        let peer_claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root);
+        let peer_budget = crate::cloud::peer_claims::PeerBudget::default();
+        let cloud_duration = req.duration_secs.clamp(1, 3600) as u32;
+        let claim_kind = if task.task_type == crate::types::TaskType::Epic {
+            crate::cloud::peer_claims::ClaimKind::Epic
+        } else {
+            crate::cloud::peer_claims::ClaimKind::Task
+        };
+        let mut cloud_claimed = false;
+        let mut cloud_local_holder: Option<String> = None;
+        let peer_note = match peer_claims.clone() {
             Some(claims) => {
                 use crate::cloud::peer_claims::{Acquire, ClaimKind};
-                let is_local = |id: &str| agent_store.get(id).is_ok();
-                let kind = if task.task_type == crate::types::TaskType::Epic {
-                    ClaimKind::Epic
-                } else {
-                    ClaimKind::Task
-                };
+                let kind = claim_kind;
+                let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                match claims.acquire(
-                    &req.task_id,
-                    kind,
-                    &agent_id,
-                    &agent_name,
-                    req.duration_secs.clamp(1, 3600) as u32,
-                    &is_local,
-                ) {
-                    Acquire::Claimed => String::new(),
+                let answer = {
+                    let (id, agent, name) =
+                        (req.task_id.clone(), agent_id.clone(), agent_name.clone());
+                    peer_budget
+                        .run(move || {
+                            claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                                local.contains(holder)
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(Acquire::Unavailable)
+                };
+                match answer {
+                    Acquire::Claimed => {
+                        cloud_claimed = true;
+                        String::new()
+                    }
+                    Acquire::LocalHolder(holder) => {
+                        cloud_local_holder = Some(holder);
+                        String::new()
+                    }
                     Acquire::PeerHolds(hold) if kind == ClaimKind::Task => {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
@@ -275,6 +296,32 @@ impl CasCore {
                 message: Cow::from(format!("Failed to claim task: {e}")),
                 data: None,
             })?;
+
+        // cas-0078: the cloud claim follows the local lease. The winner takes
+        // a claim another local agent held; a refused claimant leaves behind
+        // no claim of its own, and never touches anyone else's.
+        if let Some(claims) = peer_claims {
+            let won = match &result {
+                ClaimResult::Success(_) => true,
+                ClaimResult::AlreadyClaimed { held_by, .. } => held_by == &agent_id,
+                _ => false,
+            };
+            let (id, agent, name) = (req.task_id.clone(), agent_id.clone(), agent_name.clone());
+            let kind = claim_kind;
+            match (won, cloud_local_holder) {
+                (true, Some(holder)) => {
+                    let _ = peer_budget
+                        .run(move || {
+                            claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration)
+                        })
+                        .await;
+                }
+                (false, _) if cloud_claimed => {
+                    let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+                }
+                _ => {}
+            }
+        }
 
         match result {
             ClaimResult::Success(lease) => {

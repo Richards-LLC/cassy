@@ -1982,7 +1982,23 @@ impl EmbeddedDaemon {
                     let cas_root = self.config.cas_root.clone();
                     let agent = id.clone();
                     drop(tokio::task::spawn_blocking(move || {
-                        crate::cloud::peer_claims::renew_agent_claims_if_due(&cas_root, &agent);
+                        let Some(report) =
+                            crate::cloud::peer_claims::renew_agent_claims_if_due(&cas_root, &agent)
+                        else {
+                            return;
+                        };
+                        // cas-0078: a claim this agent lost and a peer took
+                        // cannot be taken back. Renewal queued a notice to
+                        // the owning supervisor; the log keeps a trace.
+                        for (task, hold) in &report.conflicts {
+                            tracing::warn!(
+                                task = %task,
+                                holder = %hold.describe(),
+                                until = %hold.until(),
+                                "cloud claim lost to a peer: this agent still holds the local lease, \
+                                 but a session on another machine now holds the Cassy Cloud claim"
+                            );
+                        }
                     }));
                 }
             }

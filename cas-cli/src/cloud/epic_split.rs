@@ -383,6 +383,9 @@ fn claim_share(
         }
         match claims.acquire(id, ClaimKind::Task, &caller.id, &caller.name, duration, &|_| false) {
             Acquire::Claimed => taken.push(id),
+            // Another agent of this database took it since the read above:
+            // still this side's.
+            Acquire::LocalHolder(_) => {}
             Acquire::StalePeer(hold) => warnings.push(format!(
                 "{id}: {}'s claim {}; Cassy Cloud still lists them until it expires the claim",
                 hold.describe(),
@@ -406,7 +409,7 @@ fn claim_share(
         None => Ok(warnings),
         Some(failure) => {
             for id in taken {
-                if let Err(error) = claims.release_held_by(id, &caller.id) {
+                if let Err(error) = claims.release_own(id, &caller.id) {
                     tracing::warn!(task = %id, %error, "could not release a split claim");
                 }
             }
@@ -418,7 +421,7 @@ fn claim_share(
 /// Release the claims `caller` itself holds on `ids`. Returns how many.
 fn release_share(claims: &PeerClaims, ids: &[String], caller_id: &str) -> usize {
     ids.iter()
-        .filter(|id| claims.release_held_by(id, caller_id).unwrap_or(false))
+        .filter(|id| claims.release_own(id, caller_id).unwrap_or(false))
         .count()
 }
 

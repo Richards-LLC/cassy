@@ -220,15 +220,7 @@ pub fn discover_peers(
 /// `factory action=worker_status` and `cas status --verbose`. Blocking (one
 /// HTTP round trip per page, [`DISCOVERY_TIMEOUT`] each); a failure is
 /// reported in the section, never raised.
-pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
-    let mut text = discovery_section(cas_root, self_id);
-    // cas-4736: the epic splits agreed with peers, read fresh from this
-    // database.
-    text.push_str(&crate::cloud::epic_split::render_splits(cas_root));
-    text
-}
-
-fn discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
+fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
     match discover_peers(cas_root, self_id) {
         Ok(PeerDiscovery::Found {
             canonical_id,
@@ -241,6 +233,62 @@ fn discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
              match peers by (set [project] canonical_id or a git origin).\n"
             .to_string(),
         Err(error) => format!("Peers: Cassy Cloud lookup failed: {error}\n"),
+    }
+}
+
+pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
+    let mut section = peers_discovery_section(cas_root, self_id);
+    append_mailbox_status(cas_root, self_id, &mut section);
+    section
+}
+
+/// The mailbox status and (cas-4736) the epic splits agreed with peers, both
+/// read fresh from this clone, never cached with the discovery.
+fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+    append_mailbox_health(cas_root, self_id, section);
+    section.push_str(&crate::cloud::epic_split::render_splits(cas_root));
+}
+
+fn append_mailbox_health(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+    let agents = crate::store::open_agent_store(cas_root).ok();
+    if let Some(id) = self_id {
+        let session = agents
+            .and_then(|store| store.get(id).ok())
+            .and_then(|agent| agent.factory_session);
+        section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+            cas_root,
+            session.as_deref(),
+        ));
+        return;
+    }
+    // The CLI has no caller id. Show the live factory sessions on this clone,
+    // rather than suggesting a logged-in daemon cannot receive.
+    let mut sessions = agents
+        .and_then(|store| store.list(None).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| {
+            a.role == crate::types::AgentRole::Supervisor
+                && matches!(
+                    a.status,
+                    crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
+                )
+        })
+        .filter_map(|a| a.factory_session)
+        .collect::<Vec<_>>();
+    sessions.sort();
+    sessions.dedup();
+    if sessions.is_empty() {
+        section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+            cas_root, None,
+        ));
+    } else {
+        for session in sessions {
+            section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+                cas_root,
+                Some(&session),
+            ));
+        }
     }
 }
 
@@ -262,18 +310,18 @@ pub fn peers_section_cached(cas_root: &Path, self_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(&key))
         && at.elapsed() < PEERS_CACHE_TTL
     {
-        return format!(
-            "{text}{}",
-            crate::cloud::epic_split::render_splits(cas_root)
-        );
+        let mut text = text.clone();
+        append_mailbox_status(cas_root, self_id, &mut text);
+        return text;
     }
-    let text = discovery_section(cas_root, self_id);
+    let mut text = peers_discovery_section(cas_root, self_id);
     CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(key, (std::time::Instant::now(), text.clone()));
-    format!("{text}{}", crate::cloud::epic_split::render_splits(cas_root))
+    append_mailbox_status(cas_root, self_id, &mut text);
+    text
 }
 
 #[cfg(test)]

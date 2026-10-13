@@ -537,11 +537,12 @@ async fn cas_a19b_unqualified_target_names_cloud_lookup_failures() {
     let service = service_for(&machine.cas_dir, "a");
     let request = json!({"action": "message", "target": "calm-marten-67", "summary": "hold staging", "message": "hold staging"});
     for status in [401, 503] {
-        let response = Mock::given(method("GET"))
+        server.reset().await;
+        Mock::given(method("GET"))
             .and(path("/api/agents"))
             .respond_with(ResponseTemplate::new(status))
             .with_priority(1)
-            .mount_as_scoped(&server)
+            .mount(&server)
             .await;
         let error = coordinate(&service, request.clone()).await.unwrap_err();
         assert!(
@@ -549,7 +550,6 @@ async fn cas_a19b_unqualified_target_names_cloud_lookup_failures() {
             "{error}"
         );
         assert!(inbox(&machine.cas_dir).is_empty());
-        drop(response);
     }
     let mut config = cas::cloud::CloudConfig::load_from_cas_dir(&machine.cas_dir).unwrap();
     config.token = None;
@@ -607,6 +607,7 @@ async fn cas_a19b_known_peer_names_mailbox_failure() {
 #[tokio::test]
 async fn cas_a19b_only_a_pending_local_spawn_can_wait_for_registration() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
     let machine = TestMachine::new("soundwave");
     let mut agent = Agent::new("a".into(), "sup-a".into());
     agent.role = AgentRole::Supervisor;
@@ -631,6 +632,9 @@ async fn cas_a19b_only_a_pending_local_spawn_can_wait_for_registration() {
     let service = service_for(&machine.cas_dir, "a");
     let sent = coordinate(&service, request.clone()).await.unwrap();
     assert!(sent.contains("will deliver on registration"), "{sent}");
+    // Once the spawn fails, an empty cloud lookup can establish that the
+    // name is unknown both locally and remotely.
+    seed_project(&machine, &server.uri(), "github.com/acme/widgets");
     spawns
         .record_spawn_state(
             id,
@@ -675,15 +679,22 @@ fn cas_a19b_abandonment_notifies_sender_once_with_id_and_reason() {
             .unwrap(),
         0
     );
-    // A notice that cannot itself be delivered must not generate a bounce loop.
+    // Test an unread notice separately: inbox polling above correctly marks
+    // delivery, so abandoning that already delivered row would be illegal.
+    let another = queue
+        .enqueue_with_session("sup-a", "missing-worker", "again", "factory-a")
+        .unwrap();
+    queue.mark_abandoned(another, Some("target gone")).unwrap();
+    let pending = queue.peek_all(10).unwrap();
+    assert_eq!(pending.len(), 1);
     queue
-        .mark_abandoned(notices[0].id, Some("sender gone"))
+        .mark_abandoned(pending[0].id, Some("sender gone"))
         .unwrap();
     assert!(queue.peek_all(10).unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn cas_a19b_peer_lookup_without_project_identity_fails_immediately() {
+async fn cas_a19b_unconfigured_project_fails_immediately() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let machine = TestMachine::new("soundwave");
     let mut agent = Agent::new("a".into(), "sup-a".into());
@@ -697,7 +708,7 @@ async fn cas_a19b_peer_lookup_without_project_identity_fails_immediately() {
             "action": "message", "target": target, "summary": "hold staging", "message": "hold staging"
         })).await.unwrap_err();
         assert!(
-            error.contains("no canonical id") && error.contains(target),
+            error.contains("no token") && error.contains(target),
             "{error}"
         );
         assert!(inbox(&machine.cas_dir).is_empty());

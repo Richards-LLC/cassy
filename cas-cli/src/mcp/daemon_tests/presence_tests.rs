@@ -297,6 +297,11 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
         assert_eq!(beat[META_CANONICAL_ID], json!(REPO), "{beat}");
         assert_eq!(beat[META_FACTORY_SESSION], json!(SESSION), "{beat}");
         assert_eq!(beat[META_FOCUS], json!("cas-571d"), "{beat}");
+        assert_eq!(
+            beat[crate::cloud::peers::META_HOSTNAME],
+            json!(crate::cloud::peers::machine_label()),
+            "{beat}"
+        );
     }
     assert!(
         state

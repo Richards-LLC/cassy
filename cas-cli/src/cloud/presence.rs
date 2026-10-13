@@ -183,8 +183,9 @@ pub fn current_branch(cas_root: &Path, agent: &Agent) -> Option<String> {
     checked_out_branch(&work_dir(cas_root, agent))
 }
 
-/// The heartbeat body's metadata: project binding, focus, branch and factory
-/// session. Focus and branch are always sent (empty when none) so a cleared
+/// The heartbeat body's metadata: project binding, focus, branch, factory
+/// session and machine label (so a row registered before the cloud's
+/// project binding heals on its next beat). Focus and branch are always sent (empty when none) so a cleared
 /// one clears in the cloud too; the project binding and session are sent
 /// only when known, since omitting them keeps what the cloud has.
 pub fn heartbeat_metadata(
@@ -193,8 +194,11 @@ pub fn heartbeat_metadata(
     focus: Option<&str>,
     branch: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
-    use crate::cloud::peers::{META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
+    use crate::cloud::peers::{
+        META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS, META_HOSTNAME,
+    };
     let mut metadata = serde_json::Map::new();
+    metadata.insert(META_HOSTNAME.into(), crate::cloud::peers::machine_label().into());
     if let Some(canonical_id) = coordinator.canonical_id() {
         metadata.insert(META_CANONICAL_ID.into(), canonical_id.into());
     }

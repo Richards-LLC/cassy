@@ -638,6 +638,11 @@ async fn a_refused_local_claim_leaves_the_cloud_claim_with_its_holder() {
     let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused start");
     assert_eq!(lock.agent_id, alpha.agent_id, "{refused}");
 
+    // The claim path needs the task assigned to the claimant before it asks
+    // the cloud; alpha's local lease still stands.
+    let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-pa01").unwrap();
+    task.assignee = Some("delta-sup".into());
+    open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
     let claimed = claim(&delta, "cas-pa01").await.unwrap_or_else(|error| error);
     assert!(claimed.contains("already claimed"), "{claimed}");
     let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused claim");

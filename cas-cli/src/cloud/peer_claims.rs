@@ -744,6 +744,23 @@ pub fn lease_duration_secs(cas_root: &Path) -> u32 {
 mod tests {
     use super::*;
 
+    /// cas-0078 (f): cloud work runs on the blocking pool, and one budget
+    /// bounds every call of a request: past the deadline the caller gets an
+    /// answer at once instead of waiting on the network.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_budget_runs_work_off_the_runtime_and_stops_at_its_deadline() {
+        let budget = PeerBudget::new(Duration::from_millis(150));
+        let worker = budget.run(|| std::thread::current().id()).await.unwrap();
+        assert_ne!(worker, std::thread::current().id(), "not on the runtime thread");
+        let started = Instant::now();
+        let slow = budget.run(|| std::thread::sleep(Duration::from_millis(600))).await;
+        assert!(slow.unwrap_err().contains("no answer"));
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        let spent = Instant::now();
+        assert!(budget.run(|| 1).await.is_err(), "a spent budget answers at once");
+        assert!(spent.elapsed() < Duration::from_millis(50));
+    }
+
     #[test]
     fn claim_keys_are_scoped_to_the_repository() {
         let widget = claim_key("github.com/acme/widget", "cas-1234");

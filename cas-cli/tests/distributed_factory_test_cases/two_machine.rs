@@ -22,6 +22,69 @@ use super::fake_cloud::FakeCloud;
 
 const WIDGETS: &str = "github.com/acme/widgets";
 
+fn operator_cli(machine: &TestMachine, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cas"));
+    command
+        .args(args)
+        .current_dir(machine.cas_dir.parent().unwrap())
+        .env("CAS_ROOT", &machine.cas_dir)
+        .env_remove("CAS_CLONE_PATH")
+        .env_remove("CAS_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID");
+    command
+}
+
+#[test]
+fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    for via_pid in [false, true] {
+        let mut caller = alpha.agent_store().get("a").unwrap();
+        caller.pid = via_pid.then_some(std::process::id());
+        alpha.agent_store().update(&caller).unwrap();
+        let mut command = operator_cli(&alpha, &["peers", "--json"]);
+        if !via_pid {
+            command.env("CLAUDE_CODE_SESSION_ID", "a");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let peers = report["peers"].as_array().unwrap();
+        assert_eq!(peers.len(), 1, "via_pid={via_pid}: {report}");
+        assert_eq!(peers[0]["supervisor"]["agent_id"], "b");
+    }
+}
+
+#[test]
+fn cas_1caa_cli_without_self_resolves_token_account_and_worker_claims() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    CloudCoordinator::new(cloud.config())
+        .unwrap()
+        .with_agent_id("bw")
+        .claim("cas-visible", 600, None)
+        .unwrap();
+    let result = operator_cli(&alpha, &["peers", "--peer", "sup-b", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let peer = &report["peers"][0];
+    assert_eq!(peer["claims_visibility"], "same_account", "{report}");
+    assert_eq!(peer["claims"][0]["task_id"], "cas-visible");
+    assert_eq!(peer["workers"][0]["claims"][0]["task_id"], "cas-visible");
+}
+
 #[tokio::test]
 async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();

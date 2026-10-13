@@ -268,3 +268,74 @@ async fn cas_559c_paging_echoes_sort_cursor_with_project_on_every_page() {
         ["remote"]
     );
 }
+
+#[test]
+fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    tasks
+        .add(&crate::types::Task::new(
+            "cas-local".into(),
+            "Synced task title".into(),
+        ))
+        .unwrap();
+    let owner_id = "22b34bda-18a6-4be1-a107-b90ad96f6fa7";
+    let mut owner = agent(owner_id, "worker", "factory-b", "beta", REPO, 1);
+    owner.name = "qa-worker".into();
+    let agents = vec![
+        agent("sup", "supervisor", "factory-b", "beta", REPO, 1),
+        owner,
+    ];
+    let local_key = super::super::peer_claims::claim_key(REPO, "cas-local");
+    let remote_key = super::super::peer_claims::claim_key(REPO, "cas-remote");
+    let foreign_key = super::super::peer_claims::claim_key("github.com/acme/other", "cas-foreign");
+    let locks = vec![
+        lease(&local_key, owner_id, LeaseStatus::Active, 600),
+        lease(&remote_key, owner_id, LeaseStatus::Active, 600),
+        lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
+    ];
+    let report = PeerReport {
+        cloud_presence: None,
+        cloud_presence_message: String::new(),
+        mailbox_status: String::new(),
+        canonical_id: Some(REPO.into()),
+        detail: true,
+        status: "ready".into(),
+        error: None,
+        peers: assemble_peer_details(
+            peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
+            &agents,
+            &locks,
+            &[REPO.into()],
+            tasks.as_ref(),
+            Some("test-user"),
+            Utc::now(),
+        ),
+    };
+    let text = render_peer_report(&report, 80, true);
+    assert!(
+        text.starts_with("[OK] 1 peer supervisor | 1 live\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Synced task title")
+            && text.contains("cas-local")
+            && text.contains("cas-remote"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Owner qa-worker") && text.contains("title not synced"),
+        "{text}"
+    );
+    assert!(
+        !text.contains('~') && !text.contains(owner_id) && !text.contains("cas-foreign"),
+        "{text}"
+    );
+    let data = serde_json::to_value(&report).unwrap();
+    let claims = data["peers"][0]["claims"].as_array().unwrap();
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0]["agent_id"], owner_id);
+    assert_eq!(claims[0]["task_id"], "cas-local");
+    assert_eq!(claims[0]["lock_key"], local_key);
+}

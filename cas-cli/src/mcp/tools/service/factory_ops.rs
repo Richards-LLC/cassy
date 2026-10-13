@@ -2447,6 +2447,86 @@ impl CasService {
             });
         }
 
+        // cas-0078: ask Cassy Cloud about peers before anything is queued. A
+        // live peer claim on the pre-assigned task refuses the spawn unless
+        // force=true; a peer on the worker's epic is reported; an unreachable
+        // cloud is said, not hidden. Off the async runtime, within a budget.
+        let peer_epics: Vec<String> = match req.task_id.as_deref() {
+            Some(task_id) => task_store
+                .get_dependencies(task_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|dep| dep.dep_type == crate::types::DependencyType::ParentChild)
+                .filter_map(|dep| task_store.get(&dep.to_id).ok())
+                .filter(|parent| parent.task_type == TaskType::Epic)
+                .map(|parent| parent.id)
+                .collect(),
+            None => ctx
+                .factory_session
+                .as_deref()
+                .and_then(|session| std::fs::read_to_string(metadata_path(session)).ok())
+                .and_then(|raw| {
+                    serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok()
+                })
+                .and_then(|metadata| metadata.pinned_epic_id.or(metadata.epic_id))
+                .map(|epic| epic.trim().to_string())
+                .filter(|epic| !epic.is_empty())
+                .into_iter()
+                .collect(),
+        };
+        let peer_check = {
+            let (cas_root, task_id) = (self.inner.cas_root.clone(), req.task_id.clone());
+            crate::cloud::peer_claims::PeerBudget::default()
+                .run(move || {
+                    crate::cloud::peer_claims::spawn_peer_check(
+                        &cas_root,
+                        task_id.as_deref(),
+                        &peer_epics,
+                    )
+                })
+                .await
+                .unwrap_or_else(|why| {
+                    Some(crate::cloud::peer_claims::SpawnPeerCheck {
+                        unavailable: Some(why),
+                        ..Default::default()
+                    })
+                })
+        };
+        let force_peer_claim = req.force.unwrap_or(false);
+        let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+        let mut peer_notice = String::new();
+        if let Some(check) = peer_check {
+            if let Some((task_id, hold)) = check.task {
+                if !force_peer_claim {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        format!(
+                            "⛔ HELD BY A PEER — task {task_id} is claimed by {} (a session of this repository on another machine or clone) until {}. A worker spawned for it would duplicate their work, so nothing was queued. Ask them first: {prefix}coordination action=message target={} summary=\"{task_id}\" message=\"Are you still on {task_id}?\". To spawn anyway: {prefix}factory action=spawn_workers task_id={task_id} force=true",
+                            hold.describe(),
+                            hold.until(),
+                            hold.name(),
+                        ),
+                    ));
+                }
+                peer_notice.push_str(&format!(
+                    "\n⚠️  PEER CLAIM OVERRIDE — {} claims {task_id} until {}; spawned anyway (force=true). The worker's start will be refused unless it is forced too. Tell them: {prefix}coordination action=message target={} summary=\"took over {task_id}\" message=\"...\"",
+                    hold.describe(),
+                    hold.until(),
+                    hold.name(),
+                ));
+            }
+            for (epic_id, hold) in &check.epics {
+                peer_notice.push_str(&hold.shared_epic_note(epic_id, &prefix));
+            }
+            if let Some(why) = check.unavailable {
+                peer_notice.push_str(&format!(
+                    "\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}), so whether a session on another machine already holds {} could not be checked.",
+                    crate::mcp::tools::truncate_str(&why, 200),
+                    req.task_id.as_deref().unwrap_or("this work"),
+                ));
+            }
+        }
+
         // The epic gate exists to stop *unscoped* spawning — workers summoned
         // with no stated work, which is how a factory ends up with idle panes
         // and no plan. A concrete open task_id already states the work, so it
@@ -2823,22 +2903,11 @@ impl CasService {
             .task_id
             .as_ref()
             .map(|id| {
-                // cas-5f28: a peer on another machine may already hold it;
-                // the worker's start would then be refused.
-                let peer = crate::cloud::peer_claims::peer_hold_for(&self.inner.cas_root, id)
-                    .map(|hold| {
-                        format!(
-                            "\n⚠️  HELD BY A PEER — {} claims {id} until {}. The spawned worker's start will be refused unless the claim is released or the start is forced (force=true); check with them first.",
-                            hold.describe(),
-                            hold.until(),
-                        )
-                    })
-                    .unwrap_or_default();
-                format!(
-                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}{peer}"
-                )
+                format!("\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}")
             })
             .unwrap_or_default();
+        // cas-0078: peer findings, measured before the queue row existed.
+        let task_id_note = format!("{task_id_note}{peer_notice}");
         let brief_delivery_note = "\nSupervisor brief: none supplied or delivered. To send a brief, use coordination action=message after the worker registers.";
         let request_id_text = request_id.to_string();
         let count_text = count.to_string();
@@ -6695,34 +6764,53 @@ impl CasService {
         let pinned_epic = (!clear).then(|| epic_id.map(str::to_string)).flatten();
         let cas_root = self.inner.cas_root.clone();
         let agent_id = self.inner.get_agent_id().ok();
-        focus_epic(&self.inner.cas_root, &factory_session, request)
-            .map(|text| {
-                let shared = pinned_epic
-                    .zip(agent_id)
-                    .and_then(|(epic, agent)| {
-                        crate::cloud::peer_claims::claim_epic_focus(&cas_root, &epic, &agent)
-                            .map(|hold| {
-                                hold.shared_epic_note(
-                                    &epic,
-                                    &crate::mcp::tools::core::guidance::caller_prefix(),
-                                )
-                            })
-                    })
-                    .unwrap_or_default();
-                Self::success(format!("{text}{shared}"))
-            })
-            .map_err(|error| match error {
-                OperationError::Failed(message) => {
-                    Self::error(ErrorCode::INTERNAL_ERROR, message)
-                }
-                OperationError::NotFound(message)
-                | OperationError::Invalid(message) => {
+        let text = focus_epic(&self.inner.cas_root, &factory_session, request).map_err(
+            |error| match error {
+                OperationError::Failed(message) => Self::error(ErrorCode::INTERNAL_ERROR, message),
+                OperationError::NotFound(message) | OperationError::Invalid(message) => {
                     Self::error(ErrorCode::INVALID_PARAMS, message)
                 }
                 stale @ OperationError::Stale(_) => {
                     Self::error(ErrorCode::INVALID_PARAMS, stale.to_string())
                 }
-            })
+            },
+        )?;
+        // cas-0078: the focus claim is recorded on the agent, so the daemon
+        // renews it while the focus stands; clearing the focus releases it.
+        // Both run off the async runtime within a budget.
+        let budget = crate::cloud::peer_claims::PeerBudget::default();
+        let shared = match (pinned_epic, agent_id) {
+            (Some(epic), Some(agent)) => {
+                use crate::cloud::peer_claims::Acquire;
+                let claimed = {
+                    let epic = epic.clone();
+                    budget
+                        .run(move || {
+                            crate::cloud::peer_claims::claim_epic_focus(&cas_root, &epic, &agent)
+                        })
+                        .await
+                };
+                match claimed {
+                    Ok(Some(Acquire::PeerHolds(hold))) => hold.shared_epic_note(
+                        &epic,
+                        &crate::mcp::tools::core::guidance::caller_prefix(),
+                    ),
+                    Ok(Some(Acquire::Unavailable(why))) | Err(why) => format!(
+                        "\n\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}), so whether a session on another machine already works {epic} could not be checked.",
+                        crate::mcp::tools::truncate_str(&why, 200),
+                    ),
+                    Ok(_) => String::new(),
+                }
+            }
+            (None, Some(agent)) if clear => {
+                let _ = budget
+                    .run(move || crate::cloud::peer_claims::release_epic_focus(&cas_root, &agent))
+                    .await;
+                String::new()
+            }
+            _ => String::new(),
+        };
+        Ok(Self::success(format!("{text}{shared}")))
     }
 
     pub(super) async fn factory_gc_cleanup(

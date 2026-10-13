@@ -15,9 +15,15 @@
 //!
 //! The cloud is advisory infrastructure: when it is unreachable, the local
 //! lease still decides and the caller is told that peers were not checked.
+//!
+//! cas-0078: the local lease decides between agents of one database, so a
+//! cloud claim only moves between them after the local lease has a winner
+//! ([`PeerClaims::take_from_local`]). Every network call made for an async
+//! MCP handler runs off the runtime under one [`PeerBudget`].
 
+use std::collections::HashSet;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +36,64 @@ use crate::types::ClaimResult;
 /// Bounded wait for a claim round trip, so an unreachable cloud costs a
 /// start seconds, not the coordinator's default thirty.
 pub const CLAIM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The total time one MCP request may spend asking Cassy Cloud about peers.
+/// Past it, the request proceeds on the local lease and says peers were not
+/// checked.
+pub const PEER_BUDGET: Duration = Duration::from_secs(8);
+
+/// Agent metadata key naming the epic whose focus this agent claims in the
+/// cloud (a supervisor's `focus_epic`). Renewal keeps that claim alive;
+/// clearing the focus releases it.
+pub const META_FOCUS_CLAIM: &str = "cloud_focus_epic";
+
+/// One request's bounded allowance of cloud round trips (cas-0078). Each
+/// call runs on the blocking pool, so a slow cloud never stalls the async
+/// runtime, and all calls of one request share one deadline.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerBudget {
+    deadline: Instant,
+}
+
+impl Default for PeerBudget {
+    fn default() -> Self {
+        Self::new(PEER_BUDGET)
+    }
+}
+
+impl PeerBudget {
+    pub fn new(total: Duration) -> Self {
+        Self { deadline: Instant::now() + total }
+    }
+
+    /// Run `work` off the async runtime within what is left of the budget.
+    /// `Err` says why it gave no answer (the budget ran out, or it panicked).
+    pub async fn run<T, F>(&self, work: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(format!("no answer within {}s", PEER_BUDGET.as_secs()));
+        }
+        match tokio::time::timeout(left, tokio::task::spawn_blocking(work)).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(format!("the peer check failed: {error}")),
+            Err(_) => Err(format!("no answer within {}s", PEER_BUDGET.as_secs())),
+        }
+    }
+}
+
+/// The ids of every agent registered in this database, whatever its status:
+/// an owned stand-in for an `is_local` lookup that can cross into
+/// [`PeerBudget::run`].
+pub fn local_agent_ids(agents: &dyn crate::store::AgentStore) -> HashSet<String> {
+    agents
+        .list(None)
+        .map(|agents| agents.into_iter().map(|agent| agent.id).collect())
+        .unwrap_or_default()
+}
 
 /// What a claim is for. Recorded in the claim reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +221,10 @@ impl PeerHold {
 pub enum Acquire {
     /// This agent now holds (or already held) the cloud claim.
     Claimed,
+    /// Another agent of this database holds the cloud claim. That is not a
+    /// peer: the local lease decides between the two, and only its winner
+    /// moves the claim, with [`PeerClaims::take_from_local`].
+    LocalHolder(String),
     /// A live peer on another machine holds it.
     PeerHolds(PeerHold),
     /// A peer's claim ran out without being released (its holder stopped
@@ -212,8 +280,9 @@ impl PeerClaims {
     }
 
     /// Claim `task_id` for `agent_id`. A claim held by another agent of this
-    /// database (`is_local`) is not a peer's: the local lease already decided,
-    /// so the claim moves to `agent_id`.
+    /// database (`is_local`) is reported as [`Acquire::LocalHolder`] and left
+    /// where it is: this call runs before the local lease decides, so moving
+    /// it here would take it from an agent that may keep its lease.
     pub fn acquire(
         &self,
         task_id: &str,
@@ -239,22 +308,63 @@ impl PeerClaims {
             return Acquire::Claimed;
         }
         if !held_by.is_empty() && is_local(&held_by) {
-            let moved = self
-                .coordinator(&held_by)
-                .and_then(|holder| holder.release(&key))
-                .and_then(|()| coordinator.claim(&key, duration_secs, Some(&reason)));
-            return match moved {
-                Ok(ClaimResult::Success(_)) => Acquire::Claimed,
-                Ok(other) => Acquire::Unavailable(format!("could not move the claim: {other:?}")),
-                Err(error) => Acquire::Unavailable(error.to_string()),
-            };
+            return Acquire::LocalHolder(held_by);
         }
-        let hold = self.hold(&key, &held_by);
+        self.peer_answer(&key, &held_by)
+    }
+
+    /// Move the cloud claim on `task_id` from `from`, another agent of this
+    /// database, to `agent_id`. Only for the winner of the local lease.
+    pub fn take_from_local(
+        &self,
+        task_id: &str,
+        kind: ClaimKind,
+        from: &str,
+        agent_id: &str,
+        agent_name: &str,
+        duration_secs: u32,
+    ) -> Acquire {
+        let key = self.key(task_id);
+        let reason = ClaimHolder::new(kind, agent_name, &self.project).reason();
+        let moved = self
+            .coordinator(from)
+            .and_then(|holder| holder.release(&key))
+            .and_then(|()| self.coordinator(agent_id))
+            .and_then(|coordinator| coordinator.claim(&key, duration_secs, Some(&reason)));
+        match moved {
+            Ok(ClaimResult::Success(_)) => Acquire::Claimed,
+            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if held_by == agent_id => Acquire::Claimed,
+            // Someone else claimed it between the release and the claim.
+            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if !held_by.is_empty() => {
+                self.peer_answer(&key, &held_by)
+            }
+            Ok(other) => Acquire::Unavailable(format!("could not move the claim: {other:?}")),
+            Err(error) => Acquire::Unavailable(error.to_string()),
+        }
+    }
+
+    /// A peer's hold on `key`, live or stale.
+    fn peer_answer(&self, key: &str, held_by: &str) -> Acquire {
+        let hold = self.hold(key, held_by);
         if hold.is_stale(Utc::now()) {
             Acquire::StalePeer(hold)
         } else {
             Acquire::PeerHolds(hold)
         }
+    }
+
+    /// Release the cloud claim on `task_id` only when `agent_id` holds it.
+    /// Returns whether a claim was released.
+    pub fn release_own(&self, task_id: &str, agent_id: &str) -> Result<bool, CasError> {
+        let key = self.key(task_id);
+        let Some(lock) = self.coordinator(agent_id)?.get_lock(&key)? else {
+            return Ok(false);
+        };
+        if lock.agent_id != agent_id {
+            return Ok(false);
+        }
+        self.coordinator(agent_id)?.release(&key)?;
+        Ok(true)
     }
 
     /// The holder as Cassy Cloud lists it: whether it is live, and its
@@ -301,12 +411,22 @@ impl PeerClaims {
             .map(|lock| lock.agent_id.clone())
             .unwrap_or_else(|| held_by.to_string());
         let listed = self.listed_holder(&agent_id);
+        // cas-0078: only a running holder renews its claim, so a renewal
+        // within the live window is a liveness signal of its own. It keeps a
+        // holder whose cloud registration failed (and so is not listed) live.
+        let renewed_recently = lock.as_ref().is_some_and(|lock| {
+            (Utc::now() - lock.renewed_at).num_seconds() <= crate::cloud::peers::PEER_LIVE_SECS
+        });
+        let live = match listed.as_ref().map(|(live, _)| *live) {
+            Some(false) if renewed_recently => Some(true),
+            other => other,
+        };
         PeerHold {
             holder: lock
                 .as_ref()
                 .and_then(|lock| ClaimHolder::from_reason(lock.claim_reason.as_deref()))
                 .or_else(|| listed.as_ref().and_then(|(_, holder)| holder.clone())),
-            live: listed.map(|(live, _)| live),
+            live,
             expires_at: lock.map(|lock| lock.expires_at),
             agent_id,
         }
@@ -366,9 +486,13 @@ pub struct RenewReport {
 }
 
 /// Renew the cloud claims of every task and epic `agent_id` holds a local
-/// lease on, for the configured lease duration. Called from the daemon
-/// heartbeat, so claims stay alive while the agent works and run out after
-/// it stops.
+/// lease on, and of the epic its focus claims ([`META_FOCUS_CLAIM`]), for the
+/// configured lease duration. Called from the daemon heartbeat, so claims
+/// stay alive while the agent works and run out after it stops.
+///
+/// cas-0078: a claim that can no longer be renewed (it was released or
+/// expired in the cloud) is claimed again. When a peer took it meanwhile, the
+/// report names the peer as a conflict instead.
 pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     let mut report = RenewReport::default();
     let Some(claims) = PeerClaims::for_project(cas_root) else {
@@ -380,13 +504,59 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     let Ok(leases) = agents.list_agent_leases(agent_id) else {
         return report;
     };
+    let me = agents.get(agent_id).ok();
+    let name = me
+        .as_ref()
+        .map(|agent| agent.name.clone())
+        .unwrap_or_else(|| agent_id.to_string());
+    // (claim id, backed by a local lease)
+    let mut targets: Vec<(String, bool)> = leases
+        .into_iter()
+        .filter(|lease| lease.is_valid())
+        .map(|lease| (lease.task_id, true))
+        .collect();
+    if let Some(focus) = me
+        .as_ref()
+        .and_then(|agent| agent.metadata.get(META_FOCUS_CLAIM))
+        .filter(|focus| !focus.trim().is_empty())
+        && !targets.iter().any(|(id, _)| id == focus)
+    {
+        targets.push((focus.clone(), false));
+    }
+    let tasks = crate::store::open_task_store(cas_root).ok();
+    let kind_of = |id: &str| match tasks.as_ref().and_then(|tasks| tasks.get(id).ok()) {
+        Some(task) if task.task_type == crate::types::TaskType::Epic => ClaimKind::Epic,
+        _ => ClaimKind::Task,
+    };
+    let is_local = |id: &str| agents.get(id).is_ok();
     let duration = lease_duration_secs(cas_root);
-    for lease in leases.iter().filter(|lease| lease.is_valid()) {
-        match claims.renew(&lease.task_id, agent_id, duration) {
-            Ok(()) => report.renewed += 1,
+    for (task_id, lease_backed) in targets {
+        match claims.renew(&task_id, agent_id, duration) {
+            Ok(()) => {
+                report.renewed += 1;
+                continue;
+            }
             Err(error) => {
+                tracing::debug!(task = %task_id, %error, "cloud claim renewal failed; claiming again");
+            }
+        }
+        let kind = kind_of(&task_id);
+        let mut answer = claims.acquire(&task_id, kind, agent_id, &name, duration, &is_local);
+        // This agent's local lease already won, so the claim belongs here.
+        if lease_backed && let Acquire::LocalHolder(from) = &answer {
+            answer = claims.take_from_local(&task_id, kind, from, agent_id, &name, duration);
+        }
+        match answer {
+            Acquire::Claimed => report.reacquired += 1,
+            // A focus another agent of this database also claims: the epic is
+            // still claimed for this repository, and nothing is lost.
+            Acquire::LocalHolder(_) => {}
+            Acquire::PeerHolds(hold) | Acquire::StalePeer(hold) => {
+                report.conflicts.push((task_id, hold));
+            }
+            Acquire::Unavailable(error) => {
                 report.failed += 1;
-                tracing::debug!(task = %lease.task_id, %error, "cloud claim renewal failed");
+                tracing::debug!(task = %task_id, %error, "cloud claim could not be taken again");
             }
         }
     }
@@ -433,36 +603,131 @@ pub fn release_task_claim(cas_root: &Path, task_id: &str) {
     }
 }
 
-/// A live claim a peer holds on `task_id`, if the project is logged in and
-/// the cloud answers. Read-only: for advisories such as `spawn_workers`.
-pub fn peer_hold_for(cas_root: &Path, task_id: &str) -> Option<PeerHold> {
+/// What a spawn learns about peers before it queues anything (cas-0078).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpawnPeerCheck {
+    /// A live peer claim on the task the spawn would pre-assign.
+    pub task: Option<(String, PeerHold)>,
+    /// Live peer claims on the epics the spawned worker would work in.
+    pub epics: Vec<(String, PeerHold)>,
+    /// Why Cassy Cloud could not be asked, when it could not.
+    pub unavailable: Option<String>,
+}
+
+/// Live peer claims on `task_id` and `epic_ids`, for `spawn_workers`.
+/// `None` when the project is not logged in (no peers to see). Read-only.
+pub fn spawn_peer_check(
+    cas_root: &Path,
+    task_id: Option<&str>,
+    epic_ids: &[String],
+) -> Option<SpawnPeerCheck> {
     let claims = PeerClaims::for_project(cas_root)?;
-    let agents = crate::store::open_agent_store(cas_root).ok()?;
-    let is_local = |id: &str| agents.get(id).is_ok();
-    claims.peer_hold(task_id, &is_local).ok().flatten()
+    let local = crate::store::open_agent_store(cas_root)
+        .map(|agents| local_agent_ids(agents.as_ref()))
+        .unwrap_or_default();
+    let is_local = |id: &str| local.contains(id);
+    let mut check = SpawnPeerCheck::default();
+    let ids = task_id
+        .map(|id| (id, true))
+        .into_iter()
+        .chain(epic_ids.iter().map(|id| (id.as_str(), false)));
+    for (id, is_task) in ids {
+        match claims.peer_hold(id, &is_local) {
+            Ok(Some(hold)) if is_task => check.task = Some((id.to_string(), hold)),
+            Ok(Some(hold)) => check.epics.push((id.to_string(), hold)),
+            Ok(None) => {}
+            Err(error) => {
+                check.unavailable = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    Some(check)
 }
 
 /// Claim the focus on `epic_id` for `agent_id` (a supervisor's
-/// `focus_epic`). Returns the peer that already works it, if any; the focus
-/// is never refused.
-pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Option<PeerHold> {
+/// `focus_epic`), and record it on the agent so renewal keeps the claim
+/// alive while the focus stands. A previous focus's claim is released. The
+/// answer says whether a peer already works the epic; the focus is never
+/// refused. `None` when the project is not logged in.
+pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Option<Acquire> {
     let claims = PeerClaims::for_project(cas_root)?;
-    let agents = crate::store::open_agent_store(cas_root).ok()?;
+    let Ok(agents) = crate::store::open_agent_store(cas_root) else {
+        return Some(Acquire::Unavailable("the agent registry could not be opened".into()));
+    };
+    if let Some(previous) = remember_focus(agents.as_ref(), agent_id, Some(epic_id))
+        .filter(|previous| previous != epic_id)
+    {
+        release_focus_claim(&claims, agents.as_ref(), &previous, agent_id);
+    }
     let name = agents
         .get(agent_id)
         .map(|agent| agent.name)
         .unwrap_or_else(|_| agent_id.to_string());
     let is_local = |id: &str| agents.get(id).is_ok();
-    match claims.acquire(
+    Some(claims.acquire(
         epic_id,
         ClaimKind::Epic,
         agent_id,
         &name,
         lease_duration_secs(cas_root),
         &is_local,
-    ) {
-        Acquire::PeerHolds(hold) => Some(hold),
-        _ => None,
+    ))
+}
+
+/// Forget `agent_id`'s focus claim and release it in the cloud. Returns the
+/// epic it was on, if any.
+pub fn release_epic_focus(cas_root: &Path, agent_id: &str) -> Option<String> {
+    let agents = crate::store::open_agent_store(cas_root).ok()?;
+    let previous = remember_focus(agents.as_ref(), agent_id, None)?;
+    if let Some(claims) = PeerClaims::for_project(cas_root) {
+        release_focus_claim(&claims, agents.as_ref(), &previous, agent_id);
+    }
+    Some(previous)
+}
+
+/// Set (or with `None`, clear) the agent's focus claim; returns the old one.
+fn remember_focus(
+    agents: &dyn crate::store::AgentStore,
+    agent_id: &str,
+    epic_id: Option<&str>,
+) -> Option<String> {
+    let mut agent = agents.get(agent_id).ok()?;
+    let previous = agent.metadata.get(META_FOCUS_CLAIM).cloned();
+    if previous.as_deref() != epic_id {
+        match epic_id {
+            Some(epic_id) => {
+                agent.metadata.insert(META_FOCUS_CLAIM.to_string(), epic_id.to_string());
+            }
+            None => {
+                agent.metadata.remove(META_FOCUS_CLAIM);
+            }
+        }
+        if let Err(error) = agents.update(&agent) {
+            tracing::debug!(%error, "could not record the focus claim");
+        }
+    }
+    previous
+}
+
+/// Release the focus claim on `epic_id`, unless `agent_id` also holds a
+/// local lease on the epic (a subtask start claims it): then the claim stays
+/// and renews with that lease.
+fn release_focus_claim(
+    claims: &PeerClaims,
+    agents: &dyn crate::store::AgentStore,
+    epic_id: &str,
+    agent_id: &str,
+) {
+    let leased = agents
+        .list_agent_leases(agent_id)
+        .map(|leases| leases.iter().any(|lease| lease.task_id == epic_id && lease.is_valid()))
+        .unwrap_or(false);
+    if leased {
+        return;
+    }
+    if let Err(error) = claims.release_own(epic_id, agent_id) {
+        tracing::debug!(epic = %epic_id, %error, "cloud focus claim release failed");
     }
 }
 

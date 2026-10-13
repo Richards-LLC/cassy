@@ -10,7 +10,7 @@ use crate::cloud::peers::{PeerDiscovery, discover_peers};
 use crate::mcp::tools::service::imports::*;
 
 /// The local-only targets that never route to a peer.
-const LOCAL_TARGETS: &[&str] = &["operator", "supervisor", "all_workers"];
+const LOCAL_TARGETS: &[&str] = &["operator", "supervisor", "all_workers", "director", "owner"];
 
 impl CasService {
     /// Route a supervisor's message to a peer supervisor when it addresses
@@ -31,6 +31,8 @@ impl CasService {
             .iter()
             .any(|local| target.eq_ignore_ascii_case(local))
             || target.starts_with("commander:")
+            || target.starts_with("inbox:")
+            || super::message::target_is_reserved_source(target)
         {
             return Ok(None);
         }
@@ -123,6 +125,9 @@ impl CasService {
             if local {
                 return Ok(None);
             }
+            if self.message_target_has_pending_spawn(target, sender.factory_session.as_deref())? {
+                return Ok(None);
+            }
         }
 
         let (root, self_id, wanted) = (cas_root.clone(), sender.id.clone(), target.to_string());
@@ -131,23 +136,31 @@ impl CasService {
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let peers = match discovery {
             Ok(PeerDiscovery::Found { peers, .. }) => peers,
-            Ok(PeerDiscovery::NotLoggedIn) if qualified => {
+            Ok(PeerDiscovery::NotLoggedIn) => {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(
-                        "'{wanted}' names a peer supervisor, but this project is not logged in \
-                         to Cassy Cloud (`cas login`)"
+                        "Could not resolve message target '{wanted}' through Cassy Cloud: no token \
+                         (not logged in; `cas login`). Nothing was enqueued."
                     ),
                 ));
             }
-            Ok(_) => return Ok(None),
-            Err(error) if qualified => {
+            Ok(PeerDiscovery::NoProjectIdentity) => {
                 return Err(Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Could not look up peer supervisors: {error}"),
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Could not resolve message target '{wanted}' through Cassy Cloud: this project has no canonical id. Nothing was enqueued."
+                    ),
                 ));
             }
-            Err(_) => return Ok(None),
+            Err(error) => {
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Could not look up peer supervisors for '{wanted}': {error}. Nothing was enqueued."
+                    ),
+                ));
+            }
         };
         let peer = peer_mailbox::resolve_peer_target(&peers, &wanted)
             .map_err(|ambiguous| Self::error(ErrorCode::INVALID_PARAMS, ambiguous))?
@@ -155,6 +168,19 @@ impl CasService {
         let Some(peer) = peer else {
             return Ok(None);
         };
+        if peer
+            .session
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "{}@{} is not running a factory daemon, so it cannot receive peer messages",
+                    peer.name, peer.machine
+                ),
+            ));
+        }
         if urgent {
             return Err(refuse_urgent());
         }
@@ -166,7 +192,15 @@ impl CasService {
         })
         .await
         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-        .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Could not deliver to {}@{} mailbox: {error}",
+                    peer.name, peer.machine
+                ),
+            )
+        })?;
         let staleness = if peer.live {
             String::new()
         } else {
@@ -177,10 +211,32 @@ impl CasService {
             )
         };
         Ok(Some(Self::success(format!(
-            "Message sent to peer supervisor {}@{} via Cassy Cloud (peer message {}, {}).{staleness} \
+            "Message sent to peer supervisor {}@{} via Cassy Cloud (peer message {}, {}): delivered to {}@{} mailbox.{staleness} \
              Check delivery with coordination action=message_status id={}.",
-            peer.name, peer.machine, receipt.id, receipt.status, receipt.id
+            peer.name,
+            peer.machine,
+            receipt.id,
+            receipt.status,
+            peer.name,
+            peer.machine,
+            receipt.id
         ))))
+    }
+
+    /// Queue-on-registration is reserved for names CAS is actually spawning.
+    pub(in crate::mcp::tools::service) fn message_target_has_pending_spawn(
+        &self,
+        target: &str,
+        factory_session: Option<&str>,
+    ) -> Result<bool, McpError> {
+        crate::store::open_spawn_queue_store(&self.inner.cas_root)
+            .and_then(|store| Ok(store.has_pending_spawn(target, factory_session)?))
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Could not check pending local spawn for '{target}': {error}"),
+                )
+            })
     }
 
     /// `message_status id=<peer message id>`: the cloud delivery receipt of a
@@ -190,6 +246,7 @@ impl CasService {
         id: String,
     ) -> Result<CallToolResult, McpError> {
         let cas_root = self.inner.cas_root.clone();
+        let wanted = id.clone();
         let status = tokio::task::spawn_blocking(move || {
             peer_mailbox::http_mailbox(&cas_root)
                 .ok_or_else(|| "not logged in to Cassy Cloud".to_string())?
@@ -197,7 +254,17 @@ impl CasService {
         })
         .await
         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-        .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+        .map_err(|error| {
+            let visibility = if error.starts_with("peer message status refused (404)") {
+                " is not visible to this account (or does not exist)"
+            } else {
+                " status could not be read"
+            };
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!("Peer message {wanted}{visibility}: {error}"),
+            )
+        })?;
         Ok(Self::success(format!(
             "Peer message {}: {}{} (delivery attempts: {})",
             status.id,

@@ -119,6 +119,48 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
             .unwrap()
             .is_none()
     );
+    // The selector alone expands details; workers remain unselectable peers.
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "peers", "peer": "sup-b@machine-beta", "json": true
+    }))
+    .unwrap();
+    let selected = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    let selected = selected.content[0].as_text().unwrap();
+    let selected: serde_json::Value = serde_json::from_str(&selected.text).unwrap();
+    assert_eq!(selected["detail"], true);
+    assert_eq!(selected["peers"][0]["workers"].as_array().unwrap().len(), 4);
+    for peer in ["beta-worker", "sup-missing"] {
+        let request =
+            serde_json::from_value(serde_json::json!({"action": "peers", "peer": peer})).unwrap();
+        let error = service
+            .coordination(rmcp::handler::server::wrapper::Parameters(request))
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.contains("not found") && error.message.contains(peer),
+            "{error}"
+        );
+    }
+    // CLI parity uses the actual binary built with this integration harness.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cas"))
+        .args(["peers", "--peer", "sup-b", "--json"])
+        .current_dir(alpha.cas_dir.parent().unwrap())
+        .env("CAS_ROOT", &alpha.cas_dir)
+        .env("CAS_SESSION_ID", "a")
+        .env_remove("CAS_CLONE_PATH")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["peers"][0]["workers"].as_array().unwrap().len(), 4);
+    assert_eq!(cli["peers"][0]["claims"].as_array().unwrap().len(), 3);
 }
 
 /// Register `id` in the cloud (as the daemon does) and in the machine's own

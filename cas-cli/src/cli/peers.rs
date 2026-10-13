@@ -26,7 +26,14 @@ pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()
         self_id.as_deref(),
         args.detail,
         args.peer.as_deref(),
-    )?;
+    )
+    .unwrap_or_else(|error| crate::cloud::peers_detail::PeerReport {
+        canonical_id: crate::cloud::resolve_canonical_id(cas_root),
+        detail: args.detail || args.peer.is_some(),
+        status: "lookup_failed".into(),
+        peers: Vec::new(),
+        error: Some(error.to_string()),
+    });
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

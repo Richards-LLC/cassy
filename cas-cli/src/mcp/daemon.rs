@@ -459,12 +459,23 @@ impl EmbeddedDaemon {
         }));
     }
 
-    /// Wait for the in-flight cloud presence tick, if any.
+    /// Wait until no cloud presence tick is in flight. The slot stays
+    /// occupied while waiting, so a concurrent kick still skips (as in
+    /// production); a brief first sleep lets already-spawned kicks run.
     #[cfg(test)]
     pub(crate) async fn await_cloud_presence(&self) {
-        let task = self.presence_task.lock().await.take();
-        if let Some(task) = task {
-            let _ = task.await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        loop {
+            let running = self
+                .presence_task
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|task| !task.is_finished());
+            if !running {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 

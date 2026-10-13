@@ -213,6 +213,8 @@ async fn session_start(daemon: &EmbeddedDaemon, session_id: &str, name: &str) {
 
 /// One daemon heartbeat tick, waiting for its cloud presence upkeep.
 async fn heartbeat_tick(daemon: &EmbeddedDaemon) {
+    // Settle any earlier kick first, so this tick is not skipped.
+    daemon.await_cloud_presence().await;
     daemon.send_agent_heartbeat().await;
     daemon.await_cloud_presence().await;
 }

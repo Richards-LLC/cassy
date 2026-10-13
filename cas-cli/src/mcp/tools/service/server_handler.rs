@@ -761,6 +761,15 @@ mod tests {
         std::fs::create_dir_all(&core.cas_root).unwrap();
         core.register_agent("timeout-sender".into(), "timeout-supervisor".into(), None)
             .unwrap();
+        // Unknown targets are refused before enqueue (cas-a19b). This
+        // post-commit timeout fixture needs a routable local recipient.
+        crate::store::open_agent_store(&core.cas_root)
+            .unwrap()
+            .register(&crate::types::Agent::new(
+                "timeout-recipient-id".into(),
+                "timeout-recipient".into(),
+            ))
+            .unwrap();
         let service = CasService::new(
             core,
             #[cfg(feature = "mcp-proxy")]

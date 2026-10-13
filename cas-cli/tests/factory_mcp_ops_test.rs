@@ -6037,7 +6037,18 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
         text.contains("Prompt queue entries pruned: 0"),
         "age-targeted remediation must preserve history: {text}"
     );
-    assert_eq!(pq.pending_count().unwrap(), 0);
+    // Remediation expires the original row, then leaves a fresh notice for
+    // its sender; that notice must survive this same cleanup transaction.
+    assert_eq!(pq.pending_count().unwrap(), 1);
+    let pending = pq.peek_all(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let notice = &pending[0];
+    assert_ne!(notice.id, id);
+    assert_eq!(notice.source, "delivery-watchdog");
+    assert_eq!(notice.target, "src");
+    assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+    assert!(notice.prompt.contains(&format!("Message {id} to dead-worker")));
+    assert!(notice.prompt.contains("explicit queue remediation"));
     let report = pq
         .message_delivery_report(id)
         .unwrap()
@@ -7887,6 +7898,9 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     // addressed to a worker name the supervisor already knows (e.g. from an
     // explicit spawn_workers worker_names= request) before the daemon has
     // finished spawning it.
+    env.spawn_queue()
+        .enqueue_spawn(1, &["not-born-yet".to_string()], true, None, None, None)
+        .expect("pending local spawn");
 
     let req = coord_msg("message", "not-born-yet", "start with task cas-abc1", None);
     let result = env.service.coordination(Parameters(req)).await;

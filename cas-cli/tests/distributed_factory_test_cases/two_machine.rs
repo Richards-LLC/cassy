@@ -491,11 +491,21 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
         let outcome = service
             .coordination(rmcp::handler::server::wrapper::Parameters(request))
             .await;
-        let text = match &outcome {
-            Ok(result) => format!("{:?}", result.content),
-            Err(error) => error.message.to_string(),
-        };
-        assert!(!text.contains("peer supervisor"), "{target}: {text}");
+        let error = outcome.expect_err("remote workers are not routable peer supervisors");
+        assert!(
+            error.message.contains(&format!(
+                "no supervisor or worker named {target} in this project or its peers"
+            )),
+            "{target}: {error}"
+        );
+        assert!(
+            open_prompt_queue_store(&alpha.cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .is_empty(),
+            "no local registration promise for a remote worker"
+        );
     }
     assert!(
         cloud.messages_to("bw").is_empty(),

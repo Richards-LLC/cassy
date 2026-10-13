@@ -1,0 +1,787 @@
+{
+  "schema": 1,
+  "group": "agents",
+  "captured_on": "2026-10-13",
+  "endpoint": "https://petra-stella-cloud.vercel.app",
+  "capture_script": "scripts/cloud-contract-capture.py",
+  "exchanges": [
+    {
+      "group": "agents",
+      "name": "register_c_idle",
+      "note": "the 3.51 client's register body (coordinator.rs register_with_focus)",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/register",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "<agent-c>",
+          "name": "cc-<run>-idle",
+          "agent_type": "primary",
+          "role": "supervisor",
+          "pid": 4242,
+          "parent_id": null,
+          "machine_id": "<host>",
+          "factory_id": null,
+          "clone_path": null,
+          "metadata": {
+            "role": "supervisor",
+            "canonical_id": "<project>",
+            "factory_session": "<factory-session>",
+            "hostname": "<host>"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agent": {
+            "id": "<agent-c>",
+            "name": "cc-<run>-idle",
+            "agent_type": "primary",
+            "status": "active",
+            "user_id": "<uuid-1>",
+            "project_id": "<project>",
+            "team_id": null,
+            "pid": 4242,
+            "session_id": null,
+            "machine_id": "<host>",
+            "last_heartbeat": "<ts-1>",
+            "active_tasks": 0,
+            "metadata": {
+              "role": "supervisor",
+              "hostname": "<host>",
+              "canonical_id": "<project>",
+              "factory_session": "<factory-session>"
+            }
+          }
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "register_a",
+      "note": "the 3.51 client's register body (coordinator.rs register_with_focus)",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/register",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "<agent-a>",
+          "name": "cc-<run>-sup-a",
+          "agent_type": "primary",
+          "role": "supervisor",
+          "pid": 4242,
+          "parent_id": null,
+          "machine_id": "<host>",
+          "factory_id": null,
+          "clone_path": null,
+          "metadata": {
+            "role": "supervisor",
+            "canonical_id": "<project>",
+            "factory_session": "<factory-session>",
+            "hostname": "<host>"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agent": {
+            "id": "<agent-a>",
+            "name": "cc-<run>-sup-a",
+            "agent_type": "primary",
+            "status": "active",
+            "user_id": "<uuid-1>",
+            "project_id": "<project>",
+            "team_id": null,
+            "pid": 4242,
+            "session_id": null,
+            "machine_id": "<host>",
+            "last_heartbeat": "<ts-2>",
+            "active_tasks": 0,
+            "metadata": {
+              "role": "supervisor",
+              "hostname": "<host>",
+              "canonical_id": "<project>",
+              "factory_session": "<factory-session>"
+            }
+          }
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "register_b",
+      "note": "the 3.51 client's register body (coordinator.rs register_with_focus)",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/register",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "<agent-b>",
+          "name": "cc-<run>-sup-b",
+          "agent_type": "primary",
+          "role": "supervisor",
+          "pid": 4242,
+          "parent_id": null,
+          "machine_id": "<host>",
+          "factory_id": null,
+          "clone_path": null,
+          "metadata": {
+            "role": "supervisor",
+            "canonical_id": "<project>",
+            "factory_session": "<factory-session>",
+            "hostname": "<host>"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agent": {
+            "id": "<agent-b>",
+            "name": "cc-<run>-sup-b",
+            "agent_type": "primary",
+            "status": "active",
+            "user_id": "<uuid-1>",
+            "project_id": "<project>",
+            "team_id": null,
+            "pid": 4242,
+            "session_id": null,
+            "machine_id": "<host>",
+            "last_heartbeat": "<ts-3>",
+            "active_tasks": 0,
+            "metadata": {
+              "role": "supervisor",
+              "hostname": "<host>",
+              "canonical_id": "<project>",
+              "factory_session": "<factory-session>"
+            }
+          }
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "heartbeat_with_metadata",
+      "note": "metadata is merged; canonical_id re-binds, null clears, omitted keeps",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/<agent-a>/heartbeat",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "metadata": {
+            "canonical_id": "<project>",
+            "focus": "cas-<run>e",
+            "branch": "factory/cc-<run>",
+            "factory_session": "<factory-session>"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "<agent-a>",
+          "name": "cc-<run>-sup-a",
+          "agent_type": "primary",
+          "status": "active",
+          "user_id": "<uuid-1>",
+          "project_id": "<project>",
+          "team_id": null,
+          "pid": 4242,
+          "session_id": null,
+          "machine_id": "<host>",
+          "last_heartbeat": "<ts-4>",
+          "active_tasks": 0,
+          "metadata": {
+            "role": "supervisor",
+            "focus": "cas-<run>e",
+            "branch": "factory/cc-<run>",
+            "hostname": "<host>",
+            "canonical_id": "<project>",
+            "factory_session": "<factory-session>"
+          }
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "heartbeat_without_body",
+      "note": "a bodiless heartbeat still returns 200 and keeps the binding",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/<agent-b>/heartbeat",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "<agent-b>",
+          "name": "cc-<run>-sup-b",
+          "agent_type": "primary",
+          "status": "active",
+          "user_id": "<uuid-1>",
+          "project_id": "<project>",
+          "team_id": null,
+          "pid": 4242,
+          "session_id": null,
+          "machine_id": "<host>",
+          "last_heartbeat": "<ts-5>",
+          "active_tasks": 0,
+          "metadata": {
+            "role": "supervisor",
+            "hostname": "<host>",
+            "canonical_id": "<project>",
+            "factory_session": "<factory-session>"
+          }
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_page_1",
+      "note": "keyset paging: next_* fields carry the cursor",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-b>",
+              "name": "cc-<run>-sup-b",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-5>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-6>",
+          "next_cursor_id": "<agent-b>",
+          "next_sort_cursor": "<ts-6>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_page_2",
+      "note": "second page with every cursor field from page 1, project kept",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-6>",
+          "cursor_id": "<agent-b>",
+          "sort_cursor": "<ts-6>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-7>",
+          "next_cursor_id": "<agent-a>",
+          "next_sort_cursor": "<ts-7>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_page_2_without_sort_cursor",
+      "note": "the 3.51 client's loop echoes only cursor and cursor_id (coordinator.rs list_agent_infos); compare with list_project_page_2",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-6>",
+          "cursor_id": "<agent-b>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-7>",
+          "next_cursor_id": "<agent-a>",
+          "next_sort_cursor": "<ts-7>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_page_3",
+      "note": "third page: the oldest scratch agent",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-7>",
+          "cursor_id": "<agent-a>",
+          "sort_cursor": "<ts-7>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-c>",
+              "name": "cc-<run>-idle",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-1>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-8>",
+          "next_cursor_id": "<agent-c>",
+          "next_sort_cursor": "<ts-8>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_past_end",
+      "note": "past the last agent: an empty page",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-8>",
+          "cursor_id": "<agent-c>",
+          "sort_cursor": "<ts-8>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [],
+          "next_cursor": null,
+          "next_cursor_id": null,
+          "next_sort_cursor": null
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_active",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "status": "active"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-b>",
+              "name": "cc-<run>-sup-b",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-5>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-c>",
+              "name": "cc-<run>-idle",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-1>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": null,
+          "next_cursor_id": null,
+          "next_sort_cursor": null
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_unknown_project",
+      "note": "unknown or unauthorized project: 200 with agents: []",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "github.com/petrastella-live-check/none-<run>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [],
+          "next_cursor": null,
+          "next_cursor_id": null,
+          "next_sort_cursor": null
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_without_project",
+      "note": "without ?project= only the caller's own agents (truncated to 2 here)",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "limit": 2
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-b>",
+              "name": "cc-<run>-sup-b",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-5>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-7>",
+          "next_cursor_id": "<agent-a>",
+          "next_sort_cursor": "<ts-7>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_stale",
+      "note": "status is computed live: a heartbeat older than five minutes reads stale",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "status": "stale"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-b>",
+              "name": "cc-<run>-sup-b",
+              "agent_type": "primary",
+              "status": "stale",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-5>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "stale",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            },
+            {
+              "id": "<agent-c>",
+              "name": "cc-<run>-idle",
+              "agent_type": "primary",
+              "status": "stale",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-1>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": null,
+          "next_cursor_id": null,
+          "next_sort_cursor": null
+        }
+      }
+    }
+  ]
+}

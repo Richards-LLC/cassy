@@ -220,6 +220,8 @@ pub fn discover_peers(
         .collect::<Vec<_>>();
     let peers = crate::cloud::CloudCoordinator::new(config)?
         .with_timeout(DISCOVERY_TIMEOUT)
+        // cas-f707: ask the cloud for this project (petra-stella-cloud#151).
+        .with_canonical_id(Some(canonical_id.clone()))
         .list_repo_peers(&canonical_id, &alias_class, self_id, Utc::now())?;
     Ok(PeerDiscovery::Found {
         canonical_id,

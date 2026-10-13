@@ -144,9 +144,10 @@ impl PeerHold {
     /// caller's tool prefix (e.g. `mcp__cas__`).
     pub fn shared_epic_note(&self, epic_id: &str, prefix: &str) -> String {
         format!(
-            "\n\n👥 SHARED EPIC — {} also works epic {epic_id} (claimed until {}). Agree who takes which children before both of you start the same one: {prefix}coordination action=message target={} summary=\"{epic_id}\" message=\"...\"",
+            "\n\n👥 SHARED EPIC — {} also works epic {epic_id} (claimed until {}). Agree who takes which children before both of you start the same one: {prefix}factory action=epic_split id={epic_id} target={} mine=<ids> theirs=<ids>, or {prefix}coordination action=message target={} summary=\"{epic_id}\" message=\"...\"",
             self.describe(),
             self.until(),
+            self.name(),
             self.name(),
         )
     }

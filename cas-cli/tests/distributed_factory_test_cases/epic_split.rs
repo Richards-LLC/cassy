@@ -25,12 +25,24 @@ const EPIC: &str = "cas-e100";
 const SOUNDWAVE_TAKES: [&str; 3] = ["cas-a1", "cas-a2", "cas-a3"];
 const PROWL_TAKES: [&str; 3] = ["cas-d1", "cas-d2", "cas-d3"];
 
-/// One machine: its database, its supervisor's id and MCP surfaces.
+/// One machine: its database, its supervisor's id and MCP surface, and the
+/// MCP core of one of its workers (supervisors delegate starts to workers).
 struct Side {
     machine: TestMachine,
     id: &'static str,
     service: cas::mcp::CasService,
-    core: cas::mcp::CasCore,
+    worker: cas::mcp::CasCore,
+}
+
+/// Register `agent` in the cloud (as its daemon does) and locally.
+fn register(machine: &TestMachine, agent: &Agent) {
+    let config = cas::cloud::CloudConfig::load_from_cas_dir(&machine.cas_dir).unwrap();
+    CloudCoordinator::new(config)
+        .unwrap()
+        .with_canonical_id(resolve_canonical_id(&machine.cas_dir))
+        .register_with_focus(agent, Some(EPIC))
+        .unwrap();
+    open_agent_store(&machine.cas_dir).unwrap().register(agent).unwrap();
 }
 
 fn side(cloud: &FakeCloud, machine_name: &str, id: &'static str, name: &str) -> Side {
@@ -41,18 +53,17 @@ fn side(cloud: &FakeCloud, machine_name: &str, id: &'static str, name: &str) -> 
         format!("[project]\ncanonical_id = {WIDGETS:?}\n[verification]\nenabled = false\n"),
     )
     .unwrap();
-    // A supervisor registered in the cloud (as its daemon does) and locally.
-    let mut agent = Agent::new(id.to_string(), name.to_string());
-    agent.role = AgentRole::Supervisor;
-    agent.machine_id = Some(machine_name.to_string());
-    agent.factory_session = Some(format!("factory-{id}"));
-    let config = cas::cloud::CloudConfig::load_from_cas_dir(&machine.cas_dir).unwrap();
-    CloudCoordinator::new(config)
-        .unwrap()
-        .with_canonical_id(resolve_canonical_id(&machine.cas_dir))
-        .register_with_focus(&agent, Some(EPIC))
-        .unwrap();
-    open_agent_store(&machine.cas_dir).unwrap().register(&agent).unwrap();
+    // A supervisor and one of its workers, in one factory session.
+    for (agent_id, agent_name, role) in [
+        (id.to_string(), name.to_string(), AgentRole::Supervisor),
+        (format!("{id}-w"), format!("{name}-worker"), AgentRole::Worker),
+    ] {
+        let mut agent = Agent::new(agent_id, agent_name);
+        agent.role = role;
+        agent.machine_id = Some(machine_name.to_string());
+        agent.factory_session = Some(format!("factory-{id}"));
+        register(&machine, &agent);
+    }
     // The same epic and children, as every clone sees them after a pull.
     let tasks = open_task_store(&machine.cas_dir).unwrap();
     let mut epic = Task::new(EPIC.to_string(), "shared epic".to_string());
@@ -70,15 +81,15 @@ fn side(cloud: &FakeCloud, machine_name: &str, id: &'static str, name: &str) -> 
             ))
             .unwrap();
     }
-    let core = cas::mcp::CasCore::with_daemon(machine.cas_dir.clone(), None, None);
-    core.set_agent_id_for_testing(id.to_string());
+    let worker = cas::mcp::CasCore::with_daemon(machine.cas_dir.clone(), None, None);
+    worker.set_agent_id_for_testing(format!("{id}-w"));
     let service_core = cas::mcp::CasCore::with_daemon(machine.cas_dir.clone(), None, None);
     service_core.set_agent_id_for_testing(id.to_string());
     Side {
         machine,
         id,
         service: cas::mcp::CasService::new(service_core, None),
-        core,
+        worker,
     }
 }
 
@@ -115,8 +126,9 @@ impl Side {
             .map_err(|error| error.message.to_string())
     }
 
+    /// A start by this side's worker.
     async fn start(&self, id: &str, force: bool) -> Result<String, String> {
-        self.core
+        self.worker
             .cas_task_start_with_options(Parameters(TaskStartRequest {
                 id: id.to_string(),
                 brief: Some(true),
@@ -130,7 +142,7 @@ impl Side {
     async fn claim(&self, id: &str) -> Result<String, String> {
         let request: cas::mcp::tools::TaskClaimRequest =
             serde_json::from_value(json!({"task_id": id})).unwrap();
-        self.core
+        self.worker
             .cas_task_claim(Parameters(request))
             .await
             .map(text)
@@ -227,11 +239,8 @@ async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
     let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
 
     // A worker cannot split an epic.
-    let mut worker = Agent::new("w1".to_string(), "worker-one".to_string());
-    worker.role = AgentRole::Worker;
-    open_agent_store(&soundwave.machine.cas_dir).unwrap().register(&worker).unwrap();
     let worker_core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
-    worker_core.set_agent_id_for_testing("w1".to_string());
+    worker_core.set_agent_id_for_testing("sw-w".to_string());
     let request: cas_mcp::types::CoordinationRequest = serde_json::from_value(
         json!({"action": "epic_split", "id": EPIC, "target": "prowl", "mine": "cas-a1", "theirs": "cas-d1"}),
     )
@@ -304,8 +313,10 @@ async fn epic_split_cancel_releases_only_the_cancellers_own_claims() {
     for child in SOUNDWAVE_TAKES {
         assert_eq!(cloud_holder(&cloud, child).as_deref(), Some("sw"), "{child} untouched");
     }
-    // prowl's own gate is lifted at once.
-    prowl.start("cas-a2", false).await.unwrap_err(); // still soundwave's cloud claim
+    // prowl's split gate is lifted at once; soundwave's own cloud claim
+    // still refuses prowl on cas-a2.
+    let held = prowl.start("cas-a2", false).await.unwrap_err();
+    assert!(held.contains("HELD BY A PEER") && !held.contains("SPLIT"), "{held}");
     let report = soundwave.tick().await;
     assert_eq!(report.delivered, 1, "{report:?}");
     let listed = soundwave.factory(json!({})).await.unwrap();
@@ -346,7 +357,7 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
         .unwrap_err();
     assert!(refused.contains("nothing claimed") && refused.contains("cas-a2"), "{refused}");
     assert_eq!(cloud_holder(&cloud, "cas-a1"), None);
-    assert_eq!(cloud_holder(&cloud, "cas-a2").as_deref(), Some("pr"));
+    assert_eq!(cloud_holder(&cloud, "cas-a2").as_deref(), Some("pr-w"));
     assert_eq!(cloud_holder(&cloud, "cas-a3"), None);
     assert!(cloud.messages_to("pr").is_empty(), "nothing was proposed");
     assert!(soundwave.factory(json!({})).await.unwrap().contains("No epic splits"));

@@ -5362,21 +5362,24 @@ mod workspace_contract_tests {
                     }
                 }
             }
-            for command in [
-                format!("echo 'write_roots = [\"/\"]' > {relative}"),
-                format!("printf x >> {relative}"),
-                format!("echo x | tee -a {relative}"),
-                format!("cp /tmp/forged.toml {relative}"),
-                format!("mv /tmp/forged.toml {relative}"),
-                format!("sed -i 's/a/b/' {relative}"),
-                format!("perl -pi -e 's/a/b/' {relative}"),
-                format!("mv {relative} /tmp/old-config"),
-                format!("rm -f {relative}"),
-                format!("cd {} && sed -i s/a/b/ {absolute}", worktree.display()),
-            ] {
-                for supervisor in [false, true] {
-                    let cwd = if supervisor { &main } else { &worktree };
-                    let command = if supervisor { command.clone() } else { command.replace(&relative, &absolute) };
+            let commands = |target: &str| {
+                vec![
+                    format!("echo 'write_roots = [\"/\"]' > {target}"),
+                    format!("printf x >> {target}"),
+                    format!("echo x | tee -a {target}"),
+                    format!("cp /tmp/forged.toml {target}"),
+                    format!("mv /tmp/forged.toml {target}"),
+                    format!("sed -i 's/a/b/' {target}"),
+                    format!("perl -pi -e 's/a/b/' {target}"),
+                    format!("mv {target} /tmp/old-config"),
+                    format!("rm -f {target}"),
+                ]
+            };
+            for supervisor in [false, true] {
+                // The supervisor works in the main checkout with relative
+                // paths; a worker reaches the file by its absolute path.
+                let (cwd, target) = if supervisor { (&main, &relative) } else { (&worktree, &absolute) };
+                for command in commands(target) {
                     let decision = factory_write_decision(&bash_input(&command, cwd), &None, None, supervisor, Some(cwd.as_path()), &unconfigured, &no_tasks);
                     let FactoryWriteDecision::Denied(violation) = decision else {
                         panic!("{command} (supervisor={supervisor}) must be refused: {decision:?}");
@@ -5505,6 +5508,11 @@ mod workspace_contract_tests {
             for (case, input) in &admitted {
                 let (decision, reason) = decide(&cas_a, &project_a, role, input.clone());
                 assert_ne!(decision, "deny", "project A {role} {case} must be admitted: {reason}");
+                if role == "supervisor" && *case == "delete" {
+                    // A supervisor may already delete under /tmp (cas-cf4f),
+                    // where this fixture's HOME lives.
+                    continue;
+                }
                 let (decision, reason) = decide(&cas_b, &project_b, role, input.clone());
                 assert_eq!(decision, "deny", "project B {role} {case} has no roots and stays refused: {reason}");
             }

@@ -291,13 +291,20 @@ fn claim_route(
         .cloned();
     let duration = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
     match (method, action) {
-        ("POST", "claim") => match active {
-            // As petra-stella-cloud today: an active row is held whatever its
-            // expires_at (petra-stella-cloud#150).
+        ("POST", "claim") => match active.filter(|lock| {
+            // Production (petra-stella-cloud #150, PR #153): an expired lock is
+            // free, and a claim takes it over.
+            lock["expires_at"]
+                .as_str()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|at| at > Utc::now())
+        }) {
+            // A live lock refuses with a body naming the holder and the
+            // expiry, and no `status`.
             Some(lock) if lock["agent_id"] != agent_id.as_str() => (
                 409,
-                json!({"status": "conflict", "result": null, "lock": null,
-                       "error": "already_claimed", "owner_agent_id": lock["agent_id"]}),
+                json!({"error": "already_claimed", "owner_agent_id": lock["agent_id"],
+                       "agent_id": agent_id, "expires_at": lock["expires_at"]}),
             ),
             Some(lock) => (
                 200,

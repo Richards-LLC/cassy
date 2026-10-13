@@ -89,6 +89,10 @@ class StepFailed(Exception):
     pass
 
 
+class StepSkipped(Exception):
+    """The step cannot run in this configuration (not a pass, not a fail)."""
+
+
 class Machine:
     """One host: soundwave runs commands locally, prowl over ssh."""
 
@@ -335,6 +339,9 @@ class Run:
                     if pending:
                         receipt["detail"] = f"{requires} not merged: executed for observation only, never a pass"
                         receipt["observed"] = "would pass"
+                except StepSkipped as skipped:
+                    receipt["status"] = "pending" if pending else "skipped"
+                    receipt["detail"] = str(skipped)
                 except StepFailed as failure:
                     receipt["status"] = "pending" if pending else "fail"
                     receipt["detail"] = str(failure)
@@ -590,7 +597,7 @@ class Run:
 
     def step_presence_recovery(self, evidence, notes):
         if not self.standin:
-            raise StepFailed("needs the stand-in's fault injection; not runnable against the real cloud")
+            raise StepSkipped("needs the stand-in's fault injection; not runnable against the real cloud")
         evidence["faults"] = self.standin_admin("POST", "/__standin/faults", {"register_fail": 2})
         self.restart_prowl(evidence, "prowl")
         self.launch(self.b, self.sessions["b"], self.names["b"], [self.names["bw"]])
@@ -765,6 +772,7 @@ def main(argv=None):
         "steps": statuses,
         "passed": [s for s, v in statuses.items() if v == "pass"],
         "failed": [s for s, v in statuses.items() if v in ("fail", "error")],
+        "skipped": [s for s, v in statuses.items() if v == "skipped"],
         "pending": {s: PENDING_BY_DEFAULT.get(s) for s, v in statuses.items() if v == "pending"},
         "setup_error": setup_error,
         "diagnostic_workaround_eager_registration": args.workaround_eager_registration,

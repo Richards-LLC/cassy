@@ -252,3 +252,16 @@ fn cas_f707_a_peer_the_cloud_reports_stale_is_not_live() {
     let live: Vec<(&str, bool)> = peers.iter().map(|p| (p.agent_id.as_str(), p.live)).collect();
     assert_eq!(live, [("sup-live", true), ("sup-stale", false)]);
 }
+
+#[test]
+fn cas_f707_peer_lines_fit_an_80_column_terminal() {
+    let mut long = supervisor("sup-long", REPO, 20);
+    long.metadata.insert(META_FACTORY_SESSION.into(), "cassy-swift-gazelle-77".into());
+    long.metadata.insert(META_HOSTNAME.into(), "build-host-with-a-long-name".into());
+    let peers = repo_peers(&[long, supervisor("sup-b", REPO, 900)], REPO, &[], None, now());
+    let text = render_peers(REPO, &peers);
+    // `cas status` indents the section by two more columns.
+    assert!(text.lines().all(|line| line.chars().count() + 2 <= 80), "{text}");
+    assert!(text.contains("name-sup-long [live] on build-host-with-a-long-name, heartbeat 20s ago"));
+    assert!(text.contains("    session cassy-swift-gazelle-77 | focus cas-571d"), "{text}");
+}

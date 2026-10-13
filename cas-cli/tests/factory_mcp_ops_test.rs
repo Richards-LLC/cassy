@@ -3762,11 +3762,10 @@ async fn cas_f707_worker_status_summary_flags_a_failing_cloud_presence() {
     presence::save(&env.cas_root, &failing);
     let flagged = summary(&env).await;
     assert!(
-        flagged.contains(
-            "Cloud presence: failing: Failed to register agent (503): registry unavailable (2 failed attempts"
-        ),
+        flagged.contains("Cloud presence: failing: Failed to register agent (503): registry"),
         "{flagged}"
     );
+    assert!(flagged.contains("  2 failed attempts, next retry in"), "{flagged}");
 
     presence::save(
         &env.cas_root,

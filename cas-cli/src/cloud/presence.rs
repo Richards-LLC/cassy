@@ -347,9 +347,13 @@ pub fn opted_out(cas_root: &Path) -> bool {
         .is_some_and(|cloud| !cloud.auto_sync)
 }
 
-/// The presence line for a project that opted out.
-pub const DISABLED_LINE: &str = "Cloud presence: disabled (cloud.auto_sync=false): this \
-     project's agents are not registered with Cassy Cloud.\n";
+/// The presence lines for a project that opted out (wrapped).
+pub fn disabled_lines() -> String {
+    wrap_line(
+        "Cloud presence: disabled (cloud.auto_sync=false): this project's agents \
+         are not registered with Cassy Cloud.",
+    )
+}
 
 /// The project's cloud coordinator (its own cloud config, scoped to its
 /// canonical id), or `None` when the project is not logged in or opted out
@@ -390,36 +394,80 @@ fn age(secs: i64) -> String {
     }
 }
 
-/// One line for `coordination action=peers`, `worker_status` and
+/// Status lines are wrapped to this many columns, so `cas status` (which
+/// indents them) still fits an 80-column terminal.
+pub const WRAP_COLUMNS: usize = 72;
+
+/// `text` word-wrapped to [`WRAP_COLUMNS`], continuation lines indented by
+/// two spaces, ending in a newline. A single word longer than the width is
+/// kept whole on its own line.
+pub fn wrap_line(text: &str) -> String {
+    let mut out = String::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let indent = if out.is_empty() { 0 } else { 2 };
+        if !line.is_empty() && indent + line.chars().count() + 1 + word.chars().count() > WRAP_COLUMNS
+        {
+            if !out.is_empty() {
+                out.push_str("  ");
+            }
+            out.push_str(&line);
+            out.push('\n');
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        if !out.is_empty() {
+            out.push_str("  ");
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The presence lines for `coordination action=peers`, `worker_status` and
 /// `cas status`: "Cloud presence: registered ..." or "Cloud presence:
-/// failing: <cause> ...".
+/// failing: <cause>" plus the retry state, wrapped to [`WRAP_COLUMNS`].
 pub fn render_line(record: Option<&PresenceRecord>, now: DateTime<Utc>) -> String {
     let Some(record) = record else {
-        return "Cloud presence: not registered yet (no registration attempt recorded for \
-                this agent)\n"
-            .to_string();
+        return wrap_line(
+            "Cloud presence: not registered yet (no registration attempt recorded for \
+             this agent)",
+        );
     };
     match record.state {
-        PresenceState::Registered => format!(
-            "Cloud presence: registered (focus {}, branch {}, registered {} ago)\n",
+        PresenceState::Registered => wrap_line(&format!(
+            "Cloud presence: registered (focus {}, branch {}, registered {} ago)",
             record.focus.as_deref().unwrap_or("-"),
             record.branch.as_deref().unwrap_or("-"),
             age(record
                 .registered_at
                 .map(|at| (now - at).num_seconds())
                 .unwrap_or_default()),
-        ),
+        )),
         PresenceState::Failing => {
             let retry = match record.next_retry_at {
                 Some(at) if at > now => format!("next retry in {}", age((at - now).num_seconds())),
                 _ => "retrying on the next heartbeat".to_string(),
             };
             format!(
-                "Cloud presence: failing: {} ({} failed attempt{}, {retry}; peers cannot see \
-                 this agent until it registers)\n",
-                record.cause.as_deref().unwrap_or("unknown error"),
-                record.failures,
-                if record.failures == 1 { "" } else { "s" },
+                "{}{}{}",
+                wrap_line(&format!(
+                    "Cloud presence: failing: {}",
+                    record.cause.as_deref().unwrap_or("unknown error")
+                )),
+                // Short by construction ("  12 failed attempts, next retry in 5m.").
+                format!(
+                    "  {} failed attempt{}, {retry}.\n",
+                    record.failures,
+                    if record.failures == 1 { "" } else { "s" },
+                ),
+                "  Peers cannot see this agent until it registers.\n",
             )
         }
     }
@@ -460,7 +508,9 @@ mod tests {
             line.starts_with("Cloud presence: failing: Failed to register agent (503)"),
             "{line}"
         );
-        assert!(line.contains("2 failed attempts"), "{line}");
+        assert!(line.contains("2 failed attempts, next retry in 30s."), "{line}");
+        assert!(line.contains("Peers cannot see this agent until it registers."), "{line}");
+        assert!(line.lines().all(|l| l.chars().count() <= WRAP_COLUMNS + 2), "{line}");
         let registered = PresenceRecord {
             state: PresenceState::Registered,
             cause: None,
@@ -475,6 +525,20 @@ mod tests {
             render_line(Some(&registered), now)
                 .starts_with("Cloud presence: registered (focus cas-571d, branch epic/x"),
         );
+    }
+
+    #[test]
+    fn cas_f707_wrap_line_fits_the_width_and_indents_continuations() {
+        let text = "Cloud presence: failing: Failed to register agent (503): registry \
+                    unavailable because the upstream registry returned an error page";
+        let wrapped = wrap_line(text);
+        let lines: Vec<&str> = wrapped.lines().collect();
+        assert!(lines.len() > 1, "{wrapped}");
+        assert!(lines.iter().all(|l| l.chars().count() <= WRAP_COLUMNS), "{wrapped}");
+        assert!(lines[1..].iter().all(|l| l.starts_with("  ")), "{wrapped}");
+        let rejoined: Vec<&str> = wrapped.split_whitespace().collect();
+        assert_eq!(rejoined, text.split_whitespace().collect::<Vec<_>>());
+        assert_eq!(wrap_line("short"), "short\n");
     }
 
     #[test]

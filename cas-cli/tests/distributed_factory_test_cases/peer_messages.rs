@@ -571,7 +571,7 @@ async fn cas_a19b_only_a_pending_local_spawn_can_wait_for_registration() {
     let service = service_for(&machine.cas_dir, "a");
     let sent = coordinate(&service, request.clone()).await.unwrap();
     assert!(sent.contains("will deliver on registration"), "{sent}");
-    spawns.record_spawn_state(id, cas::store::SpawnLifecycleState::Failed, None, Some("launch failed")).unwrap();
+    spawns.record_spawn_state(id, cas_store::SpawnLifecycleState::Failed, None, Some("launch failed")).unwrap();
     let error = coordinate(&service, request).await.unwrap_err();
     assert!(error.contains("no supervisor or worker named new-fox-1"), "{error}");
     assert_eq!(inbox(&machine.cas_dir).len(), 1);

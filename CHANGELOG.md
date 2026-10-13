@@ -30,43 +30,43 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added and fixed — same-repo collaboration across factories (3.51)
 
-- **Discovery (cas-e477). Was:** supervisors in other sessions or machines were
+- **Discovery (cas-e477).** **Was:** supervisors in other sessions or machines were
   absent from the factory view. **Now:** same-repository supervisors appear in
   `coordination action=peers`, the full worker-status view and
   `cas status --verbose`, with machine, session, focus and heartbeat age.
-- **Peer messages (cas-f9c7). Was:** coordination messages stayed in the local
+- **Peer messages (cas-f9c7).** **Was:** coordination messages stayed in the local
   queue. **Now:** supervisors address peers by name or `name@machine` through
   the cloud mailbox, reply and inspect delivery receipts. Peer traffic carries
   colleague provenance and no operator authority or control of another fleet.
-- **Task claims (cas-5f28). Was:** local leases could permit the same task on two
+- **Task claims (cas-5f28).** **Was:** local leases could permit the same task on two
   machines. **Now:** cloud claims refuse an overlapping start or claim, renew
   while the holder works, and release on lifecycle handoff. Claims are scoped
   by repository and currently visible within one user account; cross-account
   team claims are tracked in petra-stella-cloud#155.
-- **Presence recovery (cas-f707). Was:** registration could fail once, focus
+- **Presence recovery (cas-f707).** **Was:** registration could fail once, focus
   could become stale, and discovery did not send the production project
   filter. **Now:** shared presence updates recover registration, refresh focus
   and bind discovery to the project, with a visible local health cause.
   TODO(cas-f707): confirm final merged behavior and strings before release.
-- **Claim and spawn safety (cas-0078). Was:** refused local work could disturb a
+- **Claim and spawn safety (cas-0078).** **Was:** refused local work could disturb a
   cloud claim, lost renewals stayed lost, and spawn warned after queueing.
   **Now:** holder-aware claims recover or report loss, focus claims follow the
   focus lifetime, and peer-held work is refused before spawning.
   TODO(cas-0078): confirm merged takeover and loss behavior before release.
-- **Peer awareness (cas-559c). Was:** peers showed only presence and frozen
+- **Peer awareness (cas-559c).** **Was:** peers showed only presence and frozen
   focus. **Now:** peer details include focus, visible claims, workers and
   branches, and distinguish another account's invisible claims from no claims.
   TODO(cas-559c): confirm merged CLI and detail fields before release.
-- **Epic split (cas-4736). Was:** supervisors had no recorded way to divide an
+- **Epic split (cas-4736).** **Was:** supervisors had no recorded way to divide an
   epic. **Now:** peers propose and accept disjoint child ownership, with local
   refusal outside their share and a cancellation or expiry path.
   TODO(cas-4736): confirm merged command contract before release.
-- **Mailbox recovery (cas-13c7). Was:** starting before cloud login could leave
+- **Mailbox recovery (cas-13c7).** **Was:** starting before cloud login could leave
   receiving permanently off, and retrying a send could duplicate it. **Now:**
   the receiver recovers prerequisites, shows health, and durable bounded retry
   preserves each logical send's identity and reports terminal abandonment.
   TODO(cas-13c7): confirm merged retry lifetime and status before release.
-- **Named send outcomes (cas-a19b, #1186). Was:** an unknown peer or cloud lookup
+- **Named send outcomes (cas-a19b, #1186).** **Was:** an unknown peer or cloud lookup
   failure could enter a local queue and silently die. **Now:** unknown targets,
   missing receiving factories and cloud resolution failures name the cause;
   real registration races can queue, and abandonment reaches the sender.

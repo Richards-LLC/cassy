@@ -21,11 +21,7 @@ pub enum ConfigCommands {
     /// Get a config value
     Get(ConfigGetArgs),
 
-    /// Set a config value. `factory.write_roots "<dir>,<dir>"` names
-    /// directories outside the worktree where this project's agents may
-    /// create, edit and delete files; it is stored in .cas/config.toml, an
-    /// empty value clears it, and only the operator can change it (agents are
-    /// refused by Cassy's tool-call hook; guardrail-grade, not security-grade).
+    /// Set a config value (see `factory.write_roots` below)
     Set(ConfigSetArgs),
 
     /// List all config options
@@ -73,7 +69,19 @@ pub struct ConfigGetArgs {
 
 #[derive(Parser)]
 #[command(
-    after_help = "Project write roots (operator only):\n  cas config set factory.write_roots \"~/Downloads,/mnt/models\"\n  cas config set factory.write_roots \"\"   # clear\nStored in .cas/config.toml as [factory] write_roots. Each root lets this project's supervisor and workers create, edit and delete files beneath it. Paths are canonicalized; /, $HOME, its ancestors, the project root and anything containing or inside .cas are refused. Run it from your terminal or as `! cas config set …` in an agent pane; agents' own tool calls are refused, and it refuses inside a factory worker cgroup. Guardrail-grade, not security-grade: agents share your Unix user."
+    after_help = concat!(
+        "Project write roots (operator only):\n",
+        "  cas config set factory.write_roots \"~/Downloads,/mnt/models\"\n",
+        "  cas config set factory.write_roots \"\"    # clear\n",
+        "\n",
+        "Stored in .cas/config.toml as [factory] write_roots. Each root lets this\n",
+        "project's supervisor and workers create, edit and delete files beneath it.\n",
+        "Paths are canonicalized; /, $HOME and its parents, the project root, and\n",
+        "anything containing or inside .cas are refused. Run it in your terminal or\n",
+        "as `! cas config set ...` in an agent pane. Agents' own tool calls are\n",
+        "refused, and it refuses inside a factory worker cgroup. Guardrail-grade,\n",
+        "not security-grade: agents share your Unix user."
+    )
 )]
 pub struct ConfigSetArgs {
     /// Config key to set

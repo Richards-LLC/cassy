@@ -102,18 +102,25 @@ pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -
         return Ok(());
     }
     if change.stored.is_empty() {
-        println!("Cleared factory.write_roots in {config_path}");
+        println!("Cleared factory.write_roots in .cas/config.toml");
     } else {
-        println!("Set factory.write_roots in {config_path}");
+        println!("Set factory.write_roots in .cas/config.toml.");
+        println!("Agents may create, edit and delete files beneath:");
         for root in &change.stored {
-            println!("  {root} (create, edit, delete)");
+            println!("  {root}");
         }
     }
-    for path in &change.migrated {
-        println!("  moved from .cas/operator/write-policy.toml: {path}");
+    if !change.migrated.is_empty() {
+        println!("Moved from .cas/operator/write-policy.toml:");
+        for path in &change.migrated {
+            println!("  {path}");
+        }
     }
-    for entry in &change.dropped {
-        eprintln!("  dropped legacy root that is no longer allowed: {entry}");
+    if !change.dropped.is_empty() {
+        eprintln!("Dropped legacy roots that are no longer allowed:");
+        for entry in &change.dropped {
+            eprintln!("  {entry}");
+        }
     }
     Ok(())
 }
@@ -202,10 +209,11 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     }
     println!("{}", roots.join(","));
     if !legacy.is_empty() {
-        eprintln!(
-            "note: also honoured from .cas/operator/write-policy.toml: {}. `cas config set factory.write_roots` moves them into config.toml.",
-            legacy.join(",")
-        );
+        eprintln!("note: also honoured from .cas/operator/write-policy.toml:");
+        for root in &legacy {
+            eprintln!("  {root}");
+        }
+        eprintln!("`cas config set factory.write_roots` moves them into config.toml.");
     }
     Ok(())
 }

@@ -1287,8 +1287,9 @@ impl Config {
             // generic setter (MCP, the config editor, reset) never widens it.
             "factory.write_roots" => {
                 return Err(MemError::Other(
-                    "factory.write_roots is operator-only: agents, the config editor and MCP cannot change it. \
-                     The operator runs `cas config set factory.write_roots \"<dir>,<dir>\"` (an empty value clears it)."
+                    "factory.write_roots is operator-only: agents, the config editor and MCP\n\
+                     cannot change it. The operator runs\n\
+                     `cas config set factory.write_roots \"<dir>,<dir>\"` (empty clears it)."
                         .to_string(),
                 ));
             }

@@ -455,10 +455,13 @@ impl CloudCoordinator {
     pub fn list_locks(&self) -> Result<Vec<TaskLease>, CasError> {
         let url = format!("{}/api/agents/locks", self.config.endpoint);
 
-        let response = ureq::get(&url)
+        let mut request = ureq::get(&url)
             .timeout(self.timeout)
-            .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
+            .set("Authorization", &format!("Bearer {}", self.token()));
+        if let Some(canonical_id) = &self.canonical_id {
+            request = request.query("canonical_id", canonical_id);
+        }
+        let response = request.call();
 
         match response {
             Ok(resp) => {

@@ -1368,7 +1368,7 @@ impl CasService {
                 }
 
                 // cas-e477: read-only peer supervisor discovery.
-                "peers" => this.coordination_peers().await,
+                "peers" => this.coordination_peers(req).await,
 
                 // ---- Disposable database branches (cas-0033) ----
                 "db_branch_create" => this.db_branch_create(&req).await,

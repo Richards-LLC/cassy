@@ -39,7 +39,7 @@ pub const PEER_LIVE_SECS: i64 = 300;
 pub const PEER_LISTING_WINDOW_SECS: i64 = 24 * 60 * 60;
 
 /// One supervisor of the same repo, as registered in Cassy Cloud.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Peer {
     pub agent_id: String,
     pub name: String,

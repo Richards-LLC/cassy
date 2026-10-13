@@ -5700,12 +5700,36 @@ impl CasService {
     /// `coordination action=peers` (cas-e477): the live supervisors of this
     /// repo on any machine, from the Cassy Cloud agent registry. Read-only;
     /// peers are never spawned, messaged or claimed for (cas-604d).
-    pub(super) async fn coordination_peers(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn coordination_peers(
+        &self,
+        req: CoordinationRequest,
+    ) -> Result<CallToolResult, McpError> {
         let cas_root = self.inner.cas_root.clone();
         // Read-only: never auto-register or revive the caller for a lookup.
         let self_id = self.inner.get_registered_agent_id_read_only().ok();
         let text = tokio::task::spawn_blocking(move || {
-            crate::cloud::peers::peers_section(&cas_root, self_id.as_deref())
+            if !req.detail.unwrap_or(false) && req.peer.is_none() && !req.json.unwrap_or(false) {
+                return Ok(crate::cloud::peers::peers_section(
+                    &cas_root,
+                    self_id.as_deref(),
+                ));
+            }
+            let report = crate::cloud::peers_detail::discover_peer_report(
+                &cas_root,
+                self_id.as_deref(),
+                req.detail.unwrap_or(false),
+                req.peer.as_deref(),
+            )?;
+            if req.json.unwrap_or(false) {
+                serde_json::to_string_pretty(&report)
+                    .map_err(|error| crate::error::CasError::Other(error.to_string()))
+            } else {
+                Ok(crate::cloud::peers_detail::render_peer_report(
+                    &report,
+                    80,
+                    crate::cloud::peers_detail::ascii_terminal(),
+                ))
+            }
         })
         .await
         .map_err(|e| {
@@ -5713,7 +5737,8 @@ impl CasService {
                 ErrorCode::INTERNAL_ERROR,
                 format!("Peer lookup failed: {e}"),
             )
-        })?;
+        })?
+        .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
         Ok(Self::success(text))
     }
 

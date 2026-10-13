@@ -462,8 +462,8 @@ pub fn propose(
         return Err(format!("{both} is in both mine and theirs; the shares must be disjoint"));
     }
     let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
-    if !(60..=MAX_TTL_SECS).contains(&ttl) {
-        return Err(format!("ttl_secs must be between 60 and {MAX_TTL_SECS}"));
+    if !(1..=MAX_TTL_SECS).contains(&ttl) {
+        return Err(format!("ttl_secs must be between 1 and {MAX_TTL_SECS}"));
     }
 
     let tasks = crate::store::open_task_store(cas_root)

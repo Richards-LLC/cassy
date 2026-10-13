@@ -94,3 +94,6 @@ mod fake_cloud;
 
 #[path = "distributed_factory_test_cases/two_machine.rs"]
 mod two_machine;
+
+#[path = "distributed_factory_test_cases/epic_split.rs"]
+mod epic_split;

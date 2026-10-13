@@ -169,7 +169,10 @@ fn age(secs: i64) -> String {
 /// Human-readable lines for `worker_status`, `cas status` and
 /// `coordination action=peers`.
 pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
-    let mut out = format!("Peers ({canonical_id}, via Cassy Cloud):\n");
+    // cas-f707: two short lines per peer, so the list fits 80 columns.
+    let mut out = crate::cloud::presence::wrap_line(&format!(
+        "Peers ({canonical_id}, via Cassy Cloud):"
+    ));
     if peers.is_empty() {
         out.push_str("  no other supervisors of this repo seen in the last 24h\n");
         return out;
@@ -177,12 +180,12 @@ pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
     for peer in peers {
         let state = if peer.live { "live" } else { "stale" };
         out.push_str(&format!(
-            "  {} [{state}] machine {} | session {} | focus {} | heartbeat {} ago\n",
+            "  {} [{state}] on {}, heartbeat {} ago\n    session {} | focus {}\n",
             peer.name,
             peer.machine,
+            age(peer.heartbeat_age_secs),
             peer.session.as_deref().unwrap_or("-"),
             peer.focus.as_deref().unwrap_or("-"),
-            age(peer.heartbeat_age_secs),
         ));
     }
     out
@@ -260,9 +263,12 @@ fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
     // of the registry; discovery still reads it, so it is one-way.
     if crate::cloud::presence::opted_out(cas_root) {
         return format!(
-            "{}Peers: discovery is one-way: this project still lists peers that \
-             registered, but they cannot see its supervisors.\n",
-            crate::cloud::presence::DISABLED_LINE
+            "{}{}",
+            crate::cloud::presence::disabled_lines(),
+            crate::cloud::presence::wrap_line(
+                "Peers: discovery is one-way: this project still lists peers that \
+                 registered, but they cannot see its supervisors.",
+            )
         );
     }
     let Some(self_id) = self_id else {
@@ -278,13 +284,17 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
             canonical_id,
             peers,
         }) => render_peers(&canonical_id, &peers),
-        Ok(PeerDiscovery::NotLoggedIn) => "Peers: not logged in to Cassy Cloud, so supervisors \
-             on other machines are unknown (`cas login`).\n"
-            .to_string(),
-        Ok(PeerDiscovery::NoProjectIdentity) => "Peers: this project has no canonical id to \
-             match peers by (set [project] canonical_id or a git origin).\n"
-            .to_string(),
-        Err(error) => format!("Peers: Cassy Cloud lookup failed: {error}\n"),
+        Ok(PeerDiscovery::NotLoggedIn) => crate::cloud::presence::wrap_line(
+            "Peers: not logged in to Cassy Cloud, so supervisors on other machines are \
+             unknown (`cas login`).",
+        ),
+        Ok(PeerDiscovery::NoProjectIdentity) => crate::cloud::presence::wrap_line(
+            "Peers: this project has no canonical id to match peers by (set [project] \
+             canonical_id or a git origin).",
+        ),
+        Err(error) => {
+            crate::cloud::presence::wrap_line(&format!("Peers: Cassy Cloud lookup failed: {error}"))
+        }
     }
 }
 

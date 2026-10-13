@@ -5,8 +5,8 @@
 //! also claims the task in Cassy Cloud. These tests drive the real MCP
 //! surface of two databases against a fake cloud that serves the same
 //! `/api/agents/tasks/<id>/{claim,release,renew,lock}` contract as
-//! petra-stella-cloud, including its current flaw (a claim ignores
-//! `expires_at`, petra-stella-cloud#150).
+//! production petra-stella-cloud (#150, PR #153): an expired lock is free,
+//! and a refused claim's 409 body names the holder and the expiry.
 
 use crate::support::*;
 use cas::mcp::CasCore;
@@ -123,12 +123,31 @@ impl FakeCloud {
         let active = state.locks.get(&key).filter(|lock| lock.status == "active").cloned();
         match (method, action) {
             ("POST", "claim") => match active {
-                // Like the real route: an active row is held whatever its expires_at.
-                Some(lock) if lock.agent_id != agent_id => (
+                // The production contract (petra-stella-cloud #150, PR #153): a
+                // live lock refuses with a body that names the holder and the
+                // expiry and has no `status`; an expired lock is free and a
+                // claim takes it over.
+                Some(lock) if lock.agent_id != agent_id && lock.expires_at > now => (
                     409,
-                    serde_json::json!({"status": "conflict", "result": null, "lock": null,
-                        "error": "already_claimed", "owner_agent_id": lock.agent_id}),
+                    serde_json::json!({"error": "already_claimed",
+                        "owner_agent_id": lock.agent_id, "agent_id": agent_id,
+                        "expires_at": lock.expires_at.to_rfc3339()}),
                 ),
+                Some(lock) if lock.agent_id != agent_id => {
+                    let secs = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
+                    let lock = FakeLock {
+                        agent_id,
+                        status: "active".into(),
+                        expires_at: now + Duration::seconds(secs),
+                        renewed_at: now,
+                        renewal_count: 0,
+                        claim_reason: body["reason"].as_str().map(str::to_string),
+                    };
+                    let json = lock_json(&key, &lock);
+                    state.locks.insert(key, lock);
+                    (200, serde_json::json!({"status": "success", "result": "claimed",
+                        "lock": json, "error": null, "owner_agent_id": null}))
+                }
                 Some(lock) => (
                     200,
                     serde_json::json!({"status": "success", "result": "claimed",
@@ -198,7 +217,18 @@ impl FakeCloud {
             .insert(machine.agent_id.clone(), (name.to_string(), hostname(), Utc::now()));
     }
 
-        fn keys(&self) -> Vec<String> {
+        /// How many requests so far read a lock directly.
+    fn lock_reads(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|request| request.starts_with("GET ") && request.ends_with("/lock"))
+            .count()
+    }
+
+    fn keys(&self) -> Vec<String> {
         self.state.lock().unwrap().locks.keys().cloned().collect()
     }
 
@@ -359,7 +389,12 @@ async fn peer_start_is_refused_with_the_holders_identity_until_it_releases() {
     assert_eq!(lock.agent_id, alpha.agent_id, "{started}");
     assert_ne!(key, "cas-p001", "the claim key carries the project scope");
 
+    let reads_before = cloud.lock_reads();
     let refused = start(&bravo.core, "cas-p001", false).await.expect_err("bravo is refused");
+    // cas-0078: the 409 names the holder and its expiry, and the agent list
+    // names its machine, so a refusal needs no second read of the lock.
+    assert_eq!(cloud.lock_reads(), reads_before, "{refused}");
+    assert!(refused.contains(&lock.expires_at.format("%H:%M UTC").to_string()), "{refused}");
     assert!(refused.contains("alpha-sup"), "{refused}");
     assert!(refused.contains(&hostname()), "{refused}");
     assert!(refused.contains("message"), "names how to reach the holder: {refused}");
@@ -437,10 +472,10 @@ async fn close_releases_and_other_repositories_never_collide() {
         .expect("after alpha closes it, the claim is gone");
 }
 
-/// Claims renew while the holder works; after it dies its claim ages out and
-/// a peer may start the task, told whose claim went stale.
+/// Claims renew while the holder works; after it dies its claim runs out,
+/// and the cloud frees it, so a peer starts the task and holds the claim.
 #[tokio::test]
-async fn claims_renew_while_working_and_a_dead_holders_claim_goes_stale() {
+async fn claims_renew_while_working_and_an_expired_claim_is_taken_over() {
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let cloud = FakeCloud::start();
@@ -462,9 +497,9 @@ async fn claims_renew_while_working_and_a_dead_holders_claim_goes_stale() {
     cloud.age_out("cas-p004");
     let taken = start(&bravo.core, "cas-p004", false)
         .await
-        .expect("a stale claim does not block");
-    assert!(taken.contains("alpha-sup"), "{taken}");
-    assert!(taken.to_lowercase().contains("expired"), "{taken}");
+        .expect("an expired claim does not block");
+    assert!(!taken.contains("HELD BY A PEER"), "{taken}");
+    assert_eq!(cloud.active_lock("cas-p004").unwrap().1.agent_id, bravo.agent_id, "{taken}");
 }
 
 /// Two supervisors working children of one epic are told about each other.

@@ -140,8 +140,9 @@ fn lock_json(task: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn cas_f707_register_list_and_claim_calls_carry_the_canonical_id() {
+    // pin: body field name agreed with the cloud on petra-stella-cloud#151.
     assert_eq!(PROJECT_SCOPE_KEY, "canonical_id");
-    // Production's discovery parameter (cloud PR #153).
+    // pin: production's discovery query parameter (cloud PR #153).
     assert_eq!(PROJECT_QUERY_KEY, "project");
     let server = MockServer::start().await;
     Mock::given(method("POST"))

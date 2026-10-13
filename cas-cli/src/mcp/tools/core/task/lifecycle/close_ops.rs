@@ -6004,6 +6004,7 @@ impl CasCore {
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
         repo_path: &std::path::Path,
+        parent_branch: &str,
         candidate: Option<&str>,
     ) -> Option<String> {
         let candidate = candidate?;
@@ -6013,12 +6014,14 @@ impl CasCore {
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
         let foreign_since = self.sibling_lease_boundary(task_store, task);
-        parked_anchor_advance_is_attributable(
+        let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
+        parked_anchor_advance_with_target_is_attributable(
             repo_path,
             recorded,
             &candidate,
             &task.id,
             foreign_since,
+            &target,
         )
         .then_some(candidate)
     }
@@ -6144,12 +6147,14 @@ impl CasCore {
             return parking;
         };
         let foreign_since = self.sibling_lease_boundary(task_store, task);
-        if !parked_anchor_advance_is_attributable(
+        let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
+        if !parked_anchor_advance_with_target_is_attributable(
             repo_path,
             recorded,
             &tip,
             &task.id,
             foreign_since,
+            &target,
         ) {
             return parking;
         }
@@ -6217,6 +6222,7 @@ impl CasCore {
             task_store,
             task,
             repo_path,
+            parent_branch,
             Some(factory_branch_anchor),
         ) else {
             return;
@@ -7528,6 +7534,7 @@ impl CasCore {
                             task_store.as_ref(),
                             &task,
                             &close_project_root,
+                            &resolved_parent_branch,
                             live_tip.as_deref(),
                         )
                         .unwrap_or(anchor),
@@ -11747,7 +11754,7 @@ fn merge_tip_contains_recorded_anchor(
     let output = String::from_utf8_lossy(&output.stdout);
     let mut parents = output.split_whitespace();
     let _merge = parents.next();
-    parents.any(|parent| {
+    parents.skip(1).any(|parent| {
         parent == recorded_anchor || git_commit_is_ancestor(repo_path, recorded_anchor, parent)
     })
 }
@@ -21040,7 +21047,8 @@ pub(crate) fn validate_pushed_task_receipt(
         let attributed = task_tip_has_non_empty_attributed_diff(
             &context.repo_root, task, &tip, task.deliverables.factory_branch_anchor.as_deref());
         let correction = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
-            parked_anchor_advance_is_attributable(&context.repo_root, anchor, &tip, &task.id, None)
+            parked_anchor_advance_with_target_is_attributable(
+                &context.repo_root, anchor, &tip, &task.id, None, &target)
         });
         if !attributed && !correction {
             return Err(format!("PUSHED TASK RECEIPT REJECTED: {tip} is not attributable to task {}", task.id));
@@ -21373,6 +21381,82 @@ pub(crate) fn parked_anchor_advance_is_attributable(
                     *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
                 })
         })
+}
+
+/// cas-9668: an epic sync imports sibling commits without transferring the
+/// task's delivery identity. Only side parents already on the declared target
+/// may bypass the foreign-task check; direct worker commits and lease cutoffs
+/// still apply. The recorded anchor must lie on the first-parent chain, so a
+/// supervisor's integration merge cannot become a worker continuation.
+fn parked_anchor_advance_with_target_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    candidate: &str,
+    task_id: &str,
+    foreign_since: Option<i64>,
+    target_ref: &str,
+) -> bool {
+    if parked_anchor_advance_is_attributable(repo_path, recorded, candidate, task_id, foreign_since)
+    {
+        return true;
+    }
+    if commit_ids_match(recorded, candidate)
+        || !is_safe_git_refname(recorded)
+        || !is_safe_git_refname(candidate)
+        || !is_safe_git_refname(target_ref)
+        || !git_commit_is_ancestor(repo_path, recorded, candidate)
+    {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .args([
+            "log",
+            "--first-parent",
+            "--format=%P%x1f%ct%x1f%B%x1e",
+            &format!("{recorded}..{candidate}"),
+            "--",
+        ])
+        .current_dir(repo_path)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let log = String::from_utf8_lossy(&output.stdout);
+    let Some(commits) = log
+        .split('\u{1e}')
+        .filter(|record| !record.trim().is_empty())
+        .map(|record| {
+            let (parents, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (epoch, message) = rest.split_once('\u{1f}')?;
+            Some((
+                parents.split_whitespace().collect::<Vec<_>>(),
+                epoch.trim().parse::<i64>().ok()?,
+                message,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    // An anchor reachable only through a side parent is a different delivery.
+    commits.last().is_some_and(|(parents, _, _)| {
+        parents
+            .first()
+            .is_some_and(|parent| commit_ids_match(parent, recorded))
+    }) && commits.iter().all(|(parents, epoch, message)| {
+        let target_import = parents.len() > 1
+            && parents
+                .iter()
+                .skip(1)
+                .all(|parent| git_commit_is_ancestor(repo_path, parent, target_ref));
+        (target_import
+            || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
+            && foreign_since
+                .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
+    })
 }
 
 /// Content-level delivery proof for one immutable commit against one exact

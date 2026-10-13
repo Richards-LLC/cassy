@@ -48,6 +48,33 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `task start` of a pulled task already in progress under an assignee who is
   not on this host names that assignee.
 
+### Fixed — peers stay visible (cas-f707)
+
+- Was: a supervisor registered with Cassy Cloud once, at SessionStart, and a
+  failure was only printed. Now every registration path pushes, including
+  the MCP server's own registration and a replayed SessionStart. A failed
+  registration is retried on the next heartbeat, then with backoff up to
+  every 5 minutes. A heartbeat the cloud refuses with 404 or 401 registers
+  the agent again.
+- Was: the epic focus peers saw was frozen at SessionStart. Now
+  `focus_epic` pushes it, and every heartbeat carries the agent's project,
+  epic focus, branch and factory session, so a change shows within 30 s.
+- Registrations carry the branch checked out where the agent works
+  (`metadata.branch`).
+- A project that sets `cloud.auto_sync = false` keeps its agents out of the
+  registry. Agent names, hostnames and branches stay on the machine. `peers`
+  then says `Cloud presence: disabled (cloud.auto_sync=false)` and explains
+  that discovery is one-way. `worker_status --summary` flags a failing
+  registration.
+- `coordination action=peers`, `worker_status` and `cas status` open with
+  this agent's own state: `Cloud presence: registered` or
+  `Cloud presence: failing: <cause>`.
+- Peer discovery asks the cloud for this project
+  (`GET /api/agents?project=<canonical id>`), which also returns teammates'
+  agents on a team project. A peer the cloud reports `stale` is shown stale.
+- `cas status` no longer lists its own session as a peer. Claims and
+  discovery name a machine the same way.
+
 ## [3.50.1] - 2026-10-13
 
 ### Changed — write roots by project (#1182)

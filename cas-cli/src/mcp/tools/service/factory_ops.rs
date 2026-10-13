@@ -3805,6 +3805,20 @@ impl CasService {
             );
             // Preserve the summary's session heading and worker rows. Only an
             // urgent daemon-health finding belongs above that scope heading.
+            // cas-f707: a failing cloud registration makes this supervisor
+            // invisible to its peers; the fast poll says so (local read only),
+            // after the scope heading and rows, before the mailbox footer.
+            let presence = self
+                .inner
+                .get_registered_agent_id_read_only()
+                .ok()
+                .and_then(|id| crate::cloud::presence::load(&self.inner.cas_root, &id))
+                .filter(|record| record.state == crate::cloud::presence::PresenceState::Failing)
+                .map(|record| {
+                    crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
+                })
+                .unwrap_or_default();
+            let mailbox_health = format!("{presence}{mailbox_health}");
             return Ok(Self::success(if health.is_empty() {
                 format!("{summary}\n{}", mailbox_health.trim_end())
             } else {
@@ -6788,6 +6802,15 @@ impl CasService {
                 }
             },
         )?;
+        // cas-f707: peers see the new focus now, not at the next heartbeat.
+        // In the background: a slow cloud never delays the focus reply, and
+        // the daemon's heartbeat carries a focus change it missed.
+        if let Some(agent) = agent_id.clone() {
+            let cas_root = cas_root.clone();
+            drop(tokio::task::spawn_blocking(move || {
+                crate::cloud::presence::push_agent(&cas_root, &agent)
+            }));
+        }
         // cas-0078: the focus claim is recorded on the agent, so the daemon
         // renews it while the focus stands; clearing the focus releases it.
         // Both run off the async runtime within a budget.

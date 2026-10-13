@@ -179,3 +179,76 @@ fn peers_section_explains_a_logged_out_project_without_a_network_call() {
     let text = peers_section(dir.path(), None);
     assert!(text.starts_with("Peers: not logged in"), "{text}");
 }
+
+#[test]
+fn cas_f707_cas_status_knows_its_own_session_and_does_not_list_it() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("CAS_SESSION_ID", "sup-self");
+    let dir = tempfile::tempdir().unwrap();
+    let self_id = cli_self_id(dir.path());
+    assert_eq!(self_id.as_deref(), Some("sup-self"));
+    let agents = [supervisor("sup-self", REPO, 5), supervisor("sup-peer", REPO, 5)];
+    let peers = repo_peers(&agents, REPO, &[], self_id.as_deref(), now());
+    let ids: Vec<&str> = peers.iter().map(|peer| peer.agent_id.as_str()).collect();
+    assert_eq!(ids, ["sup-peer"]);
+}
+
+#[test]
+fn cas_f707_cas_status_finds_its_agent_by_an_ancestor_pid_without_env() {
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+        ("CAS_SESSION_ID", None),
+        ("CLAUDE_CODE_SESSION_ID", None),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let store = crate::store::open_agent_store(&cas_root).unwrap();
+    let mut agent = Agent::new("sup-by-pid".into(), "pid-sup".into());
+    agent.role = AgentRole::Supervisor;
+    #[cfg(unix)]
+    {
+        agent.pid = Some(std::os::unix::process::parent_id());
+    }
+    store.register(&agent).unwrap();
+    if cfg!(unix) {
+        assert_eq!(cli_self_id(&cas_root).as_deref(), Some("sup-by-pid"));
+    }
+}
+
+#[test]
+fn cas_f707_claims_and_discovery_name_this_machine_the_same_way() {
+    let label = machine_label();
+    assert!(!label.trim().is_empty());
+    let holder = crate::cloud::peer_claims::ClaimHolder::new(
+        crate::cloud::peer_claims::ClaimKind::Task,
+        "alpha-sup",
+        REPO,
+    );
+    assert_eq!(holder.machine, label);
+    let mut agent = Agent::new("sup-1".into(), "alpha-sup".into());
+    agent.role = AgentRole::Supervisor;
+    let metadata = identity_metadata(&agent, Some(REPO), None, Some(label.as_str()));
+    assert_eq!(metadata.get(META_HOSTNAME), Some(&label));
+    // A peer registered that way is shown on the same machine the claim names.
+    let registered = info(
+        "sup-1",
+        "active",
+        5,
+        &[
+            (META_ROLE, "supervisor"),
+            (META_CANONICAL_ID, REPO),
+            (META_HOSTNAME, label.as_str()),
+        ],
+        Some("a-machine-uuid"),
+    );
+    let peers = repo_peers(&[registered], REPO, &[], None, now());
+    assert_eq!(peers[0].machine, holder.machine);
+}
+
+#[test]
+fn cas_f707_a_peer_the_cloud_reports_stale_is_not_live() {
+    let mut stale = supervisor("sup-stale", REPO, 5);
+    stale.status = "stale".to_string();
+    let peers = repo_peers(&[stale, supervisor("sup-live", REPO, 5)], REPO, &[], None, now());
+    let live: Vec<(&str, bool)> = peers.iter().map(|p| (p.agent_id.as_str(), p.live)).collect();
+    assert_eq!(live, [("sup-live", true), ("sup-stale", false)]);
+}

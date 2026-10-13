@@ -807,3 +807,56 @@ async fn a_spawn_on_a_peer_claimed_task_is_refused_before_queueing() {
     let queued = cas::store::open_spawn_queue_store(&bravo.cas_dir).unwrap().peek(10).unwrap();
     assert!(queued.is_empty(), "nothing is queued: {queued:?}");
 }
+
+/// cas-0078 (b): a claim lost to a peer reaches the supervisor that owns the
+/// losing agent, once, as a daemon notice naming the peer and its machine.
+#[tokio::test]
+async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+    let bravo = machine(&cloud.url, PROJECT, "bravo-sup");
+    for m in [&alpha, &bravo] {
+        m.put_task("cas-pb02", TaskType::Task);
+    }
+    // alpha's database runs a factory: a supervisor and its worker.
+    let session = format!("peer-loss-{}", std::process::id());
+    let agents = open_agent_store(&alpha.cas_dir).unwrap();
+    let mut supervisor = Agent::new_with_role(
+        format!("zen-sup-{}", std::process::id()),
+        "zen-sup".into(),
+        AgentRole::Supervisor,
+    );
+    supervisor.factory_session = Some(session.clone());
+    agents.register(&supervisor).unwrap();
+    let mut worker = Agent::new_with_role(
+        format!("quick-worker-{}", std::process::id()),
+        "quick-worker".into(),
+        AgentRole::Worker,
+    );
+    worker.factory_session = Some(session.clone());
+    agents.register(&worker).unwrap();
+    // The worker holds the local lease, but a peer holds the cloud claim.
+    agents.try_claim("cas-pb02", &worker.id, 600, Some("Task started")).unwrap();
+    cloud.live(&bravo, "bravo-sup");
+    start(&bravo.core, "cas-pb02", false).await.expect("bravo claims it");
+
+    let first = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &worker.id);
+    assert_eq!(first.conflicts.len(), 1, "{first:?}");
+    let again = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &worker.id);
+    assert_eq!(again.conflicts.len(), 1, "{again:?}");
+
+    let notices: Vec<_> = cas::store::open_prompt_queue_store(&alpha.cas_dir)
+        .unwrap()
+        .peek_all(100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.target == "zen-sup")
+        .collect();
+    let prompts: Vec<&str> = notices.iter().map(|row| row.prompt.as_str()).collect();
+    assert_eq!(notices.len(), 1, "one deduped notice: {prompts:?}");
+    let expected = format!("claim on cas-pb02 lost to bravo-sup@{}; stop work or coordinate", hostname());
+    assert!(prompts[0].contains(&expected), "{prompts:?}");
+    assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
+}

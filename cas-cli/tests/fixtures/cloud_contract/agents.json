@@ -317,7 +317,7 @@
     {
       "group": "agents",
       "name": "list_project_page_2",
-      "note": "second page with the cursor from page 1, project kept",
+      "note": "second page with every cursor field from page 1, project kept",
       "expect": 200,
       "request": {
         "method": "GET",
@@ -365,6 +365,142 @@
           "next_cursor": "<ts-7>",
           "next_cursor_id": "<agent-a>",
           "next_sort_cursor": "<ts-7>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_page_2_without_sort_cursor",
+      "note": "the 3.51 client's loop echoes only cursor and cursor_id (coordinator.rs list_agent_infos); compare with list_project_page_2",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-6>",
+          "cursor_id": "<agent-b>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-a>",
+              "name": "cc-<run>-sup-a",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-4>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "focus": "cas-<run>e",
+                "branch": "factory/cc-<run>",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-7>",
+          "next_cursor_id": "<agent-a>",
+          "next_sort_cursor": "<ts-7>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_page_3",
+      "note": "third page: the oldest scratch agent",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-7>",
+          "cursor_id": "<agent-a>",
+          "sort_cursor": "<ts-7>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [
+            {
+              "id": "<agent-c>",
+              "name": "cc-<run>-idle",
+              "agent_type": "primary",
+              "status": "active",
+              "user_id": "<uuid-1>",
+              "project_id": "<project>",
+              "team_id": null,
+              "pid": 4242,
+              "session_id": null,
+              "machine_id": "<host>",
+              "last_heartbeat": "<ts-1>",
+              "active_tasks": 0,
+              "metadata": {
+                "role": "supervisor",
+                "hostname": "<host>",
+                "canonical_id": "<project>",
+                "factory_session": "<factory-session>"
+              }
+            }
+          ],
+          "next_cursor": "<ts-8>",
+          "next_cursor_id": "<agent-c>",
+          "next_sort_cursor": "<ts-8>"
+        }
+      }
+    },
+    {
+      "group": "agents",
+      "name": "list_project_past_end",
+      "note": "past the last agent: an empty page",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents",
+        "query": {
+          "project": "<project>",
+          "limit": 1,
+          "cursor": "<ts-8>",
+          "cursor_id": "<agent-c>",
+          "sort_cursor": "<ts-8>"
+        },
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "agents": [],
+          "next_cursor": null,
+          "next_cursor_id": null,
+          "next_sort_cursor": null
         }
       }
     },

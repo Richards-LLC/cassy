@@ -28,7 +28,9 @@ REQUIRED = {
     "agents": {
         "register_a": 200, "register_b": 200, "register_c_idle": 200,
         "heartbeat_with_metadata": 200, "heartbeat_without_body": 200,
-        "list_project_page_1": 200, "list_project_page_2": 200, "list_project_active": 200,
+        "list_project_page_1": 200, "list_project_page_2": 200,
+        "list_project_page_2_without_sort_cursor": 200, "list_project_page_3": 200,
+        "list_project_past_end": 200, "list_project_active": 200,
         "list_project_stale": 200, "list_unknown_project": 200, "list_without_project": 200,
     },
     "claims": {
@@ -156,6 +158,16 @@ class FixtureSchema(unittest.TestCase):
         self.assertIn("<agent-c>", [agent["id"] for agent in stale])
         self.assertTrue(all(agent["status"] == "stale" for agent in stale))
         self.assertEqual(agents["list_unknown_project"]["response"]["body"]["agents"], [])
+        # The client's loop echoes only cursor and cursor_id: that page matches the full echo.
+        self.assertEqual(agents["list_project_page_2"]["response"]["body"],
+                         agents["list_project_page_2_without_sort_cursor"]["response"]["body"])
+        self.assertNotIn("sort_cursor", agents["list_project_page_2_without_sort_cursor"]["request"]["query"])
+        # A full last page still names a next cursor; the end is an empty page with null cursors.
+        self.assertTrue(agents["list_project_page_3"]["response"]["body"]["next_cursor"])
+        end = agents["list_project_past_end"]["response"]["body"]
+        self.assertEqual(end["agents"], [])
+        self.assertIsNone(end["next_cursor"])
+        self.assertIsNone(end["next_cursor_id"])
 
     def test_teardown_was_verified(self):
         checks = by_name(load("teardown"))["verification"]["response"]["body"]

@@ -221,8 +221,27 @@ def capture_agents(cloud, run, project, ids, session, host, registered_at):
                          ("next_sort_cursor", "sort_cursor")):
         if isinstance(page, dict) and page.get(field):
             query[param] = page[field]
-    cloud.call("agents", "list_project_page_2", "GET", "/api/agents", query=query, expect=200,
-               note="second page with the cursor from page 1, project kept")
+    _, page2 = cloud.call("agents", "list_project_page_2", "GET", "/api/agents", query=query, expect=200,
+                          note="second page with every cursor field from page 1, project kept")
+    client_query = {k: v for k, v in query.items() if k != "sort_cursor"}
+    cloud.call("agents", "list_project_page_2_without_sort_cursor", "GET", "/api/agents",
+               query=client_query, expect=200,
+               note="the 3.51 client's loop echoes only cursor and cursor_id (coordinator.rs "
+                    "list_agent_infos); compare with list_project_page_2")
+    query3 = {"project": project, "limit": 1}
+    for field, param in (("next_cursor", "cursor"), ("next_cursor_id", "cursor_id"),
+                         ("next_sort_cursor", "sort_cursor")):
+        if isinstance(page2, dict) and page2.get(field):
+            query3[param] = page2[field]
+    _, page3 = cloud.call("agents", "list_project_page_3", "GET", "/api/agents", query=query3, expect=200,
+                          note="third page: the oldest scratch agent")
+    query4 = {"project": project, "limit": 1}
+    for field, param in (("next_cursor", "cursor"), ("next_cursor_id", "cursor_id"),
+                         ("next_sort_cursor", "sort_cursor")):
+        if isinstance(page3, dict) and page3.get(field):
+            query4[param] = page3[field]
+    cloud.call("agents", "list_project_past_end", "GET", "/api/agents", query=query4, expect=200,
+               note="past the last agent: an empty page")
     cloud.call("agents", "list_project_active", "GET", "/api/agents",
                query={"project": project, "status": "active"}, expect=200)
     cloud.call("agents", "list_unknown_project", "GET", "/api/agents",

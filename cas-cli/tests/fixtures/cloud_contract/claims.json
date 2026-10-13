@@ -34,8 +34,8 @@
             "task_id": "<task-key-1>",
             "agent_id": "<agent-a>",
             "status": "active",
-            "expires_at": "<ts-8>",
-            "renewed_at": "<ts-9>",
+            "expires_at": "<ts-9>",
+            "renewed_at": "<ts-10>",
             "renewal_count": 0,
             "epoch": 1,
             "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
@@ -74,8 +74,8 @@
             "task_id": "<task-key-1>",
             "agent_id": "<agent-a>",
             "status": "active",
-            "expires_at": "<ts-8>",
-            "renewed_at": "<ts-9>",
+            "expires_at": "<ts-9>",
+            "renewed_at": "<ts-10>",
             "renewal_count": 0,
             "epoch": 1,
             "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
@@ -113,7 +113,7 @@
           "error": "already_claimed",
           "owner_agent_id": "<agent-a>",
           "agent_id": "<agent-a>",
-          "expires_at": "<ts-8>"
+          "expires_at": "<ts-9>"
         }
       }
     },
@@ -145,7 +145,7 @@
           "error": "already_claimed",
           "owner_agent_id": "<agent-a>",
           "agent_id": "<agent-a>",
-          "expires_at": "<ts-8>"
+          "expires_at": "<ts-9>"
         }
       }
     },
@@ -175,8 +175,8 @@
             "task_id": "<task-key-1>",
             "agent_id": "<agent-a>",
             "status": "active",
-            "expires_at": "<ts-10>",
-            "renewed_at": "<ts-11>",
+            "expires_at": "<ts-11>",
+            "renewed_at": "<ts-12>",
             "renewal_count": 1,
             "epoch": 1,
             "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
@@ -206,8 +206,8 @@
             "task_id": "<task-key-1>",
             "agent_id": "<agent-a>",
             "status": "active",
-            "expires_at": "<ts-10>",
-            "renewed_at": "<ts-11>",
+            "expires_at": "<ts-11>",
+            "renewed_at": "<ts-12>",
             "renewal_count": 1,
             "epoch": 1,
             "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
@@ -239,8 +239,8 @@
               "task_id": "<task-key-1>",
               "agent_id": "<agent-a>",
               "status": "active",
-              "expires_at": "<ts-10>",
-              "renewed_at": "<ts-11>",
+              "expires_at": "<ts-11>",
+              "renewed_at": "<ts-12>",
               "renewal_count": 1,
               "epoch": 1,
               "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
@@ -273,8 +273,8 @@
               "task_id": "<task-key-1>",
               "agent_id": "<agent-a>",
               "status": "active",
-              "expires_at": "<ts-10>",
-              "renewed_at": "<ts-11>",
+              "expires_at": "<ts-11>",
+              "renewed_at": "<ts-12>",
               "renewal_count": 1,
               "epoch": 1,
               "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
@@ -312,8 +312,8 @@
             "task_id": "<task-key-2>",
             "agent_id": "<agent-a>",
             "status": "active",
-            "expires_at": "<ts-12>",
-            "renewed_at": "<ts-13>",
+            "expires_at": "<ts-13>",
+            "renewed_at": "<ts-14>",
             "renewal_count": 0,
             "epoch": 1,
             "claim_reason": null
@@ -352,8 +352,8 @@
             "task_id": "<task-key-2>",
             "agent_id": "<agent-b>",
             "status": "active",
-            "expires_at": "<ts-14>",
-            "renewed_at": "<ts-15>",
+            "expires_at": "<ts-15>",
+            "renewed_at": "<ts-16>",
             "renewal_count": 0,
             "epoch": 2,
             "claim_reason": null

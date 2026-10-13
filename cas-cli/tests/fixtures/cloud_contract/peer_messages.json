@@ -496,7 +496,7 @@
               "body": "cas-2911 contract capture cc-<run>",
               "summary": "contract capture",
               "in_reply_to": null,
-              "created_at": "<ts-16>",
+              "created_at": "<ts-17>",
               "attempts": 1
             }
           ],
@@ -544,7 +544,7 @@
               "body": "reply",
               "summary": "reply",
               "in_reply_to": "<uuid-5>",
-              "created_at": "<ts-17>",
+              "created_at": "<ts-18>",
               "attempts": 1
             }
           ],
@@ -712,7 +712,7 @@
         "body": {
           "id": "<uuid-5>",
           "status": "delivered",
-          "delivered_at": "<ts-18>",
+          "delivered_at": "<ts-19>",
           "attempts": 1
         }
       }

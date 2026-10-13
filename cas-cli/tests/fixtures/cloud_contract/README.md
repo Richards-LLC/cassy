@@ -8,7 +8,7 @@ in `cas-cli/tests/mcp_tools_test/task_tools/peer_claims.rs`).
 
 | file | routes |
 | --- | --- |
-| `agents.json` | register (with metadata), heartbeat with and without a metadata body, `GET /api/agents?project=` (keyset paging, `status=active`, `status=stale`, unknown project, no project) |
+| `agents.json` | register (with metadata), heartbeat with and without a metadata body, `GET /api/agents?project=` (keyset paging to the empty end page, with and without `sort_cursor`, `status=active`, `status=stale`, unknown project, no project) |
 | `claims.json` | claim, same-agent re-claim, 409 conflict, canonical_id ignored, renew, lock, account locks, agent locks, takeover after expiry, renew-after-takeover 404, release, idempotent release |
 | `peer_messages.json` | send, duplicate, same key with a different body, dedupe from a second sender, every send error code reachable with one account, claim (lease, `denied`, invalid lease), ack (per-item results, invalid id, re-ack), status (leased, delivered, stranger 404) |
 | `teardown.json` | releases, message drain, agent shutdowns and the verification result |
@@ -67,6 +67,12 @@ the fixtures record production:
 - **Claim 409:** the body keeps the legacy envelope `status: "conflict"`,
   `result: null`, `lock: null`. Its `agent_id` names the holder, as
   `owner_agent_id` does.
+- **Agent paging:** `sort_cursor` is not needed with the default order.
+  - `next_sort_cursor` equals `next_cursor` on every page captured.
+  - A page requested with only `cursor` and `cursor_id`, as the 3.51 client
+    does, is identical to one that also sends `sort_cursor`.
+  - A full last page still returns `next_*` cursors; the end of the list is
+    an empty page with null cursors.
 - **Ack:** a non-UUID ack id rejects the whole request with 400
   `invalid_request`. An unknown UUID is a per-item 404, and a re-ack is a
   per-item 409.

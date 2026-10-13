@@ -7,7 +7,7 @@
   "exchanges": [
     {
       "group": "teardown",
-      "name": "release_bt1~47925a1c_a",
+      "name": "release_2t1~fa4f3bfd_a",
       "note": null,
       "expect": null,
       "request": {
@@ -31,7 +31,7 @@
     },
     {
       "group": "teardown",
-      "name": "release_bt1~47925a1c_b",
+      "name": "release_2t1~fa4f3bfd_b",
       "note": null,
       "expect": null,
       "request": {
@@ -55,7 +55,7 @@
     },
     {
       "group": "teardown",
-      "name": "release_bt2~47925a1c_a",
+      "name": "release_2t2~fa4f3bfd_a",
       "note": null,
       "expect": null,
       "request": {
@@ -79,7 +79,7 @@
     },
     {
       "group": "teardown",
-      "name": "release_bt2~47925a1c_b",
+      "name": "release_2t2~fa4f3bfd_b",
       "note": null,
       "expect": null,
       "request": {
@@ -406,7 +406,7 @@
         "body": {
           "id": "<uuid-5>",
           "status": "delivered",
-          "delivered_at": "<ts-18>",
+          "delivered_at": "<ts-19>",
           "attempts": 1
         }
       }
@@ -430,7 +430,7 @@
         "body": {
           "id": "<uuid-6>",
           "status": "delivered",
-          "delivered_at": "<ts-18>",
+          "delivered_at": "<ts-19>",
           "attempts": 1
         }
       }

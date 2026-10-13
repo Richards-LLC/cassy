@@ -1713,6 +1713,7 @@ impl CasService {
                                 store.as_ref(),
                                 &task,
                                 &repo.repo_root,
+                                &repo.target_branch,
                                 Some(&live_tip),
                             )
                         })

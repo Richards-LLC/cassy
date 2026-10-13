@@ -117,6 +117,19 @@ pub trait PeerMailbox: Send + Sync {
         recipient_agent_ids: &[String],
         consumer_id: &str,
     ) -> Result<Vec<ClaimedPeerMessage>, String>;
+    /// Claim warnings must remain visible even if some projects succeeded.
+    fn claim_report(
+        &self,
+        project_ids: &[String],
+        recipient_agent_ids: &[String],
+        consumer_id: &str,
+    ) -> Result<PeerClaim, String> {
+        self.claim(project_ids, recipient_agent_ids, consumer_id)
+            .map(|messages| PeerClaim {
+                messages,
+                denied: Vec::new(),
+            })
+    }
     fn ack(&self, consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String>;
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String>;
 }
@@ -331,8 +344,16 @@ pub fn deliver_claimed(
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
         .collect();
-    let claimed = match mailbox.claim(&project_ids, &recipient_ids, consumer_id) {
-        Ok(claimed) => claimed,
+    let claimed = match mailbox.claim_report(&project_ids, &recipient_ids, consumer_id) {
+        Ok(batch) => {
+            if !batch.denied.is_empty() {
+                report.errors.push(format!(
+                    "peer message claim denied projects: {}",
+                    batch.denied.join(", ")
+                ));
+            }
+            batch.messages
+        }
         Err(error) => {
             report.errors.push(error);
             return report;
@@ -492,6 +513,17 @@ pub fn reply_to_peer_row(
             row.target
         ));
     }
+    if envelope
+        .session
+        .as_deref()
+        .is_none_or(|session| session.trim().is_empty())
+    {
+        return Err(PeerSendError::NoReceivingDaemon(format!(
+            "{}@{}",
+            envelope.sender_name, envelope.machine
+        ))
+        .to_string());
+    }
     let receipt = send_raw(
         cas_root,
         sender_agent_id,
@@ -575,9 +607,20 @@ impl HttpPeerMailbox {
 
 /// `POST /api/peer-messages/claim` response.
 #[derive(Deserialize)]
-struct ClaimResponse {
+pub struct PeerClaim {
+    pub messages: Vec<ClaimedPeerMessage>,
     #[serde(default)]
-    messages: Vec<ClaimedPeerMessage>,
+    pub denied: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AckResponse {
+    results: Vec<AckResult>,
+}
+#[derive(Deserialize)]
+struct AckResult {
+    id: String,
+    status: u16,
 }
 
 impl PeerMailbox for HttpPeerMailbox {
@@ -592,35 +635,89 @@ impl PeerMailbox for HttpPeerMailbox {
         recipient_agent_ids: &[String],
         consumer_id: &str,
     ) -> Result<Vec<ClaimedPeerMessage>, String> {
-        let response: ClaimResponse = Self::read(
-            "peer message claim",
-            self.post(
-                "/claim",
-                serde_json::json!({
-                    "project_ids": project_ids,
-                    "recipient_agent_ids": recipient_agent_ids,
-                    "consumer_id": consumer_id,
-                    "max": CLAIM_MAX,
-                    "lease_secs": LEASE_SECS,
-                }),
-            ),
-        )?;
-        Ok(response.messages)
+        let batch = self.claim_report(project_ids, recipient_agent_ids, consumer_id)?;
+        if batch.denied.is_empty() {
+            Ok(batch.messages)
+        } else {
+            Err(format!(
+                "peer message claim denied projects: {}",
+                batch.denied.join(", ")
+            ))
+        }
+    }
+
+    fn claim_report(
+        &self,
+        project_ids: &[String],
+        recipient_agent_ids: &[String],
+        consumer_id: &str,
+    ) -> Result<PeerClaim, String> {
+        let mut combined = PeerClaim {
+            messages: Vec::new(),
+            denied: Vec::new(),
+        };
+        for projects in project_ids.chunks(50) {
+            for recipients in recipient_agent_ids.chunks(50) {
+                let batch:PeerClaim=Self::read("peer message claim",self.post("/claim",serde_json::json!({
+                    "project_ids":projects,"recipient_agent_ids":recipients,"consumer_id":consumer_id,
+                    "max":CLAIM_MAX,"lease_secs":LEASE_SECS,
+                })))?;
+                combined.messages.extend(batch.messages);
+                combined.denied.extend(batch.denied);
+            }
+        }
+        combined.denied.sort();
+        combined.denied.dedup();
+        Ok(combined)
     }
 
     fn ack(&self, consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String> {
-        let acks: Vec<_> = acks
-            .iter()
-            .map(|(id, outcome)| serde_json::json!({"id": id, "outcome": outcome}))
-            .collect();
-        Self::read::<serde_json::Value>(
-            "peer message ack",
-            self.post(
-                "/ack",
-                serde_json::json!({"consumer_id": consumer_id, "acks": acks}),
-            ),
-        )
-        .map(|_| ())
+        let mut errors = Vec::new();
+        for batch in acks.chunks(50) {
+            let items: Vec<_> = batch
+                .iter()
+                .map(|(id, outcome)| serde_json::json!({"id":id,"outcome":outcome}))
+                .collect();
+            let response: AckResponse = Self::read(
+                "peer message ack",
+                self.post(
+                    "/ack",
+                    serde_json::json!({"consumer_id":consumer_id,"acks":items}),
+                ),
+            )?;
+            if response.results.len() != batch.len() {
+                return Err("peer message ack: incomplete per-item receipt".into());
+            }
+            for ((id, outcome), result) in batch.iter().zip(response.results) {
+                if result.id != *id {
+                    errors.push(format!(
+                        "peer message ack: expected {id}, received {}",
+                        result.id
+                    ));
+                    continue;
+                }
+                match result.status {
+                    200 => {}
+                    409 => {
+                        let expected = match outcome {
+                            PeerAckOutcome::Delivered => "delivered",
+                            PeerAckOutcome::Rejected => "rejected",
+                        };
+                        match self.status(id) {
+                            Ok(status) if status.status==expected=>{},
+                            Ok(status)=>errors.push(format!("peer message ack {id} refused (409): status is {}, expected {expected}",status.status)),
+                            Err(error)=>errors.push(format!("peer message ack {id} refused (409): {error}")),
+                        }
+                    }
+                    code => errors.push(format!("peer message ack {id} refused ({code})")),
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String> {

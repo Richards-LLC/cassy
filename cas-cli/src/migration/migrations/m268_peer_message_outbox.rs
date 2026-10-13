@@ -22,7 +22,7 @@ pub const MIGRATION: Migration = Migration {
             last_error TEXT,
             notice_sent INTEGER NOT NULL DEFAULT 0
         )",
-        "CREATE INDEX IF NOT EXISTS idx_peer_outbox_due ON peer_message_outbox(sender_session,state,next_attempt_at)",
+        "CREATE INDEX IF NOT EXISTS idx_peer_outbox_due ON peer_message_outbox(state,next_attempt_at)",
     ],
     detect: Some("SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE name='peer_message_outbox' AND type='table') AND EXISTS (SELECT 1 FROM sqlite_master WHERE name='idx_peer_outbox_due' AND type='index') THEN 1 ELSE 0 END"),
 };

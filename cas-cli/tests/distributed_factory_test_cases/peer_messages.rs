@@ -92,7 +92,7 @@ impl Respond for Claim {
                 messages.push(message.clone());
             }
         }
-        ResponseTemplate::new(200).set_body_json(json!({"messages": messages}))
+        ResponseTemplate::new(200).set_body_json(json!({"messages": messages,"denied":[]} ))
     }
 }
 
@@ -107,7 +107,13 @@ impl Respond for Ack {
                 message["delivered_at"] = json!(chrono::Utc::now().to_rfc3339());
             }
         }
-        ResponseTemplate::new(200).set_body_json(json!({"status": "success"}))
+        let results: Vec<_> = body["acks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|ack| json!({"id":ack["id"],"status":200}))
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"results":results}))
     }
 }
 

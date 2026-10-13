@@ -60,9 +60,13 @@ pub(super) fn enqueue_and_send(
         let id = tx.last_insert_rowid();
         // A project-local row id, plus both registry identities: stable across
         // retries and daemon restarts, distinct for intentional repeated text.
+        use sha2::{Digest, Sha256};
+        let identity =
+            serde_json::to_vec(&(&message.sender_agent_id, &message.recipient_agent_id, id))?;
         message.dedupe_key = format!(
-            "{}:{}:{id}",
-            message.sender_agent_id, message.recipient_agent_id
+            "peer:{}:{:x}",
+            message.sender_agent_id.chars().take(64).collect::<String>(),
+            Sha256::digest(identity)
         );
         tx.execute(
             "UPDATE peer_message_outbox SET payload=?1 WHERE id=?2",

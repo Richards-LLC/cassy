@@ -605,7 +605,7 @@ async fn cas_a19b_known_peer_names_mailbox_failure() {
             .mount(&server)
             .await;
         let error = coordinate(&service_for(&alpha.cas_dir, "a"), json!({
-        "action": "message", "target": "sup-b", "summary": "hold staging", "message": "hold staging"
+        "action": "message", "target": "sup-b", "summary": "hold staging", "message": format!("hold staging ({cause})")
     })).await.unwrap_err();
         assert!(
             error.contains(&status.to_string())

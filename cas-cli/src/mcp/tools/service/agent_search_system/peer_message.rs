@@ -246,6 +246,7 @@ impl CasService {
         id: String,
     ) -> Result<CallToolResult, McpError> {
         let cas_root = self.inner.cas_root.clone();
+        let wanted = id.clone();
         let status = tokio::task::spawn_blocking(move || {
             peer_mailbox::http_mailbox(&cas_root)
                 .ok_or_else(|| "not logged in to Cassy Cloud".to_string())?
@@ -253,7 +254,17 @@ impl CasService {
         })
         .await
         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-        .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+        .map_err(|error| {
+            let visibility = if error.starts_with("peer message status refused (404)") {
+                " is not visible to this account (or does not exist)"
+            } else {
+                " status could not be read"
+            };
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!("Peer message {wanted}{visibility}: {error}"),
+            )
+        })?;
         Ok(Self::success(format!(
             "Peer message {}: {}{} (delivery attempts: {})",
             status.id,

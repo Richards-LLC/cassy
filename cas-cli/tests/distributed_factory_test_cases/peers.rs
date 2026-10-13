@@ -26,6 +26,11 @@ impl Respond for Register {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         let id = body["id"].as_str().unwrap().to_string();
+        // These registrations represent different simulated machines even
+        // though their HTTP clients execute on one host. Give discovery the
+        // fixture's hostname instead of the test runner's real hostname.
+        let mut metadata = body["metadata"].clone();
+        metadata["hostname"] = body["machine_id"].clone();
         let agent = json!({
             "id": id,
             "name": body["name"],
@@ -36,7 +41,7 @@ impl Respond for Register {
             "machine_id": body["machine_id"],
             "last_heartbeat": chrono::Utc::now().to_rfc3339(),
             "active_tasks": 0,
-            "metadata": body["metadata"],
+            "metadata": metadata,
         });
         self.0.lock().unwrap().insert(id, agent.clone());
         ResponseTemplate::new(200).set_body_json(json!({"status": "success", "agent": agent}))

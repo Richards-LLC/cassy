@@ -84,6 +84,17 @@ pub struct ConfigMeta {
 }
 
 impl ConfigMeta {
+    /// Example values for `cas config describe`: the type's generic examples,
+    /// or a key-specific one where the generic text would mislead.
+    pub fn examples(&self) -> Vec<&'static str> {
+        match self.key {
+            "factory.write_roots" => vec!["~/Downloads,/mnt/models"],
+            _ => self.value_type.examples(),
+        }
+    }
+}
+
+impl ConfigMeta {
     /// Validate a value against this config's constraints
     pub fn validate(&self, value: &str) -> Result<(), String> {
         // First check type

@@ -1,0 +1,363 @@
+//! Cloud presence (cas-f707): an agent stays registered with Cassy Cloud.
+//!
+//! Peer discovery, peer messaging and claim refusal all read the cloud agent
+//! registry, so an agent that is not registered there is invisible to its
+//! peers. Registration used to be one-shot from SessionStart, with the
+//! failure printed and forgotten. This module keeps it alive instead:
+//!
+//! - [`register_now`] pushes the registration and records the outcome.
+//! - [`tick`] runs on every daemon heartbeat: it registers when the agent
+//!   has no record, its last attempt failed and the backoff ran out, or its
+//!   epic focus changed; otherwise it heartbeats, and a heartbeat the cloud
+//!   refuses with 404 or 401 registers again.
+//! - The outcome is persisted per agent under `.cas/cloud_presence/`, so
+//!   `coordination action=peers`, `worker_status` and `cas status` show it
+//!   from any process ([`render_line`]).
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::cloud::coordinator::HeartbeatError;
+use crate::cloud::{CloudConfig, CloudCoordinator};
+use crate::types::Agent;
+
+/// Directory under the project's `.cas` holding one record per agent.
+pub const PRESENCE_DIR: &str = "cloud_presence";
+/// Per-request cap for presence calls, so a slow cloud never holds a
+/// heartbeat tick for the coordinator's default thirty seconds.
+pub const PRESENCE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Backoff after the second consecutive failure; it doubles from here.
+pub const BACKOFF_BASE_SECS: i64 = 30;
+/// Longest wait between two registration attempts.
+pub const BACKOFF_MAX_SECS: i64 = 300;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    /// The cloud accepted the last registration or heartbeat.
+    Registered,
+    /// The last attempt failed; see `cause`.
+    Failing,
+}
+
+/// The last known cloud presence of one agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceRecord {
+    pub agent_id: String,
+    pub state: PresenceState,
+    /// Why the last attempt failed. `None` while registered.
+    #[serde(default)]
+    pub cause: Option<String>,
+    /// Consecutive failed attempts since the last success.
+    #[serde(default)]
+    pub failures: u32,
+    pub last_attempt_at: DateTime<Utc>,
+    /// When the cloud last accepted a registration.
+    #[serde(default)]
+    pub registered_at: Option<DateTime<Utc>>,
+    /// Earliest time the next registration attempt is due while failing.
+    #[serde(default)]
+    pub next_retry_at: Option<DateTime<Utc>>,
+    /// The epic focus carried by the last accepted registration.
+    #[serde(default)]
+    pub focus: Option<String>,
+}
+
+/// What one [`tick`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TickAction {
+    /// Registered (first time, retry, or focus change).
+    Registered,
+    /// The cloud refused a heartbeat as unknown; registered again.
+    Reregistered,
+    /// Heartbeat accepted.
+    Heartbeat,
+    /// The attempt failed; the record carries the cause.
+    Failed(String),
+    /// Failing, and the backoff has not run out yet.
+    Waiting,
+}
+
+/// How long to wait after `failures` consecutive failures: the first is
+/// retried on the next heartbeat tick, then 30 s, 60 s, ... up to 5 min.
+pub fn backoff_after(failures: u32) -> chrono::Duration {
+    if failures <= 1 {
+        return chrono::Duration::zero();
+    }
+    let shift = (failures - 2).min(16);
+    chrono::Duration::seconds((BACKOFF_BASE_SECS << shift).min(BACKOFF_MAX_SECS))
+}
+
+fn record_path(cas_root: &Path, agent_id: &str) -> PathBuf {
+    let file: String = agent_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cas_root.join(PRESENCE_DIR).join(format!("{file}.json"))
+}
+
+/// The recorded presence of `agent_id`, if any attempt was ever made.
+pub fn load(cas_root: &Path, agent_id: &str) -> Option<PresenceRecord> {
+    let text = std::fs::read_to_string(record_path(cas_root, agent_id)).ok()?;
+    serde_json::from_str::<PresenceRecord>(&text)
+        .ok()
+        .filter(|record| record.agent_id == agent_id)
+}
+
+fn save(cas_root: &Path, record: &PresenceRecord) {
+    let path = record_path(cas_root, &record.agent_id);
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(path.parent().unwrap_or(cas_root))?;
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(record)?)?;
+        std::fs::rename(&tmp, &path)
+    };
+    if let Err(error) = write() {
+        tracing::debug!(agent = %record.agent_id, %error, "could not record cloud presence");
+    }
+}
+
+/// The epic focus `agent` registers with: its factory session's pinned (or
+/// default) epic, read fresh so a `focus_epic` shows on the next push.
+pub fn current_focus(agent: &Agent) -> Option<String> {
+    agent
+        .factory_session
+        .as_deref()
+        .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
+}
+
+fn failing(
+    previous: Option<&PresenceRecord>,
+    agent_id: &str,
+    cause: String,
+    now: DateTime<Utc>,
+) -> PresenceRecord {
+    let failures = previous
+        .filter(|record| record.state == PresenceState::Failing)
+        .map(|record| record.failures)
+        .unwrap_or(0)
+        .saturating_add(1);
+    PresenceRecord {
+        agent_id: agent_id.to_string(),
+        state: PresenceState::Failing,
+        cause: Some(cause),
+        failures,
+        last_attempt_at: now,
+        registered_at: previous.and_then(|record| record.registered_at),
+        next_retry_at: Some(now + backoff_after(failures)),
+        focus: previous.and_then(|record| record.focus.clone()),
+    }
+}
+
+/// Push `agent`'s registration (with its current focus) and record the
+/// outcome.
+pub fn register_now(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+) -> PresenceRecord {
+    let previous = load(cas_root, &agent.id);
+    let focus = current_focus(agent);
+    let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT);
+    let record = match coordinator.register_with_focus(agent, focus.as_deref()) {
+        Ok(_) => PresenceRecord {
+            agent_id: agent.id.clone(),
+            state: PresenceState::Registered,
+            cause: None,
+            failures: 0,
+            last_attempt_at: now,
+            registered_at: Some(now),
+            next_retry_at: None,
+            focus,
+        },
+        Err(error) => failing(previous.as_ref(), &agent.id, error.to_string(), now),
+    };
+    save(cas_root, &record);
+    record
+}
+
+/// Register `agent` unless it is already registered with its current focus.
+/// SessionStart calls this, so a replayed SessionStart does not re-push.
+pub fn ensure_registered(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+) -> PresenceRecord {
+    match load(cas_root, &agent.id) {
+        Some(record)
+            if record.state == PresenceState::Registered
+                && record.focus == current_focus(agent) =>
+        {
+            record
+        }
+        _ => register_now(coordinator, cas_root, agent, now),
+    }
+}
+
+/// One heartbeat-tick of presence upkeep for `agent`. See the module docs.
+pub fn tick(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+) -> TickAction {
+    let outcome = |record: PresenceRecord, ok: TickAction| match record.state {
+        PresenceState::Registered => ok,
+        PresenceState::Failing => TickAction::Failed(record.cause.unwrap_or_default()),
+    };
+    let Some(record) = load(cas_root, &agent.id) else {
+        return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
+    };
+    if record.state == PresenceState::Failing {
+        if record.next_retry_at.is_some_and(|at| at > now) {
+            return TickAction::Waiting;
+        }
+        return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
+    }
+    if record.focus != current_focus(agent) {
+        return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
+    }
+    match coordinator.heartbeat_presence(&agent.id) {
+        Ok(_) => TickAction::Heartbeat,
+        Err(HeartbeatError::NotRegistered { .. }) => outcome(
+            register_now(coordinator, cas_root, agent, now),
+            TickAction::Reregistered,
+        ),
+        Err(HeartbeatError::Failed(error)) => {
+            let record = failing(Some(&record), &agent.id, format!("heartbeat: {error}"), now);
+            save(cas_root, &record);
+            TickAction::Failed(record.cause.unwrap_or_default())
+        }
+    }
+}
+
+/// The project's cloud coordinator (its own cloud config, scoped to its
+/// canonical id), or `None` when the project is not logged in.
+pub fn project_coordinator(cas_root: &Path) -> Option<CloudCoordinator> {
+    let config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    if !config.is_logged_in() {
+        return None;
+    }
+    Some(
+        CloudCoordinator::new(config)
+            .ok()?
+            .with_canonical_id(crate::cloud::resolve_canonical_id(cas_root)),
+    )
+}
+
+/// Re-push `agent_id`'s registration now, e.g. after `focus_epic` changed
+/// what it registers. `None` when the project is not logged in or the
+/// agent is unknown.
+pub fn push_agent(cas_root: &Path, agent_id: &str) -> Option<PresenceRecord> {
+    let coordinator = project_coordinator(cas_root)?;
+    let agent = crate::store::open_agent_store(cas_root)
+        .ok()?
+        .get(agent_id)
+        .ok()?;
+    Some(register_now(&coordinator, cas_root, &agent, Utc::now()))
+}
+
+fn age(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
+/// One line for `coordination action=peers`, `worker_status` and
+/// `cas status`: "Cloud presence: registered ..." or "Cloud presence:
+/// failing: <cause> ...".
+pub fn render_line(record: Option<&PresenceRecord>, now: DateTime<Utc>) -> String {
+    let Some(record) = record else {
+        return "Cloud presence: not registered yet (no registration attempt recorded for \
+                this agent)\n"
+            .to_string();
+    };
+    match record.state {
+        PresenceState::Registered => format!(
+            "Cloud presence: registered (focus {}, registered {} ago)\n",
+            record.focus.as_deref().unwrap_or("-"),
+            age(record
+                .registered_at
+                .map(|at| (now - at).num_seconds())
+                .unwrap_or_default()),
+        ),
+        PresenceState::Failing => {
+            let retry = match record.next_retry_at {
+                Some(at) if at > now => format!("next retry in {}", age((at - now).num_seconds())),
+                _ => "retrying on the next heartbeat".to_string(),
+            };
+            format!(
+                "Cloud presence: failing: {} ({} failed attempt{}, {retry}; peers cannot see \
+                 this agent until it registers)\n",
+                record.cause.as_deref().unwrap_or("unknown error"),
+                record.failures,
+                if record.failures == 1 { "" } else { "s" },
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cas_f707_backoff_is_bounded_and_retries_the_first_failure_next_tick() {
+        let secs = |n| backoff_after(n).num_seconds();
+        assert_eq!(secs(1), 0);
+        assert_eq!(secs(2), 30);
+        assert_eq!(secs(3), 60);
+        assert_eq!(secs(4), 120);
+        assert_eq!(secs(5), 240);
+        assert_eq!(secs(6), 300);
+        assert_eq!(secs(60), 300);
+    }
+
+    #[test]
+    fn cas_f707_render_line_names_the_failure_cause() {
+        let now = Utc::now();
+        let record = PresenceRecord {
+            agent_id: "sup-1".into(),
+            state: PresenceState::Failing,
+            cause: Some("Failed to register agent (503): registry unavailable".into()),
+            failures: 2,
+            last_attempt_at: now,
+            registered_at: None,
+            next_retry_at: Some(now + chrono::Duration::seconds(30)),
+            focus: None,
+        };
+        let line = render_line(Some(&record), now);
+        assert!(
+            line.starts_with("Cloud presence: failing: Failed to register agent (503)"),
+            "{line}"
+        );
+        assert!(line.contains("2 failed attempts"), "{line}");
+        let registered = PresenceRecord {
+            state: PresenceState::Registered,
+            cause: None,
+            failures: 0,
+            registered_at: Some(now),
+            next_retry_at: None,
+            focus: Some("cas-571d".into()),
+            ..record
+        };
+        assert!(
+            render_line(Some(&registered), now)
+                .starts_with("Cloud presence: registered (focus cas-571d"),
+        );
+    }
+}

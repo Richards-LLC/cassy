@@ -27,6 +27,7 @@ pub mod code_embeddings;
 pub mod embeddings;
 // cas-e477: peer supervisor discovery through the cloud agent registry.
 pub mod peers;
+pub mod presence;
 // cas-f9c7: cross-machine supervisor messaging through a cloud peer mailbox.
 pub mod peer_mailbox;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
@@ -89,7 +90,7 @@ pub use project_aliases::{
     select_alias_record,
 };
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
-pub use coordinator::{AgentInfo, CloudCoordinator};
+pub use coordinator::{AgentInfo, CloudCoordinator, HeartbeatError, PROJECT_SCOPE_KEY};
 pub use device::DeviceConfig;
 pub use embed_drain::{
     CodeVectorDrain, DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history,

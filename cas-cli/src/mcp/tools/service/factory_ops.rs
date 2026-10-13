@@ -6695,7 +6695,19 @@ impl CasService {
         let pinned_epic = (!clear).then(|| epic_id.map(str::to_string)).flatten();
         let cas_root = self.inner.cas_root.clone();
         let agent_id = self.inner.get_agent_id().ok();
-        focus_epic(&self.inner.cas_root, &factory_session, request)
+        let focused = focus_epic(&self.inner.cas_root, &factory_session, request);
+        // cas-f707: peers see the new focus now, not at the next heartbeat.
+        // In the background: a slow cloud never delays the focus reply, and
+        // the daemon's heartbeat re-pushes a focus change it missed.
+        if focused.is_ok()
+            && let Some(agent) = agent_id.clone()
+        {
+            let cas_root = cas_root.clone();
+            drop(tokio::task::spawn_blocking(move || {
+                crate::cloud::presence::push_agent(&cas_root, &agent)
+            }));
+        }
+        focused
             .map(|text| {
                 let shared = pinned_epic
                     .zip(agent_id)

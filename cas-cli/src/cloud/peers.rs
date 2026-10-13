@@ -55,6 +55,17 @@ pub struct Peer {
     pub live: bool,
 }
 
+/// This machine's label, as registration metadata ([`META_HOSTNAME`]) and
+/// claim holders both record it: the hostname, else the generated machine
+/// id. One function, so a claim and discovery name a machine the same way
+/// (cas-f707).
+pub fn machine_label() -> String {
+    crate::cloud::device::DeviceConfig::hostname()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(crate::types::Agent::get_or_generate_machine_id)
+}
+
 /// The cloud metadata a registration carries so peers can find each other:
 /// the agent's own metadata plus role, repo identity, focus, factory session
 /// and hostname. Empty values are omitted.
@@ -219,8 +230,30 @@ pub fn discover_peers(
 /// The Peers section shown by `coordination action=peers`,
 /// `factory action=worker_status` and `cas status --verbose`. Blocking (one
 /// HTTP round trip per page, [`DISCOVERY_TIMEOUT`] each); a failure is
-/// reported in the section, never raised.
+/// reported in the section, never raised. When the caller is known and the
+/// project syncs, it opens with the caller's own cloud presence (cas-f707).
 pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
+    let discovery = discovery_section(cas_root, self_id);
+    format!("{}{discovery}", presence_line(cas_root, self_id))
+}
+
+/// The caller's own registration state, from the record the daemon keeps
+/// (cas-f707). Empty when the caller is unknown or the project does not
+/// reach Cassy Cloud.
+fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
+    let Some(self_id) = self_id else {
+        return String::new();
+    };
+    let logged_in = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
+        .is_ok_and(|config| config.is_logged_in());
+    if !logged_in || crate::cloud::resolve_canonical_id(cas_root).is_none() {
+        return String::new();
+    }
+    let record = crate::cloud::presence::load(cas_root, self_id);
+    crate::cloud::presence::render_line(record.as_ref(), Utc::now())
+}
+
+fn discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
     match discover_peers(cas_root, self_id) {
         Ok(PeerDiscovery::Found {
             canonical_id,
@@ -239,13 +272,14 @@ pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
 /// How long [`peers_section_cached`] reuses a lookup.
 pub const PEERS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// [`peers_section`], reused for [`PEERS_CACHE_TTL`] per project and caller
-/// so a supervisor polling `worker_status` does not query the cloud on every
-/// call.
+/// [`peers_section`], with the cloud lookup reused for [`PEERS_CACHE_TTL`]
+/// per project and caller so a supervisor polling `worker_status` does not
+/// query the cloud on every call. The presence line is always read fresh.
 pub fn peers_section_cached(cas_root: &Path, self_id: Option<&str>) -> String {
     type Key = (std::path::PathBuf, Option<String>);
     static CACHE: std::sync::Mutex<Option<HashMap<Key, (std::time::Instant, String)>>> =
         std::sync::Mutex::new(None);
+    let presence = presence_line(cas_root, self_id);
     let key = (cas_root.to_path_buf(), self_id.map(str::to_string));
     if let Some((at, text)) = CACHE
         .lock()
@@ -254,15 +288,62 @@ pub fn peers_section_cached(cas_root: &Path, self_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(&key))
         && at.elapsed() < PEERS_CACHE_TTL
     {
-        return text.clone();
+        return format!("{presence}{text}");
     }
-    let text = peers_section(cas_root, self_id);
+    let text = discovery_section(cas_root, self_id);
     CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(key, (std::time::Instant::now(), text.clone()));
-    text
+    format!("{presence}{text}")
+}
+
+/// The agent a CLI invocation runs under, so `cas status` does not list its
+/// own session as a peer (cas-f707): the harness session id in the
+/// environment, else the agent registered for one of this process's
+/// ancestors (the harness that ran the shell that ran `cas`).
+pub fn cli_self_id(cas_root: &Path) -> Option<String> {
+    let from_env = ["CAS_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty());
+    if from_env.is_some() {
+        return from_env;
+    }
+    let store = crate::store::open_agent_store(cas_root).ok()?;
+    ancestor_pids(6)
+        .into_iter()
+        .find_map(|pid| store.get_by_pid(pid).ok().flatten())
+        .map(|agent| agent.id)
+}
+
+/// Up to `depth` ancestors of this process, nearest first.
+#[allow(unused_mut)]
+fn ancestor_pids(depth: usize) -> Vec<u32> {
+    let mut pids = Vec::new();
+    #[cfg(unix)]
+    {
+        let mut pid = std::os::unix::process::parent_id();
+        while pid > 1 && pids.len() < depth {
+            pids.push(pid);
+            // Linux: the parent is field 4 of /proc/<pid>/stat, after the
+            // parenthesised command name. Elsewhere only the parent is known.
+            let Some(next) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let rest = &stat[stat.rfind(')')? + 1..];
+                    rest.split_whitespace().nth(1)?.parse::<u32>().ok()
+                })
+            else {
+                break;
+            };
+            pid = next;
+        }
+    }
+    let _ = depth;
+    pids
 }
 
 #[cfg(test)]

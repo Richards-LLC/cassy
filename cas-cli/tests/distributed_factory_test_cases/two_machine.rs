@@ -22,6 +22,61 @@ use super::fake_cloud::FakeCloud;
 
 const WIDGETS: &str = "github.com/acme/widgets";
 
+#[tokio::test]
+async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importing_workers() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, beta, _gamma) = three_machines(&cloud);
+    for n in 1..4 {
+        register(&beta, &format!("bw{n}"), &format!("beta-worker-{n}"),
+            AgentRole::Worker, "b", "cas-f9c7");
+    }
+    register(&beta, "other-session", "unrelated-worker", AgentRole::Worker, "other", "cas-other");
+    let config = cloud.config();
+    for (task, owner) in [("cas-held", "b"), ("cas-active", "bw"), ("cas-unsynced", "bw1")] {
+        CloudCoordinator::new(config.clone()).unwrap().with_agent_id(owner)
+            .with_canonical_id(Some(WIDGETS.into())).claim(task, 600, None).unwrap();
+    }
+    let mut task = cas::types::Task::new("cas-active".into(), "Implement peer awareness".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    alpha.task_store().add(&task).unwrap();
+    {
+        let mut state = cloud.state.lock().unwrap();
+        for id in ["bw", "bw1", "bw2", "bw3"] {
+            state.agents.get_mut(id).unwrap()["metadata"]["branch"] =
+                serde_json::json!(format!("factory/{id}"));
+        }
+    }
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "peers", "peer": "sup-b", "detail": true, "json": true
+    })).unwrap();
+    let result = service.coordination(rmcp::handler::server::wrapper::Parameters(request)).await.unwrap();
+    let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str())).collect::<String>();
+    let detail: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let peers = detail["peers"].as_array().unwrap();
+    assert_eq!(peers.len(), 1, "{detail}");
+    let peer = &peers[0];
+    assert_eq!(peer["supervisor"]["focus"], "cas-f9c7");
+    assert_eq!(peer["supervisor"]["machine_id"], "machine-beta");
+    assert_eq!(peer["supervisor"]["session"], "factory-b");
+    assert_eq!(peer["claims"].as_array().unwrap().len(), 3);
+    let active = peer["claims"].as_array().unwrap().iter().find(|c| c["task_id"] == "cas-active").unwrap();
+    assert_eq!(active["title"], task.title);
+    assert_eq!(active["status"], "in_progress");
+    assert!(active["age_secs"].as_i64().unwrap() >= 0);
+    let workers = peer["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 4, "{workers:?}");
+    let worker = workers.iter().find(|w| w["agent_id"] == "bw").unwrap();
+    assert_eq!(worker["branch"], "factory/bw");
+    assert_eq!(worker["claims"][0]["task_id"], "cas-active");
+    assert!(alpha.agent_store().get("bw").is_err());
+    assert!(open_spawn_queue_store(&alpha.cas_dir).unwrap().peek(10).unwrap().is_empty());
+    assert!(resolve_peer_target(&peers_of(&alpha.cas_dir, "a"), "beta-worker").unwrap().is_none());
+}
+
 /// Register `id` in the cloud (as the daemon does) and in the machine's own
 /// store, in factory session `factory-<session>`.
 fn register(

@@ -101,7 +101,9 @@ Agent pagination echoes the returned `next_sort_cursor` with the other cursors.
 
 Claims are scoped to the repository's canonical identity. Their titles and task
 status come from this checkout's synced task store when available; an unsynced
-task remains visible by ID. Claim age is time since the lease's last renewal.
+task remains visible by its plain task ID, with `title not synced` explaining
+the missing title. Human rows use agent names; JSON also keeps `lock_key` and
+`agent_id` for exact cloud receipts. Claim age is time since the last renewal.
 Only active, unexpired claims count. Live workers have an active/idle heartbeat
 within five minutes and must match both the peer's factory session and machine.
 A missing branch is shown as unknown. Worker details are read-only: these rows
@@ -111,7 +113,9 @@ Cloud locks are private to one user account: a team peer on another account show
 `Claims not visible (different account)` and worker tasks as `not visible`.
 If the caller's account identity is unknown, the report says so. JSON includes
 `claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
-is authoritative only when visibility is `same_account`.
+is authoritative only when visibility is `same_account`. The viewer account
+comes from the token-owned agent list, independently of caller session lookup.
+Operator CLI self-exclusion uses the same session/ancestor-PID lookup as status.
 
 ## Adding Features
 

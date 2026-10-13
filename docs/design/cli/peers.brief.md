@@ -2,10 +2,10 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | The caller's registration state comes first, then the count of visible and live supervisors; repository scope follows. |
+| First two lines | The caller's registration state and focus open the view, then the peer/live count starts the next group; repository scope follows. |
 | Scannable | Each supervisor groups machine, session, epic focus, claims, and live workers with branch and task rows. |
-| Readable | Claim titles and locally synced task status explain the held work; claim age is time since the last renewal. |
-| Machine output | `coordination action=peers json=true` and `cas peers --json` return one object with `canonical_id`, `peers`, and `detail`; top-level `cloud_presence` holds the typed last recorded state, `cloud_presence_message` the current display (including opt-out), and `mailbox_status` the footer; each detail peer contains `supervisor`, `user_id`, `team_id`, `project_id`, `claims_visibility`, `branch`, `claims`, and `workers`. Missing synced titles, statuses, or branches are null; claims visibility is `same_account`, `different_account` or `unknown`. |
+| Readable | Claims use plain task IDs and owner names; synced titles/status explain the work, and missing titles explicitly say they are not synced. Claim age is time since renewal. |
+| Machine output | `coordination action=peers json=true` and `cas peers --json` return one object with `canonical_id`, `peers`, and `detail`; top-level `cloud_presence` holds the typed last recorded state, `cloud_presence_message` the current display (including opt-out), and `mailbox_status` the footer; each detail peer contains `supervisor`, `user_id`, `team_id`, `project_id`, `claims_visibility`, `branch`, `claims`, and `workers`; claims expose plain `task_id`, raw `lock_key`, `agent_id` and `agent_name`. Missing synced titles, statuses, or branches are null; claims visibility is `same_account`, `different_account` or `unknown`. |
 | Omitted | Human output truncates long values to 80 cells; JSON preserves full values. Workers are read-only observations and never become message or spawn targets. |
 
 ## Critique
@@ -20,6 +20,6 @@ terminal-qa: PASS peers-long · 12 runs · 0 fail · 0 warn · 0 allowed · /hom
 | Fit | 4 | Supervisor groups separate identity, claims and live workers; the summary omits expanded work. |
 | Craft | 4 | Claim ages align right with one seconds heading; presence and mailbox use the shared status messages; long values truncate with a JSON escape. |
 | Theme safety | 5 | Both gates pass dark, light and Solarized, NO_COLOR and C locale without colors or controls. |
-| Machine contract | 5 | One typed document carries full values, visibility and identity; failure JSON is valid and exits nonzero. |
+| Machine contract | 5 | One typed document preserves raw lock keys and owner IDs; human text uses plain task IDs/names; failure JSON is valid and exits nonzero. |
 
-Scored by golden-gazelle-73 on 2026-10-13 at 31cf7ef2d. Captures use the actual built CLI with an isolated fake cloud; production proof is cas-c7c7.
+Scored by golden-gazelle-73 on 2026-10-13 at d167482b1. Captures use the actual built CLI with an isolated fake cloud; production proof is cas-c7c7.

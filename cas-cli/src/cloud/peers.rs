@@ -250,7 +250,7 @@ pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
 /// The caller's own registration state, from the record the daemon keeps
 /// (cas-f707). Empty when the caller is unknown or the project does not
 /// reach Cassy Cloud.
-fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
+pub(crate) fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
     let logged_in = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
         .is_ok_and(|config| config.is_logged_in());
     if !logged_in || crate::cloud::resolve_canonical_id(cas_root).is_none() {
@@ -288,7 +288,7 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
     }
 }
 
-fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+pub(crate) fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
     let agents = crate::store::open_agent_store(cas_root).ok();
     if let Some(id) = self_id {
         let session = agents

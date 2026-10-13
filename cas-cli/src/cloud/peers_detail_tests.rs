@@ -119,6 +119,9 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
+        cloud_presence: None,
+        cloud_presence_message: String::new(),
+        mailbox_status: String::new(),
         canonical_id: Some(REPO.into()),
         status: "ready".into(),
         detail: true,
@@ -160,13 +163,13 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
 }
 
 #[tokio::test]
-async fn cas_559c_list_locks_sends_canonical_id_and_surfaces_failure() {
+async fn cas_559c_list_locks_sends_project_and_surfaces_failure() {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/agents/locks"))
-        .and(query_param("canonical_id", REPO))
+        .and(query_param("project", REPO))
         .respond_with(ResponseTemplate::new(503).set_body_string("claims unavailable"))
         .expect(1)
         .mount(&server)
@@ -199,6 +202,9 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        cloud_presence: None,
+        cloud_presence_message: String::new(),
+        mailbox_status: String::new(),
         canonical_id: Some(REPO.into()),
         detail: true,
         status: "ready".into(),
@@ -212,4 +218,53 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
         "{text}"
     );
     assert!(!text.contains("Claims  0"), "{text}");
+}
+
+#[tokio::test]
+async fn cas_559c_paging_echoes_sort_cursor_with_project_on_every_page() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/agents"))
+        .and(query_param("project", REPO))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "agents": [], "next_cursor": "created-at", "next_cursor_id": "agent-b",
+            "next_sort_cursor": "opaque-sort-key"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/agents"))
+        .and(query_param("project", REPO))
+        .and(query_param("cursor", "created-at"))
+        .and(query_param("cursor_id", "agent-b"))
+        .and(query_param("sort_cursor", "opaque-sort-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "agents": [agent("remote", "supervisor", "session", "beta", REPO, 1)],
+            "next_cursor": null, "next_cursor_id": null, "next_sort_cursor": null
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    let agents = tokio::task::spawn_blocking(move || {
+        super::super::CloudCoordinator::new(super::super::CloudConfig {
+            endpoint,
+            token: Some("fake-test-token".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .with_canonical_id(Some(REPO.into()))
+        .list_agent_infos()
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        ["remote"]
+    );
 }

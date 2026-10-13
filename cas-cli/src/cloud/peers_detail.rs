@@ -67,11 +67,31 @@ fn claims_visibility(viewer: Option<&str>, owner: Option<&AgentInfo>) -> ClaimsV
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
+    pub cloud_presence: Option<super::presence::PresenceRecord>,
+    pub cloud_presence_message: String,
+    pub mailbox_status: String,
     pub canonical_id: Option<String>,
     pub detail: bool,
     pub status: String,
     pub peers: Vec<PeerDetail>,
     pub error: Option<String>,
+}
+
+impl PeerReport {
+    pub(crate) fn new(cas_root: &Path, self_id: Option<&str>, detail: bool) -> Self {
+        let mut mailbox_status = String::new();
+        peers::append_mailbox_status(cas_root, self_id, &mut mailbox_status);
+        Self {
+            cloud_presence: self_id.and_then(|id| super::presence::load(cas_root, id)),
+            cloud_presence_message: peers::presence_line(cas_root, self_id),
+            mailbox_status,
+            canonical_id: super::resolve_canonical_id(cas_root),
+            detail,
+            status: "ready".into(),
+            peers: Vec::new(),
+            error: None,
+        }
+    }
 }
 
 fn meta<'a>(agent: &'a AgentInfo, key: &str) -> Option<&'a str> {
@@ -207,8 +227,9 @@ pub fn assemble_peer_details(
         .collect()
 }
 
-/// Fetch full details only when requested. Every request is repo scoped, and
-/// missing lock evidence is an error rather than an invented empty claim list.
+/// Fetch full details only when requested. Discovery is repo scoped; locks
+/// remain account-private and are filtered against the discovered owners.
+/// Missing lock evidence is an error rather than an invented empty claim list.
 pub fn discover_peer_report(
     cas_root: &Path,
     self_id: Option<&str>,
@@ -216,14 +237,7 @@ pub fn discover_peer_report(
     selected: Option<&str>,
 ) -> Result<PeerReport, CasError> {
     let detail = detail || selected.is_some();
-    let canonical_id = super::resolve_canonical_id(cas_root);
-    let mut report = PeerReport {
-        canonical_id,
-        detail,
-        status: "ready".into(),
-        peers: Vec::new(),
-        error: None,
-    };
+    let mut report = PeerReport::new(cas_root, self_id, detail);
     let Some(repo) = report.canonical_id.as_deref() else {
         report.status = "no_project_identity".into();
         report.error = Some("project has no canonical id; configure [project] canonical_id".into());
@@ -355,6 +369,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         }
         out.push('\n');
     };
+    for presence_line in report.cloud_presence_message.lines() {
+        line(presence_line.to_string());
+    }
     if let Some(error) = &report.error {
         line(format!("[WARN] Peers unavailable: {}", report.status));
         line(format!("  {error}"));
@@ -441,6 +458,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 line(format!("      Tasks {task_label}"));
             }
         }
+    }
+    for mailbox_line in report.mailbox_status.lines() {
+        line(mailbox_line.to_string());
     }
     drop(line);
     if truncated {

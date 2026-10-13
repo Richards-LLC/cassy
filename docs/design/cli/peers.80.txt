@@ -1,3 +1,4 @@
+Cloud presence: registered (focus cas-soundwave, branch factory/sup-soundwave…
 [OK] 1 peer supervisors | 1 live
 Repo github.com/acme/widgets
 sup-prowl [live]
@@ -26,3 +27,5 @@ sup-prowl [live]
     prowl-worker-3 [active]
       Branch factory/prowl-worker-3
       Tasks none
+Peer mailbox: not receiving: no factory daemon session.
+--json for untruncated values (MCP: json=true)

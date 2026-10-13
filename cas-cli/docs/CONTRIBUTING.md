@@ -94,7 +94,10 @@ factory session, epic focus, active task claims, live workers and registered
 branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
 implies detail. `json=true` returns the full report without truncation.
 The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
-`--json` accepting the same filters and output contract.
+`--json` accepting the same filters and output contract. Presence appears first,
+then peers or details, then the mailbox footer. JSON carries the typed
+`cloud_presence` record, `cloud_presence_message`, and `mailbox_status` too.
+Agent pagination echoes the returned `next_sort_cursor` with the other cursors.
 
 Claims are scoped to the repository's canonical identity. Their titles and task
 status come from this checkout's synced task store when available; an unsynced

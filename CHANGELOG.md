@@ -28,25 +28,51 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   server, and the PreToolUse hook refuses the agent shell command. The
   operator at a terminal, and ordinary servers, are unaffected.
 
-### Added — a task one machine works is not started on another (cas-5f28)
+### Added and fixed — same-repo collaboration across factories (3.51)
 
-- When the project is logged in to Cassy Cloud, `task start` and
-  `task action=claim` also claim the task in the cloud. A session of the same
-  repository on another machine (or in another clone) that tries to start it
-  is refused. The refusal names the holder and its machine, and shows how to
-  message them. `force=true` takes the task over and says so.
-- Claims are scoped to the repository, so the same task id in two of your
-  repositories never collides.
-- Claims are released on close, release, reset, transfer, park and cancel.
-  The daemon heartbeat renews them every two minutes.
-- When the holder's machine stops, its claim runs out and a peer may start
-  the task with a stale-claim warning. When the cloud is unreachable, the
-  local lease applies, with a "peers not checked" warning.
-- Two sessions working children of the same epic (subtask start, epic start,
-  `focus_epic`) are told about each other; nothing is refused.
-- `spawn_workers` warns when a peer holds the task it pre-assigns.
-- `task start` of a pulled task already in progress under an assignee who is
-  not on this host names that assignee.
+- **Discovery (cas-e477). Was:** supervisors in other sessions or machines were
+  absent from the factory view. **Now:** same-repository supervisors appear in
+  `coordination action=peers`, the full worker-status view and
+  `cas status --verbose`, with machine, session, focus and heartbeat age.
+- **Peer messages (cas-f9c7). Was:** coordination messages stayed in the local
+  queue. **Now:** supervisors address peers by name or `name@machine` through
+  the cloud mailbox, reply and inspect delivery receipts. Peer traffic carries
+  colleague provenance and no operator authority or control of another fleet.
+- **Task claims (cas-5f28). Was:** local leases could permit the same task on two
+  machines. **Now:** cloud claims refuse an overlapping start or claim, renew
+  while the holder works, and release on lifecycle handoff. Claims are scoped
+  by repository and currently visible within one user account; cross-account
+  team claims are tracked in petra-stella-cloud#155.
+- **Presence recovery (cas-f707). Was:** registration could fail once, focus
+  could become stale, and discovery did not send the production project
+  filter. **Now:** shared presence updates recover registration, refresh focus
+  and bind discovery to the project, with a visible local health cause.
+  TODO(cas-f707): confirm final merged behavior and strings before release.
+- **Claim and spawn safety (cas-0078). Was:** refused local work could disturb a
+  cloud claim, lost renewals stayed lost, and spawn warned after queueing.
+  **Now:** holder-aware claims recover or report loss, focus claims follow the
+  focus lifetime, and peer-held work is refused before spawning.
+  TODO(cas-0078): confirm merged takeover and loss behavior before release.
+- **Peer awareness (cas-559c). Was:** peers showed only presence and frozen
+  focus. **Now:** peer details include focus, visible claims, workers and
+  branches, and distinguish another account's invisible claims from no claims.
+  TODO(cas-559c): confirm merged CLI and detail fields before release.
+- **Epic split (cas-4736). Was:** supervisors had no recorded way to divide an
+  epic. **Now:** peers propose and accept disjoint child ownership, with local
+  refusal outside their share and a cancellation or expiry path.
+  TODO(cas-4736): confirm merged command contract before release.
+- **Mailbox recovery (cas-13c7). Was:** starting before cloud login could leave
+  receiving permanently off, and retrying a send could duplicate it. **Now:**
+  the receiver recovers prerequisites, shows health, and durable bounded retry
+  preserves each logical send's identity and reports terminal abandonment.
+  TODO(cas-13c7): confirm merged retry lifetime and status before release.
+- **Named send outcomes (cas-a19b, #1186). Was:** an unknown peer or cloud lookup
+  failure could enter a local queue and silently die. **Now:** unknown targets,
+  missing receiving factories and cloud resolution failures name the cause;
+  real registration races can queue, and abandonment reaches the sender.
+  TODO(cas-a19b): confirm merged immediate errors and notices before release.
+
+Operator setup and the two-machine walkthrough: [peer supervisors guide](docs/guides/peer-supervisors.md).
 
 ## [3.50.1] - 2026-10-13
 

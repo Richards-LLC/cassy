@@ -372,6 +372,10 @@ pub trait SpawnQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SpawnLifecycle>>;
 
+    /// Whether this name belongs to a nonterminal local spawn, including
+    /// provisioning requests already removed from the pending queue.
+    fn has_pending_spawn(&self, name: &str, factory_session: Option<&str>) -> Result<bool>;
+
     /// Get count of pending requests
     fn pending_count(&self) -> Result<usize>;
 
@@ -795,6 +799,33 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(rows)
+    }
+
+    fn has_pending_spawn(&self, name: &str, factory_session: Option<&str>) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT worker_names, spawn_worker FROM spawn_queue
+             WHERE action = 'spawn'
+               AND COALESCE(spawn_state, 'queued') IN ('queued', 'provisioning', 'launched')
+               AND (? IS NULL OR factory_session = ? OR factory_session IS NULL)",
+        )?;
+        let rows = stmt.query_map(params![factory_session, factory_session], |row| {
+            Ok((
+                Self::parse_worker_names(row.get(0)?),
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        for row in rows {
+            let (requested, provisioned) = row?;
+            if requested
+                .iter()
+                .chain(provisioned.iter())
+                .any(|worker| worker.eq_ignore_ascii_case(name))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn pending_count(&self) -> Result<usize> {

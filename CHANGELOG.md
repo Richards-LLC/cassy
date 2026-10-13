@@ -47,6 +47,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `task start` of a pulled task already in progress under an assignee who is
   not on this host names that assignee.
 
+### Fixed — peers stay visible (cas-f707)
+
+- Was: a supervisor registered with Cassy Cloud once, at SessionStart, and a
+  failure was only printed. Now every registration path pushes, including
+  the MCP server's own registration and a replayed SessionStart. A failed
+  registration is retried on the next heartbeat, then with backoff up to
+  every 5 minutes. A heartbeat the cloud refuses with 404 or 401 registers
+  the agent again.
+- Was: the epic focus peers saw was frozen at SessionStart. Now
+  `focus_epic` pushes it, and the heartbeat re-pushes any focus change.
+- `coordination action=peers`, `worker_status` and `cas status` open with
+  this agent's own state: `Cloud presence: registered` or
+  `Cloud presence: failing: <cause>`.
+- Agent list, registration and claim calls carry the repo's `canonical_id`,
+  so the cloud can scope them to the project (petra-stella-cloud#151).
+- `cas status` no longer lists its own session as a peer. Claims and
+  discovery name a machine the same way.
+
 ## [3.50.0] - 2026-10-10
 
 ### Changed — many agents on one machine (#1165)

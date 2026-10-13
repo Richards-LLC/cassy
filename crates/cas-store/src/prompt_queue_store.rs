@@ -10775,6 +10775,15 @@ mod tests {
                     .prompt
                     .contains(&format!("; ids {}, {}", later[0], later[1]))
             );
+            // An ended sender still falls back to the current supervisor,
+            // with one aggregate in that supervisor's own session.
+            agents.unregister(&a.id).unwrap();
+            let orphaned = [enqueue_old(&a, "orphan-worker"), enqueue_old(&a, "orphan-worker")];
+            assert_eq!(run_sweep(), 2);
+            let fallback = store.poll_unseen_for_recipient(&b.name, b.factory_session.as_deref(), 10).unwrap();
+            assert_eq!(fallback.len(), 1);
+            assert_eq!(fallback[0].factory_session, b.factory_session);
+            assert!(fallback[0].prompt.contains(&format!("; ids {}, {}", orphaned[0], orphaned[1])));
         }
     }
 

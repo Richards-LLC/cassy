@@ -6055,6 +6055,36 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
 }
 
 #[tokio::test]
+async fn test_c384_gc_cleanup_aggregates_notices_per_sender() {
+    let env = FactoryTestEnv::new();
+    let pq = env.prompt_queue();
+    let mut originals = Vec::new();
+    for (sender, count) in [("sender-a", 5), ("sender-b", 2)] {
+        for _ in 0..count {
+            originals.push(pq.enqueue(sender, "dead-worker", "old work").unwrap());
+        }
+    }
+    let mut req = factory_req("gc_cleanup");
+    req.force = Some(true);
+    req.older_than_secs = Some(0);
+    let result = env.service.factory_request(Parameters(req)).await.unwrap();
+    let text = get_text(&result);
+    assert!(text.contains("Prompt queue entries expired: 7"), "{text}");
+    assert!(text.contains("Prompt queue entries pruned: 0"), "{text}");
+    let pending = pq.peek_all(10).unwrap();
+    assert_eq!(pending.len(), 2, "two senders receive two notices, not seven");
+    for (sender, count) in [("sender-a", 5), ("sender-b", 2)] {
+        let notice = pending.iter().find(|row| row.target == sender).unwrap();
+        assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(notice.prompt.starts_with(&format!("{count} messages to dead-worker were abandoned (")), "{}", notice.prompt);
+        assert!(notice.prompt.contains("explicit queue remediation"));
+    }
+    for id in originals {
+        assert_eq!(pq.message_delivery_report(id).unwrap().unwrap().stage, cas_store::DeliveryStage::Abandoned);
+    }
+}
+
+#[tokio::test]
 async fn test_gc_cleanup_purges_stale_and_shutdown_worker_records() {
     let env = FactoryTestEnv::new();
 

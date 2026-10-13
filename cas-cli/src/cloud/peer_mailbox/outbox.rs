@@ -176,7 +176,7 @@ pub(super) fn tick(root: &Path, session: &str) -> Result<(), String> {
 
 fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
     let conn = connection(root)?;
-    conn.execute("UPDATE peer_message_outbox SET state='abandoned',last_error=COALESCE(last_error,'mailbox unavailable') || '; retry TTL expired' WHERE state IN ('pending','retrying') AND created_at<=?1", params![now-OUTBOX_TTL_SECS])?;
+    conn.execute("UPDATE peer_message_outbox SET state='abandoned',last_error=COALESCE(last_error,'mailbox unavailable') || '; retry TTL expired' WHERE state IN ('pending','retrying') AND created_at<=?1 AND next_attempt_at<=?2", params![now-OUTBOX_TTL_SECS,now])?;
     let notices = {
         let mut stmt = conn.prepare("SELECT id,sender_agent_id,sender_name,sender_session,recipient,last_error FROM peer_message_outbox WHERE state='abandoned' AND notice_sent=0")?;
         stmt.query_map([], |r| {
@@ -220,8 +220,6 @@ fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Replaced with cas-a19b's agreed public API as soon as its epic merge lands.
-#[allow(unused_variables)]
 fn notify_abandoned(
     queue: &dyn PromptQueueStore,
     sender: &str,
@@ -231,5 +229,6 @@ fn notify_abandoned(
     recipient: &str,
     cause: &str,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("sender-abandonment API pending cas-a19b epic merge")
+    queue.notify_peer_send_abandoned(sender, name, session, id, recipient, cause)?;
+    Ok(())
 }

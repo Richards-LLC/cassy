@@ -562,6 +562,15 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert!(replies[0].prompt.ends_with("yes"));
 }
 
+fn public_outbox_status(root: &Path, id: &str) -> String {
+    tokio::runtime::Handle::current()
+        .block_on(coordinate(
+            &service_for(root, "a"),
+            json!({"action":"message_status","id":id}),
+        ))
+        .unwrap()
+}
+
 /// The cloud accepted the first send but its receipt was lost. Automatic
 /// retry must reuse the local row key; a deliberate identical send is new.
 struct AcceptThenFail {
@@ -615,6 +624,7 @@ async fn cas_13c7_automatic_retry_keeps_logical_send_key_and_identical_sends_dis
             retrying.contains(": retrying") && retrying.contains("503"),
             "{retrying}"
         );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": retrying"));
         let second =
             send_to_peer(&alpha.cas_dir, "a", &peers[0], "hold merges", None, None).unwrap();
         assert_ne!(second.id, "pm_1");
@@ -631,6 +641,7 @@ async fn cas_13c7_automatic_retry_keeps_logical_send_key_and_identical_sends_dis
                 .unwrap()
                 .contains(": pending")
         );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": pending"));
         // Competing daemon consumers share a project outbox; its atomic row
         // lease permits one HTTP retry even when both observe a due send.
         let mut second_supervisor = Agent::new("second-local".into(), "sup-second".into());
@@ -667,6 +678,7 @@ async fn cas_13c7_automatic_retry_keeps_logical_send_key_and_identical_sends_dis
             sent.contains(": sent") && sent.contains("cloud message pm_1"),
             "{sent}"
         );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": sent"));
         assert_eq!(tick(&beta.cas_dir, "b").delivered, 2);
         assert_eq!(inbox(&beta.cas_dir).len(), 2);
         assert_eq!(
@@ -701,7 +713,7 @@ async fn cas_13c7_outbox_expires_once_and_notifies_sender_after_restart() {
         assert!(send_to_peer(&alpha.cas_dir, "a", &peers[0], "will expire", None, None).is_err());
         let conn = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
         conn.execute(
-            "UPDATE peer_message_outbox SET created_at=?1 WHERE id=1",
+            "UPDATE peer_message_outbox SET created_at=?1,next_attempt_at=0 WHERE id=1",
             [chrono::Utc::now().timestamp() - OUTBOX_TTL_SECS - 1],
         )
         .unwrap();
@@ -722,6 +734,7 @@ async fn cas_13c7_outbox_expires_once_and_notifies_sender_after_restart() {
             expired.contains(": abandoned") && expired.contains("TTL expired"),
             "{expired}"
         );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": abandoned"));
         let notices = inbox(&alpha.cas_dir);
         assert_eq!(
             notices.len(),

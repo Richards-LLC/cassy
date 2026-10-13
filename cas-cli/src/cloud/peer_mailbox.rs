@@ -22,6 +22,11 @@ use crate::cloud::peers::Peer;
 use crate::store::{AgentStore, PromptQueueStore};
 use crate::types::{AgentRole, AgentStatus};
 
+mod outbox;
+mod runtime;
+pub use outbox::{OUTBOX_TTL_SECS, PeerSendError, outbox_status_text, retry_peer_send};
+pub use runtime::{PeerMailboxPoller, PeerMailboxRuntime, mailbox_status_section};
+
 /// Tag of the envelope line.
 const ENVELOPE_TAG: &str = "<cas-peer-message ";
 
@@ -35,7 +40,7 @@ pub const CLAIM_MAX: u32 = 50;
 pub const LEASE_SECS: u32 = 120;
 
 /// One outbound peer message (`POST /api/peer-messages`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerSend {
     pub project_id: String,
     pub sender_agent_id: String,
@@ -112,6 +117,19 @@ pub trait PeerMailbox: Send + Sync {
         recipient_agent_ids: &[String],
         consumer_id: &str,
     ) -> Result<Vec<ClaimedPeerMessage>, String>;
+    /// Claim warnings must remain visible even if some projects succeeded.
+    fn claim_report(
+        &self,
+        project_ids: &[String],
+        recipient_agent_ids: &[String],
+        consumer_id: &str,
+    ) -> Result<PeerClaim, String> {
+        self.claim(project_ids, recipient_agent_ids, consumer_id)
+            .map(|messages| PeerClaim {
+                messages,
+                denied: Vec::new(),
+            })
+    }
     fn ack(&self, consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String>;
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String>;
 }
@@ -326,8 +344,16 @@ pub fn deliver_claimed(
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
         .collect();
-    let claimed = match mailbox.claim(&project_ids, &recipient_ids, consumer_id) {
-        Ok(claimed) => claimed,
+    let claimed = match mailbox.claim_report(&project_ids, &recipient_ids, consumer_id) {
+        Ok(batch) => {
+            if !batch.denied.is_empty() {
+                report.errors.push(format!(
+                    "peer message claim denied projects: {}",
+                    batch.denied.join(", ")
+                ));
+            }
+            batch.messages
+        }
         Err(error) => {
             report.errors.push(error);
             return report;
@@ -401,7 +427,13 @@ pub fn send_to_peer(
     body: &str,
     summary: Option<&str>,
     in_reply_to: Option<&str>,
-) -> Result<SendReceipt, String> {
+) -> Result<SendReceipt, PeerSendError> {
+    if peer.session.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        return Err(PeerSendError::NoReceivingDaemon(format!(
+            "{}@{}",
+            peer.name, peer.machine
+        )));
+    }
     send_raw(
         cas_root,
         sender_agent_id,
@@ -409,6 +441,7 @@ pub fn send_to_peer(
         body,
         summary,
         in_reply_to,
+        &format!("{}@{}", peer.name, peer.machine),
     )
 }
 
@@ -419,20 +452,26 @@ fn send_raw(
     body: &str,
     summary: Option<&str>,
     in_reply_to: Option<&str>,
-) -> Result<SendReceipt, String> {
-    let mailbox = http_mailbox(cas_root)
-        .ok_or("not logged in to Cassy Cloud, so peers on other machines are unreachable")?;
-    let project_id = crate::cloud::resolve_canonical_id(cas_root)
-        .ok_or("this project has no canonical id to address peers by")?;
-    mailbox.send(&PeerSend {
-        project_id,
-        sender_agent_id: sender_agent_id.to_string(),
-        recipient_agent_id: recipient_agent_id.to_string(),
-        body: body.to_string(),
-        summary: summary.map(str::to_string),
-        in_reply_to: in_reply_to.map(str::to_string),
-        dedupe_key: format!("{sender_agent_id}:{}", uuid::Uuid::new_v4()),
-    })
+    recipient_label: &str,
+) -> Result<SendReceipt, PeerSendError> {
+    let project_id =
+        crate::cloud::resolve_canonical_id(cas_root).ok_or_else(|| PeerSendError::Failed {
+            cause: "this project has no canonical id to address peers by".into(),
+            retry: String::new(),
+        })?;
+    outbox::enqueue_and_send(
+        cas_root,
+        PeerSend {
+            project_id,
+            sender_agent_id: sender_agent_id.to_string(),
+            recipient_agent_id: recipient_agent_id.to_string(),
+            body: body.to_string(),
+            summary: summary.map(str::to_string),
+            in_reply_to: in_reply_to.map(str::to_string),
+            dedupe_key: String::new(),
+        },
+        recipient_label,
+    )
 }
 
 /// A reply to a delivered peer message, addressed back to its sender.
@@ -474,6 +513,17 @@ pub fn reply_to_peer_row(
             row.target
         ));
     }
+    if envelope
+        .session
+        .as_deref()
+        .is_none_or(|session| session.trim().is_empty())
+    {
+        return Err(PeerSendError::NoReceivingDaemon(format!(
+            "{}@{}",
+            envelope.sender_name, envelope.machine
+        ))
+        .to_string());
+    }
     let receipt = send_raw(
         cas_root,
         sender_agent_id,
@@ -481,7 +531,9 @@ pub fn reply_to_peer_row(
         body,
         summary,
         Some(&envelope.id),
-    )?;
+        &format!("{}@{}", envelope.sender_name, envelope.machine),
+    )
+    .map_err(|error| error.to_string())?;
     queue
         .ack(row_id)
         .map_err(|error| format!("reply sent, but acking message {row_id} failed: {error}"))?;
@@ -496,73 +548,6 @@ pub fn http_mailbox(cas_root: &Path) -> Option<HttpPeerMailbox> {
     let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).ok()?;
     let token = config.token.as_deref().filter(|token| !token.is_empty())?;
     Some(HttpPeerMailbox::new(&config.endpoint, token))
-}
-
-/// The factory daemon's peer mailbox puller: one blocking claim-and-admit
-/// tick per [`POLL_INTERVAL`] for this factory session's supervisors.
-pub struct PeerMailboxRuntime {
-    cas_dir: std::path::PathBuf,
-    factory_session: String,
-    canonical_id: String,
-    alias_class: Vec<String>,
-    consumer_id: String,
-    mailbox: HttpPeerMailbox,
-}
-
-impl PeerMailboxRuntime {
-    /// `None` when the project is not logged in to Cassy Cloud or has no
-    /// canonical id. Each reason is logged once.
-    pub fn start(cas_dir: &Path, factory_session: &str) -> Option<Self> {
-        let Some(mailbox) = http_mailbox(cas_dir) else {
-            tracing::info!("peer mailbox skipped: not logged in to Cassy Cloud");
-            return None;
-        };
-        let Some(canonical_id) = crate::cloud::resolve_canonical_id(cas_dir) else {
-            tracing::info!("peer mailbox skipped: project has no canonical id");
-            return None;
-        };
-        let consumer_id: String = format!(
-            "{}:{factory_session}",
-            cas_types::Agent::get_or_generate_machine_id()
-        )
-        .chars()
-        .take(200)
-        .collect();
-        tracing::info!(project = %canonical_id, "claiming peer supervisor messages from Cassy Cloud");
-        Some(Self {
-            cas_dir: cas_dir.to_path_buf(),
-            factory_session: factory_session.to_string(),
-            alias_class: crate::cloud::project_aliases_from_config_toml(cas_dir),
-            canonical_id,
-            consumer_id,
-            mailbox,
-        })
-    }
-
-    /// One blocking tick: claim, admit and ack.
-    pub fn tick_blocking(&self) -> DeliveryReport {
-        let failed = |error: String| DeliveryReport {
-            errors: vec![error],
-            ..DeliveryReport::default()
-        };
-        let queue = match crate::store::open_prompt_queue_store(&self.cas_dir) {
-            Ok(queue) => queue,
-            Err(error) => return failed(format!("could not open the prompt queue: {error}")),
-        };
-        let agents = match crate::store::open_agent_store(&self.cas_dir) {
-            Ok(agents) => agents,
-            Err(error) => return failed(format!("could not open the agent store: {error}")),
-        };
-        deliver_claimed(
-            &self.mailbox,
-            queue.as_ref(),
-            agents.as_ref(),
-            &self.canonical_id,
-            &self.alias_class,
-            &self.factory_session,
-            &self.consumer_id,
-        )
-    }
 }
 
 /// `PeerMailbox` over Cassy Cloud HTTP.
@@ -622,9 +607,20 @@ impl HttpPeerMailbox {
 
 /// `POST /api/peer-messages/claim` response.
 #[derive(Deserialize)]
-struct ClaimResponse {
+pub struct PeerClaim {
+    pub messages: Vec<ClaimedPeerMessage>,
     #[serde(default)]
-    messages: Vec<ClaimedPeerMessage>,
+    pub denied: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AckResponse {
+    results: Vec<AckResult>,
+}
+#[derive(Deserialize)]
+struct AckResult {
+    id: String,
+    status: u16,
 }
 
 impl PeerMailbox for HttpPeerMailbox {
@@ -639,35 +635,89 @@ impl PeerMailbox for HttpPeerMailbox {
         recipient_agent_ids: &[String],
         consumer_id: &str,
     ) -> Result<Vec<ClaimedPeerMessage>, String> {
-        let response: ClaimResponse = Self::read(
-            "peer message claim",
-            self.post(
-                "/claim",
-                serde_json::json!({
-                    "project_ids": project_ids,
-                    "recipient_agent_ids": recipient_agent_ids,
-                    "consumer_id": consumer_id,
-                    "max": CLAIM_MAX,
-                    "lease_secs": LEASE_SECS,
-                }),
-            ),
-        )?;
-        Ok(response.messages)
+        let batch = self.claim_report(project_ids, recipient_agent_ids, consumer_id)?;
+        if batch.denied.is_empty() {
+            Ok(batch.messages)
+        } else {
+            Err(format!(
+                "peer message claim denied projects: {}",
+                batch.denied.join(", ")
+            ))
+        }
+    }
+
+    fn claim_report(
+        &self,
+        project_ids: &[String],
+        recipient_agent_ids: &[String],
+        consumer_id: &str,
+    ) -> Result<PeerClaim, String> {
+        let mut combined = PeerClaim {
+            messages: Vec::new(),
+            denied: Vec::new(),
+        };
+        for projects in project_ids.chunks(50) {
+            for recipients in recipient_agent_ids.chunks(50) {
+                let batch:PeerClaim=Self::read("peer message claim",self.post("/claim",serde_json::json!({
+                    "project_ids":projects,"recipient_agent_ids":recipients,"consumer_id":consumer_id,
+                    "max":CLAIM_MAX,"lease_secs":LEASE_SECS,
+                })))?;
+                combined.messages.extend(batch.messages);
+                combined.denied.extend(batch.denied);
+            }
+        }
+        combined.denied.sort();
+        combined.denied.dedup();
+        Ok(combined)
     }
 
     fn ack(&self, consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String> {
-        let acks: Vec<_> = acks
-            .iter()
-            .map(|(id, outcome)| serde_json::json!({"id": id, "outcome": outcome}))
-            .collect();
-        Self::read::<serde_json::Value>(
-            "peer message ack",
-            self.post(
-                "/ack",
-                serde_json::json!({"consumer_id": consumer_id, "acks": acks}),
-            ),
-        )
-        .map(|_| ())
+        let mut errors = Vec::new();
+        for batch in acks.chunks(50) {
+            let items: Vec<_> = batch
+                .iter()
+                .map(|(id, outcome)| serde_json::json!({"id":id,"outcome":outcome}))
+                .collect();
+            let response: AckResponse = Self::read(
+                "peer message ack",
+                self.post(
+                    "/ack",
+                    serde_json::json!({"consumer_id":consumer_id,"acks":items}),
+                ),
+            )?;
+            if response.results.len() != batch.len() {
+                return Err("peer message ack: incomplete per-item receipt".into());
+            }
+            for ((id, outcome), result) in batch.iter().zip(response.results) {
+                if result.id != *id {
+                    errors.push(format!(
+                        "peer message ack: expected {id}, received {}",
+                        result.id
+                    ));
+                    continue;
+                }
+                match result.status {
+                    200 => {}
+                    409 => {
+                        let expected = match outcome {
+                            PeerAckOutcome::Delivered => "delivered",
+                            PeerAckOutcome::Rejected => "rejected",
+                        };
+                        match self.status(id) {
+                            Ok(status) if status.status==expected=>{},
+                            Ok(status)=>errors.push(format!("peer message ack {id} refused (409): status is {}, expected {expected}",status.status)),
+                            Err(error)=>errors.push(format!("peer message ack {id} refused (409): {error}")),
+                        }
+                    }
+                    code => errors.push(format!("peer message ack {id} refused ({code})")),
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String> {

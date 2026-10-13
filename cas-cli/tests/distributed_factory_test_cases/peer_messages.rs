@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use cas::cloud::peer_mailbox::{
-    DeliveryReport, PeerMailbox, PeerSend, deliver_claimed, http_mailbox, parse_envelope,
-    reply_to_peer_row, resolve_peer_target, send_to_peer,
+    DeliveryReport, PeerMailbox, PeerSend, http_mailbox, parse_envelope, reply_to_peer_row,
+    resolve_peer_target, send_to_peer,
 };
 use cas::store::{open_agent_store, open_prompt_queue_store};
 use cas::types::{Agent, AgentRole};
@@ -92,7 +92,7 @@ impl Respond for Claim {
                 messages.push(message.clone());
             }
         }
-        ResponseTemplate::new(200).set_body_json(json!({"messages": messages}))
+        ResponseTemplate::new(200).set_body_json(json!({"messages": messages,"denied":[]} ))
     }
 }
 
@@ -107,7 +107,13 @@ impl Respond for Ack {
                 message["delivered_at"] = json!(chrono::Utc::now().to_rfc3339());
             }
         }
-        ResponseTemplate::new(200).set_body_json(json!({"status": "success"}))
+        let results: Vec<_> = body["acks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|ack| json!({"id":ack["id"],"status":200}))
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"results":results}))
     }
 }
 
@@ -170,16 +176,9 @@ fn supervisor_at(cas_dir: &Path, machine_name: &str, id: &str) {
 
 /// One recipient-daemon tick for supervisor `id`'s session.
 fn tick(cas_dir: &Path, id: &str) -> DeliveryReport {
-    let canonical = cas::cloud::resolve_canonical_id(cas_dir).unwrap();
-    deliver_claimed(
-        &http_mailbox(cas_dir).expect("logged-in project has a mailbox"),
-        open_prompt_queue_store(cas_dir).unwrap().as_ref(),
-        open_agent_store(cas_dir).unwrap().as_ref(),
-        &canonical,
-        &[],
-        &format!("factory-{id}"),
-        &format!("consumer-{id}"),
-    )
+    cas::cloud::peer_mailbox::PeerMailboxRuntime::start(cas_dir, &format!("factory-{id}"))
+        .expect("mailbox runtime survives missing startup credentials")
+        .tick_blocking()
 }
 
 fn inbox(cas_dir: &Path) -> Vec<cas::store::QueuedPrompt> {
@@ -189,6 +188,111 @@ fn inbox(cas_dir: &Path) -> Vec<cas::store::QueuedPrompt> {
         .unwrap();
     rows.sort_by_key(|row| row.id);
     rows
+}
+
+async fn daemon_poll(
+    poller: &mut cas::cloud::peer_mailbox::PeerMailboxPoller,
+    now: std::time::Instant,
+) -> DeliveryReport {
+    for _ in 0..1000 {
+        if let Some(report) = poller.poll(now).await {
+            return report;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    panic!("daemon mailbox duty did not complete");
+}
+
+#[tokio::test]
+async fn cas_13c7_daemon_recovers_when_login_arrives_after_startup() {
+    use cas::cloud::peer_mailbox::{PeerMailboxPoller, mailbox_status_section};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    let endpoint = server.uri();
+    let alpha = TestMachine::new("machine-alpha");
+    let beta = TestMachine::new("machine-beta");
+    let mut poller = PeerMailboxPoller::new(&beta.cas_dir, "factory-b");
+    let start = std::time::Instant::now();
+    let unavailable = daemon_poll(&mut poller, start).await;
+    assert!(
+        unavailable.errors[0].contains("not logged in"),
+        "{unavailable:?}"
+    );
+    assert!(mailbox_status_section(&beta.cas_dir, Some("factory-b")).contains("not logged in"));
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    let (_alpha, _beta, receipt) = tokio::task::spawn_blocking(move || {
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+        let peers = peers_of(&alpha.cas_dir, "a");
+        let receipt = send_to_peer(
+            &alpha.cas_dir,
+            "a",
+            &peers[0],
+            "late login delivery",
+            None,
+            None,
+        )
+        .unwrap();
+        (alpha, beta, receipt)
+    })
+    .await
+    .unwrap();
+    // The first retry is due in five seconds, comfortably inside one minute.
+    assert!(
+        poller
+            .poll(start + std::time::Duration::from_secs(4))
+            .await
+            .is_none()
+    );
+    let report = daemon_poll(&mut poller, start + std::time::Duration::from_secs(5)).await;
+    assert_eq!(report.delivered, 1, "{report:?}");
+    assert!(inbox(&b)[0].prompt.ends_with("late login delivery"));
+    assert!(mailbox_status_section(&b, Some("factory-b")).contains(": receiving."));
+    let service = service_for(&b, "b");
+    let peers_text = coordinate(&service, json!({"action":"peers"}))
+        .await
+        .unwrap();
+    assert!(
+        peers_text.contains("Peer mailbox: receiving."),
+        "{peers_text}"
+    );
+    for summary in [false, true] {
+        let req =
+            serde_json::from_value(json!({"action":"worker_status","summary":summary})).unwrap();
+        let result = service
+            .factory_request(rmcp::handler::server::wrapper::Parameters(req))
+            .await
+            .unwrap();
+        let text = result
+            .content
+            .iter()
+            .filter_map(|c| match &c.raw {
+                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Peer mailbox: receiving."),
+            "summary={summary}: {text}"
+        );
+    }
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            http_mailbox(&a)
+                .unwrap()
+                .status(&receipt.id)
+                .unwrap()
+                .status,
+            "delivered"
+        );
+        let section = cas::cloud::peers::peers_section(&b, Some("b"));
+        assert!(section.contains("Peer mailbox: receiving."), "{section}");
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -456,6 +560,309 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .unwrap();
     assert_eq!(replies.len(), 1);
     assert!(replies[0].prompt.ends_with("yes"));
+}
+
+fn public_outbox_status(root: &Path, id: &str) -> String {
+    tokio::runtime::Handle::current()
+        .block_on(coordinate(
+            &service_for(root, "a"),
+            json!({"action":"message_status","id":id}),
+        ))
+        .unwrap()
+}
+
+/// The cloud accepted the first send but its receipt was lost. Automatic
+/// retry must reuse the local row key; a deliberate identical send is new.
+struct AcceptThenFail {
+    send: Send,
+    first: std::sync::atomic::AtomicBool,
+}
+impl Respond for AcceptThenFail {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let accepted = self.send.respond(request);
+        if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            ResponseTemplate::new(503).set_body_string("receipt lost after acceptance")
+        } else {
+            accepted
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_13c7_automatic_retry_keeps_logical_send_key_and_identical_sends_distinct() {
+    use cas::cloud::peer_mailbox::{PeerMailboxRuntime, outbox_status_text};
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages"))
+        .respond_with(AcceptThenFail {
+            send: Send(registry, mailbox.clone()),
+            first: std::sync::atomic::AtomicBool::new(true),
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let alpha = TestMachine::new("machine-alpha");
+        let beta = TestMachine::new("machine-beta");
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+        let peers = peers_of(&alpha.cas_dir, "a");
+        let error = send_to_peer(&alpha.cas_dir, "a", &peers[0], "hold merges", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("503") && error.contains("queued for automatic retry as peer-outbox:1"),
+            "{error}"
+        );
+        let retrying = outbox_status_text(&alpha.cas_dir, "peer-outbox:1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            retrying.contains(": retrying") && retrying.contains("503"),
+            "{retrying}"
+        );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": retrying"));
+        let second =
+            send_to_peer(&alpha.cas_dir, "a", &peers[0], "hold merges", None, None).unwrap();
+        assert_ne!(second.id, "pm_1");
+        // Simulate restart after local enqueue but before taking the retry lease.
+        let conn = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        conn.execute(
+            "UPDATE peer_message_outbox SET state='pending',next_attempt_at=0 WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert!(
+            outbox_status_text(&alpha.cas_dir, "peer-outbox:1")
+                .unwrap()
+                .unwrap()
+                .contains(": pending")
+        );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": pending"));
+        // Competing daemon consumers share a project outbox; its atomic row
+        // lease permits one HTTP retry even when both observe a due send.
+        let mut second_supervisor = Agent::new("second-local".into(), "sup-second".into());
+        second_supervisor.role = AgentRole::Supervisor;
+        second_supervisor.factory_session = Some("other-session".into());
+        open_agent_store(&alpha.cas_dir)
+            .unwrap()
+            .register(&second_supervisor)
+            .unwrap();
+        std::thread::scope(|scope| {
+            for session in ["factory-a", "other-session"] {
+                let root = &alpha.cas_dir;
+                scope.spawn(move || {
+                    let report = PeerMailboxRuntime::start(root, session)
+                        .unwrap()
+                        .tick_blocking();
+                    assert!(report.errors.is_empty(), "{report:?}");
+                });
+            }
+        });
+        assert_eq!(
+            conn.query_row(
+                "SELECT attempts FROM peer_message_outbox WHERE id=1",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            2
+        );
+        let sent = outbox_status_text(&alpha.cas_dir, "peer-outbox:1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            sent.contains(": sent") && sent.contains("cloud message pm_1"),
+            "{sent}"
+        );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": sent"));
+        assert_eq!(tick(&beta.cas_dir, "b").delivered, 2);
+        assert_eq!(inbox(&beta.cas_dir).len(), 2);
+        assert_eq!(
+            mailbox.lock().unwrap().len(),
+            2,
+            "cloud retry must not duplicate accepted send"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cas_13c7_outbox_expires_once_and_notifies_sender_after_restart() {
+    use cas::cloud::peer_mailbox::{OUTBOX_TTL_SECS, PeerMailboxRuntime, outbox_status_text};
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("temporarily unavailable"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let alpha = TestMachine::new("machine-alpha");
+        let beta = TestMachine::new("machine-beta");
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+        let peers = peers_of(&alpha.cas_dir, "a");
+        assert!(send_to_peer(&alpha.cas_dir, "a", &peers[0], "will expire", None, None).is_err());
+        let conn = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        conn.execute(
+            "UPDATE peer_message_outbox SET created_at=?1,next_attempt_at=0 WHERE id=1",
+            [chrono::Utc::now().timestamp() - OUTBOX_TTL_SECS - 1],
+        )
+        .unwrap();
+        let agents = open_agent_store(&alpha.cas_dir).unwrap();
+        let mut sender = agents.get("a").unwrap();
+        sender.factory_session = Some("restarted-session".into());
+        agents.update(&sender).unwrap();
+        for _ in 0..2 {
+            let report = PeerMailboxRuntime::start(&alpha.cas_dir, "restarted-session")
+                .unwrap()
+                .tick_blocking();
+            assert!(report.errors.is_empty(), "{report:?}");
+        }
+        let expired = outbox_status_text(&alpha.cas_dir, "peer-outbox:1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            expired.contains(": abandoned") && expired.contains("TTL expired"),
+            "{expired}"
+        );
+        assert!(public_outbox_status(&alpha.cas_dir, "peer-outbox:1").contains(": abandoned"));
+        let notices = inbox(&alpha.cas_dir);
+        assert_eq!(
+            notices.len(),
+            1,
+            "restart must not duplicate sender abandonment notice"
+        );
+        assert_eq!(notices[0].target, "sup-a");
+        assert!(notices[0].prompt.contains("peer-outbox:1"));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cas_13c7_auth_failure_does_not_retry_and_nonfactory_recipient_is_typed_refusal() {
+    use cas::cloud::peer_mailbox::{PeerMailboxRuntime, PeerSendError, outbox_status_text};
+    let (server, _registry, mailbox) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("login expired"))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let alpha = TestMachine::new("machine-alpha");
+        let beta = TestMachine::new("machine-beta");
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        supervisor(&beta, "b");
+        let mut peer = peers_of(&alpha.cas_dir, "a").remove(0);
+        peer.session = None;
+        assert!(matches!(
+            send_to_peer(&alpha.cas_dir, "a", &peer, "hello", None, None),
+            Err(PeerSendError::NoReceivingDaemon(_))
+        ));
+        peer.session = Some("factory-b".into());
+        let error = send_to_peer(&alpha.cas_dir, "a", &peer, "hello", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("401") && !error.contains("queued for automatic retry"),
+            "{error}"
+        );
+        assert!(
+            outbox_status_text(&alpha.cas_dir, "peer-outbox:1")
+                .unwrap()
+                .unwrap()
+                .contains(": abandoned")
+        );
+        PeerMailboxRuntime::start(&alpha.cas_dir, "factory-a")
+            .unwrap()
+            .tick_blocking();
+        assert!(mailbox.lock().unwrap().is_empty());
+        std::fs::remove_file(alpha.cas_dir.join("cloud.json")).unwrap();
+        assert!(send_to_peer(&alpha.cas_dir, "a", &peer, "logged out", None, None).is_err());
+        let conn = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "no retry row while logged out"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cas_13c7_ack_checks_each_result_and_claim_denial_is_visible() {
+    let (server, _registry, _mailbox) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/ack"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"results":[{"id":"pm_1","status":409}]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/peer-messages/pm_1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":"pm_1","status":"leased","attempts":2})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"messages":[],"denied":["github.com/acme/widgets"]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let machine = TestMachine::new("machine-alpha");
+        seed_project(&machine, &endpoint, "github.com/acme/widgets");
+        supervisor(&machine, "a");
+        let mailbox = http_mailbox(&machine.cas_dir).unwrap();
+        let error = mailbox
+            .ack(
+                "same-consumer",
+                &[(
+                    "pm_1".into(),
+                    cas::cloud::peer_mailbox::PeerAckOutcome::Delivered,
+                )],
+            )
+            .unwrap_err();
+        assert!(error.contains("409") && error.contains("leased"), "{error}");
+        let report = tick(&machine.cas_dir, "a");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("denied") && e.contains("github.com/acme/widgets")),
+            "{report:?}"
+        );
+    })
+    .await
+    .unwrap();
 }
 
 /// GH #1186's unqualified target must receive an honest, immediate outcome.

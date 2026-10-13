@@ -16,6 +16,38 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Short timeout for non-critical requests (heartbeats)
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The body field that scopes register and claim calls to a project
+/// (petra-stella-cloud#151, cas-f707). Its value is the repo's canonical id.
+/// Production (cloud PR #153) resolves registrations through
+/// `metadata.canonical_id` and ignores this field on claims; it stays as a
+/// harmless explicit scope.
+pub const PROJECT_SCOPE_KEY: &str = "canonical_id";
+
+/// The query parameter that scopes `GET /api/agents` (and other project
+/// lists) to a project: `?project=<canonical id or alias>` (cloud PR #153).
+pub const PROJECT_QUERY_KEY: &str = "project";
+
+/// A heartbeat the cloud refused or could not take (cas-f707).
+#[derive(Debug)]
+pub enum HeartbeatError {
+    /// The cloud does not know this agent (404) or will not accept it as
+    /// the caller's (401): the agent must register again.
+    NotRegistered { status: u16, body: String },
+    /// Any other failure (network, 5xx, unreadable body).
+    Failed(CasError),
+}
+
+impl std::fmt::Display for HeartbeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeartbeatError::NotRegistered { status, body } => {
+                write!(f, "Heartbeat failed ({status}): {body}")
+            }
+            HeartbeatError::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 /// Cloud coordinator for distributed multi-agent coordination
 #[derive(Clone)]
 pub struct CloudCoordinator {
@@ -57,13 +89,25 @@ pub struct AgentInfo {
 }
 
 /// Response from task claim
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// cas-0078: production's 409 body is
+/// `{"error":"already_claimed","owner_agent_id","agent_id","expires_at"}`
+/// with no `status`, so every field is optional on the wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaimResponse {
+    #[serde(default)]
     pub status: String,
+    #[serde(default)]
     pub result: Option<String>,
+    #[serde(default)]
     pub lock: Option<LockInfo>,
+    #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
     pub owner_agent_id: Option<String>,
+    /// When the holder's lock runs out (409 only).
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 /// Lock information from cloud
@@ -159,6 +203,32 @@ impl CloudCoordinator {
         self.config.token.as_deref().unwrap_or("")
     }
 
+    /// The repo identity this coordinator scopes its calls to.
+    pub fn canonical_id(&self) -> Option<&str> {
+        self.canonical_id.as_deref()
+    }
+
+    /// `body` with [`PROJECT_SCOPE_KEY`] set to this coordinator's
+    /// canonical id, when it has one (cas-f707).
+    fn project_scoped(&self, mut body: serde_json::Value) -> serde_json::Value {
+        if let (Some(canonical_id), Some(fields)) =
+            (self.canonical_id.as_deref(), body.as_object_mut())
+        {
+            fields.insert(PROJECT_SCOPE_KEY.to_string(), canonical_id.into());
+        }
+        body
+    }
+
+    /// `request` with the [`PROJECT_QUERY_KEY`] query parameter, when this
+    /// coordinator has a canonical id (cas-f707). Shared by every project
+    /// list call.
+    pub(crate) fn project_query(&self, request: ureq::Request) -> ureq::Request {
+        match self.canonical_id.as_deref() {
+            Some(canonical_id) => request.query(PROJECT_QUERY_KEY, canonical_id),
+            None => request,
+        }
+    }
+
     /// Register an agent with the cloud
     pub fn register(&mut self, agent: &Agent) -> Result<AgentInfo, CasError> {
         self.register_with_focus(agent, None)
@@ -173,20 +243,35 @@ impl CloudCoordinator {
         agent: &Agent,
         focus: Option<&str>,
     ) -> Result<AgentInfo, CasError> {
+        self.register_with_presence(agent, focus, None)
+    }
+
+    /// [`Self::register_with_focus`] plus the branch checked out where the
+    /// agent works, as `metadata.branch` (cas-f707).
+    pub fn register_with_presence(
+        &mut self,
+        agent: &Agent,
+        focus: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<AgentInfo, CasError> {
         let url = format!("{}/api/agents/register", self.config.endpoint);
 
         let factory_id = std::env::var("CAS_FACTORY_ID").ok();
-        let metadata = crate::cloud::peers::identity_metadata(
+        let machine = crate::cloud::peers::machine_label();
+        let mut metadata = crate::cloud::peers::identity_metadata(
             agent,
             self.canonical_id.as_deref(),
             focus,
-            crate::cloud::device::DeviceConfig::hostname().as_deref(),
+            Some(machine.as_str()),
         );
+        if let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) {
+            metadata.insert(crate::cloud::peers::META_BRANCH.to_string(), branch.to_string());
+        }
         let response = ureq::post(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(serde_json::json!({
+            .send_json(self.project_scoped(serde_json::json!({
                 "id": agent.id,
                 "name": agent.name,
                 "agent_type": format!("{:?}", agent.agent_type).to_lowercase(),
@@ -197,7 +282,7 @@ impl CloudCoordinator {
                 "factory_id": factory_id,
                 "clone_path": agent.metadata.get("clone_path"),
                 "metadata": metadata,
-            }));
+            })));
 
         match response {
             Ok(resp) => {
@@ -280,11 +365,11 @@ impl CloudCoordinator {
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(serde_json::json!({
+            .send_json(self.project_scoped(serde_json::json!({
                 "agent_id": agent_id,
                 "duration_secs": duration_secs,
                 "reason": reason,
-            }));
+            })));
 
         match response {
             Ok(resp) => {
@@ -306,19 +391,22 @@ impl CloudCoordinator {
                 }
             }
             Err(ureq::Error::Status(409, resp)) => {
-                // Conflict - already claimed
-                let claim_resp: ClaimResponse = resp.into_json().unwrap_or(ClaimResponse {
-                    status: "error".to_string(),
-                    result: None,
-                    lock: None,
-                    error: Some("already_claimed".to_string()),
-                    owner_agent_id: None,
-                });
+                // Conflict - already claimed. The body names the holder and
+                // when its lock runs out. A missing or unparseable expiry
+                // reads as now: production frees an expired lock, so a 409
+                // never names a past expiry, and callers treat one as unknown.
+                let claim_resp: ClaimResponse = resp.into_json().unwrap_or_default();
+                let expires_at = claim_resp
+                    .expires_at
+                    .as_deref()
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| at.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
 
                 Ok(ClaimResult::AlreadyClaimed {
                     task_id: task_id.to_string(),
                     held_by: claim_resp.owner_agent_id.unwrap_or_default(),
-                    expires_at: chrono::Utc::now(),
+                    expires_at,
                 })
             }
             Err(ureq::Error::Status(404, _)) => Ok(ClaimResult::TaskNotFound(task_id.to_string())),
@@ -346,9 +434,9 @@ impl CloudCoordinator {
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(serde_json::json!({
+            .send_json(self.project_scoped(serde_json::json!({
                 "agent_id": agent_id,
-            }));
+            })));
 
         match response {
             Ok(_) => Ok(()),
@@ -376,10 +464,10 @@ impl CloudCoordinator {
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
-            .send_json(serde_json::json!({
+            .send_json(self.project_scoped(serde_json::json!({
                 "agent_id": agent_id,
                 "duration_secs": duration_secs,
-            }));
+            })));
 
         match response {
             Ok(resp) => {
@@ -435,9 +523,12 @@ impl CloudCoordinator {
             url.push_str(&format!("?status={s:?}").to_lowercase());
         }
 
-        let response = ureq::get(&url)
-            .timeout(self.timeout)
-            .set("Authorization", &format!("Bearer {}", self.token()))
+        let response = self
+            .project_query(
+                ureq::get(&url)
+                    .timeout(self.timeout)
+                    .set("Authorization", &format!("Bearer {}", self.token())),
+            )
             .call();
 
         match response {
@@ -519,34 +610,69 @@ impl CloudCoordinator {
     /// Heartbeat a specific agent (cas-e477). Each daemon heartbeats its own
     /// agent, not whichever agent this coordinator registered last.
     pub fn heartbeat_agent(&self, agent_id: &str) -> Result<AgentInfo, CasError> {
+        self.heartbeat_presence(agent_id, None).map_err(|error| match error {
+            HeartbeatError::Failed(error) => error,
+            not_registered => CasError::Other(not_registered.to_string()),
+        })
+    }
+
+    /// [`Self::heartbeat_agent`] with the refusal that means "register
+    /// again" (404 or 401) kept apart from other failures (cas-f707).
+    /// `metadata`, when given, is sent as `{"metadata": {...}}` and merged by
+    /// the cloud: it re-binds the project and refreshes focus and branch on
+    /// every beat (cloud PR #153).
+    pub fn heartbeat_presence(
+        &self,
+        agent_id: &str,
+        metadata: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<AgentInfo, HeartbeatError> {
         let url = format!("{}/api/agents/{}/heartbeat", self.config.endpoint, agent_id);
 
-        let response = ureq::post(&url)
+        let request = ureq::post(&url)
             .timeout(HEARTBEAT_TIMEOUT)
-            .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
+            .set("Authorization", &format!("Bearer {}", self.token()));
+        let response = match metadata {
+            Some(metadata) => request
+                .set("Content-Type", "application/json")
+                .send_json(serde_json::json!({ "metadata": metadata })),
+            None => request.call(),
+        };
 
         match response {
             Ok(resp) => {
-                let body: serde_json::Value = resp
-                    .into_json()
-                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
+                let parse = |e: std::io::Error| {
+                    HeartbeatError::Failed(CasError::Other(format!(
+                        "Failed to parse response: {e}"
+                    )))
+                };
+                let body: serde_json::Value = resp.into_json().map_err(parse)?;
                 // The server answers with the bare agent; older servers wrapped
                 // it as {status, agent}.
                 let agent = match body.get("agent") {
                     Some(agent) if agent.is_object() => agent.clone(),
                     _ => body,
                 };
-                serde_json::from_value(agent)
-                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))
+                serde_json::from_value(agent).map_err(|e| {
+                    HeartbeatError::Failed(CasError::Other(format!(
+                        "Failed to parse response: {e}"
+                    )))
+                })
+            }
+            Err(ureq::Error::Status(status @ (401 | 404), resp)) => {
+                Err(HeartbeatError::NotRegistered {
+                    status,
+                    body: resp.into_string().unwrap_or_default(),
+                })
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                Err(CasError::Other(format!(
+                Err(HeartbeatError::Failed(CasError::Other(format!(
                     "Heartbeat failed ({code}): {body}"
-                )))
+                ))))
             }
-            Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
+            Err(ureq::Error::Transport(e)) => Err(HeartbeatError::Failed(CasError::Other(
+                format!("Network error: {e}"),
+            ))),
         }
     }
 
@@ -559,10 +685,12 @@ impl CloudCoordinator {
         let mut agents = Vec::new();
         let mut cursor: Option<(String, String)> = None;
         for _ in 0..MAX_AGENT_PAGES {
-            let mut request = ureq::get(&format!("{}/api/agents", self.config.endpoint))
-                .timeout(self.timeout)
-                .set("Authorization", &format!("Bearer {}", self.token()))
-                .query("limit", &AGENT_PAGE_LIMIT.to_string());
+            let mut request = self.project_query(
+                ureq::get(&format!("{}/api/agents", self.config.endpoint))
+                    .timeout(self.timeout)
+                    .set("Authorization", &format!("Bearer {}", self.token()))
+                    .query("limit", &AGENT_PAGE_LIMIT.to_string()),
+            );
             if let Some((at, id)) = &cursor {
                 request = request.query("cursor", at).query("cursor_id", id);
             }

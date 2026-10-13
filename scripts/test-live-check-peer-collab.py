@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -115,7 +116,9 @@ class StandinCloudTest(unittest.TestCase):
 
 
 class PendingIsNeverAPassTest(unittest.TestCase):
-    def make_run(self, *extra):
+    """cas-937a5 F03: a step's pending state comes from the binary probe."""
+
+    def make_run(self, *extra, features=None):
         receipts = tempfile.mkdtemp(prefix="live-check-test-")
         self.addCleanup(shutil.rmtree, receipts, True)
         args = live_check.parse_args([
@@ -123,40 +126,199 @@ class PendingIsNeverAPassTest(unittest.TestCase):
             "--run-id", "abc123", *extra,
         ])
         run = live_check.Run(args)
+        run.features = dict.fromkeys(set(live_check.STEP_REQUIRES.values()), False)
+        run.features.update(features or {})
+        run.probes = {"soundwave": {"features": dict(run.features)}, "prowl": {"features": dict(run.features)}}
         calls = []
         for step in live_check.STEP_ORDER:
             setattr(run, f"step_{step}", lambda evidence, notes, step=step: calls.append(step))
         return run, calls
 
-    def test_pending_steps_are_not_executed_by_default(self):
+    def test_steps_whose_feature_is_missing_are_pending_and_not_executed(self):
         run, calls = self.make_run()
         run.run_steps()
         statuses = {r["step"]: r["status"] for r in run.results}
-        for step, task in live_check.PENDING_BY_DEFAULT.items():
+        for step in live_check.STEP_REQUIRES:
             self.assertEqual(statuses[step], "pending", step)
             self.assertNotIn(step, calls)
         self.assertEqual(statuses["peers_discovery"], "pass")
         receipt = json.loads((run.receipts / "02-peer_detail.json").read_text())
         self.assertEqual((receipt["status"], receipt["requires"]), ("pending", "cas-559c"))
+        self.assertEqual(receipt["probe"], {"soundwave": False, "prowl": False})
 
     def test_try_pending_executes_but_still_reports_pending(self):
         run, calls = self.make_run("--try-pending")
         run.run_steps()
         statuses = {r["step"]: r["status"] for r in run.results}
         self.assertEqual(set(calls), set(live_check.STEP_ORDER))
-        for step in live_check.PENDING_BY_DEFAULT:
+        for step in live_check.STEP_REQUIRES:
             self.assertEqual(statuses[step], "pending", step)
 
-    def test_merged_steps_run_for_real(self):
-        run, calls = self.make_run("--merged", "cas-559c")
-        run.steps = ["peer_detail"]
+    def test_a_probed_feature_makes_its_step_run_for_real(self):
+        run, calls = self.make_run(features={"cas-559c": True})
+        run.steps = ["peer_detail", "epic_split"]
 
         def failing(evidence, notes):
             raise live_check.StepFailed("no detail")
 
         run.step_peer_detail = failing
         run.run_steps()
-        self.assertEqual(run.results[0]["status"], "fail")
+        statuses = {r["step"]: r["status"] for r in run.results}
+        self.assertEqual(statuses, {"peer_detail": "fail", "epic_split": "pending"})
+
+
+class FakeMachine:
+    def __init__(self, label):
+        self.label = label
+        self.binary = f"/fake/{label}/cas"
+
+
+class PreflightTest(unittest.TestCase):
+    """cas-937a5 F02/F03: configuration problems exit 2 before anything is
+    created; binaries at different commits are refused unless --allow-mixed."""
+
+    def run_preflight(self, commits, *extra, features=None):
+        receipts = tempfile.mkdtemp(prefix="live-check-test-")
+        self.addCleanup(shutil.rmtree, receipts, True)
+        args = live_check.parse_args(["--binary", sys.executable, "--prowl-binary", "/x",
+                                      "--receipts-dir", receipts, "--run-id", "pf0001", *extra])
+        run = live_check.Run(args)
+        machines = (FakeMachine("soundwave"), FakeMachine("prowl"))
+
+        def resolve():
+            run.machines = machines
+
+        run.resolve_machines = resolve
+        original = live_check.machine_stream
+
+        def fake_stream(machine, *argv, timeout=180):
+            commit = commits[machine.label]
+            return {"ok": True, "commit": commit, "version": f"cas 0.0.0-fixture ({commit} 2026-10-13)",
+                    "features": (features or {}).get(machine.label, {})}
+
+        live_check.machine_stream = fake_stream
+        self.addCleanup(setattr, live_check, "machine_stream", original)
+        run.preflight()
+        return run
+
+    def test_mixed_binaries_are_refused_unless_allowed(self):
+        with self.assertRaises(live_check.ConfigError) as refused:
+            self.run_preflight({"soundwave": "1ce845a", "prowl": "c25f0e3"})
+        self.assertIn("different commits", str(refused.exception))
+        run = self.run_preflight({"soundwave": "1ce845a", "prowl": "c25f0e3"}, "--allow-mixed",
+                                 features={"soundwave": {"cas-a19b": True, "cas-13c7": True},
+                                           "prowl": {"cas-a19b": True}})
+        self.assertTrue(run.features["cas-a19b"])
+        self.assertFalse(run.features["cas-13c7"], "a feature counts only when both binaries carry it")
+        self.assertTrue((run.receipts / "preflight.json").exists())
+
+    def test_a_missing_token_exits_2_before_creating_anything(self):
+        receipts = tempfile.mkdtemp(prefix="live-check-test-")
+        self.addCleanup(shutil.rmtree, receipts, True)
+        env = {k: v for k, v in os.environ.items() if k not in ("LIVE_CHECK_TOKEN_A", "LIVE_CHECK_TOKEN_B")}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "live-check-peer-collab.py"), "--binary", sys.executable,
+             "--prowl-binary", "/x", "--cloud-url", "https://example.invalid", "--receipts-dir", receipts,
+             "--run-id", "tok001", "--soundwave-scratch", receipts],
+            capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("needs a device token", result.stdout)
+        self.assertFalse(list(Path(receipts).glob("live-check-*")), "nothing was created")
+        summary = json.loads(next(Path(receipts).glob("*/summary.json")).read_text())
+        self.assertIn("device token", summary["config_error"])
+
+    def test_unknown_step_exits_2(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "live-check-peer-collab.py"), "--binary", sys.executable,
+             "--prowl-binary", "/x", "--steps", "nope", "--receipts-dir", tempfile.gettempdir()],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 2, result.stderr)
+
+
+class ProbeTest(unittest.TestCase):
+    def test_probe_reads_the_commit_and_feature_markers_from_the_binary(self):
+        sys.path.insert(0, str(SCRIPTS / "live_check_peer_collab"))
+        import harness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "cas"
+            markers = b"\n".join(b"# " + marker for marker in harness.FEATURE_MARKERS["cas-4736"])
+            fake.write_bytes(b"#!/bin/sh\necho 'cas 0.0.0-fixture (abc1234 2026-10-13)'\nexit 0\n" + markers + b"\n")
+            fake.chmod(0o755)
+            probe = harness.probe_binary(str(fake))
+        self.assertEqual(probe["commit"], "abc1234")
+        self.assertTrue(probe["features"]["cas-4736"])
+        self.assertFalse(probe["features"]["cas-559c"])
+
+
+SIGTERM_CHILD = r"""
+import importlib.util, json, shutil, subprocess, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("lc", sys.argv[1]); lc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lc)
+scratch = Path(sys.argv[2])
+
+def preflight(self):
+    self.machines = tuple(
+        lc.Machine(label, None, str(scratch / f"live-check-{self.rid}" / label), "/bin/true", sys.executable)
+        for label in ("soundwave", "prowl"))
+
+def setup(self):
+    for machine in self.machines:
+        Path(machine.run_dir).mkdir(parents=True)
+        shutil.copy2(lc.HELPER_DIR / "harness.py", machine.helper)
+        # Stand-ins for the factory daemons: detached, cwd inside the run dir.
+        subprocess.Popen(["sleep", "300"], cwd=machine.run_dir, start_new_session=True)
+        machine.versions_before = {"version": "v", "sha256": "s"}
+
+def run_steps(self):
+    print("READY", flush=True)
+    time.sleep(120)
+
+lc.Run.preflight, lc.Run.setup, lc.Run.run_steps = preflight, setup, run_steps
+lc.machine_call_installed = lambda machine: {"version": "v", "sha256": "s"}
+sys.exit(lc.main(sys.argv[3:]))
+"""
+
+
+class SigtermTeardownTest(unittest.TestCase):
+    """cas-937a5 F01: SIGTERM (and SIGHUP) unwind into teardown: every process
+    in the run directories is stopped and the directories are removed."""
+
+    def check_signal(self, signum):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipts = Path(tmp) / "receipts"
+            child = subprocess.Popen(
+                [sys.executable, "-c", SIGTERM_CHILD, str(SCRIPTS / "live-check-peer-collab.py"), tmp,
+                 "--binary", "/bin/true", "--prowl-binary", "/bin/true", "--receipts-dir", str(receipts),
+                 "--run-id", "sig001"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            output = ""
+            for line in child.stdout:
+                output += line
+                if "READY" in line:
+                    break
+            run_root = Path(tmp) / "live-check-sig001"
+            sys.path.insert(0, str(SCRIPTS / "live_check_peer_collab"))
+            import harness
+
+            self.assertEqual(len(harness.run_dir_processes(str(run_root))), 2, output)
+            child.send_signal(signum)
+            output += child.communicate(timeout=60)[0]
+            self.assertEqual(child.returncode, 128 + signum, output)
+            self.assertFalse(run_root.exists(), output)
+            self.assertEqual(harness.run_dir_processes(str(run_root)), [])
+            teardown = json.loads(next(receipts.glob("*/teardown.json")).read_text())
+            self.assertEqual(teardown["soundwave"]["processes_stopped"], 1)
+            self.assertEqual(teardown["prowl"]["processes_left"], [])
+            summary = json.loads(next(receipts.glob("*/summary.json")).read_text())
+            self.assertIn(signal.Signals(signum).name, summary["setup_error"])
+
+    def test_sigterm_tears_down(self):
+        self.check_signal(signal.SIGTERM)
+
+    def test_sighup_tears_down(self):
+        self.check_signal(signal.SIGHUP)
 
 
 class ScratchGuardTest(unittest.TestCase):

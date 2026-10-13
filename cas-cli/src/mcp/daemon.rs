@@ -359,6 +359,9 @@ pub struct EmbeddedDaemon {
     /// PID → session ID mapping for hooks to look up their session
     /// Key is Claude Code's PID, value is the session ID
     pid_sessions: RwLock<std::collections::HashMap<u32, String>>,
+    /// The in-flight cloud presence upkeep (cas-f707). One at a time: a tick
+    /// that finds the previous one still running skips its turn.
+    presence_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl EmbeddedDaemon {
@@ -373,8 +376,14 @@ impl EmbeddedDaemon {
             None
         };
 
-        // Initialize cloud coordinator for real-time agent registration
-        let cloud_coordinator = if config.cloud_sync_enabled {
+        // Cloud coordinator for agent presence (registration + heartbeat).
+        // cas-f707: an explicit `cloud.auto_sync = false` opts the project
+        // out, so agent names, hostnames and branches stay on the machine
+        // (peers then show "Cloud presence: disabled"); otherwise it follows
+        // the project's login.
+        let cloud_coordinator = if config.cloud_sync_enabled
+            && !crate::cloud::presence::opted_out(&config.cas_root)
+        {
             init_cloud_coordinator(&config.cas_root)
         } else {
             None
@@ -403,13 +412,77 @@ impl EmbeddedDaemon {
             proxy_snapshot_refreshed_at: std::sync::Mutex::new(None),
             agent_id: RwLock::new(None),
             pid_sessions: RwLock::new(std::collections::HashMap::new()),
+            presence_task: tokio::sync::Mutex::new(None),
         }
     }
 
-    /// Set the agent ID for heartbeat tracking
+    /// Set the agent ID for heartbeat tracking, and push its cloud
+    /// registration (cas-f707). This is how the eager MCP registration path
+    /// and PID adoption reach the cloud, not only SessionStart.
     pub async fn set_agent_id(&self, id: String) {
-        let mut agent_id = self.agent_id.write().await;
-        *agent_id = Some(id);
+        {
+            let mut agent_id = self.agent_id.write().await;
+            *agent_id = Some(id.clone());
+        }
+        self.kick_cloud_presence(id).await;
+    }
+
+    /// Start one cloud presence tick for `agent_id` in the background
+    /// ([`crate::cloud::presence::tick`]): register when unregistered, due
+    /// for a retry or refocused; otherwise heartbeat, re-registering when
+    /// the cloud answers 404/401. Skipped when the previous tick still runs
+    /// or the project has no cloud coordinator.
+    async fn kick_cloud_presence(&self, agent_id: String) {
+        let Some(coordinator) = self.cloud_coordinator.read().await.clone() else {
+            return;
+        };
+        let mut slot = self.presence_task.lock().await;
+        if slot.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        let cas_root = self.config.cas_root.clone();
+        *slot = Some(tokio::task::spawn_blocking(move || {
+            let Ok(store) = open_agent_store(&cas_root) else {
+                return;
+            };
+            let Ok(agent) = store.get(&agent_id) else {
+                return;
+            };
+            let short = &agent_id[..8.min(agent_id.len())];
+            match crate::cloud::presence::tick(&coordinator, &cas_root, &agent, Utc::now()) {
+                crate::cloud::presence::TickAction::Registered => {
+                    eprintln!("[Cassy] Cloud registered agent: {short}");
+                }
+                crate::cloud::presence::TickAction::Reregistered => {
+                    eprintln!("[Cassy] Cloud re-registered agent after a refused heartbeat: {short}");
+                }
+                crate::cloud::presence::TickAction::Failed(cause) => {
+                    tracing::warn!(agent_id = %short, %cause, "cloud presence failing; will retry");
+                }
+                crate::cloud::presence::TickAction::Heartbeat
+                | crate::cloud::presence::TickAction::Waiting => {}
+            }
+        }));
+    }
+
+    /// Wait until no cloud presence tick is in flight. The slot stays
+    /// occupied while waiting, so a concurrent kick still skips (as in
+    /// production); a brief first sleep lets already-spawned kicks run.
+    #[cfg(test)]
+    pub(crate) async fn await_cloud_presence(&self) {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        loop {
+            let running = self
+                .presence_task
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|task| !task.is_finished());
+            if !running {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// Set the proxy engine for hot-reload watching
@@ -1707,28 +1780,40 @@ impl EmbeddedDaemon {
                     );
                 }
 
-                // A replayed SessionStart only refreshes local liveness; it
-                // does not represent a second cloud agent either.
-                if !reused {
-                    let mut coord_guard = self.cloud_coordinator.write().await;
-                    if let Some(ref mut coord) = *coord_guard {
-                        // cas-e477: peers find each other by repo identity and
-                        // epic focus carried in the registration metadata.
-                        let focus = agent.factory_session.as_deref().and_then(
-                            crate::ui::factory::preferred_epic_id_from_session_metadata_named,
-                        );
-                        match coord.register_with_focus(&agent, focus.as_deref()) {
-                            Ok(_) => {
-                                eprintln!(
-                                    "[Cassy] Cloud registered agent: {}",
-                                    &session_id[..8.min(session_id.len())]
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[Cassy] Cloud agent registration failed (best-effort): {e}"
-                                );
-                            }
+                // cas-f707: every SessionStart, new or replayed, makes sure
+                // the agent is registered with Cassy Cloud under its repo
+                // identity and current epic focus (cas-e477). A replay of an
+                // already-registered agent does not push again. A failure is
+                // recorded and retried by the owning daemon's heartbeat.
+                let coordinator = self.cloud_coordinator.read().await.clone();
+                if let Some(coordinator) = coordinator {
+                    let cas_root = self.config.cas_root.clone();
+                    let agent = agent.clone();
+                    let record = tokio::task::spawn_blocking(move || {
+                        crate::cloud::presence::ensure_registered(
+                            &coordinator,
+                            &cas_root,
+                            &agent,
+                            Utc::now(),
+                        )
+                    })
+                    .await;
+                    match record {
+                        Ok(record)
+                            if record.state
+                                == crate::cloud::presence::PresenceState::Registered =>
+                        {
+                            eprintln!(
+                                "[Cassy] Cloud registered agent: {}",
+                                &session_id[..8.min(session_id.len())]
+                            );
+                        }
+                        Ok(record) => eprintln!(
+                            "[Cassy] Cloud agent registration failed, will retry: {}",
+                            record.cause.unwrap_or_default()
+                        ),
+                        Err(error) => {
+                            eprintln!("[Cassy] Cloud agent registration did not run: {error}")
                         }
                     }
                 }
@@ -1961,20 +2046,11 @@ impl EmbeddedDaemon {
                     );
                 }
 
-                // Send cloud heartbeat (best-effort, in blocking task to avoid stalling async loop)
-                {
-                    let coord_guard = self.cloud_coordinator.read().await;
-                    if let Some(ref coord) = *coord_guard {
-                        // cas-e477: heartbeat this daemon's own agent. The
-                        // coordinator's registered id is whichever agent the
-                        // socket owner registered last, often a worker.
-                        let coord_clone = coord.clone();
-                        let own_id = id.clone();
-                        drop(tokio::task::spawn_blocking(move || {
-                            let _ = coord_clone.heartbeat_agent(&own_id);
-                        }));
-                    }
-                }
+                // Cloud presence (cas-f707): heartbeat this daemon's own
+                // agent, registering it again when it is unknown to the
+                // cloud, its last registration failed, or its focus moved.
+                // Runs in a blocking task so the async loop never stalls.
+                self.kick_cloud_presence(id.clone()).await;
 
                 // cas-5f28: keep this agent's Cassy Cloud task claims alive
                 // while it works; once it stops, they run out on their own.
@@ -1982,7 +2058,23 @@ impl EmbeddedDaemon {
                     let cas_root = self.config.cas_root.clone();
                     let agent = id.clone();
                     drop(tokio::task::spawn_blocking(move || {
-                        crate::cloud::peer_claims::renew_agent_claims_if_due(&cas_root, &agent);
+                        let Some(report) =
+                            crate::cloud::peer_claims::renew_agent_claims_if_due(&cas_root, &agent)
+                        else {
+                            return;
+                        };
+                        // cas-0078: a claim this agent lost and a peer took
+                        // cannot be taken back. Renewal queued a notice to
+                        // the owning supervisor; the log keeps a trace.
+                        for (task, hold) in &report.conflicts {
+                            tracing::warn!(
+                                task = %task,
+                                holder = %hold.describe(),
+                                until = %hold.until(),
+                                "cloud claim lost to a peer: this agent still holds the local lease, \
+                                 but a session on another machine now holds the Cassy Cloud claim"
+                            );
+                        }
                     }));
                 }
             }
@@ -2463,3 +2555,7 @@ pub fn spawn_daemon(
 #[cfg(test)]
 #[path = "daemon_tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_tests/presence_tests.rs"]
+mod presence_tests;

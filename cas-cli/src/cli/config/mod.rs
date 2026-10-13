@@ -21,14 +21,13 @@ pub enum ConfigCommands {
     /// Get a config value
     Get(ConfigGetArgs),
 
-    /// Set a config value. `factory.write_roots` is operator-only and
-    /// guardrail-grade, not security-grade: it is written to
-    /// .cas/operator/write-policy.toml and refused inside agent sessions.
+    /// Set a config value (write roots: `cas config set --help`)
+    ///
     /// Keys that relax a Cassy guard (slack.transport, verification.enabled,
     /// verification.force_bypass_allowed, factory.supervisor_only_mcp and
     /// _env, factory.worker_credential_env, qa.evidence_gate,
     /// qa.independent_pass, release.claude_account_allowlist) are
-    /// operator-only too: they need an interactive terminal outside any agent.
+    /// operator-only: they need an interactive terminal outside any agent.
     Set(ConfigSetArgs),
 
     /// List all config options
@@ -75,6 +74,21 @@ pub struct ConfigGetArgs {
 }
 
 #[derive(Parser)]
+#[command(
+    after_help = concat!(
+        "Project write roots (operator only):\n",
+        "  cas config set factory.write_roots \"~/Downloads,/mnt/models\"\n",
+        "  cas config set factory.write_roots \"\"    # clear\n",
+        "\n",
+        "Stored in .cas/config.toml as [factory] write_roots. Each root lets this\n",
+        "project's supervisor and workers create, edit and delete files beneath it.\n",
+        "Paths are canonicalized; /, $HOME and its parents, the project root, and\n",
+        "anything containing or inside .cas are refused. Run it in your terminal or\n",
+        "as `! cas config set ...` in an agent pane. Agents' own tool calls are\n",
+        "refused, and it refuses inside a factory worker cgroup. Guardrail-grade,\n",
+        "not security-grade: agents share your Unix user."
+    )
+)]
 pub struct ConfigSetArgs {
     /// Config key to set
     pub key: String,
@@ -209,7 +223,8 @@ pub struct ConfigEditArgs {
 /// cas_root is resolved once at CLI entry point and passed here.
 pub fn execute_subcommand(cmd: &ConfigCommands, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
-        // cas-3147: write roots live in the operator policy file, not config.toml.
+        // GH #1182: write roots are operator-only. `set` validates every path
+        // and migrates legacy cas-3147 roots; `get` also notes legacy roots.
         ConfigCommands::Get(args) if args.key == "factory.write_roots" => {
             operator_ops::execute_get_write_roots(cli, cas_root)
         }

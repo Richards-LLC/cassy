@@ -1,0 +1,28 @@
+[OK] 1 peer supervisors | 1 live
+Repo github.com/acme/widgets
+sup-prowl [live]
+  Machine prowl
+  Session factory-prowl
+  Focus   cas-prowl
+  Heartbeat 0s ago
+  Branch  factory/sup-prowl
+  Claims  3 | age since renewal (s)
+       30 cas-task-0 [claimed]
+          Owner prowl
+       30 cas-task-1 [claimed]
+          Owner worker-0
+       30 cas-task-2 [claimed]
+          Owner worker-1
+  Workers 4 live (read-only)
+    prowl-worker-0 [active]
+      Branch factory/prowl-worker-0
+      Tasks cas-task-1
+    prowl-worker-1 [active]
+      Branch factory/prowl-worker-1
+      Tasks cas-task-2
+    prowl-worker-2 [active]
+      Branch factory/prowl-worker-2
+      Tasks none
+    prowl-worker-3 [active]
+      Branch factory/prowl-worker-3
+      Tasks none

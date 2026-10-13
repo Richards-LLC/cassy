@@ -298,6 +298,7 @@ pub fn discover_peer_report(
         .flatten();
     let now = Utc::now();
     let mut supervisors = peers::repo_peers(&agents, repo, &aliases, self_id, now);
+    peers::exclude_project_agents(cas_root, &mut supervisors)?;
     if let Some(selected) = selected {
         let peer = super::peer_mailbox::resolve_peer_target(&supervisors, selected)
             .map_err(CasError::Other)?

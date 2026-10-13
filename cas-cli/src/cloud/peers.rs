@@ -208,6 +208,22 @@ pub enum PeerDiscovery {
     NoProjectIdentity,
 }
 
+/// A plain operator terminal may have no harness session or registered
+/// ancestor PID. Agents registered in this project's own store still belong
+/// to this clone, so none of them are remote peers of the project.
+pub(crate) fn exclude_project_agents(
+    cas_root: &Path,
+    peers: &mut Vec<Peer>,
+) -> Result<(), crate::error::CasError> {
+    let local_ids: std::collections::HashSet<_> = crate::store::open_agent_store(cas_root)?
+        .list(None)?
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect();
+    peers.retain(|peer| !local_ids.contains(&peer.agent_id));
+    Ok(())
+}
+
 /// Look up the peers of the project rooted at `cas_root` through Cassy Cloud.
 pub fn discover_peers(
     cas_root: &Path,
@@ -227,11 +243,12 @@ pub fn discover_peers(
         .into_iter()
         .chain(std::iter::once(canonical_id.clone()))
         .collect::<Vec<_>>();
-    let peers = crate::cloud::CloudCoordinator::new(config)?
+    let mut peers = crate::cloud::CloudCoordinator::new(config)?
         .with_timeout(DISCOVERY_TIMEOUT)
         // cas-f707: ask the cloud for this project (petra-stella-cloud#151).
         .with_canonical_id(Some(canonical_id.clone()))
         .list_repo_peers(&canonical_id, &alias_class, self_id, Utc::now())?;
+    exclude_project_agents(cas_root, &mut peers)?;
     Ok(PeerDiscovery::Found {
         canonical_id,
         peers,

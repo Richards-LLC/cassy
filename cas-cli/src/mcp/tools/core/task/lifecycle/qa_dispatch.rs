@@ -2396,6 +2396,80 @@ mod stale_anchor_rebind_tests_cas_00eb {
         }
     }
 
+    fn merge_epic_into_delivery(f: &mut Fixture) {
+        let repo = f.dir.path();
+        std::fs::write(repo.join("epic.txt"), "sibling delivery\n").unwrap();
+        git(repo, &["add", "epic.txt"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-f0a6): epic sibling"]);
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "Merge epic/cas-571d into delivery", "main"]);
+        f.tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+    }
+
+    #[test]
+    fn repark_binds_qa_to_epic_merge_tip_cas_9668() {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture(&mut env, TaskStatus::AwaitingMerge);
+        merge_epic_into_delivery(&mut f);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        cas_store::open_qa_pass(&cas_dir, &NewQaPass {
+            task_id: &f.task.id, implementer_agent_id: "worker",
+            branch: WORKER_TASK_BRANCH, bound_head: &f.anchor,
+            deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+        }, now).unwrap();
+        f.core.advance_awaiting_merge_anchor(tasks.as_ref(), &f.task, repo, "main", Some(&f.tip));
+        let parked = tasks.get(&f.task.id).unwrap();
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.tip.as_str()));
+        let dispatch = f.core.dispatch_independent_qa(&parked, repo, "main", Some(&f.tip)).unwrap();
+        assert!(dispatch.contains("INDEPENDENT QA DISPATCHED"), "{dispatch}");
+        let passes = cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap();
+        assert!(passes.iter().any(|pass| pass.bound_head == f.anchor && pass.state == QaPassState::Superseded));
+        assert!(passes.iter().any(|pass| pass.bound_head == f.tip && pass.state == QaPassState::Pending));
+    }
+
+    #[test]
+    fn fresh_park_binds_qa_to_epic_merge_tip_cas_9668() {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture(&mut env, TaskStatus::InProgress);
+        merge_epic_into_delivery(&mut f);
+        let repo = f.dir.path();
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(), &f.task, repo, "main", Some(WORKER_TASK_BRANCH), Some(&f.tip));
+        assert_eq!(parking.deliverables.factory_branch_anchor.as_deref(), Some(f.tip.as_str()));
+        f.core.dispatch_independent_qa(&parking, repo, "main", Some(&f.tip)).unwrap();
+        let passes = cas_store::list_qa_passes(&repo.join(".cas"), &f.task.id).unwrap();
+        assert_eq!(passes[0].bound_head, f.tip);
+    }
+
+    #[test]
+    fn explicit_qa_request_accepts_pushed_epic_merge_tip_cas_9668() {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture(&mut env, TaskStatus::AwaitingMerge);
+        merge_epic_into_delivery(&mut f);
+        let repo = f.dir.path();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", WORKER_TASK_BRANCH]);
+        let cas_dir = repo.join(".cas");
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id='cas-9668-fixture'\n[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n").unwrap();
+        f.task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:cas-9668-fixture".into(), target_branch: "main".into(),
+        });
+        open_task_store(&cas_dir).unwrap().update(&f.task).unwrap();
+        let dispatch = f.core.request_independent_qa_at_receipt(&f.task,
+            "review the pushed epic merge", Some(&f.tip)).expect("merge tip is task delivery");
+        assert!(dispatch.contains("INDEPENDENT QA DISPATCHED"), "{dispatch}");
+        let passes = cas_store::list_qa_passes(&cas_dir, &f.task.id).unwrap();
+        assert_eq!(passes[0].bound_head, f.tip);
+    }
+
     /// AC1: the fresh park advances a commit-time anchor to the tip when the
     /// commits since it are the task's own, so the round binds the tip.
     #[test]

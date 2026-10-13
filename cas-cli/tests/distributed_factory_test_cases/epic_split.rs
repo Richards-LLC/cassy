@@ -139,7 +139,12 @@ impl Side {
             .map_err(|error| error.message.to_string())
     }
 
+    /// The supervisor assigns `id` to its worker, then the worker claims it.
     async fn claim(&self, id: &str) -> Result<String, String> {
+        let tasks = open_task_store(&self.machine.cas_dir).unwrap();
+        let mut task = tasks.get(id).unwrap();
+        task.assignee = Some(format!("{}-w", self.id));
+        tasks.update(&task).unwrap();
         let request: cas::mcp::tools::TaskClaimRequest =
             serde_json::from_value(json!({"task_id": id})).unwrap();
         self.worker

@@ -331,7 +331,7 @@ pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<
         .components()
         .any(|component| component == std::path::Component::ParentDir)
     {
-        anyhow::bail!("write root `{raw}` must not contain `..`; name the directory directly");
+        anyhow::bail!("write root `{raw}` must not contain `..`;\nname the directory directly");
     }
     let canonical = resolve_operator_path(raw, cas_root)?;
     if let Some(home) = std::env::var_os("HOME")
@@ -340,21 +340,21 @@ pub fn resolve_project_write_root(raw: &str, cas_root: &Path) -> anyhow::Result<
         && home.starts_with(&canonical)
     {
         anyhow::bail!(
-            "write root `{}` contains your home directory; name the folders inside it",
+            "write root `{}` contains your home directory;\nname the folders inside it",
             canonical.display()
         );
     }
     let cas_dir = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
     if cas_dir.starts_with(&canonical) {
         anyhow::bail!(
-            "write root `{}` contains this project's Cassy directory ({}); name a directory outside the project",
+            "write root `{}` contains this project's Cassy directory\n({});\nname a directory outside the project",
             canonical.display(),
             cas_dir.display()
         );
     }
     if canonical.starts_with(&cas_dir) {
         anyhow::bail!(
-            "write root `{}` is inside this project's Cassy directory ({})",
+            "write root `{}` is inside this project's Cassy directory\n({})",
             canonical.display(),
             cas_dir.display()
         );
@@ -374,7 +374,7 @@ pub fn parse_project_write_roots(value: &str, cas_root: &Path) -> anyhow::Result
             && parse_modes(modes).is_ok()
         {
             anyhow::bail!(
-                "write root `{entry}`: roots no longer take modes; each root permits create, edit and delete. Use a one-off `cas config grant-write` for narrower access"
+                "write root `{entry}`: roots no longer take modes.\nEach root permits create, edit and delete; use `cas config grant-write`\nfor narrower, per-task access."
             );
         }
         let root = resolve_project_write_root(entry, cas_root)?;
@@ -413,7 +413,7 @@ pub fn worker_cgroup_refusal(cgroup: &str) -> Option<String> {
         .split(['/', '\n'])
         .any(|part| part.starts_with("cas-worker-") || part.starts_with("cas-server-"))
         .then(|| {
-            "refused: this process runs inside a Cassy factory worker cgroup. Write roots are operator-only; run `cas config set factory.write_roots …` from your own terminal or the supervisor's pane."
+            "refused: this runs inside a Cassy factory worker cgroup.\nWrite roots are operator-only: run `cas config set factory.write_roots ...`\nfrom your own terminal or as `! cas ...` in the supervisor's pane."
                 .to_string()
         })
 }

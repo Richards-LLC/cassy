@@ -1,0 +1,485 @@
+{
+  "schema": 1,
+  "group": "claims",
+  "captured_on": "2026-10-13",
+  "endpoint": "https://petra-stella-cloud.vercel.app",
+  "capture_script": "scripts/cloud-contract-capture.py",
+  "exchanges": [
+    {
+      "group": "claims",
+      "name": "claim",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>",
+          "duration_secs": 600,
+          "reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "result": "claimed",
+          "lock": {
+            "id": "<uuid-2>",
+            "task_id": "<task-key-1>",
+            "agent_id": "<agent-a>",
+            "status": "active",
+            "expires_at": "<ts-9>",
+            "renewed_at": "<ts-10>",
+            "renewal_count": 0,
+            "epoch": 1,
+            "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+          },
+          "error": null,
+          "owner_agent_id": null
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "reclaim_same_agent",
+      "note": "returns the existing lock and does NOT extend it; use /renew",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>",
+          "duration_secs": 600,
+          "reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "result": "claimed",
+          "lock": {
+            "id": "<uuid-2>",
+            "task_id": "<task-key-1>",
+            "agent_id": "<agent-a>",
+            "status": "active",
+            "expires_at": "<ts-9>",
+            "renewed_at": "<ts-10>",
+            "renewal_count": 0,
+            "epoch": 1,
+            "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+          },
+          "error": null,
+          "owner_agent_id": null
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "claim_conflict",
+      "note": "409 names owner_agent_id and expires_at; no `status` field",
+      "expect": 409,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>",
+          "duration_secs": 600,
+          "reason": null
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "status": "conflict",
+          "result": null,
+          "lock": null,
+          "error": "already_claimed",
+          "owner_agent_id": "<agent-a>",
+          "agent_id": "<agent-a>",
+          "expires_at": "<ts-9>"
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "claim_with_canonical_id",
+      "note": "a canonical_id in the claim body is ignored",
+      "expect": 409,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>",
+          "duration_secs": 600,
+          "canonical_id": "<project>"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "status": "conflict",
+          "result": null,
+          "lock": null,
+          "error": "already_claimed",
+          "owner_agent_id": "<agent-a>",
+          "agent_id": "<agent-a>",
+          "expires_at": "<ts-9>"
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "renew",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/renew",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>",
+          "duration_secs": 600
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "lock": {
+            "id": "<uuid-2>",
+            "task_id": "<task-key-1>",
+            "agent_id": "<agent-a>",
+            "status": "active",
+            "expires_at": "<ts-11>",
+            "renewed_at": "<ts-12>",
+            "renewal_count": 1,
+            "epoch": 1,
+            "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+          }
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "get_lock",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents/tasks/<task-key-1>/lock",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "lock": {
+            "id": "<uuid-2>",
+            "task_id": "<task-key-1>",
+            "agent_id": "<agent-a>",
+            "status": "active",
+            "expires_at": "<ts-11>",
+            "renewed_at": "<ts-12>",
+            "renewal_count": 1,
+            "epoch": 1,
+            "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+          }
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "list_locks",
+      "note": "task locks are scoped per user account",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents/locks",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "locks": [
+            {
+              "id": "<uuid-2>",
+              "task_id": "<task-key-1>",
+              "agent_id": "<agent-a>",
+              "status": "active",
+              "expires_at": "<ts-11>",
+              "renewed_at": "<ts-12>",
+              "renewal_count": 1,
+              "epoch": 1,
+              "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "list_agent_locks",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents/<agent-a>/locks",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "locks": [
+            {
+              "id": "<uuid-2>",
+              "task_id": "<task-key-1>",
+              "agent_id": "<agent-a>",
+              "status": "active",
+              "expires_at": "<ts-11>",
+              "renewed_at": "<ts-12>",
+              "renewal_count": 1,
+              "epoch": 1,
+              "claim_reason": "{\"v\": 1, \"kind\": \"task\", \"name\": \"cc-<run>-sup-a\", \"machine\": \"<host>\", \"project\": \"<project>\"}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "claim_short",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>",
+          "duration_secs": 1,
+          "reason": null
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "result": "claimed",
+          "lock": {
+            "id": "<uuid-3>",
+            "task_id": "<task-key-2>",
+            "agent_id": "<agent-a>",
+            "status": "active",
+            "expires_at": "<ts-13>",
+            "renewed_at": "<ts-14>",
+            "renewal_count": 0,
+            "epoch": 1,
+            "claim_reason": null
+          },
+          "error": null,
+          "owner_agent_id": null
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "claim_takeover_after_expiry",
+      "note": "the expired lock is taken over with a new epoch",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/claim",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>",
+          "duration_secs": 600,
+          "reason": null
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "result": "claimed",
+          "lock": {
+            "id": "<uuid-4>",
+            "task_id": "<task-key-2>",
+            "agent_id": "<agent-b>",
+            "status": "active",
+            "expires_at": "<ts-15>",
+            "renewed_at": "<ts-16>",
+            "renewal_count": 0,
+            "epoch": 2,
+            "claim_reason": null
+          },
+          "error": null,
+          "owner_agent_id": null
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "renew_after_takeover",
+      "note": "404 No active lock found: the original holder lost the claim",
+      "expect": 404,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/renew",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>",
+          "duration_secs": 600
+        }
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "error": "No active lock found"
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "release",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "release_again",
+      "note": "/release is idempotent",
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-2>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-b>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "release_holder",
+      "note": null,
+      "expect": 200,
+      "request": {
+        "method": "POST",
+        "path": "/api/agents/tasks/<task-key-1>/release",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "agent_id": "<agent-a>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success"
+        }
+      }
+    },
+    {
+      "group": "claims",
+      "name": "get_lock_after_release",
+      "note": "lock: null once released",
+      "expect": 200,
+      "request": {
+        "method": "GET",
+        "path": "/api/agents/tasks/<task-key-1>/lock",
+        "query": null,
+        "headers": {
+          "Authorization": "Bearer <redacted-token>"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "lock": null
+        }
+      }
+    }
+  ]
+}

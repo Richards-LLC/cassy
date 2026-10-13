@@ -898,8 +898,36 @@ pub fn cancel(
     ))
 }
 
-/// The splits recorded here, for `epic_split` and the peers view. Empty when
-/// there are none.
+/// `text` word-wrapped to the peers view's width, the first line indented
+/// by `indent` spaces and continuations by `indent + 2`.
+fn wrap(text: &str, indent: usize) -> String {
+    let width = crate::cloud::presence::WRAP_COLUMNS;
+    let mut out = String::new();
+    let mut line = " ".repeat(indent);
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        if !empty && line.chars().count() + 1 + word.chars().count() > width {
+            out.push_str(&line);
+            out.push('\n');
+            line = " ".repeat(indent + 2);
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line.push_str(word);
+        empty = false;
+    }
+    if !empty {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The splits recorded here, for `epic_split` and the peers view (after the
+/// peers, before the mailbox footer), within the view's 72 columns. Empty
+/// when there are none.
 pub fn render_splits(cas_root: &Path) -> String {
     if !has_store(cas_root) {
         return String::new();
@@ -907,35 +935,46 @@ pub fn render_splits(cas_root: &Path) -> String {
     let Ok(splits) = list_epic_splits(cas_root) else {
         return String::new();
     };
+    render_split_list(&splits, Utc::now())
+}
+
+fn render_split_list(splits: &[EpicSplit], now: DateTime<Utc>) -> String {
     if splits.is_empty() {
         return String::new();
     }
-    let now = Utc::now();
     let mut out = String::from("Epic splits:\n");
     for split in splits.iter().take(20) {
-        let state = split.display_state(now);
+        out.push_str(&wrap(
+            &format!(
+                "{} [{}, {}] epic {}",
+                split.id,
+                split.display_state(now),
+                split.direction.as_str(),
+                split.epic_id
+            ),
+            2,
+        ));
+        out.push_str(&wrap(
+            &format!("with {}@{}", split.peer_name, split.peer_machine),
+            4,
+        ));
+        out.push_str(&wrap(&format!("mine {}", split.mine.join(", ")), 4));
+        out.push_str(&wrap(&format!("theirs {}", split.theirs.join(", ")), 4));
         let when = match (split.state, split.decided_at) {
             (SplitState::Pending, _) if !split.is_expired(now) => {
-                format!(" | expires {}", split.expires_at.format("%H:%M UTC"))
+                Some(format!("expires {}", split.expires_at.format("%H:%M UTC")))
             }
-            (_, Some(at)) => format!(" | {}", at.format("%m-%d %H:%M UTC")),
-            _ => String::new(),
+            (_, Some(at)) => Some(format!("decided {}", at.format("%m-%d %H:%M UTC"))),
+            _ => None,
         };
         let reason = split
             .reason
             .as_deref()
-            .map(|reason| format!(" | {}", crate::mcp::tools::truncate_str(reason, 80)))
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "  {} [{state}, {}] epic {} with {}@{} | mine {} | theirs {}{when}{reason}\n",
-            split.id,
-            split.direction.as_str(),
-            split.epic_id,
-            split.peer_name,
-            split.peer_machine,
-            split.mine.join(","),
-            split.theirs.join(","),
-        ));
+            .map(|reason| crate::mcp::tools::truncate_str(reason, 120));
+        let tail = [when, reason].into_iter().flatten().collect::<Vec<_>>();
+        if !tail.is_empty() {
+            out.push_str(&wrap(&tail.join(" | "), 4));
+        }
     }
     out
 }
@@ -985,6 +1024,37 @@ mod tests {
         assert_eq!(parsed.kind, SplitKind::Proposal);
         assert!(SplitMessage::parse(&format!("hello\n{rendered}")).is_none());
         assert!(SplitMessage::parse("<cas-epic-split v=\"2\" kind=\"accept\" id=\"x\"/>").is_none());
+    }
+
+    #[test]
+    fn the_split_list_fits_the_peers_view_width() {
+        let now = Utc::now();
+        let many: Vec<String> = (0..12).map(|i| format!("cas-{i:04x}")).collect();
+        let split = EpicSplit {
+            id: "split-0a1b2c3d".into(),
+            epic_id: "cas-e100".into(),
+            local_agent_id: "a".into(),
+            peer_agent_id: "b".into(),
+            peer_name: "a-rather-long-supervisor-name".into(),
+            peer_machine: "a-long-hostname.example.internal".into(),
+            direction: SplitDirection::Outgoing,
+            mine: many.clone(),
+            theirs: many,
+            state: SplitState::Cancelled,
+            reason: Some("the operator reassigned this supervisor to another epic for the rest of the week".into()),
+            message_id: None,
+            expires_at: now,
+            created_at: now,
+            decided_at: Some(now),
+        };
+        let text = render_split_list(&[split], now);
+        assert!(text.starts_with("Epic splits:\n  split-0a1b2c3d [cancelled, outgoing] epic cas-e100\n"), "{text}");
+        for line in text.lines() {
+            assert!(line.chars().count() <= 72, "{line:?} is {} columns", line.chars().count());
+        }
+        assert!(text.contains("    mine cas-0000,"), "{text}");
+        assert!(text.contains("    theirs cas-0000,"), "{text}");
+        assert!(render_split_list(&[], now).is_empty());
     }
 
     #[test]

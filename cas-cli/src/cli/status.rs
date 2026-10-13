@@ -185,7 +185,9 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
         fmt.subheading("Peers")?;
         fmt.write_muted(&"─".repeat(40))?;
         fmt.newline()?;
-        for line in crate::cloud::peers::peers_section(cas_root, None).lines() {
+        // cas-f707: never list the session running this command as its own peer.
+        let self_id = crate::cloud::peers::cli_self_id(cas_root);
+        for line in crate::cloud::peers::peers_section(cas_root, self_id.as_deref()).lines() {
             fmt.write_raw(&format!("  {line}"))?;
             fmt.newline()?;
         }

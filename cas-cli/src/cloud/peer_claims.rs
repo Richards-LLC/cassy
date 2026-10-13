@@ -143,7 +143,8 @@ impl ClaimHolder {
             v: 1,
             kind: kind.as_str().to_string(),
             name: name.to_string(),
-            machine: crate::types::Agent::get_or_generate_machine_id(),
+            // cas-f707: the label discovery shows for this machine too.
+            machine: crate::cloud::peers::machine_label(),
             project: project.to_string(),
         }
     }
@@ -289,7 +290,9 @@ impl PeerClaims {
     fn coordinator(&self, agent_id: &str) -> Result<CloudCoordinator, CasError> {
         Ok(CloudCoordinator::new(self.config.clone())?
             .with_timeout(CLAIM_TIMEOUT)
-            .with_agent_id(agent_id))
+            .with_agent_id(agent_id)
+            // cas-f707: claims carry the project scope (petra-stella-cloud#151).
+            .with_canonical_id(Some(self.project.clone())))
     }
 
     /// Claim `task_id` for `agent_id`. A claim held by another agent of this

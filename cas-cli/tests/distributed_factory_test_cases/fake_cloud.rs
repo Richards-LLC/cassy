@@ -161,7 +161,33 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
             (200, json!({"status": "success", "agent": agent}))
         }
         ("GET", ["api", "agents"]) => {
-            let agents: Vec<Value> = state.agents.values().cloned().collect();
+            // `?project=<canonical id or alias>` returns that project's
+            // agents (cloud PR #153); without it, every agent (one user here).
+            let project = url
+                .split_once('?')
+                .map(|(_, query)| query)
+                .unwrap_or_default()
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("project="))
+                .map(|value| {
+                    url::form_urlencoded::parse(format!("p={value}").as_bytes())
+                        .next()
+                        .map(|(_, decoded)| decoded.into_owned())
+                        .unwrap_or_default()
+                });
+            let agents: Vec<Value> = state
+                .agents
+                .values()
+                .filter(|agent| match &project {
+                    Some(project) => cas::cloud::project_ids_match_with_aliases(
+                        agent["metadata"]["canonical_id"].as_str().unwrap_or(""),
+                        project,
+                        &[],
+                    ),
+                    None => true,
+                })
+                .cloned()
+                .collect();
             (
                 200,
                 json!({"status": "success", "agents": agents,
@@ -180,6 +206,12 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
             Some(agent) => {
                 agent["last_heartbeat"] = json!(now());
                 agent["status"] = json!("active");
+                // An optional `{"metadata": {...}}` body is merged (PR #153).
+                if let Some(patch) = body.get("metadata").and_then(Value::as_object) {
+                    for (key, value) in patch {
+                        agent["metadata"][key] = value.clone();
+                    }
+                }
                 (200, agent.clone())
             }
             None => (404, json!({"error": "agent not found"})),

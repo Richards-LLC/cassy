@@ -10549,6 +10549,93 @@ mod tests {
     }
 
     #[test]
+    fn cas_a19b_bulk_sweeps_aggregate_notices_per_sender() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentRole};
+
+        for sweep in ["remediation", "stale", "session"] {
+            let (temp, store) = create_test_store();
+            let agents = SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut a = Agent::new("sender-a".into(), "sup-a".into());
+            a.role = AgentRole::Supervisor;
+            a.factory_session = Some("sender-session-a".into());
+            let mut b = Agent::new("sender-b".into(), "sup-b".into());
+            b.role = AgentRole::Supervisor;
+            b.factory_session = Some("sender-session-b".into());
+            agents.register(&a).unwrap();
+            agents.register(&b).unwrap();
+            let enqueue_old = |sender: &Agent, target: &str| {
+                let id = store.enqueue_urgent_with_outcome(
+                    "supervisor", target, "old work", Some("recipient-session"),
+                    None, None, false,
+                    Some(&QueueOrigin::RegisteredAgent { agent_id: sender.id.clone() }),
+                ).unwrap().id();
+                backdate(&store, id, 30 * 24 * 60 * 60);
+                id
+            };
+            let ids_a: Vec<_> = (0..23).map(|n| enqueue_old(&a, &format!("worker-{}", n % 2))).collect();
+            let ids_b: Vec<_> = (0..2).map(|_| enqueue_old(&b, "other-worker")).collect();
+            let fresh = store.enqueue_with_session("supervisor", "live-worker", "fresh work", "recipient-session").unwrap();
+            let run_sweep = || match sweep {
+                "remediation" => store.abandon_pending_older_than(900).unwrap(),
+                "stale" => store.expire_stale_pending(900).unwrap().len(),
+                "session" => store.abandon_ineligible_session_targets(&["live-worker"], "recipient-session", 900).unwrap(),
+                _ => unreachable!(),
+            };
+
+            assert_eq!(run_sweep(), 25, "{sweep}");
+            for (sender, ids, targets) in [(&a, &ids_a, "worker-0, worker-1"), (&b, &ids_b, "other-worker")] {
+                let notices = store.poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100).unwrap();
+                assert_eq!(notices.len(), 1, "{sweep}: one notice per authenticated sender");
+                let notice = &notices[0];
+                assert_eq!(notice.origin, Some(QueueOrigin::Daemon));
+                assert_eq!(notice.factory_session, sender.factory_session);
+                assert!(notice.prompt.starts_with(&format!("{} messages to {targets} were abandoned (", ids.len())), "{}", notice.prompt);
+                let listed: Vec<i64> = notice.prompt.split("; ids ").nth(1).unwrap().split(", ").map(|id| id.parse().unwrap()).collect();
+                assert_eq!(&listed, ids, "every abandoned ID appears exactly once");
+                let reason = match sweep {
+                    "remediation" => "explicit queue remediation",
+                    "stale" => "stale queue item",
+                    "session" => "target no longer belongs to factory session",
+                    _ => unreachable!(),
+                };
+                assert!(notice.prompt.contains(reason), "{}", notice.prompt);
+                for id in ids {
+                    assert_eq!(store.message_delivery_report(*id).unwrap().unwrap().stage, DeliveryStage::Abandoned);
+                }
+            }
+            assert_eq!(run_sweep(), 0, "repeat sweep cannot duplicate notices");
+            assert_eq!(store.peek_for_targets(&["live-worker"], Some("recipient-session"), 10).unwrap()[0].id, fresh);
+
+            // A later sweep has a new aggregate, not a sender-wide dedupe
+            // key that would hide future abandonment.
+            let later = [enqueue_old(&a, "new-worker"), enqueue_old(&a, "new-worker")];
+            assert_eq!(run_sweep(), 2);
+            let notices = store.poll_unseen_for_recipient(&a.name, a.factory_session.as_deref(), 10).unwrap();
+            assert_eq!(notices.len(), 1);
+            assert!(notices[0].prompt.contains(&format!("; ids {}, {}", later[0], later[1])));
+        }
+    }
+
+    #[test]
+    fn cas_a19b_single_abandonments_keep_individual_notices() {
+        let (_temp, store) = create_test_store();
+        let manual = store.enqueue("sender", "worker-a", "first").unwrap();
+        let deadline = store.enqueue("sender", "worker-b", "second").unwrap();
+        store.mark_abandoned(manual, Some("target disappeared")).unwrap();
+        store.conn.lock().unwrap().execute(
+            "UPDATE prompt_queue SET first_attempt_at = ? WHERE id = ?",
+            params![(Utc::now() - chrono::Duration::seconds(901)).to_rfc3339(), deadline],
+        ).unwrap();
+        assert!(matches!(store.record_retry(deadline, PendingReason::TargetUnavailable, Some("worker unavailable")).unwrap(), PromptRetryDisposition::Abandoned { .. }));
+        let notices = store.poll_unseen_for_recipient("sender", None, 10).unwrap();
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].prompt.starts_with(&format!("Message {manual} to worker-a was abandoned")));
+        assert!(notices[1].prompt.starts_with(&format!("Message {deadline} to worker-b was abandoned")));
+    }
+
+    #[test]
     fn explicit_age_remediation_abandons_only_old_pending_rows() {
         let (_temp, store) = create_test_store();
         let old = store.enqueue("supervisor", "dead-worker", "old").unwrap();

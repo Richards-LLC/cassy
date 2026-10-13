@@ -251,7 +251,7 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
                     claimed.push(message.clone());
                 }
             }
-            (200, json!({"messages": claimed}))
+            (200, json!({"messages": claimed,"denied":[]}))
         }
         ("POST", ["api", "peer-messages", "ack"]) => {
             for ack in body["acks"].as_array().cloned().unwrap_or_default() {
@@ -260,7 +260,14 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
                     message["delivered_at"] = json!(now());
                 }
             }
-            (200, json!({"status": "success"}))
+            let results: Vec<_> = body["acks"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|ack| json!({"id":ack["id"],"status":200}))
+                .collect();
+            (200, json!({"results":results}))
         }
         ("GET", ["api", "peer-messages", id]) => {
             match state.messages.iter().find(|m| m["id"] == *id) {

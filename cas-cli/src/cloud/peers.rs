@@ -238,11 +238,13 @@ pub fn discover_peers(
 /// The Peers section shown by `coordination action=peers`,
 /// `factory action=worker_status` and `cas status --verbose`. Blocking (one
 /// HTTP round trip per page, [`DISCOVERY_TIMEOUT`] each); a failure is
-/// reported in the section, never raised. When the caller is known and the
-/// project syncs, it opens with the caller's own cloud presence (cas-f707).
+/// reported in the section, never raised. It opens with the caller's own
+/// cloud presence (cas-f707) and ends with the peer mailbox status (cas-13c7).
 pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
-    let discovery = discovery_section(cas_root, self_id);
-    format!("{}{discovery}", presence_line(cas_root, self_id))
+    let mut section = presence_line(cas_root, self_id);
+    section.push_str(&peers_discovery_section(cas_root, self_id));
+    append_mailbox_status(cas_root, self_id, &mut section);
+    section
 }
 
 /// The caller's own registration state, from the record the daemon keeps
@@ -270,7 +272,7 @@ fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
     crate::cloud::presence::render_line(record.as_ref(), Utc::now())
 }
 
-fn discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
+fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
     match discover_peers(cas_root, self_id) {
         Ok(PeerDiscovery::Found {
             canonical_id,
@@ -283,6 +285,49 @@ fn discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
              match peers by (set [project] canonical_id or a git origin).\n"
             .to_string(),
         Err(error) => format!("Peers: Cassy Cloud lookup failed: {error}\n"),
+    }
+}
+
+fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+    let agents = crate::store::open_agent_store(cas_root).ok();
+    if let Some(id) = self_id {
+        let session = agents
+            .and_then(|store| store.get(id).ok())
+            .and_then(|agent| agent.factory_session);
+        section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+            cas_root,
+            session.as_deref(),
+        ));
+        return;
+    }
+    // The CLI has no caller id. Show the live factory sessions on this clone,
+    // rather than suggesting a logged-in daemon cannot receive.
+    let mut sessions = agents
+        .and_then(|store| store.list(None).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| {
+            a.role == crate::types::AgentRole::Supervisor
+                && matches!(
+                    a.status,
+                    crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
+                )
+        })
+        .filter_map(|a| a.factory_session)
+        .collect::<Vec<_>>();
+    sessions.sort();
+    sessions.dedup();
+    if sessions.is_empty() {
+        section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+            cas_root, None,
+        ));
+    } else {
+        for session in sessions {
+            section.push_str(&crate::cloud::peer_mailbox::mailbox_status_section(
+                cas_root,
+                Some(&session),
+            ));
+        }
     }
 }
 
@@ -305,15 +350,19 @@ pub fn peers_section_cached(cas_root: &Path, self_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(&key))
         && at.elapsed() < PEERS_CACHE_TTL
     {
-        return format!("{presence}{text}");
+        let mut text = format!("{presence}{text}");
+        append_mailbox_status(cas_root, self_id, &mut text);
+        return text;
     }
-    let text = discovery_section(cas_root, self_id);
+    let text = peers_discovery_section(cas_root, self_id);
     CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(key, (std::time::Instant::now(), text.clone()));
-    format!("{presence}{text}")
+    let mut text = format!("{presence}{text}");
+    append_mailbox_status(cas_root, self_id, &mut text);
+    text
 }
 
 /// The agent a CLI invocation runs under, so `cas status` does not list its

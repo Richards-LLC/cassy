@@ -247,10 +247,24 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         let cas_root = self.inner.cas_root.clone();
         let wanted = id.clone();
-        let status = tokio::task::spawn_blocking(move || {
-            peer_mailbox::http_mailbox(&cas_root)
+        let text = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            if let Some(status) = peer_mailbox::outbox_status_text(&cas_root, &id)? {
+                return Ok(status);
+            }
+            let status = peer_mailbox::http_mailbox(&cas_root)
                 .ok_or_else(|| "not logged in to Cassy Cloud".to_string())?
-                .status(&id)
+                .status(&id)?;
+            Ok(format!(
+                "Peer message {}: {}{} (delivery attempts: {})",
+                status.id,
+                status.status,
+                status
+                    .delivered_at
+                    .as_deref()
+                    .map(|at| format!(" at {at}"))
+                    .unwrap_or_default(),
+                status.attempts
+            ))
         })
         .await
         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
@@ -265,16 +279,6 @@ impl CasService {
                 format!("Peer message {wanted}{visibility}: {error}"),
             )
         })?;
-        Ok(Self::success(format!(
-            "Peer message {}: {}{} (delivery attempts: {})",
-            status.id,
-            status.status,
-            status
-                .delivered_at
-                .as_deref()
-                .map(|at| format!(" at {at}"))
-                .unwrap_or_default(),
-            status.attempts
-        )))
+        Ok(Self::success(text))
     }
 }

@@ -243,6 +243,7 @@ mod m264_operator_reply_device_receipts;
 mod m265_operator_cloud_outbox;
 mod m266_code_parent_target_indexes;
 mod m267_supervisor_queue_add_prompt_delivered_at;
+mod m268_peer_message_outbox;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -523,6 +524,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m265_operator_cloud_outbox::MIGRATION,
     m266_code_parent_target_indexes::MIGRATION,
     m267_supervisor_queue_add_prompt_delivered_at::MIGRATION,
+    m268_peer_message_outbox::MIGRATION,
 ];
 
 #[cfg(test)]

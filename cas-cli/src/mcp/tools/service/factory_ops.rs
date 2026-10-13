@@ -3792,8 +3792,22 @@ impl CasService {
                     )
                 })
                 .unwrap_or_default();
+            let mailbox_session = factory_session.clone().or_else(|| {
+                self.inner
+                    .get_registered_agent_id_read_only()
+                    .ok()
+                    .and_then(|id| store.get(&id).ok())
+                    .and_then(|agent| agent.factory_session)
+            });
+            let mailbox_health = crate::cloud::peer_mailbox::mailbox_status_section(
+                &self.inner.cas_root,
+                mailbox_session.as_deref(),
+            );
+            // Preserve the summary's session heading and worker rows. Only an
+            // urgent daemon-health finding belongs above that scope heading.
             // cas-f707: a failing cloud registration makes this supervisor
-            // invisible to its peers; the fast poll says so (local read only).
+            // invisible to its peers; the fast poll says so (local read only),
+            // after the scope heading and rows, before the mailbox footer.
             let presence = self
                 .inner
                 .get_registered_agent_id_read_only()
@@ -3804,11 +3818,11 @@ impl CasService {
                     crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
                 })
                 .unwrap_or_default();
-            let summary = format!("{presence}{summary}");
+            let mailbox_health = format!("{presence}{mailbox_health}");
             return Ok(Self::success(if health.is_empty() {
-                summary
+                format!("{summary}\n{}", mailbox_health.trim_end())
             } else {
-                format!("{}\n{summary}", health.trim_end())
+                format!("{}\n{summary}\n{}", health.trim_end(), mailbox_health.trim_end())
             }));
         }
 
@@ -15772,7 +15786,12 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 6, "{output}");
+        assert_eq!(lines.len(), 7, "{output}");
+        assert!(
+            lines[6].starts_with("Peer mailbox: not receiving:")
+                && lines[6].contains("has not reported a mailbox poll"),
+            "summary must retain a visible mailbox health footer: {output}"
+        );
         assert!(
             lines[0].contains("Factory session: liveness-fixture-session")
                 && lines[0].contains("worker rows in scope: 5"),

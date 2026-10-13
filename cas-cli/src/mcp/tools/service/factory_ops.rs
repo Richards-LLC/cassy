@@ -3723,6 +3723,19 @@ impl CasService {
                     )
                 })
                 .unwrap_or_default();
+            // cas-f707: a failing cloud registration makes this supervisor
+            // invisible to its peers; the fast poll says so (local read only).
+            let presence = self
+                .inner
+                .get_registered_agent_id_read_only()
+                .ok()
+                .and_then(|id| crate::cloud::presence::load(&self.inner.cas_root, &id))
+                .filter(|record| record.state == crate::cloud::presence::PresenceState::Failing)
+                .map(|record| {
+                    crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
+                })
+                .unwrap_or_default();
+            let summary = format!("{presence}{summary}");
             return Ok(Self::success(if health.is_empty() {
                 summary
             } else {

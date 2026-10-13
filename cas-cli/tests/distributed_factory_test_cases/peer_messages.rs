@@ -457,3 +457,137 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert_eq!(replies.len(), 1);
     assert!(replies[0].prompt.ends_with("yes"));
 }
+
+/// GH #1186's unqualified target must receive an honest, immediate outcome.
+#[tokio::test]
+async fn cas_a19b_unknown_target_never_promises_registration() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
+    let machine = TestMachine::new("soundwave");
+    seed_project(&machine, &server.uri(), "github.com/acme/widgets");
+    let root = machine.cas_dir.clone();
+    tokio::task::spawn_blocking(move || supervisor_at(&root, "soundwave", "a")).await.unwrap();
+    let result = coordinate(&service_for(&machine.cas_dir, "a"), json!({
+        "action": "message", "target": "calm-marten-67", "summary": "hold staging",
+        "message": "Please hold staging merges while I promote staging to main."
+    })).await.unwrap_err();
+    assert!(result.contains("no supervisor or worker named calm-marten-67 in this project or its peers"), "{result}");
+    assert!(!result.contains("will deliver on registration"), "{result}");
+    assert!(inbox(&machine.cas_dir).is_empty());
+}
+
+#[tokio::test]
+async fn cas_a19b_named_remote_target_returns_a_mailbox_receipt() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let alpha = TestMachine::new("soundwave");
+    let beta = TestMachine::new("prowl");
+    seed_project(&alpha, &server.uri(), "github.com/acme/widgets");
+    seed_project(&beta, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&a, "soundwave", "a");
+        supervisor_at(&b, "prowl", "b");
+    }).await.unwrap();
+    registry.lock().unwrap().get_mut("b").unwrap()["name"] = json!("calm-marten-67");
+    let sent = coordinate(&service_for(&alpha.cas_dir, "a"), json!({
+        "action": "message", "target": "calm-marten-67", "summary": "hold staging",
+        "message": "Please hold staging merges while I promote staging to main."
+    })).await.unwrap();
+    assert!(sent.contains("delivered to calm-marten-67@prowl mailbox"), "{sent}");
+    assert!(sent.contains("pm_1"), "{sent}");
+    assert_eq!(mailbox.lock().unwrap().len(), 1);
+    assert!(inbox(&alpha.cas_dir).is_empty());
+}
+
+#[tokio::test]
+async fn cas_a19b_unqualified_target_names_cloud_lookup_failures() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
+    let machine = TestMachine::new("soundwave");
+    seed_project(&machine, &server.uri(), "github.com/acme/widgets");
+    let root = machine.cas_dir.clone();
+    tokio::task::spawn_blocking(move || supervisor_at(&root, "soundwave", "a")).await.unwrap();
+    let service = service_for(&machine.cas_dir, "a");
+    let request = json!({"action": "message", "target": "calm-marten-67", "summary": "hold staging", "message": "hold staging"});
+    for status in [401, 503] {
+        let response = Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(status)).with_priority(1)
+            .mount_as_scoped(&server).await;
+        let error = coordinate(&service, request.clone()).await.unwrap_err();
+        assert!(error.contains(&status.to_string()) && error.contains("calm-marten-67"), "{error}");
+        assert!(inbox(&machine.cas_dir).is_empty());
+        drop(response);
+    }
+    let mut config = cas::cloud::CloudConfig::load_from_cas_dir(&machine.cas_dir).unwrap();
+    config.token = None;
+    config.save_to_cas_dir(&machine.cas_dir).unwrap();
+    let error = coordinate(&service, request.clone()).await.unwrap_err();
+    assert!(error.contains("no token") && error.contains("calm-marten-67"), "{error}");
+    config.token = Some("test-token".to_string());
+    // A closed loopback listener deterministically refuses the connection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    config.endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    config.save_to_cas_dir(&machine.cas_dir).unwrap();
+    let error = coordinate(&service, request).await.unwrap_err();
+    assert!(error.to_lowercase().contains("network") && error.contains("calm-marten-67"), "{error}");
+    assert!(inbox(&machine.cas_dir).is_empty());
+}
+
+#[tokio::test]
+async fn cas_a19b_known_peer_names_mailbox_failure() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
+    let alpha = TestMachine::new("soundwave");
+    let beta = TestMachine::new("prowl");
+    seed_project(&alpha, &server.uri(), "github.com/acme/widgets");
+    seed_project(&beta, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&a, "soundwave", "a");
+        supervisor_at(&b, "prowl", "b");
+    }).await.unwrap();
+    Mock::given(method("POST")).and(path("/api/peer-messages"))
+        .respond_with(ResponseTemplate::new(401)).with_priority(1).mount(&server).await;
+    let error = coordinate(&service_for(&alpha.cas_dir, "a"), json!({
+        "action": "message", "target": "sup-b", "summary": "hold staging", "message": "hold staging"
+    })).await.unwrap_err();
+    assert!(error.contains("401") && error.contains("sup-b@prowl"), "{error}");
+    assert!(inbox(&alpha.cas_dir).is_empty());
+}
+
+#[tokio::test]
+async fn cas_a19b_only_a_pending_local_spawn_can_wait_for_registration() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let machine = TestMachine::new("soundwave");
+    let mut agent = Agent::new("a".into(), "sup-a".into());
+    agent.role = AgentRole::Supervisor;
+    agent.factory_session = Some("factory-a".into());
+    open_agent_store(&machine.cas_dir).unwrap().register(&agent).unwrap();
+    let spawns = cas::store::open_spawn_queue_store(&machine.cas_dir).unwrap();
+    let id = spawns.enqueue_spawn(1, &["new-fox-1".into()], true, None, Some("factory-a"), None).unwrap();
+    let request = json!({"action": "message", "target": "new-fox-1", "summary": "hello", "message": "hello"});
+    let service = service_for(&machine.cas_dir, "a");
+    let sent = coordinate(&service, request.clone()).await.unwrap();
+    assert!(sent.contains("will deliver on registration"), "{sent}");
+    spawns.record_spawn_state(id, cas::store::SpawnLifecycleState::Failed, None, Some("launch failed")).unwrap();
+    let error = coordinate(&service, request).await.unwrap_err();
+    assert!(error.contains("no supervisor or worker named new-fox-1"), "{error}");
+    assert_eq!(inbox(&machine.cas_dir).len(), 1);
+}
+
+#[test]
+fn cas_a19b_abandonment_notifies_sender_once_with_id_and_reason() {
+    let machine = TestMachine::new("soundwave");
+    let queue = open_prompt_queue_store(&machine.cas_dir).unwrap();
+    let id = queue.enqueue_with_session("sup-a", "missing-worker", "hello", "factory-a").unwrap();
+    queue.abandon_ineligible_session_targets(&["sup-a"], "factory-a", -1).unwrap();
+    let notices = queue.poll_unseen_for_recipient("sup-a", Some("factory-a"), 10).unwrap();
+    assert_eq!(notices.len(), 1, "sender receives abandonment notice");
+    assert!(notices[0].prompt.contains(&id.to_string()) && notices[0].prompt.contains("target no longer belongs to factory session"), "{}", notices[0].prompt);
+    assert_eq!(queue.abandon_ineligible_session_targets(&["sup-a"], "factory-a", -1).unwrap(), 0);
+    // A notice that cannot itself be delivered must not generate a bounce loop.
+    queue.mark_abandoned(notices[0].id, Some("sender gone")).unwrap();
+    assert!(queue.peek_all(10).unwrap().is_empty());
+}

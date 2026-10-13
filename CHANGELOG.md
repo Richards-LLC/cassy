@@ -66,6 +66,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   then says `Cloud presence: disabled (cloud.auto_sync=false)` and explains
   that discovery is one-way. `worker_status --summary` flags a failing
   registration.
+- The peers section fits an 80-column terminal: each peer takes two short
+  lines, and status lines wrap.
 - `coordination action=peers`, `worker_status` and `cas status` open with
   this agent's own state: `Cloud presence: registered` or
   `Cloud presence: failing: <cause>`.

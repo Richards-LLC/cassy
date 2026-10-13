@@ -31,7 +31,19 @@ use sha2::{Digest, Sha256};
 
 use crate::cloud::{CloudConfig, CloudCoordinator};
 use crate::error::CasError;
-use crate::types::ClaimResult;
+use crate::types::{ClaimResult, TaskLease};
+
+/// What Cassy Cloud's agent list says about a claim holder.
+enum Listed {
+    /// Listed, with a heartbeat inside the live window.
+    Live(ClaimHolder),
+    /// Listed, but stale, shut down or silent past the live window.
+    Stale(ClaimHolder),
+    /// The list was read and the holder is not in it.
+    Missing,
+    /// The list could not be read.
+    Unknown,
+}
 
 /// Bounded wait for a claim round trip, so an unreachable cloud costs a
 /// start seconds, not the coordinator's default thirty.
@@ -298,19 +310,53 @@ impl PeerClaims {
             Ok(coordinator) => coordinator,
             Err(error) => return Acquire::Unavailable(error.to_string()),
         };
-        let held_by = match coordinator.claim(&key, duration_secs, Some(&reason)) {
+        let (held_by, expires_at) = match coordinator.claim(&key, duration_secs, Some(&reason)) {
             Ok(ClaimResult::Success(_)) => return Acquire::Claimed,
-            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) => held_by,
+            Ok(ClaimResult::AlreadyClaimed { held_by, expires_at, .. }) => (held_by, expires_at),
             Ok(other) => return Acquire::Unavailable(format!("unexpected claim answer: {other:?}")),
             Err(error) => return Acquire::Unavailable(error.to_string()),
+        };
+        // A refusal that names no holder (an older cloud, or a body that did
+        // not parse) is resolved from the lock, so a local holder is never
+        // mistaken for a peer.
+        let (held_by, expires_at) = if held_by.is_empty() {
+            match coordinator.get_lock(&key) {
+                Ok(Some(lock)) => (lock.agent_id, lock.expires_at),
+                Ok(None) => return Acquire::Unavailable("the claim was refused without a holder".into()),
+                Err(error) => return Acquire::Unavailable(error.to_string()),
+            }
+        } else {
+            (held_by, expires_at)
         };
         if held_by == agent_id {
             return Acquire::Claimed;
         }
-        if !held_by.is_empty() && is_local(&held_by) {
+        if is_local(&held_by) {
             return Acquire::LocalHolder(held_by);
         }
-        self.peer_answer(&key, &held_by)
+        self.conflict_answer(&key, &held_by, expires_at)
+    }
+
+    /// A peer's hold from a refused claim. The 409 names the holder and when
+    /// its lock runs out, and the agent list names its machine and says
+    /// whether it is live, so the lock is read only when the list does not
+    /// know the holder (only the lock's reason can then name it) or the 409
+    /// lacked a usable expiry.
+    fn conflict_answer(&self, key: &str, held_by: &str, expires_at: DateTime<Utc>) -> Acquire {
+        let now = Utc::now();
+        if held_by.is_empty() || expires_at <= now {
+            return self.peer_answer(key, held_by);
+        }
+        let listed = self.listed_holder(held_by);
+        let lock = match &listed {
+            Listed::Live(..) | Listed::Stale(..) => None,
+            Listed::Missing | Listed::Unknown => self
+                .coordinator(held_by)
+                .and_then(|coordinator| coordinator.get_lock(key))
+                .ok()
+                .flatten(),
+        };
+        Self::answer(Self::assemble(held_by.to_string(), lock.as_ref(), Some(expires_at), listed))
     }
 
     /// Move the cloud claim on `task_id` from `from`, another agent of this
@@ -343,9 +389,12 @@ impl PeerClaims {
         }
     }
 
-    /// A peer's hold on `key`, live or stale.
+    /// A peer's hold on `key`, live or stale, read from the lock.
     fn peer_answer(&self, key: &str, held_by: &str) -> Acquire {
-        let hold = self.hold(key, held_by);
+        Self::answer(self.hold(key, held_by))
+    }
+
+    fn answer(hold: PeerHold) -> Acquire {
         if hold.is_stale(Utc::now()) {
             Acquire::StalePeer(hold)
         } else {
@@ -368,11 +417,17 @@ impl PeerClaims {
     }
 
     /// The holder as Cassy Cloud lists it: whether it is live, and its
-    /// name and machine from registration. `None` when the list is unreadable.
-    fn listed_holder(&self, held_by: &str) -> Option<(bool, Option<ClaimHolder>)> {
-        let agents = self.coordinator(held_by).ok()?.list_agent_infos().ok()?;
+    /// name and machine from registration.
+    fn listed_holder(&self, held_by: &str) -> Listed {
+        let Some(agents) = self
+            .coordinator(held_by)
+            .ok()
+            .and_then(|coordinator| coordinator.list_agent_infos().ok())
+        else {
+            return Listed::Unknown;
+        };
         let Some(agent) = agents.into_iter().find(|agent| agent.id == held_by) else {
-            return Some((false, None));
+            return Listed::Missing;
         };
         let age = DateTime::parse_from_rfc3339(&agent.last_heartbeat)
             .map(|at| (Utc::now() - at.with_timezone(&Utc)).num_seconds())
@@ -396,7 +451,7 @@ impl PeerClaims {
                 .cloned()
                 .unwrap_or_default(),
         };
-        Some((live, Some(holder)))
+        if live { Listed::Live(holder) } else { Listed::Stale(holder) }
     }
 
     /// Who holds `key`, read from the lock itself.
@@ -411,23 +466,41 @@ impl PeerClaims {
             .map(|lock| lock.agent_id.clone())
             .unwrap_or_else(|| held_by.to_string());
         let listed = self.listed_holder(&agent_id);
-        // cas-0078: only a running holder renews its claim, so a renewal
-        // within the live window is a liveness signal of its own. It keeps a
-        // holder whose cloud registration failed (and so is not listed) live.
-        let renewed_recently = lock.as_ref().is_some_and(|lock| {
+        Self::assemble(agent_id, lock.as_ref(), None, listed)
+    }
+
+    /// One hold from whatever was learned: the lock (reason, expiry, last
+    /// renewal), the 409's expiry, and the agent list.
+    ///
+    /// cas-0078: only a running holder renews its claim, so a renewal within
+    /// the live window is a liveness signal of its own. A holder missing from
+    /// the agent list (its registration failed) is live while it renews and
+    /// stale once it stopped; without a lock to read, its liveness is unknown.
+    fn assemble(
+        agent_id: String,
+        lock: Option<&TaskLease>,
+        expires_at: Option<DateTime<Utc>>,
+        listed: Listed,
+    ) -> PeerHold {
+        let renewed_recently = lock.map(|lock| {
             (Utc::now() - lock.renewed_at).num_seconds() <= crate::cloud::peers::PEER_LIVE_SECS
         });
-        let live = match listed.as_ref().map(|(live, _)| *live) {
-            Some(false) if renewed_recently => Some(true),
-            other => other,
+        let (listed_live, listed_holder) = match listed {
+            Listed::Live(holder) => (Some(true), Some(holder)),
+            Listed::Stale(holder) => (Some(false), Some(holder)),
+            Listed::Missing | Listed::Unknown => (None, None),
+        };
+        let live = match (listed_live, renewed_recently) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), _) | (None, Some(false)) => Some(false),
+            (None, None) => None,
         };
         PeerHold {
             holder: lock
-                .as_ref()
                 .and_then(|lock| ClaimHolder::from_reason(lock.claim_reason.as_deref()))
-                .or_else(|| listed.as_ref().and_then(|(_, holder)| holder.clone())),
+                .or(listed_holder),
             live,
-            expires_at: lock.map(|lock| lock.expires_at),
+            expires_at: expires_at.or(lock.map(|lock| lock.expires_at)),
             agent_id,
         }
     }

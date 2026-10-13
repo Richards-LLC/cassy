@@ -51,13 +51,25 @@ pub struct AgentInfo {
 }
 
 /// Response from task claim
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// cas-0078: production's 409 body is
+/// `{"error":"already_claimed","owner_agent_id","agent_id","expires_at"}`
+/// with no `status`, so every field is optional on the wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaimResponse {
+    #[serde(default)]
     pub status: String,
+    #[serde(default)]
     pub result: Option<String>,
+    #[serde(default)]
     pub lock: Option<LockInfo>,
+    #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
     pub owner_agent_id: Option<String>,
+    /// When the holder's lock runs out (409 only).
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 /// Lock information from cloud
@@ -300,19 +312,22 @@ impl CloudCoordinator {
                 }
             }
             Err(ureq::Error::Status(409, resp)) => {
-                // Conflict - already claimed
-                let claim_resp: ClaimResponse = resp.into_json().unwrap_or(ClaimResponse {
-                    status: "error".to_string(),
-                    result: None,
-                    lock: None,
-                    error: Some("already_claimed".to_string()),
-                    owner_agent_id: None,
-                });
+                // Conflict - already claimed. The body names the holder and
+                // when its lock runs out. A missing or unparseable expiry
+                // reads as now: production frees an expired lock, so a 409
+                // never names a past expiry, and callers treat one as unknown.
+                let claim_resp: ClaimResponse = resp.into_json().unwrap_or_default();
+                let expires_at = claim_resp
+                    .expires_at
+                    .as_deref()
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| at.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
 
                 Ok(ClaimResult::AlreadyClaimed {
                     task_id: task_id.to_string(),
                     held_by: claim_resp.owner_agent_id.unwrap_or_default(),
-                    expires_at: chrono::Utc::now(),
+                    expires_at,
                 })
             }
             Err(ureq::Error::Status(404, _)) => Ok(ClaimResult::TaskNotFound(task_id.to_string())),

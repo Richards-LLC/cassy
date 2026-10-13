@@ -208,8 +208,16 @@ impl SplitHold {
     }
 }
 
+/// Read paths never create a database where there is none.
+fn has_store(cas_root: &Path) -> bool {
+    cas_root.join("cas.db").exists()
+}
+
 /// The binding split, if any, under which `task_id` is the peer's.
 pub fn split_hold_for(cas_root: &Path, task_id: &str) -> Option<SplitHold> {
+    if !has_store(cas_root) {
+        return None;
+    }
     let splits = match open_epic_splits(cas_root) {
         Ok(splits) => splits,
         Err(error) => {
@@ -836,6 +844,9 @@ pub fn cancel(
 /// The splits recorded here, for `epic_split` and the peers view. Empty when
 /// there are none.
 pub fn render_splits(cas_root: &Path) -> String {
+    if !has_store(cas_root) {
+        return String::new();
+    }
     let Ok(splits) = list_epic_splits(cas_root) else {
         return String::new();
     };
@@ -876,6 +887,9 @@ pub fn render_splits(cas_root: &Path) -> String {
 /// binding split it is party to. Renew only: a child a worker took keeps the
 /// worker's claim, and a lapsed claim is not re-acquired.
 pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, duration: u32) -> usize {
+    if !has_store(cas_root) {
+        return 0;
+    }
     let Ok(splits) = open_epic_splits(cas_root) else {
         return 0;
     };

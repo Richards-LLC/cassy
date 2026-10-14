@@ -54,7 +54,7 @@ For burn-down triage suggestions, use [cas-jev](../cas-jev/SKILL.md); retain ind
 
 Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
 
-Before taking work in a repository with multiple supervisors, follow [peer collaboration](references/reference.md#peer-supervisors-on-the-same-repo) to inspect ownership and agree on a split.
+Other supervisors on this repo: [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 
 Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode (preflight, intake, create/pin the EPIC). Dispatch each task with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; give an idle live worker its next task with `update` (not `transfer`); end the turn.
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Execute the real web gate row and workflow classifier on isolated Git trees."""
+import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +12,19 @@ import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+_spec = importlib.util.spec_from_file_location('classify_web_inputs', ROOT / 'scripts/classify-web-inputs.py')
+WEB = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(WEB)
+WORKFLOW_FIXTURE = '''on: push
+jobs:
+  preflight:
+    steps:
+      - name: Build and test Commander web assets
+        working-directory: hub-web
+        run: npm run journeys -- --workers=4
+      - name: Check
+        run: cargo check
+'''
 
 
 class WebGate(unittest.TestCase):
@@ -18,7 +33,7 @@ class WebGate(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.repo = Path(self.scratch.name) / 'repo'
         self.repo.mkdir()
-        for name in ('release-gate.sh', 'release_scratch.py', 'release-portable.sh', 'release-test-env.sh', 'release-integration-gates.py', 'classify-ci-diff.sh', 'classify-fast-admission.sh'):
+        for name in ('release-gate.sh', 'release_scratch.py', 'release-portable.sh', 'release-test-env.sh', 'release-integration-gates.py', 'classify-ci-diff.sh', 'classify-fast-admission.sh', 'classify-web-inputs.py'):
             self.write('scripts/' + name, (ROOT / 'scripts' / name).read_text())
             (self.repo / 'scripts' / name).chmod(0o755)
         self.write('cas-cli/Cargo.toml', '[package]\nversion = "9.99.7"\n')
@@ -136,6 +151,101 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
         self.write('cas-cli/src/example.rs', '// Rust and deleted web input\n')
         self.commit()
         self.assertEqual(self.classify()['web-check-needed'], 'true')
+
+    # cas-7822: the ~19 min Commander step runs only for its real inputs.
+    def test_unrelated_script_or_workflow_skips_web_tests(self):
+        for path in ('scripts/test-jev-triage.py', '.github/workflows/release.yml', 'scripts/release-gate.sh'):
+            with self.subTest(path=path):
+                self.write(path, '# unrelated to hub-web\n')
+                self.commit()
+                self.assertEqual(self.classify()['web-check-needed'], 'false')
+                self.base = self.git('rev-parse', 'HEAD').stdout.strip()
+
+    def test_journey_catalog_specs_and_repo_level_inputs_run_web_tests(self):
+        for path in ('hub-web/src/main.ts', 'hub-web/dist/app.js', 'hub-web/e2e/journeys/reply.journey.ts',
+                     'docs/qa/journeys.md', 'docs/design/design-tokens.json', 'scripts/worker-memory.py',
+                     'scripts/assembly-proof.py', 'scripts/classify-web-inputs.py'):
+            with self.subTest(path=path):
+                self.write(path, ('# ' if path.endswith('.py') else '') + 'changed web input\n')
+                self.commit()
+                result = self.classify()
+                self.assertEqual(result['web-check-needed'], 'true')
+                self.assertNotEqual(result['class'], 'docs-only')
+                self.base = self.git('rev-parse', 'HEAD').stdout.strip()
+
+    def test_workflow_runs_web_tests_only_when_a_hub_web_step_changes(self):
+        self.write('.github/workflows/ci.yml', WORKFLOW_FIXTURE)
+        self.commit()
+        self.base = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.write('.github/workflows/ci.yml', WORKFLOW_FIXTURE.replace('cargo check', 'cargo check --locked'))
+        self.commit()
+        self.assertEqual(self.classify()['web-check-needed'], 'false')
+        self.base = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.write('.github/workflows/ci.yml', WORKFLOW_FIXTURE.replace('--workers=4', '--workers=2'))
+        self.commit()
+        self.assertEqual(self.classify()['web-check-needed'], 'true')
+
+    def test_failed_web_classifier_runs_web_tests(self):
+        self.write('scripts/classify-web-inputs.py', 'raise SystemExit(1)\n')
+        self.write('scripts/unrelated.py', '# unrelated\n')
+        self.commit()
+        self.base = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.write('scripts/unrelated.py', '# still unrelated\n')
+        self.commit()
+        self.assertEqual(self.classify()['web-check-needed'], 'true')
+
+    def test_every_repo_level_file_hub_web_reads_is_a_web_input(self):
+        # A new `../scripts/x` or `../docs/x` read in hub-web must join WEB_INPUTS.
+        reference = re.compile(r'((?:\.\./)+(?:scripts|docs)/[\w./-]+\.\w+)')
+        sources = [ROOT / 'hub-web/package.json', *ROOT.glob('hub-web/*.ts')]
+        for folder in ('src', 'scripts', 'e2e', 'fixtures'):
+            sources += [p for p in (ROOT / 'hub-web' / folder).rglob('*')
+                        if p.suffix in ('.ts', '.mjs', '.js', '.json') and 'node_modules' not in p.parts]
+        found = set()
+        for source in sources:
+            for relative in reference.findall(source.read_text(errors='replace')):
+                # Module URLs resolve from the file; npm scripts and test reads from hub-web.
+                for base in (source.parent, ROOT / 'hub-web'):
+                    target = (base / relative).resolve()
+                    if target.exists() and target.is_relative_to(ROOT) and not target.is_relative_to(ROOT / 'hub-web'):
+                        found.add(str(target.relative_to(ROOT)))
+        workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
+        for job in workflow['jobs'].values():
+            for step in job.get('steps', []):
+                if step.get('working-directory') == 'hub-web':
+                    found.update(str((ROOT / 'hub-web' / r).resolve().relative_to(ROOT))
+                                 for r in reference.findall(step.get('run', '')))
+        self.assertIn('scripts/visual-qa.mjs', found)
+        self.assertIn('scripts/worker-memory.py', found)
+        self.assertIn('docs/design/design-tokens.json', found)
+        self.assertIn('scripts/test-ci-journey-evidence-upload.sh', found)
+        # worker-memory.py's own sibling imports are inputs too.
+        closure = {'scripts/worker-memory.py'}
+        pending = ['scripts/worker-memory.py']
+        while pending:
+            body = (ROOT / pending.pop()).read_text()
+            names = re.findall(r"with_name\(['\"]([\w.-]+\.py)['\"]\)", body)
+            names += [m + '.py' for m in re.findall(r'^import (\w+)$', body, re.M)
+                      if (ROOT / 'scripts' / (m + '.py')).exists()]
+            for name in names:
+                if 'scripts/' + name not in closure:
+                    closure.add('scripts/' + name)
+                    pending.append('scripts/' + name)
+        found |= closure
+        missing = sorted(path for path in found if not WEB.covered(path))
+        self.assertEqual(missing, [], 'add these hub-web inputs to scripts/classify-web-inputs.py WEB_INPUTS')
+
+    def test_pr_1191_merge_queue_entry_skips_web_tests(self):
+        # Real history: PR #1191 touched scripts/test-jev-triage.py and no web input.
+        base, head = '1c201ff0692dbf182b6fa8eb948abcc284166a84', 'e8f0c4628d4c8f96b806ed9cbf3c6209020f2371'
+        if subprocess.run(['git', 'cat-file', '-e', head], cwd=ROOT, capture_output=True).returncode:
+            self.skipTest('shallow checkout lacks PR #1191')
+        result = subprocess.run([str(ROOT / 'scripts/classify-web-inputs.py'), base, head], cwd=ROOT,
+                                text=True, capture_output=True)
+        self.assertEqual((result.returncode, result.stdout), (0, 'false\n'), result.stderr)
+        result = subprocess.run([str(ROOT / 'scripts/classify-web-inputs.py'), '7c233bef^', '7c233bef'], cwd=ROOT,
+                                text=True, capture_output=True)
+        self.assertEqual((result.returncode, result.stdout), (0, 'true\n'), result.stderr)
 
     def test_scoped_lanes_execute_the_signaled_web_tests(self):
         workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())

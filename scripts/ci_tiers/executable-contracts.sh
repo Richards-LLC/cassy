@@ -291,6 +291,11 @@ if [[ -x "$classifier" ]]; then
     require_text "$("$classifier" 66b059b4^ 66b059b4)" 'rust-touched' 'mixed version bump plus changelog runs Rust tier'
     require_text "$("$classifier" bb7417ef^ bb7417ef)" 'rust-touched' 'code-only change runs Rust tier'
     require_text "$("$classifier" 7c233bef^ 7c233bef)" 'hub-web-only' 'hub-web-only change skips Rust work'
+    # cas-7822: the Commander web step (~19 min in the queue) follows its own
+    # inputs. PR #1191 changed one unrelated script and no web input.
+    require_text "$(python3 "$repo_root/scripts/classify-web-inputs.py" 1c201ff0692dbf182b6fa8eb948abcc284166a84 e8f0c4628d4c8f96b806ed9cbf3c6209020f2371 2>/dev/null)" 'false' 'PR 1191 queue entry without a web input skips the Commander step'
+    require_text "$(python3 "$repo_root/scripts/classify-web-inputs.py" 7c233bef^ 7c233bef 2>/dev/null)" 'true' 'hub-web change runs the Commander step'
+    require_text "$(python3 "$repo_root/scripts/classify-web-inputs.py" audit-nonexistent-base HEAD 2>/dev/null || echo classifier-failed)" 'classifier-failed' 'unresolvable web-input base fails closed'
     require_text "$("$classifier" c070753a^ c070753a)" 'slack-bridge-only' 'slack-bridge-only change skips Rust work'
     require_text "$("$classifier" 15edf2ef^ 15edf2ef)" 'version-bump' 'two-file package version bump fast-passes'
     require_text "$("$classifier" 15edf2ef^ eab3901c)" 'version-bump' 'workspace-wide seven-file version bump fast-passes'

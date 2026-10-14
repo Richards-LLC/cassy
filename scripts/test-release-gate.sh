@@ -1765,7 +1765,7 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 body = path.read_text()
-seam = '    if "$reuse_rows" && [[ -n "$key" ]]; then\n'
+seam = '    if "$row_reuse" && [[ -n "$key" ]]; then\n'
 assert body.count(seam) == 1, 'train ISA receipt seam changed'
 seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir" ]]; then
         printf '%s %s %s PASS %s %s %s %s %s\\n' \\

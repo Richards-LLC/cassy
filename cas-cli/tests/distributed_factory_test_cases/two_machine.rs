@@ -526,6 +526,14 @@ fn inbox(machine: &TestMachine) -> Vec<QueuedPrompt> {
     rows
 }
 
+/// Give `machine`'s project its own machine label (`[cloud] machine_label`).
+fn label_machine(machine: &TestMachine) {
+    let path = machine.cas_dir.join("config.toml");
+    let mut config = std::fs::read_to_string(&path).unwrap_or_default();
+    config.push_str(&format!("\n[cloud]\nmachine_label = \"{}\"\n", machine.name));
+    std::fs::write(path, config).unwrap();
+}
+
 /// alpha and beta work github.com/acme/widgets (beta's clone spelled as its
 /// git remote); gamma works another repo. beta also runs a worker.
 fn three_machines(cloud: &TestCloud) -> (TestMachine, TestMachine, TestMachine) {
@@ -537,6 +545,11 @@ fn three_machines(cloud: &TestCloud) -> (TestMachine, TestMachine, TestMachine) 
     cloud.seed(&alpha.cas_dir, WIDGETS);
     cloud.seed(&beta.cas_dir, "git@github.com:acme/widgets.git");
     cloud.seed(&gamma.cas_dir, "github.com/acme/gadgets");
+    // Three simulated machines on one host: each project names its machine
+    // (cas-c7c7), as a real host's hostname would.
+    for machine in [&alpha, &beta, &gamma] {
+        label_machine(machine);
+    }
     register(&alpha, "a", "sup-a", AgentRole::Supervisor, "a", "cas-571d");
     register(&beta, "b", "sup-b", AgentRole::Supervisor, "b", "cas-f9c7");
     register(
@@ -778,11 +791,12 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
 }
 
 /// cas-c7c7 (O2): one machine label everywhere a peer's machine is named.
-/// Discovery, a claim refusal, and a peer message's envelope and reply
-/// target all name beta's machine the same way. Epic-split notices read the
-/// same stamped sender machine as the envelope.
-#[test]
-fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
+/// Discovery, peer detail, a claim refusal, and a received peer message's
+/// envelope and reply target all name beta's machine the same way (a
+/// received epic split: `epic_split::a_received_split_names_the_proposer_by_its_machine_label`).
+#[tokio::test(flavor = "multi_thread")]
+async fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
 
@@ -818,4 +832,22 @@ fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
         "the reply target uses the same label: {}",
         inbox(&alpha)[0].prompt
     );
+
+    // Peer detail shows the same label.
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "peers", "peer": "sup-b", "detail": true, "json": true
+    }))
+    .unwrap();
+    let result = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    let detail: serde_json::Value =
+        serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+    assert_eq!(detail["peers"][0]["supervisor"]["machine"], discovered.as_str(), "{detail}");
+    // The stable identity is kept, and still addresses the peer.
+    assert_eq!(detail["peers"][0]["supervisor"]["machine_id"], "machine-beta", "{detail}");
 }

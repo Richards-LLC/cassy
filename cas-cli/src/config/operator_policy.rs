@@ -462,19 +462,35 @@ pub fn worker_cgroup_refusal(cgroup: &str) -> Option<String> {
 }
 
 /// Environment variables only an agent session carries (cas-3147).
+///
+/// cas-31ec: exact identity markers only, never a name prefix. Only a
+/// variable a harness or the factory sets for the agent processes it spawns
+/// counts; operator preferences sharing a namespace must not lock the
+/// operator out:
+/// - `cas` itself exports the build knobs `CAS_FACTORY_NICE_WORKER` and
+///   `CAS_FACTORY_CARGO_BUILD_JOBS` early in every run
+///   (`factory::apply_resource_contention_env`), and operators set those and
+///   `CAS_FACTORY_NICE_LEVEL` in their shells;
+/// - operators export Claude Code preferences such as
+///   `CLAUDE_CODE_NATIVE_CURSOR` and `CLAUDE_CODE_NO_FLICKER` from their
+///   shell rc;
+/// - `CAS_AGENT_MAX_TASKS` is a runtime setting (`config::runtime`).
 const AGENT_ENV_MARKERS: &[&str] = &[
     "CAS_AGENT_NAME",
     "CAS_AGENT_ROLE",
+    "CAS_AGENT_ID",
     "CAS_SESSION_ID",
     "CAS_CLONE_PATH",
     "CAS_SUPERVISOR_NAME",
+    "CAS_FACTORY_MODE",
+    "CAS_FACTORY_SESSION",
+    "CAS_FACTORY_WORKER_NAMES",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CODEX_SANDBOX",
     "CODEX_SANDBOX_NETWORK_DISABLED",
     "CODEX_THREAD_ID",
 ];
-const AGENT_ENV_PREFIXES: &[&str] = &["CAS_FACTORY_", "CAS_AGENT_", "CLAUDE_CODE_", "CODEX_SANDBOX"];
 
 fn agent_ancestor(command_line: &str) -> bool {
     let mut words = command_line.split_whitespace();
@@ -629,12 +645,15 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
 
 /// `subject` states what is operator-only; `remedy` what the operator runs.
 fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> Option<String> {
-    if let Some(marker) = context.env_names.iter().find(|name| {
-        AGENT_ENV_MARKERS.contains(&name.as_str())
-            || AGENT_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-    }) {
+    if let Some(marker) = context
+        .env_names
+        .iter()
+        .find(|name| AGENT_ENV_MARKERS.contains(&name.as_str()))
+    {
         return Some(format!(
-            "refused: {marker} is set, so this runs inside an agent session. {subject}; {remedy}."
+            "refused: {marker} is set, so this runs inside an agent session. {subject}; {remedy}. \
+             If this is your own terminal, it inherited {marker} from an agent pane: open a fresh \
+             terminal and run it there."
         ));
     }
     if let Some(ancestor) = context.ancestors.iter().find(|line| agent_ancestor(line)) {
@@ -978,6 +997,67 @@ mod tests {
         ] {
             assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
         }
+    }
+
+    /// cas-31ec: the operator build knobs `cas` exports (or the operator sets)
+    /// and the operator's own harness preferences are not agent markers. An operator terminal carrying them may launch a
+    /// factory, pair and authorize; a real agent context is still refused by
+    /// its identity variable, harness ancestor or worker cgroup.
+    #[test]
+    fn cas_31ec_operator_build_knobs_do_not_mark_an_agent() {
+        // Build knobs plus the operator's own Claude Code preferences
+        // (~/.bashrc) and runtime settings: none is an agent identity.
+        let knobs = [
+            "HOME",
+            "PATH",
+            "TERM",
+            "CAS_FACTORY_NICE_WORKER",
+            "CAS_FACTORY_CARGO_BUILD_JOBS",
+            "CAS_FACTORY_NICE_LEVEL",
+            "CLAUDE_CODE_NATIVE_CURSOR",
+            "CLAUDE_CODE_NO_FLICKER",
+            "CAS_AGENT_MAX_TASKS",
+            "CODEX_HOME",
+        ];
+        let operator = context(&knobs, &["-bash", "/usr/bin/konsole", "/lib/systemd/systemd --user"], true);
+        for (action, remedy) in [
+            ("Launching a factory", "run `cas factory` yourself from your own terminal"),
+            ("Pairing a Commander device (`cas hub pair`)", "run `cas hub pair` yourself"),
+            ("Authorizing a Commander pairing (`cas hub authorize`)", "run `cas hub authorize` yourself"),
+        ] {
+            assert_eq!(operator_action_refusal(action, remedy, &operator), None, "{action}");
+            assert_eq!(agent_context_refusal(action, remedy, &operator), None, "{action}");
+        }
+        assert_eq!(operator_context_refusal(&operator), None);
+
+        for marker in [
+            "CAS_AGENT_ROLE",
+            "CAS_AGENT_ID",
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CODEX_SANDBOX",
+            "CODEX_SANDBOX_NETWORK_DISABLED",
+            "CAS_FACTORY_MODE",
+            "CAS_FACTORY_SESSION",
+        ] {
+            let mut env = knobs.to_vec();
+            env.push(marker);
+            let refusal = operator_action_refusal("Launching a factory", "run `cas factory`", &context(&env, &["-bash"], true))
+                .unwrap_or_else(|| panic!("{marker} marks an agent"));
+            assert!(refusal.contains(&format!("{marker} is set")), "{refusal}");
+            assert!(refusal.contains("open a fresh terminal"), "{refusal}");
+        }
+        let under_harness = context(&knobs, &["bash -c cas factory", "claude --dangerously-skip-permissions"], true);
+        assert!(
+            operator_action_refusal("Launching a factory", "run `cas factory`", &under_harness)
+                .is_some_and(|refusal| refusal.contains("descends from an agent"))
+        );
+        let mut in_worker = context(&knobs, &["-bash"], true);
+        in_worker.cgroup = "0::/user.slice/app.slice/cas-worker-cassy-zen-viper-42-subtle-gopher-35".into();
+        assert!(
+            operator_action_refusal("Launching a factory", "run `cas factory`", &in_worker)
+                .is_some_and(|refusal| refusal.contains("cgroup"))
+        );
     }
 
     /// cas-3147: the operator-only commands refuse any process that carries

@@ -166,8 +166,8 @@ only_rows="${3:-}"
 reuse_rows=false
 [[ "${2:-}" == --reuse ]] && reuse_rows=true
 # cas-846f: a release assembled from main had no merge sweep, so its full gate
-# must prove every row fresh. The train sets this; nothing here may reuse a row
-# receipt, a sweep receipt or an assembly proof.
+# reuses no row receipt, sweep receipt or row proof. The train sets this; only
+# the integration proof named below may stand for the suite rows (cas-2970).
 no_reuse=false
 if [[ "${CAS_RELEASE_GATE_NO_REUSE:-}" == 1 ]]; then
     if "$reuse_rows"; then
@@ -176,6 +176,25 @@ if [[ "${CAS_RELEASE_GATE_NO_REUSE:-}" == 1 ]]; then
     fi
     no_reuse=true
 fi
+# cas-2970: the merge queue is the integration proof. The train names the one
+# proof its from-main assemble recorded for this code input: `merge-queue` (a
+# successful merge-queue run proved an ancestor with the same code input) or
+# `assembly` (this run's fresh two-context proof). Only a no-reuse full gate
+# honors it, and only for the suite rows that proof ran; every other row,
+# including the version-delta compile, ISA and projection rows, runs fresh.
+integration_proof="${CAS_RELEASE_GATE_INTEGRATION_PROOF:-}"
+case "$integration_proof" in
+    ''|merge-queue|assembly) ;;
+    *)
+        printf 'error: CAS_RELEASE_GATE_INTEGRATION_PROOF must be merge-queue or assembly, not %s\n' "$integration_proof" >&2
+        exit 2
+        ;;
+esac
+[[ "$no_reuse" == true ]] || integration_proof=''
+# Rows the merge queue's successful run executed on its exact tree: the CI
+# script tiers and Commander web checks (preflight), the workspace suite from
+# an archive in a plain checkout (shards), doctests and macOS Check.
+readonly merge_queue_rows=' ci-script-tests hub-web-tests hub-web-dist-drift hub-web-visual-qa macos-check fixture-paths nextest doctests archive-mode '
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -439,7 +458,20 @@ run_check() {
     # (the proof refuses a PASS unless all three passed on its tree). Consume
     # that proof even on the first full gate (cas-398c: ci-script-tests too);
     # --only remains a fresh diagnostic and cannot consume authorization.
-    if [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ \
+    if [[ -z "$only_rows" && "$integration_proof" == merge-queue && "$merge_queue_rows" == *" $name "* \
+        && -f "$repo_root/scripts/assembly-proof.py" ]]; then
+        local queue_pass=''
+        if queue_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check-merge-queue "$repo_root" 2>&1)"; then
+            source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$queue_pass")"
+            print_result PASS "$name" "$command"
+            printf '  reused %s\n' "$queue_pass"
+            printf '%s\n' "$queue_pass" >"$log"
+            printf '%s\t%s\t%s\t0\t0\t0\tREUSED\t%s\n' "$name" "$started" "$started" "$source_sha" >>"$row_log_dir/timing.tsv"
+            return 0
+        fi
+        printf '  %s\n' "$queue_pass"
+    elif [[ -z "$only_rows" && ( "$no_reuse" == false || "$integration_proof" == assembly ) \
+        && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
         if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then

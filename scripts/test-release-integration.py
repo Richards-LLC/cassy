@@ -394,7 +394,8 @@ PY
             "import json, os, sys\n"
             "json.dump({'args': sys.argv[1:],\n"
             "           'cache_dir': os.environ.get('CAS_RELEASE_GATE_CACHE_DIR'),\n"
-            "           'no_reuse': os.environ.get('CAS_RELEASE_GATE_NO_REUSE')},\n"
+            "           'no_reuse': os.environ.get('CAS_RELEASE_GATE_NO_REUSE'),\n"
+            "           'integration_proof': os.environ.get('CAS_RELEASE_GATE_INTEGRATION_PROOF')},\n"
             f"          open({str(record)!r}, 'w'))\n")
         gate.write_text("#!/usr/bin/env bash\npython3 - \"$@\" <<'PY'\n" + script + "PY\n")
         gate.chmod(0o755)
@@ -446,6 +447,85 @@ PY
         self.assertEqual(recorded["args"], ["0.0.0"], "no --reuse or --only")
         self.assertIsNone(recorded["cache_dir"], "the row cache is withheld")
         self.assertEqual(recorded["no_reuse"], "1")
+
+    def cargo_tip(self):
+        """Give the epic tip a Cargo workspace, so assemble owes a proof."""
+        self.git("checkout", "epic/one")
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = []\n')
+        self.git("add", ".")
+        self.git("commit", "-m", "cargo workspace")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("checkout", "release/test")
+
+    def recording_proof(self, queue):
+        """A stand-in assembly-proof.py: records each action, and answers
+        reuse-merge-queue with a PASS or a MISS."""
+        log = Path(self.temp.name) / "proof-calls.log"
+        helper = Path(self.temp.name) / "fake-assembly-proof"
+        helper.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$1\" >>{shlex.quote(str(log))}\n"
+            "case \"$1\" in\n"
+            "  reuse-merge-queue)\n"
+            + ("    printf 'PASS merge-queue receipt=/r.json source_sha=%s tree=t code_input=c run=https://example.invalid/runs/7\\n' "
+               f"{self.tip}\n    exit 0 ;;\n" if queue else
+               "    printf 'MISS merge-queue key=merge_queue_run reason=fixture\\n' >&2\n    exit 1 ;;\n")
+            + "  prove)\n"
+            "    printf 'assembly proof: nextest in fixture\\n'\n"
+            f"    printf 'PASS assembly receipt=/a.json source_sha={self.tip} tree=t code_input=c\\n'\n"
+            "    exit 0 ;;\n"
+            "esac\nexit 9\n")
+        helper.chmod(0o755)
+        self.addCleanup(os.environ.pop, "CAS_RELEASE_TRAIN_ASSEMBLY_PROOF", None)
+        os.environ["CAS_RELEASE_TRAIN_ASSEMBLY_PROOF"] = str(helper)
+        return log
+
+    def test_cas_2970_from_main_reuses_the_merge_queue_proof_without_a_local_suite(self):
+        self.cargo_tip()
+        log = self.recording_proof(queue=True)
+        run = self.assemble_from_main()
+        self.assertEqual(log.read_text().split(), ["reuse-merge-queue"], "no local suite runs")
+        receipt = json.loads((run / "assemble.integration.json").read_text())
+        self.assertEqual(receipt["integration_proof"]["source"], "merge-queue")
+        self.assertEqual(receipt["integration_proof"]["source_sha"], self.tip)
+        self.assertEqual(receipt["integration_proof"]["run"], "https://example.invalid/runs/7")
+        result, record = self.run_gate(internal=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("suite rows reuse the merge-queue proof", result.stdout)
+        recorded = self.wait_for_gate(run, record)
+        self.assertEqual(recorded["args"], ["0.0.0"])
+        self.assertIsNone(recorded["cache_dir"], "the row cache is still withheld")
+        self.assertEqual(recorded["no_reuse"], "1")
+        self.assertEqual(recorded["integration_proof"], "merge-queue")
+
+    def test_cas_2970_from_main_without_a_queue_receipt_proves_fresh_once(self):
+        self.cargo_tip()
+        log = self.recording_proof(queue=False)
+        run = self.assemble_from_main()
+        self.assertEqual(log.read_text().split(), ["reuse-merge-queue", "prove"])
+        receipt = json.loads((run / "assemble.integration.json").read_text())
+        self.assertEqual(receipt["integration_proof"]["source"], "assembly")
+        self.assertEqual(receipt["integration_proof"]["receipt"], "/a.json")
+        result, record = self.run_gate(internal=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        recorded = self.wait_for_gate(run, record)
+        self.assertEqual(recorded["no_reuse"], "1")
+        self.assertEqual(recorded["integration_proof"], "assembly",
+                         "the gate reuses this run's fresh proof instead of a second suite")
+
+    def test_cas_2970_reassembly_drops_a_stale_integration_proof(self):
+        self.cargo_tip()
+        self.recording_proof(queue=True)
+        run = self.assemble_from_main()
+        os.environ["CAS_RELEASE_TRAIN_ASSEMBLY_PROOF"] = "/bin/false"
+        result = subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble", "--from-main"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((run / "assemble.integration.json").read_text())
+        self.assertNotIn("integration_proof", receipt, "a failed proof leaves nothing to reuse")
+        result, record = self.run_gate(internal=True)
+        self.assertIn("every row runs fresh", result.stdout)
+        self.assertIsNone(self.wait_for_gate(run, record)["integration_proof"])
 
     def test_sweep_assembly_gate_keeps_reuse(self):
         # Control: an ordinary sweep-backed assembly keeps its reuse paths.

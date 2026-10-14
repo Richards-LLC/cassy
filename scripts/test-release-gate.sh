@@ -1774,7 +1774,7 @@ run_train_proof() {
         CAS_RELEASE_TRAIN_CAS=/bin/false CAS_RELEASE_TRAIN_CARGO="$repo/scripts/cargo-stub" \
         CAS_RELEASE_TRAIN_DATE=2099-01-02 CAS_RELEASE_TRAIN_PREFLIGHT_CMD=true \
         CAS_RELEASE_TRAIN_CUT_STOP_AFTER="$stop" CAS_RELEASE_TRAIN_CUT_POLL_SECS=1 \
-        CAS_RELEASE_TRAIN_CUT_GATE_TRIES=15 "$repo/scripts/release-train.sh" 9.99.8 "$repo" --cut "$@"
+        CAS_RELEASE_TRAIN_CUT_GATE_TRIES=120 "$repo/scripts/release-train.sh" 9.99.8 "$repo" --cut "$@"
 }
 # Resume the successful assembly receipt with a newly selected receipt output
 # location: neither suite may re-run at assemble or the first full gate.

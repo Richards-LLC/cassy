@@ -215,6 +215,11 @@ def run(command, env=None, directory=None):
     # suite's tree and outlive it (cas-7b7b9); start it outside admission.
     host_memory.start_compiler_cache(env)
     lane = 'taste' if taste_eligible(command) else None
+    # cas-f632: the assembly-headroom stop keeps a local worker suite from
+    # starving the supervisor's assembly proof. A CI job runs on a runner with
+    # its own budget, and stopping it ejects the PR it validates; it is
+    # still admitted (and waits) like any suite, but is never stopped mid-run.
+    ci_job = env.get('GITHUB_ACTIONS') == 'true'
     with host_memory.admission('worker', env, proof.memory_budget, wait, poll, directory,
                                estimate_bytes=estimate(command), lane=lane) as (admitted_env, fds), \
          host_memory.LeaseHolder(fds) as holder:
@@ -240,7 +245,7 @@ def run(command, env=None, directory=None):
                     # budget is ~0 by design; protect the floor instead.
                     if memory['available_bytes'] < host_memory.TASTE_FLOOR_BYTES:
                         raise ValueError('taste lane reached the memory floor; stopping its process group')
-                elif memory['budget_bytes'] < proof.GUARD_HEADROOM_BYTES:
+                elif not ci_job and memory['budget_bytes'] < proof.GUARD_HEADROOM_BYTES:
                     raise ValueError('worker suite reached assembly memory headroom; stopping its process group')
                 time.sleep(poll)
             return child.returncode if child.returncode >= 0 else 128 - child.returncode

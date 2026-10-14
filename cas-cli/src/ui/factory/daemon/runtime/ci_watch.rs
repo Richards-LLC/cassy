@@ -1028,6 +1028,7 @@ pub(crate) fn collect_delivery_pr_observations(
 /// the existing completed-runs listing per minute. A delivery is ejected when
 /// its open PR leaves a previously-observed queue, or when a failed
 /// `merge_group` run proves that ejection after a daemon restart.
+#[cfg(test)]
 pub(crate) fn collect_merge_queue_ejections(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
@@ -1041,6 +1042,7 @@ pub(crate) fn collect_merge_queue_ejections(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn collect_merge_queue_ejections_with_arm_state(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],

@@ -616,7 +616,8 @@ The assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
 dry-run/ignore-error modes removed. A failing script suite retains its output
 and stops assembly before either Rust suite. The full release gate runs this
-same mandatory row before build and Rust test rows. The short `--fast-rows`
+same mandatory row beside its build rows; a failure aborts the gate and
+cancels the build and Rust suite rows still running. The short `--fast-rows`
 lane checks run only `ci-script-tests-changed`: the tier entries whose script
 or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
@@ -838,6 +839,32 @@ including dependency and non-member versions, still requires a new proof.
 The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
+
+The gate runs independent rows concurrently. The 3.51.1 gate ran its rows one
+after another for 29 minutes; its longest row, `release-binary-isa`, took about
+10 minutes. Each row in `scripts/release-gate.sh` declares the resources it
+needs:
+
+- `cpu`: it builds or checks Rust. At most one such row runs per eight cores,
+  and never fewer than two.
+- `mem=<GiB>`: its estimated peak. Admission uses the assembly proof's memory
+  budget, which is MemAvailable minus the reserve and the taste lane. With no
+  heavy row running, one row is always admitted.
+- `excl=host-tests`: it runs test binaries or script fixtures, so only one such
+  row runs at a time, because they share host ports, hub processes and tmpfs.
+- `excl=hub-web`: it uses `hub-web/node_modules`.
+- `writes-tree`: it rewrites an input that `cas` embeds at compile time:
+  `hub-web/dist` or the reference-history ledger. Such a row runs alone, so
+  every other row's reuse lookup and cache receipt see a stable tree.
+- `abort`: its failure cancels every running row after it in canonical order.
+  Every row before it still runs and reports.
+
+The receipt and `timing.tsv` keep canonical row order. Scheduling events go to
+`schedule.tsv` in the row log directory. `CAS_RELEASE_GATE_PARALLEL=1` restores
+sequential execution. `scripts/test-release-gate.sh --replay-timing
+<timing.tsv> [scale]` replays a real gate's row durations through the fixture
+at the given speed-up, and reports the gate's wall time against its longest
+row.
 
 ### Release delivery completion
 
@@ -1381,8 +1408,8 @@ test, and one passing result; intentional signal/atexit children instead prove
 entry into the test body before their early exit.
 
 The full release gate's `hub-web-tests` row runs `npm ci`, `npm run typecheck`,
-and `npm test` before build and Rust suite rows. A failure prevents pipeline
-admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
+and `npm test` beside the build and Rust suite rows. A failure aborts the gate,
+cancels the rows after it, and prevents pipeline admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
 including the repo-level `scripts/visual-qa.mjs` that web tests import and read.
 Both scoped CI lanes use the same conservative paths for `web-check-needed`;
 Markdown fixtures beneath those paths still require web tests. The no-build

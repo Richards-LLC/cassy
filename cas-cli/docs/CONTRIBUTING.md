@@ -1382,10 +1382,15 @@ file, the default contract is unchanged. The layers are:
   pane, which carries agent environment and has no terminal, so it does not
   check either;
 - the grant commands also refuse when they detect any agent environment
-  variable (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_*`,
-  `CAS_CLONE_PATH`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`,
+  identity variable (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_MODE`,
+  `CAS_FACTORY_SESSION`, `CAS_FACTORY_WORKER_NAMES`, `CAS_CLONE_PATH`,
+  `CAS_SUPERVISOR_NAME`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`,
   `CODEX_THREAD_ID`), an agent or Cassy server among the process's
-  ancestors, or no interactive terminal, and need a typed confirmation;
+  ancestors, or no interactive terminal, and need a typed confirmation.
+  Operator build knobs (`CAS_FACTORY_NICE_WORKER`,
+  `CAS_FACTORY_CARGO_BUILD_JOBS`, `CAS_FACTORY_NICE_LEVEL`) are not agent
+  markers: `cas` exports the first two itself when `factory.nice_cargo` or
+  `factory.cargo_build_jobs` is set;
 - `Config::set` refuses the key, so MCP, the config TUI and `cas config reset`
   cannot set roots, and `cas config import` keeps the current value;
 - PreToolUse refuses any agent Bash call of these commands, even when wrapped

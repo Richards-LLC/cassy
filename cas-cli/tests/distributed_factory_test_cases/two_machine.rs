@@ -23,7 +23,7 @@ use super::test_cloud::TestCloud;
 const WIDGETS: &str = "github.com/acme/widgets";
 
 fn operator_cli(machine: &TestMachine, args: &[&str]) -> std::process::Command {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cas"));
+    let mut command = std::process::Command::new(cas::test_paths::cas_binary());
     command
         .args(args)
         .current_dir(machine.cas_dir.parent().unwrap())
@@ -453,7 +453,7 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
         );
     }
     // CLI parity uses the actual binary built with this integration harness.
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cas"))
+    let output = std::process::Command::new(cas::test_paths::cas_binary())
         .args(["peers", "--peer", "sup-b", "--json"])
         .current_dir(alpha.cas_dir.parent().unwrap())
         .env("CAS_ROOT", &alpha.cas_dir)

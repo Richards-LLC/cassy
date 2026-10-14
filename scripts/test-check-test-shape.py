@@ -61,6 +61,52 @@ class Shapes(unittest.TestCase):
     def test_non_rust_text_is_clean(self):
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
+    def test_archive_binary_paths_are_rejected_without_pin_escape(self):
+        for code in [
+            'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',
+            'const BIN: &str = env!(r#"CARGO_BIN_EXE_cas"#);',
+            'fn helper() { Command::new(std::env! /* gap */ (\n"CARGO_BIN_EXE_cas",\n)); }',
+            '// pin: archive contract\nconst BIN: &str = env! { "CARGO_BIN_EXE_cas" };',
+        ]:
+            with self.subTest(code=code):
+                self.assertEqual(
+                    [kind for _, kind in self.hits(code, 'cas-cli/tests/nested/probe.rs')],
+                    ['archive-unsafe Cargo binary path'],
+                )
+        for code in [
+            '// env!("CARGO_BIN_EXE_cas")\nfn helper() {}',
+            'const DOC: &str = r#"env!("CARGO_BIN_EXE_cas")"#;',
+            'fn helper() { Command::new(cas::test_paths::cas_binary()); }',
+            'fn helper() { cas::test_paths::binary("cas", option_env!("CARGO_BIN_EXE_cas").map(Into::into)); }',
+            'const OTHER: &str = env!("CARGO_MANIFEST_DIR");',
+        ]:
+            with self.subTest(code=code):
+                self.assertFalse(self.hits(code, 'cas-cli/tests/probe.rs'))
+        self.assertFalse(self.hits('const BIN: &str = env!("CARGO_BIN_EXE_cas");', 'cas-cli/src/lib.rs'))
+
+    def test_archive_binary_cli_rejects_reintroduction_in_changed_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            path = root/'cas-cli/tests/nested/probe.rs'
+            path.parent.mkdir(parents=True)
+            path.write_text('fn helper() { Command::new(cas::test_paths::cas_binary()); }')
+            git('add', '.')
+            git('commit', '-qm', 'portable base')
+            base = git('rev-parse', 'HEAD')
+            path.write_text('fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }')
+            command = ['python3', str(Path(shape.__file__).resolve())]
+            for args in [[], ['--changed-since', base]]:
+                result = subprocess.run(command+args, cwd=root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('cas-cli/tests/nested/probe.rs:1: archive-unsafe Cargo binary path', result.stdout)
+                self.assertIn('cas::test_paths::cas_binary()', result.stdout)
+                self.assertNotIn('add // pin:', result.stdout)
+
     def test_cli_changed_merge_base_and_invalid_ref(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

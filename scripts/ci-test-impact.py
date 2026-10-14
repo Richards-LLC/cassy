@@ -171,8 +171,12 @@ def plan(root, base, zero, history):
                 selected.update(mapping)
             if any(p.startswith("cas-cli/tests/") for p in paths):
                 selected.add("builtin_archive_portability_test")
+            lib_failed = set()
             for failure in recorded:
-                if failure["package"] == "cas":
+                if failure["package"] == "cas" and failure["binary"] == "cas":
+                    # A unit test in the cas lib: rerun exactly that test (cas-38ac).
+                    lib_failed.add(failure["test"])
+                elif failure["package"] == "cas":
                     matches = {stem for stem, target in mapping.items() if target == failure["binary"]}
                     if not matches:
                         return full(result, "historical binary missing from inventory")
@@ -186,6 +190,13 @@ def plan(root, base, zero, history):
                 root_uncertain = "#[path" in (root / "cas-cli/src/lib.rs").read_text() or re.search(r"\bmod\s+tests\s*\{", (root / "cas-cli/src/lib.rs").read_text())
                 unit_modules = sorted(changed_modules) if not wide and not root_uncertain and changed_modules <= declared else None
                 expressions.append("binary(cas)" if unit_modules is None else "(binary(cas) and (" + " or ".join(f"test({module}::)" for module in unit_modules) + "))")
+            if lib_failed:
+                if "--lib" not in args:
+                    args.append("--lib")
+                    unit_modules = []
+                if unit_modules is not None:
+                    unit_modules = sorted(set(unit_modules) | {test.split("::")[0] for test in lib_failed})
+                expressions.append("(binary(cas) and (" + " or ".join(f"test(={test})" for test in sorted(lib_failed)) + "))")
             for target in sorted({mapping[stem] for stem in selected}):
                 args.extend(["--test", target])
             for stem in sorted(selected):
@@ -194,7 +205,7 @@ def plan(root, base, zero, history):
             if not expressions:
                 return full(result, "no provable affected test target")
             args.extend(["-E", " or ".join(expressions)])
-            result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide else []})
+            result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide or lib_failed else []})
         if not result["commands"]:
             return full(result, "no Rust tests selected; caller requested Rust validation")
         if len(result["commands"]) > 1 and all(command["stems"] is None for command in result["commands"]):
@@ -235,11 +246,21 @@ def collect_history(destination):
         for artifact in selected:
             # Construct the endpoint from a numeric ID, not artifact-controlled URLs.
             archive = zipfile.ZipFile(io.BytesIO(fetch(api + f"/actions/artifacts/{int(artifact['id'])}/zip")))
+            logged = []
+            receipt_uncertain = False
             for info in archive.infolist():
                 if info.filename.endswith("receipt.json") and info.file_size <= 1_000_000:
                     receipt = json.loads(archive.read(info))
                     records.extend(receipt["failures"])
-                    uncertain |= receipt.get("uncertain", False)
+                    receipt_uncertain |= receipt.get("uncertain", False)
+                elif info.filename.endswith(".log") and info.file_size <= 50_000_000:
+                    logged.extend(parse_failures(strip_ansi(archive.read(info).decode(errors="replace"))))
+            # Receipts written before the progress-counter fix recorded a failed
+            # run as uncertain; its uploaded log still names the failures.
+            if receipt_uncertain and logged:
+                records.extend(logged)
+            else:
+                uncertain |= receipt_uncertain
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, zipfile.BadZipFile) as error:
         print("History unavailable; widening selection: " + str(error), file=sys.stderr)
         uncertain = True
@@ -262,18 +283,30 @@ def selected_failure(plan, failure):
     return False
 
 
+def strip_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+
+
+def parse_failures(text):
+    """FAIL lines of an ANSI-stripped nextest log. nextest 0.9.100+ prints a
+    `( 3528/11850)` progress counter after the duration (cas-38ac)."""
+    failures = []
+    for binary, test in re.findall(r"^\s*FAIL\s+\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(\S+)\s*$", text, re.M):
+        package, separator, target = binary.partition("::")
+        if not separator:
+            target = package
+        if SAFE.fullmatch(package) and SAFE.fullmatch(target):
+            failures.append({"package": package, "binary": target, "test": test})
+    return failures
+
+
 def record(plan, logs, status, elapsed, destination, role):
     count = 0
     failures = []
     for path in logs:
-        text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", Path(path).read_text())
+        text = strip_ansi(Path(path).read_text())
         count += sum(map(int, re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:", text)))
-        for binary, test in re.findall(r"^\s*FAIL\s+\[[^\]]*\]\s+(\S+)\s+(\S+)\s*$", text, re.M):
-            package, separator, target = binary.partition("::")
-            if not separator:
-                target = package
-            if SAFE.fullmatch(package) and SAFE.fullmatch(target):
-                failures.append({"package": package, "binary": target, "test": test})
+        failures.extend(parse_failures(text))
     misses = [failure for failure in failures if not selected_failure(plan, failure)] if role == "full" else []
     receipt = {"version": VERSION, "head": plan["head"], "base": plan.get("base"), "role": role, "plan": plan, "selected_test_count": count, "elapsed_seconds": elapsed, "status": status, "failures": failures, "uncertain": status != 0 and not failures, "post_merge_missed": misses, "recall": (len(failures) - len(misses)) / len(failures) if failures and role == "full" else None}
     write(destination, receipt)

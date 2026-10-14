@@ -2249,6 +2249,121 @@ fn epic_close_tip(task: &Task, commit_receipt: Option<&str>, repo: &std::path::P
         .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}^{{commit}}")))
 }
 
+/// cas-e6038: what an epic's full-suite journey receipt must bind to.
+#[derive(Debug, PartialEq, Eq)]
+enum EpicJourneyBinding {
+    /// Unmerged epic: a receipt at exactly this tip, in the epic's own
+    /// artifact directory.
+    ExactTip(String),
+    /// The epic's delivery is already in `trunk`: any trunk commit that
+    /// contains every `contained` commit may carry the receipt.
+    Trunk {
+        trunk: String,
+        trunk_tip: String,
+        contained: Vec<String>,
+        basis: String,
+    },
+}
+
+/// cas-e6038: the trunk ref merged-epic containment is measured against.
+/// With an `origin` remote only `origin/<default>` counts, so a local trunk
+/// ref cannot masquerade as landed; otherwise the local default branch.
+fn epic_trunk_ref(repo: &std::path::Path) -> Option<(String, String)> {
+    let default = resolve_close_gate_default_branch(repo).ok()?;
+    let trunk = if origin_remote_configured(repo) {
+        format!("origin/{default}")
+    } else {
+        default
+    };
+    let tip = resolve_branch_sha(repo, &format!("{trunk}^{{commit}}"))?;
+    Some((trunk, tip))
+}
+
+/// cas-e6038: the delivery anchor of a terminal child that `trunk` contains:
+/// the first of its PR merge commit, merge commit, factory anchor or
+/// auto-commit that resolves and is an ancestor of `trunk`.
+fn child_trunk_anchor(repo: &std::path::Path, child: &Task, trunk: &str) -> Option<String> {
+    let deliverables = &child.deliverables;
+    [
+        deliverables.delivery_pr_merge_commit.as_deref(),
+        deliverables.merge_commit.as_deref(),
+        deliverables.factory_branch_anchor.as_deref(),
+        deliverables.commit_hash.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|anchor| !anchor.is_empty() && is_safe_git_refname(anchor))
+    .filter_map(|anchor| resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")))
+    .find(|sha| git_commit_is_ancestor(repo, sha, trunk))
+}
+
+/// cas-e6038: decide how an epic's journey receipt binds.
+///
+/// - A readable epic tip not yet in trunk keeps the exact-tip rule.
+/// - A readable epic tip already in trunk binds to trunk commits containing it.
+/// - No readable tip and no explicit commit receipt (branchless epic, or a
+///   lane deleted after release): with every child terminal, bind to trunk
+///   commits containing each child's trunk-contained delivery anchor; with
+///   no such anchor, trunk membership alone binds.
+fn epic_journey_binding(
+    task: &Task,
+    commit_receipt: Option<&str>,
+    repo: &std::path::Path,
+    children: impl FnOnce() -> Result<Vec<Task>, String>,
+) -> Result<EpicJourneyBinding, String> {
+    let tip = epic_close_tip(task, commit_receipt, repo);
+    let trunk = epic_trunk_ref(repo);
+    if let Some(tip) = tip {
+        return Ok(match trunk {
+            Some((trunk, trunk_tip)) if git_commit_is_ancestor(repo, &tip, &trunk) => {
+                let basis = format!("epic tip {tip} is contained in {trunk}");
+                EpicJourneyBinding::Trunk { trunk, trunk_tip, contained: vec![tip], basis }
+            }
+            _ => EpicJourneyBinding::ExactTip(tip),
+        });
+    }
+    if commit_receipt.is_some() {
+        return Err("epic journey tip is unreadable".into());
+    }
+    let Some((trunk, trunk_tip)) = trunk else {
+        return Err("epic journey tip is unreadable and no trunk ref resolves".into());
+    };
+    let children = children().map_err(|e| format!("epic journey tip is unreadable and its children could not be read: {e}"))?;
+    if let Some(open) = children.iter().find(|child| !child.is_terminal()) {
+        return Err(format!(
+            "epic journey tip is unreadable and child {} is not terminal",
+            open.id
+        ));
+    }
+    let mut contained = Vec::new();
+    let mut unanchored = Vec::new();
+    for child in &children {
+        match child_trunk_anchor(repo, child, &trunk) {
+            Some(anchor) if !contained.contains(&anchor) => contained.push(anchor),
+            Some(_) => {}
+            None => unanchored.push(child.id.as_str()),
+        }
+    }
+    let label = if task.branch.is_some() { "epic lane is unreadable" } else { "branchless epic" };
+    let mut basis = if contained.is_empty() {
+        format!(
+            "{label} with {} terminal child(ren); no child delivery anchor is contained in {trunk}, so a full receipt on any {trunk} commit stands in",
+            children.len()
+        )
+    } else {
+        format!(
+            "{label} with {} terminal child(ren); receipt must contain {} child delivery anchor(s) in {trunk}",
+            children.len(),
+            contained.len()
+        )
+    };
+    if !unanchored.is_empty() {
+        basis.push_str(&format!("; children without a trunk-contained anchor: {}", unanchored.join(", ")));
+    }
+    Ok(EpicJourneyBinding::Trunk { trunk, trunk_tip, contained, basis })
+}
+
 /// cas-74cb: why an epic's own close may defer its build proof to assembly,
 /// or `None` when it must still carry the scoped proof. Either the epic's
 /// latest passing ASSEMBLY_PROOF head contains the epic tip, or the tip is
@@ -7571,20 +7686,52 @@ impl CasCore {
             && close_project_root.join("hub-web/src").is_dir()
             && close_project_root.join("docs/qa/journeys.md").is_file()
         {
-            let Some(head) = epic_close_tip(&task, req.commit_receipt.as_deref(), &close_project_root) else {
-                return Ok(Self::tool_error("EPIC ASSEMBLY REJECTED: epic journey tip is unreadable"));
+            // cas-e6038: an epic already contained in trunk binds its receipt
+            // to any trunk commit containing its delivery; an unmerged epic
+            // keeps the exact-tip rule.
+            let binding = match epic_journey_binding(
+                &task,
+                req.commit_receipt.as_deref(),
+                &close_project_root,
+                || task_store.get_subtasks(&task.id).map_err(|e| e.to_string()),
+            ) {
+                Ok(binding) => binding,
+                Err(problem) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {problem}"))),
             };
             let assembly_config = self.load_config();
             let paths = crate::config::resolved_factory_artifact_paths(&self.cas_root, assembly_config.factory().artifacts_root.as_deref());
             let artifacts = paths.task_dirs(&task.id)[0].clone();
-            let ctx = crate::qa_evidence::EvidenceContext {
-                task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
-                delivered_head: &head, notes: &task.notes, deployed_origins: &[],
-            };
-            match crate::qa_evidence::journeys::check_epic_journeys(&ctx) {
-                Ok(receipt) => append_close_decision_note(task_store.as_ref(), &mut task,
-                    &format!("Epic full-suite journey receipt accepted: {} (head {head})", receipt.display())),
-                Err(refusal) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {}. Next: {}", refusal.problem, refusal.command))),
+            match binding {
+                EpicJourneyBinding::ExactTip(head) => {
+                    let ctx = crate::qa_evidence::EvidenceContext {
+                        task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
+                        delivered_head: &head, notes: &task.notes, deployed_origins: &[],
+                    };
+                    match crate::qa_evidence::journeys::check_epic_journeys(&ctx) {
+                        Ok(receipt) => append_close_decision_note(task_store.as_ref(), &mut task,
+                            &format!("Epic full-suite journey receipt accepted: {} (head {head})", receipt.display())),
+                        Err(refusal) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {}. Next: {}", refusal.problem, refusal.command))),
+                    }
+                }
+                EpicJourneyBinding::Trunk { trunk, trunk_tip, contained, basis } => {
+                    let ctx = crate::qa_evidence::EvidenceContext {
+                        task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
+                        delivered_head: &trunk_tip, notes: &task.notes, deployed_origins: &[],
+                    };
+                    let trunk_binding = crate::qa_evidence::journeys::TrunkBinding {
+                        trunk: &trunk, contained: &contained, artifacts_root: &paths.project_root,
+                    };
+                    match crate::qa_evidence::journeys::check_merged_epic_journeys(&ctx, &trunk_binding) {
+                        Ok(accepted) => append_close_decision_note(task_store.as_ref(), &mut task, &format!(
+                            "✅ DECISION merged-epic full-suite journey receipt accepted: {} (receipt head {}). \
+                             Basis: {basis}. Containment proof: {}.",
+                            accepted.receipt.display(), accepted.head, accepted.proof
+                        )),
+                        Err(refusal) => return Ok(Self::tool_error(format!(
+                            "EPIC ASSEMBLY REJECTED: {} ({basis}). Next: {}", refusal.problem, refusal.command
+                        ))),
+                    }
+                }
             }
         }
         if close_disposition.requires_delivery_gates()

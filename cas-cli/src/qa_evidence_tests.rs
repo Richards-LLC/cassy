@@ -2549,3 +2549,159 @@ fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_refuse() 
         &source_change
     ));
 }
+
+/// cas-e6038: a merged epic. Its tip commits the selector; `trunk` contains
+/// the tip plus one later commit; `side` descends from the tip off trunk.
+/// Returns the fixture (head = epic tip), the trunk head, the side head and
+/// the root commit (on trunk, older than the tip).
+fn merged_epic_fixture_cas_e6038() -> (Fixture, String, String, String) {
+    let mut fx = Fixture::new();
+    let root = fx.head.clone();
+    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
+    std::fs::write(
+        fx.repo.join("scripts/journeys-for-diff.py"),
+        r#"
+import json, os
+assert len(os.environ['CAS_JOURNEYS_HEAD']) == 40
+print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J7'}]}))
+"#,
+    )
+    .unwrap();
+    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "epic delivery"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "trunk"]);
+    let trunk = commit(&fx.repo, "later.ts", 60);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "side", &fx.head]);
+    let side = commit(&fx.repo, "side.ts", 30);
+    git_ok(&fx.repo, &["checkout", "-q", "trunk"]);
+    (fx, trunk, side, root)
+}
+
+/// Write a receipt for `head` into `dir` and return its path.
+fn receipt_at_cas_e6038(fx: &Fixture, dir: &Path, head: &str, ids: &[&str], scope: &str) -> PathBuf {
+    let written = write_journey_receipt(fx, ids, scope, |v| {
+        v["head_sha"] = serde_json::json!(head);
+        v["base_sha"] = serde_json::json!(head);
+    });
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("journey-receipt.json");
+    std::fs::rename(written, &path).unwrap();
+    path
+}
+
+#[test]
+fn cas_e6038_merged_epic_accepts_descendant_trunk_receipt_from_project_root() {
+    let (fx, trunk, _side, _root) = merged_epic_fixture_cas_e6038();
+    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
+    let other = artifacts_root.join("cas-other");
+    let path = receipt_at_cas_e6038(&fx, &other, &trunk, &["HUB-J1", "HUB-J7"], "full");
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let contained = vec![fx.head.clone()];
+    let binding = journeys::TrunkBinding {
+        trunk: "trunk",
+        contained: &contained,
+        artifacts_root: &artifacts_root,
+    };
+    let accepted = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap();
+    assert_eq!(accepted.head, trunk);
+    assert_eq!(accepted.receipt, path.canonicalize().unwrap());
+    assert!(accepted.proof.contains(&format!("contained in trunk and contains {}", fx.head)), "{}", accepted.proof);
+
+    // The exact-tip rule refuses the same citation: it lives outside the
+    // epic's own directory.
+    assert!(journeys::check_epic_journeys(&ctx).unwrap_err().problem.contains("escapes"));
+
+    // A full receipt missing a catalog journey at the receipt head refuses.
+    receipt_at_cas_e6038(&fx, &other, &trunk, &["HUB-J1"], "full");
+    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
+    assert!(error.problem.contains("HUB-J7"), "{error:?}");
+    assert!(error.command.contains("trunk"), "{error:?}");
+
+    // Affected scope never satisfies an epic.
+    receipt_at_cas_e6038(&fx, &other, &trunk, &["HUB-J1", "HUB-J7"], "affected");
+    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
+    assert!(error.problem.contains("full-suite"), "{error:?}");
+}
+
+#[test]
+fn cas_e6038_merged_epic_refuses_receipts_that_do_not_contain_the_tip() {
+    let (fx, _trunk, side, root) = merged_epic_fixture_cas_e6038();
+    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
+    let contained = vec![fx.head.clone()];
+    let binding = journeys::TrunkBinding {
+        trunk: "trunk",
+        contained: &contained,
+        artifacts_root: &artifacts_root,
+    };
+    // On trunk but older than the epic tip.
+    let path = receipt_at_cas_e6038(&fx, &fx.task_dir, &root, &["HUB-J1", "HUB-J7"], "full");
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
+    assert!(error.problem.contains("does not contain the epic delivery"), "{error:?}");
+    // Contains the tip but is not on trunk.
+    receipt_at_cas_e6038(&fx, &fx.task_dir, &side, &["HUB-J1", "HUB-J7"], "full");
+    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
+    assert!(error.problem.contains("is not a commit contained in trunk"), "{error:?}");
+}
+
+#[test]
+fn cas_e6038_unmerged_epic_refuses_descendant_receipt() {
+    let (fx, trunk, _side, _root) = merged_epic_fixture_cas_e6038();
+    // Exact-tip rule: a descendant receipt in the epic's own directory.
+    let path = receipt_at_cas_e6038(&fx, &fx.task_dir, &trunk, &["HUB-J1", "HUB-J7"], "full");
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let error = journeys::check_epic_journeys(&ctx).unwrap_err();
+    assert!(error.problem.contains("exact delivered tip"), "{error:?}");
+}
+
+#[test]
+fn cas_e6038_branchless_epic_accepts_full_trunk_receipt() {
+    let (fx, trunk, side, _root) = merged_epic_fixture_cas_e6038();
+    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
+    let binding = journeys::TrunkBinding {
+        trunk: "trunk",
+        contained: &[],
+        artifacts_root: &artifacts_root,
+    };
+    let path = receipt_at_cas_e6038(&fx, &fx.task_dir, &trunk, &["HUB-J1", "HUB-J7"], "full");
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let accepted = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap();
+    assert_eq!(accepted.head, trunk);
+    assert_eq!(accepted.proof, format!("receipt head {trunk} is contained in trunk"));
+    // Trunk membership is still required.
+    receipt_at_cas_e6038(&fx, &fx.task_dir, &side, &["HUB-J1", "HUB-J7"], "full");
+    assert!(
+        journeys::check_merged_epic_journeys(&ctx, &binding)
+            .unwrap_err()
+            .problem
+            .contains("not a commit contained in trunk")
+    );
+}
+
+#[test]
+fn cas_e6038_receipt_outside_project_artifacts_root_refuses() {
+    let (fx, trunk, _side, _root) = merged_epic_fixture_cas_e6038();
+    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
+    let foreign = fx.repo.join("foreign");
+    let path = receipt_at_cas_e6038(&fx, &foreign, &trunk, &["HUB-J1", "HUB-J7"], "full");
+    let notes = format!("journey-receipt: {}", path.display());
+    let ctx = journey_context(&fx, &notes);
+    let contained = vec![fx.head.clone()];
+    let binding = journeys::TrunkBinding {
+        trunk: "trunk",
+        contained: &contained,
+        artifacts_root: &artifacts_root,
+    };
+    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
+    assert!(error.problem.contains("escapes the project artifacts root"), "{error:?}");
+    // A relative citation climbing out of the root refuses the same way.
+    let notes = "journey-receipt: ../../repo/foreign/journey-receipt.json".to_string();
+    let ctx = journey_context(&fx, &notes);
+    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
+    assert!(error.problem.contains("escapes the project artifacts root"), "{error:?}");
+}

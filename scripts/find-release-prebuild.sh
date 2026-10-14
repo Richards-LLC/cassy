@@ -14,9 +14,10 @@
 # prompt tag does not silently defeat the fast path. The prebuild is an
 # accelerator; it can never be the reason a release cannot ship.
 #
-# The only accepted match is a *successful* Release Prebuild run whose
-# head_sha is exactly the commit being published, so adopted bytes always come
-# from the tagged tree.
+# The only accepted match is a *successful* Release Prebuild run whose head
+# commit is the commit being published or has exactly its tree (cas-28eb: the
+# release/** push builds the landing tree before the merge queue lands it), so
+# adopted bytes always come from the tagged tree.
 set -euo pipefail
 
 sha="${1:-${GITHUB_SHA:-}}"
@@ -106,9 +107,23 @@ if [[ -z "$repo" ]]; then
     fi
 fi
 
+# Runs for this exact commit, plus recent push runs whose head commit has its
+# tree. A failed tree or recent-run lookup leaves only the exact-commit runs.
+target_tree="$("$gh_bin" api "repos/$repo/git/commits/$sha" --jq .tree.sha 2>/dev/null || true)"
 fetch_runs() {
-    "$gh_bin" api \
-        "repos/$repo/actions/workflows/$workflow/runs?head_sha=$sha&per_page=20" 2>/dev/null
+    local exact recent
+    exact="$("$gh_bin" api \
+        "repos/$repo/actions/workflows/$workflow/runs?head_sha=$sha&per_page=20" 2>/dev/null)" || return 1
+    if [[ "$target_tree" =~ ^[0-9a-f]{40}$ ]] \
+        && recent="$("$gh_bin" api \
+            "repos/$repo/actions/workflows/$workflow/runs?event=push&per_page=30" 2>/dev/null)" \
+        && jq -s --arg tree "$target_tree" \
+            '{workflow_runs: ([.[0].workflow_runs[]?]
+              + [.[1].workflow_runs[]? | select(.head_commit.tree_id == $tree)] | unique_by(.id))}' \
+            <<<"$exact$recent" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s\n' "$exact"
 }
 
 has_pending_run() {

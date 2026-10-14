@@ -285,15 +285,16 @@ if ! "$PUBLISH_TAG"; then
 fi
 
 # Tell the operator, before the tag exists, which publication path the tag will
-# take (cas-3b7c0). The lookup waits for a matching in-flight prebuild for its
-# bounded production timeout, then reports a loud cold-build fallback. The
-# difference between a ~2 minute and a ~15 minute publication is worth knowing
-# before pushing, not after.
+# take (cas-3b7c0). Don't wait here (cas-28eb): the tag workflow's own lookup
+# already waits for an in-flight prebuild of this tree and adopts it, so
+# blocking the tag push only moved that wait in front of it (~11 min on 3.51.1).
 prebuild_status="$(GITHUB_REPOSITORY="${RELEASE_REPO:-Richards-LLC/cassy}" \
-    GITHUB_SHA="$(git rev-parse HEAD)" \
+    GITHUB_SHA="$(git rev-parse HEAD)" RELEASE_PREBUILD_WAIT_SECONDS=0 \
     ./scripts/find-release-prebuild.sh 2>/dev/null || true)"
 if grep -q '^found=true' <<<"$prebuild_status"; then
     echo "Prebuilt release artifacts are ready; the tag will publish without compiling."
+elif grep -q '^reason=prebuild still queued or in progress' <<<"$prebuild_status"; then
+    echo "The Release Prebuild for this tree is still running; the tag workflow waits for it and adopts it."
 else
     echo "NOTE: no prebuilt artifacts for this commit yet — the tag will build them inline (historically 13-26 min)."
     echo "      Wait for the Release Prebuild workflow on this commit to finish if you want the fast path."

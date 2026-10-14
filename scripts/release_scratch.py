@@ -161,10 +161,21 @@ def worktrees(repo):
 
 
 def contains(path, child):
-    return path == child or path in child.parents
+    # `path == child or path in child.parents`, answered on the cached strings
+    # for ordinary absolute paths. Rebuilding every parent as a Path cost about
+    # 4 s per process_uses scan on a busy host, twice per gate run (cas-e919).
+    p, c = str(path), str(child)
+    if p == c:
+        return True
+    if p.startswith("/") and not p.startswith("//") and not c.startswith("//"):
+        return c.startswith(p if p == "/" else p + "/")
+    return path in child.parents
 
 
 def process_uses(path, own_lock_fd=None, lease_managed=False):
+    # Any spelling of a path under `path` contains its last component, so a
+    # probe without it is skipped before the Path parse (cas-e919).
+    name = path.name
     if PROC_ROOT.is_dir():
         for process in PROC_ROOT.iterdir():
             if not process.name.isdigit():
@@ -181,7 +192,8 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
                             and probe.name == str(own_lock_fd)):
                         continue  # Exempt this exact eviction descriptor, not other own outputs.
                     try:
-                        if contains(path, Path(os.readlink(probe))):
+                        target = os.readlink(probe)
+                        if name in target and contains(path, Path(target)):
                             return True
                     except FileNotFoundError:
                         pass
@@ -193,11 +205,12 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
                     if (int(process.name) == os.getpid() and index > 0
                             and arguments[index - 1] == b"--cache" and value in INVENTORY_ROOTS):
                         continue
-                    if value.startswith("/") and contains(path, Path(value)):
+                    if value.startswith("/") and name in value and contains(path, Path(value)):
                         return True
                 for line in (process / "maps").read_text().splitlines():
                     fields = line.split(maxsplit=5)
-                    if len(fields) == 6 and fields[5].startswith("/") and contains(path, Path(fields[5])):
+                    if (len(fields) == 6 and fields[5].startswith("/") and name in fields[5]
+                            and contains(path, Path(fields[5]))):
                         return True
             except FileNotFoundError:
                 if process.exists() and not lease_managed:

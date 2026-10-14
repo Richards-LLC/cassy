@@ -166,7 +166,7 @@ pub fn render_envelope(envelope: &PeerEnvelope) -> String {
 }
 
 /// Percent-escape the characters that could end an attribute or the line.
-fn escape(value: &str) -> String {
+pub(crate) fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -182,7 +182,7 @@ fn escape(value: &str) -> String {
     out
 }
 
-fn unescape(value: &str) -> String {
+pub(crate) fn unescape(value: &str) -> String {
     value
         .replace("%22", "\"")
         .replace("%3C", "<")
@@ -322,6 +322,34 @@ pub fn deliver_claimed(
     factory_session: &str,
     consumer_id: &str,
 ) -> DeliveryReport {
+    deliver_claimed_with(
+        mailbox,
+        queue,
+        agents,
+        canonical_id,
+        alias_class,
+        factory_session,
+        consumer_id,
+        &|_, _| Ok(()),
+    )
+}
+
+/// [`deliver_claimed`], running `on_admitted` for each message once it is in
+/// the local queue (newly or already) and before it is acked. An error leaves
+/// the message unacked, so the cloud redelivers it and `on_admitted` runs
+/// again; it must be idempotent. The factory daemon records epic splits here
+/// (cas-4736).
+#[allow(clippy::too_many_arguments)]
+pub fn deliver_claimed_with(
+    mailbox: &dyn PeerMailbox,
+    queue: &dyn PromptQueueStore,
+    agents: &dyn AgentStore,
+    canonical_id: &str,
+    alias_class: &[String],
+    factory_session: &str,
+    consumer_id: &str,
+    on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
+) -> DeliveryReport {
     let mut report = DeliveryReport::default();
     let recipients: Vec<_> = match agents.list(None) {
         Ok(all) => all
@@ -395,13 +423,21 @@ pub fn deliver_claimed(
             &format!("peer:{}", message.id),
             Some(&QueueOrigin::Daemon),
         ) {
-            Ok(EnqueueIdempotentResult::Created(id)) => {
-                report.delivered += 1;
-                report.admitted.push(id);
-                acks.push((message.id.clone(), PeerAckOutcome::Delivered));
-            }
-            Ok(EnqueueIdempotentResult::AlreadyExists(_)) => {
-                report.duplicates += 1;
+            Ok(admitted) => {
+                if let Err(error) = on_admitted(recipient, message) {
+                    report.errors.push(format!(
+                        "peer message {} admitted, but recording it failed: {error}",
+                        message.id
+                    ));
+                    continue;
+                }
+                match admitted {
+                    EnqueueIdempotentResult::Created(id) => {
+                        report.delivered += 1;
+                        report.admitted.push(id);
+                    }
+                    EnqueueIdempotentResult::AlreadyExists(_) => report.duplicates += 1,
+                }
                 acks.push((message.id.clone(), PeerAckOutcome::Delivered));
             }
             Err(error) => report.errors.push(format!(
@@ -445,7 +481,7 @@ pub fn send_to_peer(
     )
 }
 
-fn send_raw(
+pub(crate) fn send_raw(
     cas_root: &Path,
     sender_agent_id: &str,
     recipient_agent_id: &str,

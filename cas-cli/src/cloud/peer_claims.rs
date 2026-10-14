@@ -221,9 +221,10 @@ impl PeerHold {
     /// caller's tool prefix (e.g. `mcp__cas__`).
     pub fn shared_epic_note(&self, epic_id: &str, prefix: &str) -> String {
         format!(
-            "\n\n👥 SHARED EPIC — {} also works epic {epic_id} (claimed until {}). Agree who takes which children before both of you start the same one: {prefix}coordination action=message target={} summary=\"{epic_id}\" message=\"...\"",
+            "\n\n👥 SHARED EPIC — {} also works epic {epic_id} (claimed until {}). Agree who takes which children before both of you start the same one: {prefix}factory action=epic_split id={epic_id} target={} mine=<ids> theirs=<ids>, or {prefix}coordination action=message target={} summary=\"{epic_id}\" message=\"...\"",
             self.describe(),
             self.until(),
+            self.name(),
             self.name(),
         )
     }
@@ -541,6 +542,14 @@ impl PeerClaims {
         Ok(true)
     }
 
+    /// The agent holding the active claim on `task_id`, if any.
+    pub fn holder(&self, task_id: &str) -> Result<Option<String>, CasError> {
+        Ok(self
+            .coordinator("peer-claims-reader")?
+            .get_lock(&self.key(task_id))?
+            .map(|lock| lock.agent_id))
+    }
+
     pub fn renew(&self, task_id: &str, agent_id: &str, duration_secs: u32) -> Result<(), CasError> {
         self.coordinator(agent_id)?
             .renew(&self.key(task_id), duration_secs)
@@ -637,6 +646,9 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
             }
         }
     }
+    // cas-4736: a supervisor's share of a binding epic split is claimed by
+    // the supervisor itself, without a local lease.
+    report.renewed += crate::cloud::epic_split::renew_split_claims(cas_root, &claims, agent_id, duration);
     report
 }
 

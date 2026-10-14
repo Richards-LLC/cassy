@@ -315,7 +315,15 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
     }
 }
 
+/// After the peers: the epic splits agreed with them (cas-4736), then the
+/// mailbox footer. Both are read fresh from this clone, never cached with
+/// the discovery.
 pub(crate) fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+    section.push_str(&crate::cloud::epic_split::render_splits(cas_root));
+    append_mailbox_health(cas_root, self_id, section);
+}
+
+pub(crate) fn append_mailbox_health(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
     let agents = crate::store::open_agent_store(cas_root).ok();
     if let Some(id) = self_id {
         let session = agents

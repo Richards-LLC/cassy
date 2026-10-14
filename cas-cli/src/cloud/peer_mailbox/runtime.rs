@@ -130,7 +130,9 @@ impl PeerMailboxRuntime {
             if !has_recipient {
                 return Err("no live supervisor in this factory session".into());
             }
-            Ok(deliver_claimed(
+            // cas-4736: record epic split proposals and answers before ack.
+            let cas_dir = self.cas_dir.clone();
+            Ok(deliver_claimed_with(
                 &mailbox,
                 queue.as_ref(),
                 agents.as_ref(),
@@ -138,6 +140,18 @@ impl PeerMailboxRuntime {
                 &crate::cloud::project_aliases_from_config_toml(&self.cas_dir),
                 &self.factory_session,
                 &self.consumer_id,
+                &move |recipient, message| {
+                    match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
+                        crate::cloud::epic_split::Ingested::Ignored(why) => {
+                            tracing::info!(message = %message.id, %why, "epic split message ignored");
+                        }
+                        crate::cloud::epic_split::Ingested::NotASplit => {}
+                        recorded => {
+                            tracing::info!(message = %message.id, ?recorded, "epic split recorded")
+                        }
+                    }
+                    Ok(())
+                },
             ))
         };
         let mut report = run().unwrap_or_else(|error| DeliveryReport {

@@ -32,6 +32,7 @@ WEB_INPUTS = (
     'scripts/assembly-proof.py',
     'scripts/proof_target.py',
     'scripts/release_scratch.py',
+    'scripts/release_env.py',
     # Run inside the CI Commander step.
     'scripts/test-ci-journey-evidence-upload.sh',
     # The decision itself, and the workflow that runs the step.

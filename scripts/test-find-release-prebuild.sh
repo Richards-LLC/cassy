@@ -248,8 +248,8 @@ FAKE_REPO_VIEW='not a slug' unresolvable "$tmp/not-a-checkout" 'a malformed gh a
 unset FAKE_GH_LOG GIT_CEILING_DIRECTORIES
 
 # 12. cas-28eb: the release/** push's run built the landing tree before the
-# merge queue landed it (3.51.1: release/3.51.1 35a177531 and main 5fe54c3d5
-# share tree 2a8b2a34). It is adopted without waiting for main's own run.
+# merge queue landed it (a real release: branch head 35a177531 and main merge
+# 5fe54c3d5 share tree 2a8b2a34). It is adopted without waiting for main's run.
 tree=2a8b2a348aa3b0291dbfeaded555e6a7178f6485
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 printf '{"workflow_runs":[{"id":222,"status":"completed","conclusion":"success","head_sha":"35a177531","head_commit":{"tree_id":"%s"}}]}' \

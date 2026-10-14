@@ -287,7 +287,7 @@ fi
 # Tell the operator, before the tag exists, which publication path the tag will
 # take (cas-3b7c0). Don't wait here (cas-28eb): the tag workflow's own lookup
 # already waits for an in-flight prebuild of this tree and adopts it, so
-# blocking the tag push only moved that wait in front of it (~11 min on 3.51.1).
+# blocking the tag push only moved that wait in front of it (~11 min measured).
 prebuild_status="$(GITHUB_REPOSITORY="${RELEASE_REPO:-Richards-LLC/cassy}" \
     GITHUB_SHA="$(git rev-parse HEAD)" RELEASE_PREBUILD_WAIT_SECONDS=0 \
     ./scripts/find-release-prebuild.sh 2>/dev/null || true)"

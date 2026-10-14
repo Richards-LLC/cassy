@@ -10,7 +10,7 @@ name: Release Prebuild
 # already exist.
 #
 # cas-28eb: it also runs on the release train's `release/**` push, which carries
-# the exact tree that later lands on main (12 of 12 release PRs, 3.45.0-3.51.1).
+# the exact tree that later lands on main (12 of 12 recent release PRs).
 # The build then starts before the merge queue, not after it, and
 # find-release-prebuild.sh adopts a run whose head commit has the tagged
 # commit's tree. An equal tree also means an equal workflow file.

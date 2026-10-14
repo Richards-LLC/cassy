@@ -1382,15 +1382,17 @@ file, the default contract is unchanged. The layers are:
   pane, which carries agent environment and has no terminal, so it does not
   check either;
 - the grant commands also refuse when they detect any agent environment
-  identity variable (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_MODE`,
-  `CAS_FACTORY_SESSION`, `CAS_FACTORY_WORKER_NAMES`, `CAS_CLONE_PATH`,
-  `CAS_SUPERVISOR_NAME`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`,
-  `CODEX_THREAD_ID`), an agent or Cassy server among the process's
-  ancestors, or no interactive terminal, and need a typed confirmation.
-  Operator build knobs (`CAS_FACTORY_NICE_WORKER`,
-  `CAS_FACTORY_CARGO_BUILD_JOBS`, `CAS_FACTORY_NICE_LEVEL`) are not agent
-  markers: `cas` exports the first two itself when `factory.nice_cargo` or
-  `factory.cargo_build_jobs` is set;
+  identity variable (`CAS_AGENT_NAME`, `CAS_AGENT_ROLE`, `CAS_AGENT_ID`,
+  `CAS_SESSION_ID`, `CAS_FACTORY_MODE`, `CAS_FACTORY_SESSION`,
+  `CAS_FACTORY_WORKER_NAMES`, `CAS_CLONE_PATH`, `CAS_SUPERVISOR_NAME`,
+  `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_SANDBOX`,
+  `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_THREAD_ID`), an agent or Cassy
+  server among the process's ancestors, or no interactive terminal, and need
+  a typed confirmation. Markers are exact names, never prefixes: operator
+  build knobs (`CAS_FACTORY_NICE_WORKER`, `CAS_FACTORY_CARGO_BUILD_JOBS`,
+  `CAS_FACTORY_NICE_LEVEL`, the first two exported by `cas` itself), Claude
+  Code preferences (`CLAUDE_CODE_NATIVE_CURSOR`, `CLAUDE_CODE_NO_FLICKER`)
+  and settings such as `CAS_AGENT_MAX_TASKS` are not agent markers;
 - `Config::set` refuses the key, so MCP, the config TUI and `cas config reset`
   cannot set roots, and `cas config import` keeps the current value;
 - PreToolUse refuses any agent Bash call of these commands, even when wrapped

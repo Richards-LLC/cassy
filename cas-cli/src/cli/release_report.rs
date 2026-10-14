@@ -323,7 +323,7 @@ fn parse_stage_pairs(pairs: &str) -> Vec<(String, i64)> {
 /// The report's latency section (cas-2bef): each stage against its versioned
 /// budget with the earlier releases' times, FAILED naming every overrun.
 fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
-    let mut output = String::from("## Pipeline latency\n\n");
+    let mut output = String::from("### Pipeline latency\n\n");
     if evidence.stage_seconds.is_empty() {
         output.push_str(
             "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n",
@@ -347,10 +347,10 @@ fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
             "Budgets are unavailable: this receipt predates scripts/release-stage-budgets.json.\n\n",
         ),
         Some(_) if over.is_empty() => output.push_str(
-            "**Within budget.** Every measured stage met its budget in scripts/release-stage-budgets.json.\n\n",
+            "Within budget: every measured stage met its budget in scripts/release-stage-budgets.json.\n\n",
         ),
         Some(_) => output.push_str(&format!(
-            "**FAILED: {} over budget.** {}. Post-publication files a P0 task for each over-budget release.\n\n",
+            "FAILED: {} over budget. {}. Post-publication files a P0 task for each over-budget release.\n\n",
             over.len(),
             over.iter()
                 .map(|(stage, seconds)| format!(
@@ -369,15 +369,12 @@ fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
             format_duration(*worst)
         ));
     }
-    output
-        .push_str("| Stage | This release | Budget | Status | Earlier releases, oldest first |\n");
-    output.push_str("| --- | ---: | ---: | --- | --- |\n");
     for (stage, seconds) in &evidence.stage_seconds {
         let limit = budget(stage);
         let status = match limit {
-            Some(limit) if *seconds > limit => "FAILED",
-            Some(_) => "ok",
-            None => "no budget",
+            Some(limit) if *seconds > limit => format!("FAILED, budget {}", format_duration(limit)),
+            Some(limit) => format!("ok, budget {}", format_duration(limit)),
+            None => "no budget".to_string(),
         };
         let trend = evidence
             .stage_trend
@@ -390,11 +387,8 @@ fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
             })
             .collect::<Vec<_>>();
         output.push_str(&format!(
-            "| {stage} | {} | {} | {status} | {} |\n",
+            "- {stage}: {} ({status}); earlier releases, oldest first: {}\n",
             format_duration(*seconds),
-            limit
-                .map(format_duration)
-                .unwrap_or_else(|| "none".to_string()),
             if trend.is_empty() {
                 "unavailable".to_string()
             } else {
@@ -1576,7 +1570,6 @@ fn assemble_markdown(
             .map(|count| count.to_string())
             .unwrap_or_else(|| "unavailable".to_string())
     ));
-    output.push_str(&pipeline_latency_section(&sources.release_evidence));
     output.push_str("## What you can do now\n\n");
     output.push_str(&was_now_sections(sources, true));
     output.push_str("\n## Under the hood\n\n");
@@ -1659,6 +1652,9 @@ fn assemble_markdown(
     } else {
         output.push_str("Release receipt: unavailable.\n\n");
     }
+    // cas-2bef: the renderer fixes the top-level sections, so the stage
+    // budgets are a subsection of the evidence.
+    output.push_str(&pipeline_latency_section(&sources.release_evidence));
     if sources.warnings.is_empty() {
         output.push_str("No source warnings.\n");
     } else {
@@ -2653,17 +2649,18 @@ mod tests {
         ));
         let section = pipeline_latency_section(&evidence);
         assert!(
-            section.contains("**FAILED: 2 over budget.** gate took 50m 29s against a 15m 0s budget; publish took 25m 26s against a 20m 0s budget."),
+            section.contains("FAILED: 2 over budget. gate took 50m 29s against a 15m 0s budget; publish took 25m 26s against a 20m 0s budget."),
             "{section}"
         );
         assert!(
             section.contains(
-                "| gate | 50m 29s | 15m 0s | FAILED | v9.97.1 14m 0s · v9.98.1 29m 57s |"
+                "- gate: 50m 29s (FAILED, budget 15m 0s); earlier releases, oldest first: v9.97.1 14m 0s · v9.98.1 29m 57s"
             ),
             "{section}"
         );
         assert!(
-            section.contains("| pr-body | 0s | none | no budget | unavailable |"),
+            section
+                .contains("- pr-body: 0s (no budget); earlier releases, oldest first: unavailable"),
             "{section}"
         );
         assert!(
@@ -2675,9 +2672,9 @@ mod tests {
             "STAGE_SECS=gate:600\nSTAGE_BUDGETS=gate:900\nBUDGET_BREACHES=none\n",
         ));
         let section = pipeline_latency_section(&evidence);
-        assert!(section.contains("**Within budget.**"), "{section}");
+        assert!(section.contains("Within budget: every measured stage"), "{section}");
         assert!(
-            section.contains("| gate | 10m 0s | 15m 0s | ok |"),
+            section.contains("- gate: 10m 0s (ok, budget 15m 0s);"),
             "{section}"
         );
 

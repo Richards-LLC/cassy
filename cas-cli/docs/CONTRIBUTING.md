@@ -914,7 +914,7 @@ main commit that landed that merge. The receipt's `COMMIT_TO_MAIN` holds the
 task count, the median and the worst task, and the worst task is the value
 budgeted. When a stage is over budget:
 
-- `cas release report` marks its Pipeline latency section FAILED and names the
+- `cas release report` marks its Pipeline latency subsection (under Evidence and scope) FAILED and names the
   stage. The section also shows each stage's times from the previous five
   release receipts.
 - post-publication files one P0 task in the budget file's epic, through

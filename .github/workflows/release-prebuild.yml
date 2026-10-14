@@ -248,6 +248,10 @@ jobs:
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      # cas-d8ec: the macOS asset ships without LTO. Measured cold on macos-26
+      # (run 38613693971): 1686 s thin vs 912 s off, +3% size, same startup.
+      # Job-level so the rust-cache key changes with it. Linux keeps thin LTO.
+      CARGO_PROFILE_RELEASE_FAST_LTO: "off"
 
     steps:
       - uses: actions/checkout@v4

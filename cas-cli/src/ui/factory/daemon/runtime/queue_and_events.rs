@@ -9952,7 +9952,7 @@ mod tests {
         prompt_store.init().unwrap();
 
         let sha = "fba7a3365eb0cb6403be9d708e8f03151fc42054";
-        let create = |session: &str, filter: serde_json::Value| {
+        let create = |session: &str, cross_session: bool, filter: serde_json::Value| {
             reminder_store
                 .create_with_scope(
                     "supervisor-1",
@@ -9965,15 +9965,17 @@ mod tests {
                     0,
                     Some(session),
                     Some("origin-session"),
-                    true,
+                    cross_session,
                     None,
                 )
                 .unwrap()
         };
-        let id = create("factory-a", serde_json::json!({"sha": sha, "workflow": "CI"}));
-        // Another factory's row and a row with a corrupt filter are skipped.
-        create("factory-b", serde_json::json!({"sha": sha}));
-        create("factory-a", serde_json::json!({"sha": "zz"}));
+        let id = create("factory-a", true, serde_json::json!({"sha": sha, "workflow": "CI"}));
+        // Another factory's session-scoped row and a row with a corrupt filter
+        // are skipped. (A cross-session row is probed by any factory; its
+        // delivery target decides who may fire it, as for branch conditions.)
+        create("factory-b", false, serde_json::json!({"sha": sha}));
+        create("factory-a", true, serde_json::json!({"sha": "zz"}));
 
         let candidates = super::ci_wake_candidates(reminder_store.as_ref(), "factory-a");
         assert_eq!(candidates.len(), 1);

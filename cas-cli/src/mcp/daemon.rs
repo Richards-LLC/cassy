@@ -338,7 +338,9 @@ pub struct EmbeddedDaemon {
     status: Arc<RwLock<EmbeddedDaemonStatus>>,
     shutdown: Arc<AtomicBool>,
     /// Cloud syncer (if user is logged in)
-    cloud_syncer: Option<Arc<CloudSyncer>>,
+    /// Rebuilt when the project's login changes (cas-66c7); read it through
+    /// [`Self::fresh_cloud_syncer`] or [`Self::cached_cloud_syncer`].
+    cloud_syncer: std::sync::RwLock<Option<Arc<CloudSyncer>>>,
     /// Cloud coordinator for real-time agent registration/heartbeat
     cloud_coordinator: RwLock<Option<CloudCoordinator>>,
     /// Code watcher (if code indexing is enabled)
@@ -401,7 +403,7 @@ impl EmbeddedDaemon {
             activity,
             status: Arc::new(RwLock::new(EmbeddedDaemonStatus::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
-            cloud_syncer,
+            cloud_syncer: std::sync::RwLock::new(cloud_syncer),
             cloud_coordinator: RwLock::new(cloud_coordinator),
             code_watcher,
             #[cfg(feature = "mcp-proxy")]
@@ -427,13 +429,80 @@ impl EmbeddedDaemon {
         self.kick_cloud_presence(id).await;
     }
 
+    /// The project's Cassy Cloud login as cloud.json holds it now, or `None`
+    /// when it is logged out, cloud sync is off for this daemon, or the
+    /// project opted out (`cloud.auto_sync = false`).
+    fn current_cloud_login(&self) -> Option<CloudConfig> {
+        if !self.config.cloud_sync_enabled
+            || crate::cloud::presence::opted_out(&self.config.cas_root)
+        {
+            return None;
+        }
+        CloudConfig::load_from_cas_dir(&self.config.cas_root)
+            .ok()
+            .filter(CloudConfig::is_logged_in)
+    }
+
+    /// The cloud coordinator for presence, rebuilt from cloud.json when the
+    /// project logged in after `cas serve` started, or its token, endpoint or
+    /// team changed since the cached one was built (cas-66c7). A rebuild also
+    /// makes every failing presence record due now. `None` while logged out.
+    async fn fresh_cloud_coordinator(&self) -> Option<CloudCoordinator> {
+        let login = self.current_cloud_login();
+        let mut guard = self.cloud_coordinator.write().await;
+        let Some(login) = login else {
+            *guard = None;
+            return None;
+        };
+        let stale = guard
+            .as_ref()
+            .is_none_or(|coordinator| !coordinator.cloud_config().same_credentials(&login));
+        if stale {
+            *guard = init_cloud_coordinator(&self.config.cas_root);
+            if guard.is_some() {
+                eprintln!("[Cassy] Cloud login changed; presence now uses the current token");
+                if let Some(agent_id) = self.agent_id.read().await.clone() {
+                    crate::cloud::presence::retry_now(&self.config.cas_root, &agent_id);
+                }
+            }
+        }
+        guard.clone()
+    }
+
+    /// The cloud syncer as last built, without checking cloud.json (status
+    /// reads only).
+    fn cached_cloud_syncer(&self) -> Option<Arc<CloudSyncer>> {
+        self.cloud_syncer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The cloud syncer, rebuilt from cloud.json when the project logged in
+    /// after start or its token, endpoint or team changed (cas-66c7).
+    fn fresh_cloud_syncer(&self) -> Option<Arc<CloudSyncer>> {
+        let login = self.current_cloud_login();
+        let mut guard = self.cloud_syncer.write().unwrap_or_else(|e| e.into_inner());
+        let Some(login) = login else {
+            *guard = None;
+            return None;
+        };
+        if guard
+            .as_ref()
+            .is_none_or(|syncer| !syncer.cloud_config().same_credentials(&login))
+        {
+            *guard = init_cloud_syncer(&self.config.cas_root);
+        }
+        guard.clone()
+    }
+
     /// Start one cloud presence tick for `agent_id` in the background
     /// ([`crate::cloud::presence::tick`]): register when unregistered, due
     /// for a retry or refocused; otherwise heartbeat, re-registering when
     /// the cloud answers 404/401. Skipped when the previous tick still runs
     /// or the project has no cloud coordinator.
     async fn kick_cloud_presence(&self, agent_id: String) {
-        let Some(coordinator) = self.cloud_coordinator.read().await.clone() else {
+        let Some(coordinator) = self.fresh_cloud_coordinator().await else {
             return;
         };
         let mut slot = self.presence_task.lock().await;
@@ -649,8 +718,9 @@ impl EmbeddedDaemon {
 
         // Update cloud sync status
         {
-            status.cloud_sync_available = self.cloud_syncer.is_some();
-            if let Some(syncer) = &self.cloud_syncer {
+            let syncer = self.cached_cloud_syncer();
+            status.cloud_sync_available = syncer.is_some();
+            if let Some(syncer) = &syncer {
                 status.cloud_sync_pending = syncer.queue().queue_depth().unwrap_or(0);
             }
         }
@@ -687,7 +757,7 @@ impl EmbeddedDaemon {
             let mut status = self.status.write().await;
             status.running = true;
             {
-                status.cloud_sync_available = self.cloud_syncer.is_some();
+                status.cloud_sync_available = self.cached_cloud_syncer().is_some();
             }
             status.next_maintenance = Some(
                 Utc::now()
@@ -824,7 +894,7 @@ impl EmbeddedDaemon {
         }
 
         // Initial cloud sync: push any stale items from previous sessions, then pull
-        if self.cloud_syncer.is_some() {
+        if self.fresh_cloud_syncer().is_some() {
             eprintln!("[Cassy] Running initial cloud sync (push stale + pull)...");
             match self.run_cloud_sync().await {
                 Ok(result) => {
@@ -861,7 +931,7 @@ impl EmbeddedDaemon {
                 // ActivityTracker forever, which used to leave its local
                 // queue wedged despite the configured 60-second cadence.
                 _ = cloud_sync_interval.tick() => {
-                    if self.cloud_syncer.is_some() {
+                    if self.fresh_cloud_syncer().is_some() {
                         match self.run_cloud_sync().await {
                             Ok(result) => {
                                 let mut status = self.status.write().await;
@@ -1079,7 +1149,7 @@ impl EmbeddedDaemon {
         }
 
         // Final cloud sync: drain any pending items before shutdown
-        if self.cloud_syncer.is_some() {
+        if self.fresh_cloud_syncer().is_some() {
             eprintln!("[Cassy] Running final cloud sync before shutdown...");
             match tokio::time::timeout(Duration::from_secs(10), self.run_cloud_sync()).await {
                 Ok(Ok(result)) => {
@@ -1785,7 +1855,7 @@ impl EmbeddedDaemon {
                 // identity and current epic focus (cas-e477). A replay of an
                 // already-registered agent does not push again. A failure is
                 // recorded and retried by the owning daemon's heartbeat.
-                let coordinator = self.cloud_coordinator.read().await.clone();
+                let coordinator = self.fresh_cloud_coordinator().await;
                 if let Some(coordinator) = coordinator {
                     let cas_root = self.config.cas_root.clone();
                     let agent = agent.clone();
@@ -2090,12 +2160,10 @@ impl EmbeddedDaemon {
     /// Run cloud sync cycle
     async fn run_cloud_sync(&self) -> Result<SyncResult, CasError> {
         let syncer = self
-            .cloud_syncer
-            .as_ref()
+            .fresh_cloud_syncer()
             .ok_or_else(|| CasError::Other("Cloud syncer not available".to_string()))?;
 
         let cas_root = self.config.cas_root.clone();
-        let syncer = Arc::clone(syncer);
 
         // Run in blocking task (ureq is synchronous)
         tokio::task::spawn_blocking(move || {

@@ -629,6 +629,11 @@ impl CloudSyncer {
         self.cloud_config.is_logged_in()
     }
 
+    /// The cloud config (endpoint, login) this syncer was built from.
+    pub fn cloud_config(&self) -> &CloudConfig {
+        &self.cloud_config
+    }
+
     /// Requeue terminal cloud failures whose version gate is satisfied by the
     /// current client before either personal or team push reads the queue.
     pub(crate) fn requeue_version_gated_items(&self) -> Result<usize, CasError> {

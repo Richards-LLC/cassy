@@ -65,6 +65,11 @@ Setup, a walkthrough with real output and a troubleshooting table:
   discovery asks the cloud for this project (`?project=<canonical id>`). A
   project with `cloud.auto_sync = false` keeps its agents out of the registry
   and says `Cloud presence: disabled (cloud.auto_sync=false)`.
+- **Login changes (cas-66c7).** Was: presence and cloud sync kept the login
+  `cas serve` started with, so a late `cas login` or a rotated token never
+  took effect until a restart, while the mailbox already read `receiving`.
+  Now: both pick up cloud.json's current login on the next heartbeat or sync
+  cycle, and a failing registration retries at once with the new token.
 - **Claim safety (cas-0078, cas-f38e).** Was: a refused start could still move
   the cloud claim to the refused agent, a lost claim was never taken back,
   clearing an epic focus left its claim held for up to 30 minutes, and

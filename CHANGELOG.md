@@ -114,6 +114,66 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A release over budget files one P0 task in the pipeline epic, carrying the
   measured time, the budget and the receipt paths. Before this, regressions
   had to be reconstructed by hand from logs.
+
+### Changed — lessons must remove their cause (cas-9734)
+
+- A release failure class that has been learned twice or more can no longer
+  be marked learned again with `learn=<row>`. It needs `task=<id>` naming an
+  open P0 or P1 task whose fix removes the cause. Failure-log entries now
+  record `Recurrence`, `Rung` and `Task`.
+- Lessons tagged `operation:<op>` (`release-cut`, `spawn`, `report`,
+  `epic-close`) are shown as a short checklist when that operation starts.
+- Background-task notices are no longer saved as memories. Migration `m270`
+  backs up and then deletes the existing ones (958 on the reference store);
+  real memories are kept.
+- Each release run records its lesson recurrence rate. The release report
+  shows it, and `cas doctor` shows a five-release trend.
+
+### Changed — the release environment resolves itself (cas-9f61)
+
+- Zig, the scratch base and the toolchain now come from one resolver,
+  `scripts/release_env.py`, shared by the cut preflight, the release gate,
+  the assembly proof and lane compile checks. It is recomputed on every run;
+  nothing has to be exported by hand. `scripts/release_env.py doctor` reports
+  gaps in about a second. A fresh shell on either filesystem of the reference
+  host went from three environment blockers to none.
+
+### Changed — the close gate checks proof scope at park (cas-d6eb)
+
+- A risk=blast-radius delivery whose changes reach a source module that
+  neither its `proof_targets` nor a passing worker test covers is now refused
+  at park, while the worker can still widen the scope. The refusal names the
+  modules and the exact `task action=update proof_targets=…` command. Before
+  this, every such task in 3.51.1 passed verification and then needed a
+  supervisor scope fix.
+- A supervisor scope widening that only adds modules already covered by the
+  worker's test receipts keeps the reviewed proof cycle instead of reopening
+  the task.
+
+### Changed — faster CI and release builds
+
+- Scoped CI on factory branches no longer widens to the whole workspace.
+  nextest's progress counter had broken the failure parser, so every lane ran
+  all 11,850 tests; one real run went from 876 s to 332 s (cas-38ac).
+- The published macOS asset builds without LTO: 1686 s to 912 s cold, 3%
+  larger, same startup (cas-d8ec, measured in cas-f627).
+- The release prebuild starts at the `release/**` push and is adopted when
+  its tree matches, so the publisher no longer waits for it (cas-28eb). Its
+  cache key survives version bumps (cas-542e).
+- The merge queue reuses the release train's proof receipt for the same tree
+  (cas-2970) and runs the Commander web step only when its inputs change
+  (cas-7822). macOS Check runs on main pushes so queue entries compile warm
+  (cas-861c0).
+- `scripts/test-release-gate.sh` runs its sections in parallel: 2165 s to
+  about 115 s. The scratch guard's process scan dropped from 7.6 s to 1.2 s
+  per gate run (cas-e919).
+
+### Added — CI-completed reminders (cas-0f05)
+
+- `coordination action=remind remind_event=ci_completed` with a filter of
+  `{"sha": "<sha>"}`, and optionally `workflow`, fires once when that commit's
+  CI run completes, using the existing CI watcher.
+
 ## [3.52.0] - 2026-10-14
 
 ### Fixed — "Jump to latest" on a phone thread (cas-6a9b)

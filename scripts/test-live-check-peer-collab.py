@@ -330,6 +330,20 @@ class PeerMessageIdTest(unittest.TestCase):
         self.assertIsNone(live_check.peer_message_id("no supervisor or worker named x"))
 
 
+class PeerBlocksTest(unittest.TestCase):
+    def test_a_peer_and_its_session_line_form_one_block(self):
+        view = ("Peers (github.com/x/y, via Cassy\n  Cloud):\n"
+                "  sup-b [stale] on prowl, heartbeat 6m ago\n    session lc-1-b | focus -\n"
+                "  sup-b [live] on prowl, heartbeat 3s ago\n    session lc-1-br | focus -\n"
+                "Epic splits:\n  split-aa [accepted, outgoing] epic cas-1\n")
+        blocks = live_check.peer_blocks(view)
+        live = [blk for blk in blocks if blk.split()[0] == "sup-b" and "session lc-1-br " in blk + " "]
+        self.assertEqual(len(live), 1)
+        self.assertIn("[live]", live[0])
+        self.assertFalse([blk for blk in blocks if blk.split()[0] == "sup-b" and "session lc-1-b " in blk + " "
+                          and "[live]" in blk])
+
+
 class ScratchGuardTest(unittest.TestCase):
     def test_remove_refuses_anything_but_a_live_check_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

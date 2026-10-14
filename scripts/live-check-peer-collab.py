@@ -760,9 +760,9 @@ class Run:
 
         def listed():
             view = self.peers_text(self.a, self.names["a"])
-            line = next((l for l in view.splitlines()
-                         if b in l and f"session {session} " in l + " "), "")
-            return bool(line) and "[live]" in line, view
+            block = next((blk for blk in peer_blocks(view)
+                          if blk.split()[0:1] == [b] and f"session {session} " in blk + " "), "")
+            return bool(block) and "[live]" in block, view
 
         evidence["soundwave_peers"] = self.wait_for(
             "prowl's restarted supervisor live again after failed registrations", listed, 400, interval=10)
@@ -887,6 +887,19 @@ class Run:
         self.teardown_report = report
         self.write("teardown.json", report)
         return report
+
+
+def peer_blocks(view):
+    """Split a `coordination action=peers` view into one text block per peer:
+    a line indented two spaces starts a peer, deeper-indented lines continue it
+    ("  sup-b [live] on prowl, heartbeat 3s ago" / "    session s | focus -")."""
+    blocks = []
+    for line in view.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.strip():
+            blocks.append(line.strip())
+        elif line.startswith("   ") and blocks:
+            blocks[-1] += " " + line.strip()
+    return blocks
 
 
 def peer_message_id(text):

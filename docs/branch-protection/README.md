@@ -135,9 +135,9 @@ That line is also the ledger, so repeated polls and daemon restarts never re-enq
 A parked delivery records the decision in its parent epic's notes, and in its own notes
 when it has no epic.
 
-Tests in `cas-cli/src/ui/factory/daemon/runtime/merge_queue_recovery_tests.rs` replay
-#1198's real ejections. The HUB-J4 flake is re-enqueued once, and the memory-admission stop
-that followed escalates.
+Tests in `cas-cli/src/ui/factory/daemon/runtime/merge_queue_recovery_tests.rs` replay the
+real ejections of PR #1198. The HUB-J4 flake is re-enqueued once, and the memory-admission
+stop that followed escalates.
 
 ## 5. Check names are pinned
 

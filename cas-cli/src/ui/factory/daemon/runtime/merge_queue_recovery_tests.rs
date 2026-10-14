@@ -1,6 +1,7 @@
 //! cas-e369 tests. The logs are the real `gh run view --log-failed` lines for
 //! PR #1198's two 2026-10-14 ejections (HUB-J4 flake, then a memory-admission
-//! stop), trimmed to the lines read; the file list is #1198's real diff.
+//! stop), trimmed to the lines read; the file list is #1198's real diff
+//! less its release-notes draft, whose name carries a version literal.
 
 use super::*;
 use crate::ui::factory::daemon::runtime::ci_watch::{

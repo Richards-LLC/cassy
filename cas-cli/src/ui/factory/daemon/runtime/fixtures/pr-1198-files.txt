@@ -56,7 +56,6 @@ crates/cas-mcp/src/types/ops_secondary.rs
 docs/branch-protection/README.md
 docs/ci/release-fast-publication.md
 docs/factory/cas-src-factory-notes.md
-docs/release-notes/2026-10-14-v3.53.0-slack.md
 scripts/assembly-memory.py
 scripts/assembly-proof.py
 scripts/builtin-contract-phrases.json

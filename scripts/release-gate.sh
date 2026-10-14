@@ -1629,7 +1629,7 @@ check_working_tree() {
     fi
 }
 
-# Row scheduler (cas-dcb4). The 3.51.1 gate ran its rows one after another
+# Row scheduler (cas-dcb4). The gate measured on 2026-10-14 ran its rows one after another
 # for 29 minutes. Each scheduled row now declares what it needs, and
 # independent rows run together:
 #   cpu          builds or checks Rust: at most one per 8 cores (minimum 2).
@@ -1876,7 +1876,7 @@ run_check epic-worktree-zig \
     check_epic_worktree_zig
 # Every remaining row except the final tree check is scheduled. Resources
 # are declared next to each row; see the scheduler above. Memory estimates
-# (GiB) are rounded up from 3.51.1 and assembly-proof figures: an 8 GiB cold
+# (GiB) are rounded up from the 2026-10-14 gate and assembly-proof figures: an 8 GiB cold
 # producer, about 4 GiB plus threads for a test run, 2 GiB for script tiers.
 gate_row publish-toolchain \
     'python3 scripts/check-release-publish-toolchain.py (real zigbuild parser, no build)' \

@@ -39,6 +39,9 @@ pub(super) struct State {
     pub messages: Vec<Value>,
     /// Seconds the fake's clock runs ahead of real time ([`FakeCloud::advance_clock`]).
     pub clock_offset_secs: i64,
+    /// Answers to give instead of serving: (method, path fragment, status,
+    /// times left), as production's rate limiter does ([`FakeCloud::inject_failure`]).
+    pub injected: Vec<(String, String, u16, u32)>,
 }
 
 pub(super) struct FakeCloud {
@@ -64,12 +67,20 @@ impl FakeCloud {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
                 let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                let (status, reply) = handle(
-                    &mut thread_state.lock().unwrap(),
-                    request.method().as_str(),
-                    request.url(),
-                    &body,
-                );
+                let mut state = thread_state.lock().unwrap();
+                let method = request.method().as_str().to_string();
+                let url = request.url().to_string();
+                let injected = state.injected.iter_mut().find(|(m, fragment, _, left)| {
+                    *left > 0 && *m == method && url.contains(fragment.as_str())
+                });
+                let (status, reply) = match injected {
+                    Some(failure) => {
+                        failure.3 -= 1;
+                        (failure.2, json!({"error": "Too many requests"}))
+                    }
+                    None => handle(&mut state, &method, &url, &body),
+                };
+                drop(state);
                 let response = tiny_http::Response::from_string(reply.to_string())
                     .with_status_code(status)
                     .with_header(
@@ -115,6 +126,17 @@ impl FakeCloud {
     /// timestamps all read it, so a test need not sleep.
     pub fn advance_clock(&self, secs: i64) {
         self.state.lock().unwrap().clock_offset_secs += secs;
+    }
+
+    /// Answer the next `times` `method` requests whose URL contains
+    /// `fragment` with `status`, without serving them (e.g. a 429 from
+    /// production's rate limiter).
+    pub fn inject_failure(&self, method: &str, fragment: &str, status: u16, times: u32) {
+        self.state
+            .lock()
+            .unwrap()
+            .injected
+            .push((method.to_string(), fragment.to_string(), status, times));
     }
 
     /// The peer messages addressed to `recipient`.

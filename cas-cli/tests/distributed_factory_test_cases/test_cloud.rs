@@ -705,3 +705,33 @@ fn concurrent_runs_on_one_account_never_see_each_other() {
     let theirs: Vec<String> = other.list_agent_infos().unwrap().into_iter().map(|agent| agent.id).collect();
     assert_eq!(theirs, ["b"], "the second run lists only its own agents");
 }
+
+/// Production rate-limits an account (HTTP 429) when many tests share it.
+/// The proxy retries a limited request, so teardown still shuts every agent
+/// down (the second real-cloud leg left live agents behind exactly this way),
+/// and it records the retries so the limit stays visible.
+#[test]
+fn a_rate_limited_teardown_still_shuts_every_agent_down() {
+    use cas::cloud::CloudCoordinator;
+    use cas::types::Agent;
+    let fake = FakeCloud::start();
+    let cloud = TestCloud::Real(RealCloud::start(fake.url.clone(), "test-token".into()));
+    let mut coordinator = CloudCoordinator::new(cloud.config()).unwrap();
+    coordinator.register(&Agent::new("a".into(), "sup-a".into())).unwrap();
+    coordinator.register(&Agent::new("b".into(), "sup-b".into())).unwrap();
+    fake.inject_failure("POST", "/shutdown", 429, 2);
+    drop(cloud);
+    let state = fake.state.lock().unwrap();
+    assert!(state.agents.values().all(|agent| agent["_shutdown"] == true), "every agent shut down");
+}
+
+/// An account-wide listing keeps exactly the keys production sent: filtering
+/// to the run never adds a key.
+#[test]
+fn run_scoped_listings_keep_productions_keys() {
+    let fake = FakeCloud::start();
+    let real = RealCloud::start(fake.url.clone(), "test-token".into());
+    let (_, locks) = real.call("GET", "/api/agents/locks", None);
+    let keys: BTreeSet<&str> = locks.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, BTreeSet::from(["status", "locks"]), "{locks}");
+}

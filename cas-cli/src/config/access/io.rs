@@ -118,7 +118,7 @@ where
     result
 }
 
-/// Shown when a config file still has the `[jev]` section removed in 3.51.1.
+/// Shown when a config file still has the `[jev]` section, which was removed with Jev (cas-4971).
 const RETIRED_JEV_SECTION_NOTE: &str =
     "Note: the [jev] config section is retired and ignored; remove it from config.toml.";
 

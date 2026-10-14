@@ -1147,7 +1147,7 @@ fn worker_credential_env_round_trip_and_shared_policy_cas_82bc() {
         .unwrap().worker_credential_env.is_empty());
 }
 
-/// cas-4971: Jev was removed in 3.51.1. A config file written by an older
+/// cas-4971: Jev was removed (cas-4971). A config file written by an older
 /// release with a `[jev]` section must still load, keep its other settings,
 /// and lose the retired section on the next save.
 #[test]

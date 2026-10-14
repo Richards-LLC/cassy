@@ -7282,7 +7282,7 @@ This is the body content."#;
         assert!(user_workflow.exists());
     }
 
-    /// cas-4971: Jev was removed in 3.51.1. No catalog ships `cas-jev`, and
+    /// cas-4971: Jev was removed (cas-4971). No catalog ships `cas-jev`, and
     /// both refresh paths (`cas update` project sync and the user-level
     /// prune) remove an installed managed copy while sparing a personal one.
     #[test]

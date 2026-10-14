@@ -113,7 +113,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<crate::logging::LoggingConfig>,
 
-    /// Retired `[jev]` section (the Jev client was removed in 3.51.1).
+    /// Retired `[jev]` section (the Jev client was removed by cas-4971).
     /// Accepted so older config files still load, never written back, and
     /// noted once per process by [`Config::load`].
     #[serde(default, rename = "jev", skip_serializing)]

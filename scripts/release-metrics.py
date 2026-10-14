@@ -12,6 +12,9 @@ before the tag. This reports the whole wall clock and what cost it:
   stage-events.tsv, priced from the block to that stage's next completion (to
   publication if it never completed: `<stage>:<secs>+`).
 - STAGE_SECS: each completed stage's last attempt, start to done.
+- STAGE_BUDGETS and BUDGET_BREACHES (cas-2bef): the versioned budgets in
+  release-stage-budgets.json, and each completed stage over its budget as
+  `<stage>:<secs>/<budget>` (`none` when every stage fits).
 
 Runs recorded before stage events existed report BLOCKER_COUNT from
 blockers.log and their costs as unavailable.
@@ -25,10 +28,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import sys
 import time
 
 UNAVAILABLE = "unavailable"
+BUDGETS = Path(__file__).with_name("release-stage-budgets.json")
+
+
+def budgets() -> dict[str, int]:
+    return {stage: int(secs) for stage, secs in json.loads(BUDGETS.read_text())["budgets"].items()}
 
 
 def epoch_file(path: Path) -> int | None:
@@ -104,7 +113,8 @@ def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
     if run_dir is None or not run_dir.is_dir():
         return [(key, UNAVAILABLE) for key in (
             "REQUESTED_AT_EPOCH", "REQUEST_SOURCE", "CUT_STARTED_AT_EPOCH", "REQUEST_TO_PUBLISHED_SECS",
-            "CUT_TO_PUBLISHED_SECS", "BLOCKER_COUNT", "BLOCKER_COSTS", "BLOCKED_SECS", "STAGE_SECS")]
+            "CUT_TO_PUBLISHED_SECS", "BLOCKER_COUNT", "BLOCKER_COSTS", "BLOCKED_SECS", "STAGE_SECS",
+            "STAGE_BUDGETS", "BUDGET_BREACHES")]
     cut = epoch_file(run_dir / "cut.start.epoch")
     request = epoch_file(run_dir / "release.request.epoch")
     source = "recorded" if request is not None else ("cut-start" if cut is not None else UNAVAILABLE)
@@ -119,14 +129,19 @@ def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
         count = str(len(priced))
         costs = ",".join(f"{stage}:{secs}{'' if resolved else '+'}" for stage, secs, resolved in priced) or "none"
         blocked = str(sum(secs for _, secs, _ in priced))
-        stages = ",".join(f"{stage}:{secs}" for stage, secs in stage_seconds(rows)) or "none"
+        measured = stage_seconds(rows)
+        stages = ",".join(f"{stage}:{secs}" for stage, secs in measured) or "none"
+        limits = budgets()
+        breaches = ",".join(f"{stage}:{secs}/{limits[stage]}" for stage, secs in measured
+                            if stage in limits and secs > limits[stage]) or "none"
     else:
         try:
             legacy = [line.strip() for line in (run_dir / "blockers.log").read_text().splitlines() if line.strip()]
         except OSError:
             legacy = []
         count = str(len(dict.fromkeys(legacy)))
-        costs = blocked = stages = UNAVAILABLE
+        costs = blocked = stages = breaches = UNAVAILABLE
+        limits = budgets()
     return [
         ("REQUESTED_AT_EPOCH", str(request) if request is not None else UNAVAILABLE),
         ("REQUEST_SOURCE", source),
@@ -137,6 +152,8 @@ def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
         ("BLOCKER_COSTS", costs),
         ("BLOCKED_SECS", blocked),
         ("STAGE_SECS", stages),
+        ("STAGE_BUDGETS", ",".join(f"{stage}:{secs}" for stage, secs in limits.items())),
+        ("BUDGET_BREACHES", breaches),
     ]
 
 

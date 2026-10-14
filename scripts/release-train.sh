@@ -53,7 +53,7 @@
 #   CAS_RELEASE_TRAIN_REPORT_POST_CMD default <checkout>/scripts/release-report-post.py
 #   CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS and _DEV_THREAD_TS supplied to the adapter
 #   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
-#   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal and --host-update)
+#   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal, --host-update, budget breach task)
 #   CAS_RELEASE_TRAIN_WORKER_CACHE_CMD  default refresh-worker-build-cache.sh (host-update)
 #   CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS  default 1800 (warn-only cache refresh)
 #   CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO  explicit reason; persists across resumes;

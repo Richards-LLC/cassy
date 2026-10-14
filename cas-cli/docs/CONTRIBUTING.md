@@ -903,6 +903,19 @@ The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 
+Every train stage has a time budget in `scripts/release-stage-budgets.json`.
+Loosening a budget is a reviewed change. `release-metrics.py` compares each
+completed stage in `stage-events.tsv` with its budget, and writes the results
+to `release-latency.receipt` as `STAGE_SECS`, `STAGE_BUDGETS` and
+`BUDGET_BREACHES`. When a stage is over budget:
+
+- `cas release report` marks its Pipeline latency section FAILED and names the
+  stage. The section also shows each stage's times from the previous five
+  release receipts.
+- post-publication files one P0 task in the budget file's epic, through
+  `cas serve`. A marker in the run directory keeps a resumed stage from filing
+  it twice.
+
 ### Release delivery completion
 
 After user-facing changes reach `main`, a source merge is not the delivery

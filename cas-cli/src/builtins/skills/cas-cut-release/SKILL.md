@@ -104,6 +104,8 @@ version and worktree, never a version-keyed path.
    `Violet` hub (never a personal Slack route), report HTML/PDF evidence,
    `cas --version`, and host JSON with `refresh_binary_version`.
    The report's green-to-published latency is named only from verified receipts.
+   A stage over `scripts/release-stage-budgets.json` fails the report's Pipeline
+   latency section, and post-publication files a P0 task in the budget's epic.
 7. Add one epic note per gate run with tip, failed rows, cause class, and
    blocking step. Close only after merge and stranded-branch inspection;
    `stranded_branch_override` requires supervisor proof. Preserve the draft and

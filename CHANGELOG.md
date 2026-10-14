@@ -57,6 +57,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A failed row prints `FIX <row>: …`. A failed run on a committed tip writes
   a FAIL receipt, and the worker park refusal quotes its rows and fixes.
 
+### Added — Release stage budgets fail the report and file a P0 (cas-2bef)
+
+- Every release-train stage has a versioned budget in
+  `scripts/release-stage-budgets.json`. The latency receipt records each
+  stage's time, its budget and any breach.
+- The release report has a new Pipeline latency section. It shows each stage
+  against its budget and the stage's times in the previous five releases. A
+  stage over budget fails the section and is named. The 3.52.0 cut, for
+  example, had a 50-minute gate against a 15-minute budget.
+- A release over budget files one P0 task in the pipeline epic, carrying the
+  measured time, the budget and the receipt paths. Before this, regressions
+  had to be reconstructed by hand from logs.
+
 ### Fixed — QA browser runs are no longer starved by a background assembly proof (cas-833e)
 
 - One positively bounded worker run (a Playwright run capped at four workers,

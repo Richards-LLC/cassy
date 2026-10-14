@@ -180,6 +180,8 @@ struct Run {
     sends: Vec<(String, String, Value)>,
     /// (message id, mapped consumer) of every message leased to the run.
     leases: Vec<(String, String)>,
+    /// Requests the cloud rate-limited (HTTP 429) and the proxy retried.
+    rate_limited: usize,
     transcript: Vec<Value>,
 }
 
@@ -304,6 +306,7 @@ impl RealCloud {
             claims: BTreeSet::new(),
             sends: Vec::new(),
             leases: Vec::new(),
+            rate_limited: 0,
             transcript: Vec::new(),
         }));
         let (thread_server, thread_run) = (Arc::clone(&server), Arc::clone(&run));
@@ -462,15 +465,28 @@ impl RealCloud {
                     .count()
             })
             .unwrap_or(usize::MAX);
+        // Every agent of the run, with or without a project: the account
+        // listing, which the proxy scopes to this run, followed to its end.
         let mut live_agents = Vec::new();
-        for project in &originals {
-            let (_, listed) = self.call("GET", &format!("/api/agents?project={}", urlencode(project)), None);
-            for agent in listed["agents"].as_array().cloned().unwrap_or_default() {
+        let mut query = "limit=500".to_string();
+        for _ in 0..40 {
+            let (_, page) = self.call("GET", &format!("/api/agents?{query}"), None);
+            for agent in page["agents"].as_array().cloned().unwrap_or_default() {
                 if agent["status"] != "shutdown" && recipients.iter().any(|r| agent["id"] == r.as_str()) {
                     live_agents.push(agent["id"].clone());
                 }
             }
+            match (page["next_cursor"].as_str(), page["next_cursor_id"].as_str()) {
+                (Some(at), Some(id)) => {
+                    query = format!("limit=500&cursor={}&cursor_id={}", urlencode(at), urlencode(id));
+                    if let Some(sort) = page["next_sort_cursor"].as_str() {
+                        query.push_str(&format!("&sort_cursor={}", urlencode(sort)));
+                    }
+                }
+                _ => break,
+            }
         }
+        let rate_limited = self.run.lock().unwrap().rate_limited;
         json!({
             "claims_released": leftover_locks == 0,
             "agents_shutdown": live_agents.is_empty(),
@@ -478,6 +494,7 @@ impl RealCloud {
             "agents": recipients.len(),
             "claims": claims.len(),
             "leases_acked": leases.len(),
+            "rate_limited_retries": rate_limited,
         })
     }
 }
@@ -572,15 +589,36 @@ fn forward(run: &Mutex<Run>, method: &str, url: &str, raw: &str) -> (u16, Value)
         mapped_segments.join("/"),
         if mapped_query.is_empty() { String::new() } else { format!("?{mapped_query}") }
     );
-    let request = ureq::request(method, &target)
-        .set("Authorization", &format!("Bearer {}", run.token))
-        .timeout(std::time::Duration::from_secs(20));
-    let result = if raw.is_empty() { request.call() } else { request.set("Content-Type", "application/json").send_json(body.clone()) };
-    let (status, text) = match result {
-        Ok(response) => (response.status(), response.into_string().unwrap_or_default()),
-        Err(ureq::Error::Status(code, response)) => (code, response.into_string().unwrap_or_default()),
-        Err(error) => (599, json!({"error": format!("transport: {error}")}).to_string()),
+    // Many tests share one account, and production rate-limits an account
+    // (429). A limited request is retried with backoff, and every retry is
+    // recorded, so the limit stays visible without failing a test or a
+    // teardown on load alone.
+    let mut retries = 0;
+    let (status, text) = loop {
+        let request = ureq::request(method, &target)
+            .set("Authorization", &format!("Bearer {}", run.token))
+            .timeout(std::time::Duration::from_secs(20));
+        let result = if raw.is_empty() {
+            request.call()
+        } else {
+            request.set("Content-Type", "application/json").send_json(body.clone())
+        };
+        let (status, text, retry_after) = match result {
+            Ok(response) => (response.status(), response.into_string().unwrap_or_default(), None),
+            Err(ureq::Error::Status(code, response)) => {
+                let retry_after = response.header("Retry-After").and_then(|s| s.trim().parse::<u64>().ok());
+                (code, response.into_string().unwrap_or_default(), retry_after)
+            }
+            Err(error) => (599, json!({"error": format!("transport: {error}")}).to_string(), None),
+        };
+        if status != 429 || retries >= 6 {
+            break (status, text);
+        }
+        retries += 1;
+        let wait = retry_after.unwrap_or(1 << retries.min(3)).min(15);
+        std::thread::sleep(std::time::Duration::from_secs(wait));
     };
+    run.rate_limited += retries;
     let answer: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
     // Track what teardown must undo.
     if path == "/api/peer-messages" && status == 200
@@ -608,7 +646,7 @@ fn forward(run: &Mutex<Run>, method: &str, url: &str, raw: &str) -> (u16, Value)
             || (path == "/api/agents" && !original_query.iter().any(|(key, _)| key == "project")));
     if account_wide {
         for list in ["locks", "agents"] {
-            if let Some(items) = answer[list].as_array_mut() {
+            if let Some(items) = answer.get_mut(list).and_then(Value::as_array_mut) {
                 items.retain(|item| {
                     item["task_id"].as_str().is_some_and(|key| key.ends_with(&suffix))
                         || (list == "agents" && item["id"].as_str().is_some_and(|id| id.starts_with(&prefix)))
@@ -624,6 +662,7 @@ fn forward(run: &Mutex<Run>, method: &str, url: &str, raw: &str) -> (u16, Value)
         "request": original_body,
         "forwarded": format!("/{}", mapped_segments.join("/")),
         "status": status,
+        "rate_limited_retries": retries,
         "response": unmapped,
     }));
     (status, unmapped)

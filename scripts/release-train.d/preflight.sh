@@ -472,5 +472,3 @@ cut_stage_preflight() {
     cut_preflight_check_unreleased_tooling
     printf 'preflight passed version=%s worktree=%s\n' "$version" "$worktree"
 }
-
-cut_stage_preflight() { return 0; }

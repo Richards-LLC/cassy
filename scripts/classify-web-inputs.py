@@ -4,14 +4,13 @@
 The Commander step (typecheck, unit tests, build, visual QA, dist drift and the
 journeys) costs ~19 min per merge-queue entry. It runs when the diff changes
 anything that step reads: hub-web itself, the journey catalog, the repo-level
-files hub-web's scripts and tests load, or the CI steps that run it. A change
-elsewhere in scripts/ or .github/ no longer triggers it (cas-7822: PR #1191
+files hub-web's scripts and tests load, or the CI workflow that runs it. A
+change elsewhere in scripts/ or .github/ no longer triggers it (cas-7822: PR #1191
 touched one unrelated script and spent 1132 s in the step).
 
-Fail-closed: any Git or parse failure exits nonzero, and the caller then runs
-the web check. Without PyYAML a changed workflow counts as a web change.
+Fail-closed: a Git failure exits nonzero, and the caller then runs the web
+check.
 """
-import json
 import subprocess
 import sys
 
@@ -35,11 +34,11 @@ WEB_INPUTS = (
     'scripts/release_scratch.py',
     # Run inside the CI Commander step.
     'scripts/test-ci-journey-evidence-upload.sh',
-    # The decision itself.
+    # The decision itself, and the workflow that runs the step.
     'scripts/classify-web-inputs.py',
     '.github/actions/classify-required-diff/',
+    '.github/workflows/ci.yml',
 )
-WORKFLOW = '.github/workflows/ci.yml'
 
 
 def git(*args):
@@ -48,24 +47,6 @@ def git(*args):
 
 def covered(path):
     return any(path == entry or (entry.endswith('/') and path.startswith(entry)) for entry in WEB_INPUTS)
-
-
-def web_steps(ref):
-    """Every workflow step that names hub-web, keyed by job and position."""
-    import yaml  # noqa: PLC0415 - optional; ImportError is handled by the caller
-
-    try:
-        body = git('show', f'{ref}:{WORKFLOW}')
-    except subprocess.CalledProcessError:
-        return None
-    workflow = yaml.safe_load(body) or {}
-    steps = {}
-    for job_name, job in (workflow.get('jobs') or {}).items():
-        for index, step in enumerate((job or {}).get('steps') or []):
-            text = json.dumps(step, sort_keys=True)
-            if 'hub-web' in text:
-                steps[f'{job_name}#{step.get("name") or index}'] = text
-    return steps
 
 
 def main(argv):
@@ -79,12 +60,6 @@ def main(argv):
         print(f'classify-web-inputs: git diff failed: {error.stderr.strip()}', file=sys.stderr)
         return 1
     hits = [path for path in changed if covered(path)]
-    if not hits and WORKFLOW in changed:
-        try:
-            if web_steps(base) != web_steps(head):
-                hits = [f'{WORKFLOW} (a step that names hub-web)']
-        except ImportError:
-            hits = [f'{WORKFLOW} (PyYAML unavailable; any workflow change counts)']
     if hits:
         print(f'classify-web-inputs: {len(hits)} web input(s) changed, first {hits[0]}', file=sys.stderr)
     print('true' if hits else 'false')

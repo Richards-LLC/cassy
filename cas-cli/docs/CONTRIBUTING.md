@@ -1387,7 +1387,7 @@ including the repo-level `scripts/visual-qa.mjs` that web tests import and read.
 CI's `web-check-needed` (both scoped lanes and the merge-queue Commander step:
 build, visual QA, dist drift and journeys) is narrower: `scripts/classify-web-inputs.py`
 lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
-worker-memory wrapper with its imports, and the CI steps that name hub-web. Any
+worker-memory wrapper with its imports, and `.github/workflows/ci.yml`. Any
 other `scripts/` or `.github/` change skips them; a classifier failure runs them.
 `scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
 the list omits. Markdown fixtures beneath hub-web still require web tests. The

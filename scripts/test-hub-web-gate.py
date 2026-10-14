@@ -15,16 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location('classify_web_inputs', ROOT / 'scripts/classify-web-inputs.py')
 WEB = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(WEB)
-WORKFLOW_FIXTURE = '''on: push
-jobs:
-  preflight:
-    steps:
-      - name: Build and test Commander web assets
-        working-directory: hub-web
-        run: npm run journeys -- --workers=4
-      - name: Check
-        run: cargo check
-'''
 
 
 class WebGate(unittest.TestCase):
@@ -173,15 +163,8 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
                 self.assertNotEqual(result['class'], 'docs-only')
                 self.base = self.git('rev-parse', 'HEAD').stdout.strip()
 
-    def test_workflow_runs_web_tests_only_when_a_hub_web_step_changes(self):
-        self.write('.github/workflows/ci.yml', WORKFLOW_FIXTURE)
-        self.commit()
-        self.base = self.git('rev-parse', 'HEAD').stdout.strip()
-        self.write('.github/workflows/ci.yml', WORKFLOW_FIXTURE.replace('cargo check', 'cargo check --locked'))
-        self.commit()
-        self.assertEqual(self.classify()['web-check-needed'], 'false')
-        self.base = self.git('rev-parse', 'HEAD').stdout.strip()
-        self.write('.github/workflows/ci.yml', WORKFLOW_FIXTURE.replace('--workers=4', '--workers=2'))
+    def test_ci_workflow_change_runs_web_tests(self):
+        self.write('.github/workflows/ci.yml', 'on: push\n')
         self.commit()
         self.assertEqual(self.classify()['web-check-needed'], 'true')
 

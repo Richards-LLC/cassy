@@ -92,7 +92,7 @@ runs:
 
         # Web tests read hub-web/ plus named repo-level inputs (the journey
         # catalog, scripts/visual-qa.mjs, the worker-memory wrapper, design
-        # tokens) and the CI steps that run them; scripts/classify-web-inputs.py
+        # tokens) and the CI workflow that runs them; scripts/classify-web-inputs.py
         # owns that list (cas-7822). Decide coverage by paths independently of
         # Rust's class, including Markdown fixtures. An unavailable diff or a
         # failed classifier must still run the checks.

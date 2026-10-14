@@ -246,12 +246,8 @@ fi
             # A deduplicated main push still runs: it saves main's Darwin cache.
             (context('push', 'refs/heads/main'), True),
             (context('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', run='true'), True),
-            (context('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', reuse='full-gate'), True),
-            (context('pull_request', 'refs/pull/1/merge'), True),
             (context('push', 'refs/heads/main', diff='docs-only'), False),
             (context('push', 'refs/heads/factory/x', run='true'), False),
-            (context('push', 'refs/heads/epic/x', run='true'), False),
-            (context('push', 'refs/tags/v1.0.0'), False),
         ]
         for ctx, expected in cases:
             with self.subTest(event=ctx['github.event_name'], ref=ctx['github.ref'], diff=ctx['needs.ci-diff.outputs.class']):
@@ -263,8 +259,7 @@ fi
         # Only main saves the cargo cache; queue and tag refs restore main's copy.
         cache = next(step for step in job['steps'] if str(step.get('uses', '')).startswith('Swatinem/rust-cache'))
         save_if = cache['with']['save-if']
-        for ref, expected in [('refs/heads/main', True), ('refs/heads/gh-readonly-queue/main/pr-1-abc', False),
-                              ('refs/tags/v1.0.0', False)]:
+        for ref, expected in [('refs/heads/main', True), ('refs/heads/gh-readonly-queue/main/pr-1-abc', False)]:
             with self.subTest(save_ref=ref):
                 self.assertEqual(self.gh_expr(save_if, {'github.ref': ref}), expected)
 

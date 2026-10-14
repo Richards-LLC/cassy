@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — the merge queue skips the Commander journeys when only the CI workflow changes (cas-c846)
+
+- `.github/workflows/ci.yml` no longer counts as a Commander web input. A PR
+  whose only non-Commander change is the workflow used to run about 13 minutes
+  of Commander build and journeys in the merge queue. It now skips them.
+  `scripts/test-hub-web-gate.py` pins the step's wiring instead, and the
+  release train still runs the full journeys before publication.
+
+### Added — a merge-queue ejection of an epic PR wakes the supervisor and is retried once (cas-e369)
+
+- The CI watcher now tracks open epics' PRs, not only parked worker
+  deliveries. When the queue ejects one, the supervisor gets a typed wake
+  naming the failing job, the step, the error line and whether the failure
+  touches the PR's diff.
+- A failure outside the diff is re-enqueued once automatically. Examples are an
+  infrastructure stop, or a Commander step failing when no Commander input
+  changed. A second failure on the same head escalates instead of looping.
+  Each decision is recorded in the epic's notes.
+
 ### Changed — The release gate runs independent rows concurrently (cas-dcb4)
 
 - The 3.51.1 gate ran its rows one at a time and took 29 minutes. Its longest

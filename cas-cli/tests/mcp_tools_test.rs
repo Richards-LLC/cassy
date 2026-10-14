@@ -1,6 +1,8 @@
 #[path = "../src/test_env_guard.rs"]
 mod test_env_guard;
 
+#[path = "support/cloud_contract_replay.rs"]
+mod cloud_contract_replay;
 #[path = "mcp_tools_test/support.rs"]
 pub(crate) mod support;
 

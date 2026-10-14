@@ -27,6 +27,8 @@ pub(super) struct State {
     pub agents: BTreeMap<String, Value>,
     pub locks: BTreeMap<String, Value>,
     pub messages: Vec<Value>,
+    /// Seconds the fake's clock runs ahead of real time ([`FakeCloud::advance_clock`]).
+    pub clock_offset_secs: i64,
 }
 
 pub(super) struct FakeCloud {
@@ -96,6 +98,12 @@ impl FakeCloud {
     pub fn age_heartbeat(&self, agent_id: &str, minutes: i64) {
         let at = (Utc::now() - Duration::minutes(minutes)).to_rfc3339();
         self.state.lock().unwrap().agents.get_mut(agent_id).unwrap()["last_heartbeat"] = json!(at);
+    }
+
+    /// Move the fake's clock `secs` forward: liveness, lock expiry and new
+    /// timestamps all read it, so a test need not sleep.
+    pub fn advance_clock(&self, secs: i64) {
+        self.state.lock().unwrap().clock_offset_secs += secs;
     }
 
     /// The peer messages addressed to `recipient`.

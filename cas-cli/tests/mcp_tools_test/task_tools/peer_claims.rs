@@ -860,3 +860,24 @@ async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
     assert!(prompts[0].contains(&expected), "{prompts:?}");
     assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
 }
+
+/// cas-c7c7: this fake's claim routes answer every recorded production
+/// claim exchange (cas-2911 fixtures) with the same status, keys and
+/// literals.
+#[test]
+fn contract_parity_claims_fake_matches_production() {
+    use crate::cloud_contract_replay::{Replay, fixtures};
+    let cloud = FakeCloud::start();
+    let mut replay = Replay::new(&cloud.url, "0c7c7a12");
+    for exchange in fixtures("claims")
+        .into_iter()
+        .filter(|exchange| exchange.path.starts_with("/api/agents/tasks/"))
+    {
+        if exchange.name == "claim_takeover_after_expiry" {
+            // The capture claimed for one second and waited for it to run out.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+        }
+        replay.check(&exchange);
+    }
+    replay.assert_clean();
+}

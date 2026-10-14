@@ -97,3 +97,9 @@ mod two_machine;
 
 #[path = "distributed_factory_test_cases/epic_split.rs"]
 mod epic_split;
+
+#[path = "support/cloud_contract_replay.rs"]
+mod cloud_contract_replay;
+
+#[path = "distributed_factory_test_cases/contract_parity.rs"]
+mod contract_parity;

@@ -13905,7 +13905,11 @@ pub(crate) fn fast_rows_receipt_refusal(
         let fixes = if fixes.is_empty() {
             "- read the failed row logs in the gate output".to_string()
         } else {
-            fixes.iter().map(|line| format!("- {line}")).collect::<Vec<_>>().join("\n")
+            fixes
+                .iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
         return Some(format!(
             "⚠️ FAST ROWS FAILED before {task_id} parks: `release-gate.sh --fast-rows` failed on the \

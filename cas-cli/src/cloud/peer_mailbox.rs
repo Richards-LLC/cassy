@@ -83,6 +83,23 @@ pub struct ClaimedPeerMessage {
     pub created_at: String,
     #[serde(default)]
     pub attempts: u32,
+    /// The sender's machine label, resolved from its registry row
+    /// (`metadata.hostname`) when the message is claimed (cas-c7c7). Shown
+    /// and addressed in place of `sender_machine_id`, the stable identity,
+    /// which stays the fallback for a sender the registry does not list.
+    #[serde(default)]
+    pub sender_label: Option<String>,
+}
+
+impl ClaimedPeerMessage {
+    /// The sender's machine as people see and type it.
+    pub fn sender_machine(&self) -> String {
+        self.sender_label
+            .clone()
+            .or_else(|| self.sender_machine_id.clone())
+            .filter(|machine| !machine.trim().is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 /// Outcome acked for a claimed message.
@@ -132,6 +149,16 @@ pub trait PeerMailbox: Send + Sync {
     }
     fn ack(&self, consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String>;
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String>;
+    /// The machine labels (`metadata.hostname`) of `sender_ids`, from the
+    /// agent registry of `project_id` (cas-c7c7). Senders it cannot find are
+    /// left out, so their messages fall back to `sender_machine_id`.
+    fn sender_labels(
+        &self,
+        _project_id: &str,
+        _sender_ids: &[String],
+    ) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
 }
 
 /// The CAS-written first line of a delivered peer message. Only a
@@ -248,11 +275,7 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
 }
 
 fn machine_of(message: &ClaimedPeerMessage) -> String {
-    message
-        .sender_machine_id
-        .clone()
-        .filter(|machine| !machine.trim().is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    message.sender_machine()
 }
 
 /// Resolve `target` (`name` or `name@machine`) to one peer.
@@ -372,7 +395,7 @@ pub fn deliver_claimed_with(
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
         .collect();
-    let claimed = match mailbox.claim_report(&project_ids, &recipient_ids, consumer_id) {
+    let mut claimed = match mailbox.claim_report(&project_ids, &recipient_ids, consumer_id) {
         Ok(batch) => {
             if !batch.denied.is_empty() {
                 report.errors.push(format!(
@@ -388,6 +411,18 @@ pub fn deliver_claimed_with(
         }
     };
     report.claimed = claimed.len();
+    // cas-c7c7: show each sender under its machine label, not its id.
+    if !claimed.is_empty() {
+        let mut senders: Vec<String> = claimed.iter().map(|m| m.sender_agent_id.clone()).collect();
+        senders.sort();
+        senders.dedup();
+        let labels = mailbox.sender_labels(canonical_id, &senders);
+        for message in claimed.iter_mut() {
+            if let Some(label) = labels.get(&message.sender_agent_id) {
+                message.sender_label = Some(label.clone());
+            }
+        }
+    }
     let mut acks = Vec::new();
     for message in &claimed {
         let recipient = recipients
@@ -660,6 +695,35 @@ struct AckResult {
 }
 
 impl PeerMailbox for HttpPeerMailbox {
+    fn sender_labels(
+        &self,
+        project_id: &str,
+        sender_ids: &[String],
+    ) -> std::collections::HashMap<String, String> {
+        let response = ureq::get(&format!("{}/api/agents", self.endpoint))
+            .timeout(MAILBOX_TIMEOUT)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .query("project", project_id)
+            .query("limit", "500")
+            .call();
+        let Ok(listing) = Self::read::<serde_json::Value>("agent list", response) else {
+            return std::collections::HashMap::new();
+        };
+        listing["agents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|agent| {
+                let id = agent["id"].as_str()?;
+                let label = agent["metadata"][crate::cloud::peers::META_HOSTNAME]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())?;
+                sender_ids.iter().any(|sender| sender == id).then(|| (id.to_string(), label.to_string()))
+            })
+            .collect()
+    }
+
     fn send(&self, message: &PeerSend) -> Result<SendReceipt, String> {
         let body = serde_json::to_value(message).map_err(|error| error.to_string())?;
         Self::read("peer message", self.post("", body))

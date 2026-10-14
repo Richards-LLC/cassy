@@ -40,6 +40,7 @@ fn register(machine: &TestMachine, agent: &Agent) {
     CloudCoordinator::new(config)
         .unwrap()
         .with_canonical_id(resolve_canonical_id(&machine.cas_dir))
+        .with_machine_label(Some(cas::cloud::peers::machine_label_for(&machine.cas_dir)))
         .register_with_focus(agent, Some(EPIC))
         .unwrap();
     open_agent_store(&machine.cas_dir).unwrap().register(agent).unwrap();

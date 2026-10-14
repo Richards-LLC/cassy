@@ -149,6 +149,13 @@ impl ClaimHolder {
         }
     }
 
+    /// The holder on the machine labelled `machine` (a project's own
+    /// label, [`crate::cloud::peers::machine_label_for`]).
+    pub fn on(mut self, machine: &str) -> Self {
+        self.machine = machine.to_string();
+        self
+    }
+
     fn reason(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -254,6 +261,8 @@ pub enum Acquire {
 pub struct PeerClaims {
     config: CloudConfig,
     project: String,
+    /// This machine's label, recorded on every claim it makes (cas-c7c7).
+    label: String,
 }
 
 /// `<task id>~<first 8 hex of sha256(canonical id)>`.
@@ -276,7 +285,8 @@ impl PeerClaims {
             return None;
         }
         let project = crate::cloud::resolve_canonical_id(cas_root)?;
-        Some(Self { config, project })
+        let label = crate::cloud::peers::machine_label_for(cas_root);
+        Some(Self { config, project, label })
     }
 
     pub fn project(&self) -> &str {
@@ -309,7 +319,7 @@ impl PeerClaims {
         is_local: &dyn Fn(&str) -> bool,
     ) -> Acquire {
         let key = self.key(task_id);
-        let reason = ClaimHolder::new(kind, agent_name, &self.project).reason();
+        let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
         let coordinator = match self.coordinator(agent_id) {
             Ok(coordinator) => coordinator,
             Err(error) => return Acquire::Unavailable(error.to_string()),
@@ -375,7 +385,7 @@ impl PeerClaims {
         duration_secs: u32,
     ) -> Acquire {
         let key = self.key(task_id);
-        let reason = ClaimHolder::new(kind, agent_name, &self.project).reason();
+        let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
         let moved = self
             .coordinator(from)
             .and_then(|holder| holder.release(&key))

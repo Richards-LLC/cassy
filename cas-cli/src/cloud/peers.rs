@@ -71,6 +71,24 @@ pub fn machine_label() -> String {
         .unwrap_or_else(crate::types::Agent::get_or_generate_machine_id)
 }
 
+/// The label of the machine running the project at `cas_root`: the
+/// project's `[cloud] machine_label` when set, else [`machine_label`].
+///
+/// cas-c7c7: this one label is what people see and type for a machine:
+/// registration publishes it as [`META_HOSTNAME`], claim holders record it,
+/// and a received peer message shows the sender's. The registered
+/// `machine_id` stays the machine's stable identity and is never displayed
+/// in its place unless the label is unknown.
+pub fn machine_label_for(cas_root: &Path) -> String {
+    crate::config::Config::load(cas_root)
+        .ok()
+        .and_then(|config| config.cloud)
+        .and_then(|cloud| cloud.machine_label)
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(machine_label)
+}
+
 /// The cloud metadata a registration carries so peers can find each other:
 /// the agent's own metadata plus role, repo identity, focus, factory session
 /// and hostname. Empty values are omitted.

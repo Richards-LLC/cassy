@@ -50,6 +50,7 @@ fn message(id: &str, recipient: &str, project: &str, body: &str) -> ClaimedPeerM
         sender_agent_id: "remote-sup".to_string(),
         sender_name: "far-heron-3".to_string(),
         sender_machine_id: Some("box-b".to_string()),
+        sender_label: None,
         sender_session: Some("factory-b".to_string()),
         body: body.to_string(),
         summary: Some(format!("summary {id}")),

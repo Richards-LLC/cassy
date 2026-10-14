@@ -1400,6 +1400,11 @@ pub struct CloudSyncConfig {
     /// Warn when the oldest retryable local change is this old (seconds).
     #[serde(default = "default_cloud_queue_oldest_warning_secs")]
     pub queue_oldest_warning_secs: u64,
+
+    /// The label people see and type for this machine (`name@machine`,
+    /// claim refusals, peer listings). Unset means the hostname (cas-c7c7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_label: Option<String>,
 }
 
 fn default_cloud_sync_interval() -> u64 {
@@ -1428,6 +1433,7 @@ impl Default for CloudSyncConfig {
             max_retries: default_max_retries(),
             queue_pending_warning: default_cloud_queue_pending_warning(),
             queue_oldest_warning_secs: default_cloud_queue_oldest_warning_secs(),
+            machine_label: None,
         }
     }
 }

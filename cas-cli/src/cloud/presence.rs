@@ -199,7 +199,7 @@ pub fn heartbeat_metadata(
         META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS, META_HOSTNAME,
     };
     let mut metadata = serde_json::Map::new();
-    metadata.insert(META_HOSTNAME.into(), crate::cloud::peers::machine_label().into());
+    metadata.insert(META_HOSTNAME.into(), coordinator.machine_label().into());
     if let Some(canonical_id) = coordinator.canonical_id() {
         metadata.insert(META_CANONICAL_ID.into(), canonical_id.into());
     }
@@ -369,7 +369,8 @@ pub fn project_coordinator(cas_root: &Path) -> Option<CloudCoordinator> {
     Some(
         CloudCoordinator::new(config)
             .ok()?
-            .with_canonical_id(crate::cloud::resolve_canonical_id(cas_root)),
+            .with_canonical_id(crate::cloud::resolve_canonical_id(cas_root))
+            .with_machine_label(Some(crate::cloud::peers::machine_label_for(cas_root))),
     )
 }
 

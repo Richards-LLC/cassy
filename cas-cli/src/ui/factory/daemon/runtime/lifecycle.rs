@@ -1,5 +1,9 @@
 use crate::ui::factory::daemon::imports::*;
 
+/// The daemon's refresh tick: reminders and GitHub watcher results are
+/// handled at this cadence.
+pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Persist one worker-health incident and hand it to the supervisor's durable
 /// prompt queue. The detector has already debounced the episode and the event
 /// has already been delivery-revalidated when this runs.
@@ -275,6 +279,10 @@ pub(super) fn enqueue_worker_approval_pending_relay(
 /// a durable instruction in the delivering worker's inbox. The occurrence is
 /// a failed merge-group run ID when available, so a requeue naturally arms a
 /// new episode while repeated polls/restarts stay idempotent.
+///
+/// cas-e369: an empty `worker` is a supervisor-owned epic PR, which has no
+/// worker inbox row. `recovery` adds the failing job, error line, failure
+/// scope and the automatic re-enqueue decision to the wake.
 pub(super) fn enqueue_merge_queue_ejection_relay(
     cas_dir: &std::path::Path,
     task_id: &str,
@@ -282,6 +290,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     pr_number: u64,
     failed_run_id: Option<u64>,
     occurrence: &str,
+    recovery: Option<&super::merge_queue_recovery::EjectionReport>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
@@ -297,14 +306,19 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let detail = match failed_run_id {
+    let kind = if worker.is_empty() { "Epic PR" } else { "Delivery PR" };
+    let mut detail = match failed_run_id {
         Some(run_id) => format!(
-            "Delivery PR #{pr_number} for {task_id} left the merge queue after failed merge_group run {run_id}."
+            "{kind} #{pr_number} for {task_id} left the merge queue after failed merge_group run {run_id}."
         ),
         None => format!(
-            "Delivery PR #{pr_number} for {task_id} left the merge queue without merging (dequeued or auto-merge disarmed)."
+            "{kind} #{pr_number} for {task_id} left the merge queue without merging (dequeued or auto-merge disarmed)."
         ),
     };
+    if let Some(recovery) = recovery {
+        detail.push('\n');
+        detail.push_str(&recovery.detail());
+    }
     let key = format!(
         "merge-queue-ejection:{}:{task_id}:{pr_number}:{occurrence}",
         factory_session.as_deref().unwrap_or("")
@@ -320,6 +334,8 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         "failed_run_id": failed_run_id,
         "detail": detail,
         "occurrence": occurrence,
+        "supervisor_owned": worker.is_empty(),
+        "recovery": recovery.map(super::merge_queue_recovery::EjectionReport::payload),
     })
     .to_string();
     let notification_id = match supervisor_queue.notify_idempotent(
@@ -350,8 +366,13 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
+    let next_step = if recovery.is_some() {
+        ""
+    } else {
+        "\nInspect the failed run and requeue or request changes."
+    };
     let supervisor_body = format!(
-        "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}\nInspect the failed run and requeue or request changes.\n</worker-attention>"
+        "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
     );
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if prompt_queue.enqueue_idempotent(
@@ -359,11 +380,17 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         "supervisor",
         &supervisor_body,
         factory_session.as_deref(),
-        Some(&format!("merge queue ejected: {task_id}")),
+        Some(&match recovery {
+            Some(recovery) => format!(
+                "merge queue ejected: {task_id} PR #{pr_number} ({})",
+                recovery.decision.token()
+            ),
+            None => format!("merge queue ejected: {task_id}"),
+        }),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-outbox:{notification_id}"),
         Some(&cas_store::QueueOrigin::Daemon),
-    ).is_err() || prompt_queue.enqueue_idempotent(
+    ).is_err() || (!worker.is_empty() && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
         &format!("{detail}\nWait for the supervisor's merge recovery instructions before starting other work."),
@@ -372,7 +399,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-worker:{key}"),
         Some(&cas_store::QueueOrigin::Daemon),
-    ).is_err() {
+    ).is_err()) {
         return WorkerAttentionRelayOutcome::Pending;
     }
     let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
@@ -547,7 +574,10 @@ fn persist_ci_watch_results(
     cas_dir: &std::path::Path,
     session_name: &str,
     delivery_pr_observations: Vec<super::ci_watch::DeliveryPrObservation>,
-    ejections: Vec<super::ci_watch::MergeQueueEjection>,
+    ejections: Vec<(
+        super::ci_watch::MergeQueueEjection,
+        Option<super::merge_queue_recovery::EjectionReport>,
+    )>,
     pr_lane_failures: Vec<super::ci_watch::PrLaneFailure>,
     failures: Vec<super::ci_watch::CiFailure>,
 ) {
@@ -568,7 +598,7 @@ fn persist_ci_watch_results(
         }
     }
     relay_delivery_pr_merge_timeouts(cas_dir);
-    for ejection in ejections {
+    for (ejection, recovery) in ejections {
         match enqueue_merge_queue_ejection_relay(
             cas_dir,
             &ejection.task_id,
@@ -576,6 +606,7 @@ fn persist_ci_watch_results(
             ejection.pr_number,
             ejection.failed_run_id,
             &ejection.occurrence,
+            recovery.as_ref(),
         ) {
             WorkerAttentionRelayOutcome::Persisted { notification_id } => {
                 tracing::warn!(
@@ -1635,6 +1666,7 @@ mod worker_attention_tests {
             556,
             Some(32386300052),
             "merge-group-run:32386300052",
+            None,
         );
         let replay = enqueue_merge_queue_ejection_relay(
             &cas_dir,
@@ -1643,6 +1675,7 @@ mod worker_attention_tests {
             556,
             Some(32386300052),
             "merge-group-run:32386300052",
+            None,
         );
         assert!(matches!(
             first,
@@ -1983,6 +2016,7 @@ impl FactoryDaemon {
             spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
             last_external_wake_scan: None,
+            pending_ci_wakes: Vec::new(),
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
         })
     }
@@ -2089,13 +2123,20 @@ impl FactoryDaemon {
                     (
                         Vec<super::ci_watch::CiFailure>,
                         super::ci_watch::MergeQueuePoll,
+                        Vec<(
+                            super::ci_watch::MergeQueueEjection,
+                            Option<super::merge_queue_recovery::EjectionReport>,
+                        )>,
                         Vec<super::ci_watch::DeliveryPrObservation>,
+                        (Vec<super::ci_watch::CiWake>, bool),
                     ),
                     super::ci_watch::CiWatchError,
                 >,
             >,
         > = None;
         let mut ci_watch_unavailable_reported = false;
+        // cas-0f05: poll faster while a `ci_completed` reminder is pending.
+        let mut ci_wake_pending = false;
         // Queue membership is intentionally process-local: the durable relay
         // key is the recovery boundary. A failed merge_group run also lets the
         // first poll after a daemon restart recover a real ejection.
@@ -2132,7 +2173,7 @@ impl FactoryDaemon {
             self.app.cas_dir(),
             &self.session_name,
         );
-        let refresh_interval = Duration::from_secs(2);
+        let refresh_interval = DAEMON_REFRESH_INTERVAL;
         let poll_interval = Duration::from_millis(100);
 
         let mut prompt_notified = false;
@@ -2286,8 +2327,13 @@ impl FactoryDaemon {
                 // No supervisor action is required to notice a red run: the
                 // completed result below becomes a lifecycle-wake relay.
                 if ci_watch_task.is_none()
-                    && last_ci_watch.elapsed() >= super::ci_watch::CI_WATCH_INTERVAL
+                    && last_ci_watch.elapsed()
+                        >= super::ci_watch::ci_watch_interval(
+                            ci_wake_pending,
+                            !last_merge_queue_membership.is_empty(),
+                        )
                 {
+                    let session_name = self.session_name.clone();
                     let project = self.app.project_path().to_path_buf();
                     // GH #1165: the AwaitingMerge read runs with the GitHub
                     // calls on the blocking pool, not on this loop.
@@ -2316,21 +2362,54 @@ impl FactoryDaemon {
                     }
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
                         let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
+                        let supervisor_prs =
+                            super::merge_queue_recovery::supervisor_prs(&watch_cas_dir);
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
+                        let candidates = super::queue_and_events::ci_completed_candidates(
+                            &watch_cas_dir,
+                            &session_name,
+                        );
+                        let ci_wakes = (
+                            super::ci_watch::collect_ci_wakes(&transport, &candidates),
+                            !candidates.is_empty(),
+                        );
                         let failures =
                             super::ci_watch::collect_failures(&transport, &watched_branches)?;
-                        let queue_poll = super::ci_watch::collect_merge_queue_ejections_with_arm_state(
+                        let mut queue_poll = super::ci_watch::collect_tracked_merge_queue_ejections(
                             &transport,
                             &deliveries,
+                            &supervisor_prs,
                             &previously_queued,
                             &previously_armed,
                         )?;
+                        // cas-e369: diagnose each ejection and re-enqueue once
+                        // when its failure is outside the PR's diff. GitHub
+                        // calls stay on this blocking task (GH #1165).
+                        let ejections = std::mem::take(&mut queue_poll.ejections)
+                            .into_iter()
+                            .map(|mut ejection| {
+                                let report = super::merge_queue_recovery::recover(
+                                    &watch_cas_dir,
+                                    &transport,
+                                    &mut ejection,
+                                    chrono::Utc::now(),
+                                );
+                                if report.decision
+                                    == super::merge_queue_recovery::RecoveryDecision::AutoRequeued
+                                {
+                                    // The next poll sees it as queued, so a
+                                    // later exit is a fresh episode.
+                                    queue_poll.queued_prs.insert(ejection.pr_number);
+                                }
+                                (ejection, Some(report))
+                            })
+                            .collect::<Vec<_>>();
                         let delivery_pr_observations =
                             super::ci_watch::collect_delivery_pr_observations(
                                 &transport,
                                 &deliveries,
                             )?;
-                        Ok((failures, queue_poll, delivery_pr_observations))
+                        Ok((failures, queue_poll, ejections, delivery_pr_observations, ci_wakes))
                     }));
                     last_ci_watch = std::time::Instant::now();
                 }
@@ -2338,15 +2417,22 @@ impl FactoryDaemon {
                 if ci_watch_task.as_ref().is_some_and(JoinHandle::is_finished) {
                     let task = ci_watch_task.take().expect("checked above");
                     match task.await {
-                        Ok(Ok((failures, queue_poll, delivery_pr_observations))) => {
+                        Ok(Ok((
+                            failures,
+                            queue_poll,
+                            ejections,
+                            delivery_pr_observations,
+                            (ci_wakes, pending),
+                        ))) => {
                             ci_watch_unavailable_reported = false;
+                            ci_wake_pending = pending;
+                            self.pending_ci_wakes.extend(ci_wakes);
                             last_merge_queue_membership = queue_poll.queued_prs;
                             last_auto_merge_membership = queue_poll.auto_merge_prs;
                             // GH #1165: persisting the results is store work;
                             // it runs on the store worker, in order.
                             let cas_dir = self.app.cas_dir().to_path_buf();
                             let session_name = self.session_name.clone();
-                            let ejections = queue_poll.ejections;
                             let lane_failures = queue_poll.pr_lane_failures;
                             store_worker.submit("ci watch results", move || {
                                 persist_ci_watch_results(

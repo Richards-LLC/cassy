@@ -24,6 +24,22 @@ pub(crate) const CI_WATCH_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const EXTERNAL_WAKE_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 pub(crate) const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
+/// cas-0f05: fires once every GitHub Actions run for a commit has completed.
+pub(crate) const EXTERNAL_CI_COMPLETED_EVENT: &str = "ci_completed";
+/// The watcher's cadence while a `ci_completed` reminder is pending, so a
+/// completed run wakes the supervisor within a minute.
+pub(crate) const CI_WAKE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// cas-e369: poll at the faster wake cadence while a `ci_completed` reminder
+/// is pending or a tracked PR sits in the merge queue, so an ejection reaches
+/// the supervisor within 30 s.
+pub(crate) fn ci_watch_interval(ci_wake_pending: bool, tracked_pr_queued: bool) -> Duration {
+    if ci_wake_pending || tracked_pr_queued {
+        CI_WAKE_INTERVAL
+    } else {
+        CI_WATCH_INTERVAL
+    }
+}
 const EXTERNAL_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const REQUIRED_PR_LANE_CHECK: &str = "Scoped Validation (factory/PR)";
@@ -107,11 +123,134 @@ pub(crate) trait CiTransport {
         &self,
         branch: &str,
     ) -> Result<Vec<DeliveryPullRequest>, CiWatchError>;
+    /// cas-0f05: every run for one commit, whatever its status.
+    fn runs_for_sha(&self, _sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
+        Ok(Vec::new())
+    }
+    /// cas-e369: the run's first failed job and, when known, its failed step.
+    fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
+        Ok(self.failing_job(run_id)?.map(|name| FailedJob { name, step: None }))
+    }
+    /// cas-e369: the PR's changed paths, or `None` when they cannot be read.
+    /// An unknown diff never counts as "outside the diff".
+    fn pull_request_files(&self, _pr_number: u64) -> Result<Option<Vec<String>>, CiWatchError> {
+        Ok(None)
+    }
+    /// cas-e369: put the PR back in the merge queue, bound to the head that
+    /// was ejected so a newer push is never queued unreviewed.
+    fn enqueue_pull_request(&self, _pr_node_id: &str, _head_sha: &str) -> Result<(), CiWatchError> {
+        Err(CiWatchError::Unavailable(
+            "merge-queue re-enqueue is unavailable on this transport".to_string(),
+        ))
+    }
+}
+
+/// cas-e369: a failed job and the step inside it that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedJob {
+    pub name: String,
+    pub step: Option<String>,
+}
+
+/// A `ci_completed` reminder filter: `{"sha":"<sha>","workflow":"CI"}`, the
+/// workflow being optional. GitHub's `head_sha` filter needs the full SHA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CiCompleted {
+    pub sha: String,
+    pub workflow: Option<String>,
+}
+
+pub(crate) fn parse_ci_completed(filter: &serde_json::Value) -> Result<CiCompleted, String> {
+    let field = |name: &str| filter.get(name).and_then(serde_json::Value::as_str).map(str::trim);
+    let sha = field("sha")
+        .filter(|sha| sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or("ci_completed remind_filter requires `sha`, the full 40-character commit SHA")?;
+    Ok(CiCompleted {
+        sha: sha.to_ascii_lowercase(),
+        workflow: field("workflow").filter(|w| !w.is_empty()).map(str::to_string),
+    })
+}
+
+/// The commit's runs once every one has completed; `None` while any is still
+/// queued or running, or before the first run exists. Scheduled runs count
+/// only when their workflow is named: they run on the default-branch tip on a
+/// timer, and some sit queued for days.
+pub(crate) fn ci_completed_runs(
+    transport: &impl CiTransport,
+    condition: &CiCompleted,
+) -> Result<Option<Vec<CiRun>>, CiWatchError> {
+    let runs: Vec<CiRun> = transport
+        .runs_for_sha(&condition.sha)?
+        .into_iter()
+        .filter(|run| match &condition.workflow {
+            Some(workflow) => &run.name == workflow,
+            None => run.event != "schedule",
+        })
+        .collect();
+    let done = !runs.is_empty() && runs.iter().all(|run| run.status == "completed");
+    Ok(done.then_some(runs))
+}
+
+/// Probe each pending `ci_completed` reminder once; a failed read leaves
+/// the row pending for the next poll.
+pub(crate) fn collect_ci_wakes(
+    transport: &impl CiTransport,
+    candidates: &[(cas_store::Reminder, CiCompleted)],
+) -> Vec<CiWake> {
+    let wake = |(reminder, condition): &(cas_store::Reminder, CiCompleted)| {
+        match ci_completed_runs(transport, condition) {
+            Ok(runs) => runs.map(|runs| CiWake {
+                reminder: reminder.clone(),
+                condition: condition.clone(),
+                runs,
+            }),
+            Err(error) => {
+                tracing::warn!(reminder_id = reminder.id, %error, "ci_completed probe unavailable");
+                None
+            }
+        }
+    };
+    candidates.iter().filter_map(wake).collect()
+}
+
+/// A `ci_completed` reminder whose runs have all completed.
+#[derive(Debug, Clone)]
+pub(crate) struct CiWake {
+    pub reminder: cas_store::Reminder,
+    pub condition: CiCompleted,
+    pub runs: Vec<CiRun>,
+}
+
+impl CiWake {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        let passed = |run: &CiRun| {
+            matches!(run.conclusion.as_deref(), Some("success" | "skipped" | "neutral"))
+        };
+        serde_json::json!({
+            "sha": self.condition.sha,
+            "workflow": self.condition.workflow,
+            "outcome": if self.runs.iter().all(passed) { "success" } else { "failure" },
+            "runs": self.runs.iter().map(|run| serde_json::json!({
+                "name": run.name, "conclusion": run.conclusion, "url": run.html_url,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    pub(crate) fn description(&self) -> String {
+        let run = |run: &CiRun| {
+            let conclusion = run.conclusion.as_deref().unwrap_or("unknown");
+            format!("{} {conclusion} {}", run.name, run.html_url)
+        };
+        let runs: Vec<String> = self.runs.iter().map(run).collect();
+        format!("CI completed for {}: {}", &self.condition.sha[..12], runs.join("; "))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CiRun {
     pub id: u64,
+    #[serde(default)]
+    pub name: String,
     pub head_branch: String,
     pub head_sha: String,
     pub html_url: String,
@@ -119,6 +258,9 @@ pub(crate) struct CiRun {
     pub conclusion: Option<String>,
     #[serde(default)]
     pub event: String,
+    /// RFC 3339; for a completed run, when it finished (cas-e369).
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +303,9 @@ pub(crate) struct DeliveryPrObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct MergeQueuePullRequest {
+    /// GraphQL node ID, needed to re-enqueue the PR (cas-e369).
+    #[serde(default)]
+    pub id: String,
     pub number: u64,
     #[serde(rename = "headRefName")]
     pub head_branch: String,
@@ -206,6 +351,22 @@ pub(crate) struct MergeQueueEjection {
     pub pr_number: u64,
     pub failed_run_id: Option<u64>,
     pub occurrence: String,
+    /// cas-e369: the PR head that left the queue and its GraphQL node ID.
+    pub head_sha: String,
+    pub pr_node_id: String,
+    /// cas-e369: a supervisor-owned epic PR has no delivering worker to tell.
+    pub supervisor_owned: bool,
+    /// cas-e369: when the failed run finished. Only a recent failure can be
+    /// the cause of this exit, so only it is re-enqueued automatically.
+    pub failed_run_completed_at: Option<String>,
+}
+
+/// cas-e369: a supervisor-owned PR (an open epic's `epic/` branch) that the
+/// watcher tracks through the merge queue like a parked delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisorPr {
+    pub task_id: String,
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -518,6 +679,19 @@ struct JobsResponse {
 struct CiJob {
     name: String,
     conclusion: Option<String>,
+    #[serde(default)]
+    steps: Vec<CiStep>,
+}
+
+#[derive(Deserialize)]
+struct CiStep {
+    name: String,
+    conclusion: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EnqueueGraphqlResponse {
+    data: Option<serde_json::Value>,
 }
 
 /// A job conclusion that makes a run red. `cancelled` and `skipped` do not:
@@ -681,6 +855,84 @@ impl CiTransport for GhCiTransport {
         Ok((!log.is_empty()).then_some(log))
     }
 
+    fn runs_for_sha(&self, sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
+        let response: RunsResponse = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/actions/runs", self.repo),
+            "-f".to_string(),
+            format!("head_sha={sha}"),
+            "-f".to_string(),
+            "per_page=100".to_string(),
+        ])?;
+        Ok(response.workflow_runs)
+    }
+
+    fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
+        let response: JobsResponse = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/actions/runs/{run_id}/jobs", self.repo),
+        ])?;
+        Ok(response
+            .jobs
+            .into_iter()
+            .find(|job| job_conclusion_is_failure(job.conclusion.as_deref()))
+            .map(|job| FailedJob {
+                step: job
+                    .steps
+                    .into_iter()
+                    .find(|step| job_conclusion_is_failure(step.conclusion.as_deref()))
+                    .map(|step| step.name),
+                name: job.name,
+            }))
+    }
+
+    fn pull_request_files(&self, pr_number: u64) -> Result<Option<Vec<String>>, CiWatchError> {
+        let listing = self.gh_text(&[
+            "pr".to_string(),
+            "diff".to_string(),
+            pr_number.to_string(),
+            "--repo".to_string(),
+            self.repo.clone(),
+            "--name-only".to_string(),
+        ])?;
+        let files: Vec<String> = listing
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        Ok((!files.is_empty()).then_some(files))
+    }
+
+    fn enqueue_pull_request(&self, pr_node_id: &str, head_sha: &str) -> Result<(), CiWatchError> {
+        let mutation = "mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) { mergeQueueEntry { state } } }";
+        let response: EnqueueGraphqlResponse = self.gh_json(&[
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={mutation}"),
+            "-F".to_string(),
+            format!("id={pr_node_id}"),
+            "-F".to_string(),
+            format!("head={head_sha}"),
+        ])?;
+        let entry = response
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/enqueuePullRequest/mergeQueueEntry/state"));
+        if entry.is_some() {
+            Ok(())
+        } else {
+            Err(CiWatchError::Malformed(
+                "enqueuePullRequest returned no merge-queue entry".to_string(),
+            ))
+        }
+    }
+
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
         let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
             .ok_or_else(|| {
@@ -688,7 +940,7 @@ impl CiTransport for GhCiTransport {
                     "invalid GitHub repository for merge-queue watcher".to_string(),
                 )
             })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { id number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
         let response: MergeQueueGraphqlResponse = self.gh_json(&[
             "api".to_string(),
             "graphql".to_string(),
@@ -776,6 +1028,7 @@ pub(crate) fn collect_delivery_pr_observations(
 /// the existing completed-runs listing per minute. A delivery is ejected when
 /// its open PR leaves a previously-observed queue, or when a failed
 /// `merge_group` run proves that ejection after a daemon restart.
+#[cfg(test)]
 pub(crate) fn collect_merge_queue_ejections(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
@@ -789,15 +1042,35 @@ pub(crate) fn collect_merge_queue_ejections(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn collect_merge_queue_ejections_with_arm_state(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
     previously_queued: &BTreeSet<u64>,
     previously_armed: &BTreeSet<u64>,
 ) -> Result<MergeQueuePoll, CiWatchError> {
+    collect_tracked_merge_queue_ejections(
+        transport,
+        deliveries,
+        &[],
+        previously_queued,
+        previously_armed,
+    )
+}
+
+/// cas-e369: as above, also tracking supervisor-owned epic PRs. An epic PR
+/// that leaves the queue unmerged wakes the supervisor exactly like a parked
+/// delivery does; it has no worker to instruct.
+pub(crate) fn collect_tracked_merge_queue_ejections(
+    transport: &dyn CiTransport,
+    deliveries: &[AwaitingMergeDelivery],
+    supervisor_prs: &[SupervisorPr],
+    previously_queued: &BTreeSet<u64>,
+    previously_armed: &BTreeSet<u64>,
+) -> Result<MergeQueuePoll, CiWatchError> {
     let pulls = transport.merge_queue_pull_requests()?;
     let runs = transport.completed_runs()?;
-    let mut failed_runs = BTreeMap::<u64, u64>::new();
+    let mut failed_runs = BTreeMap::<u64, &CiRun>::new();
     for run in &runs {
         if run.event == "merge_group"
             && run.conclusion.as_deref() == Some("failure")
@@ -805,14 +1078,26 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
         {
             failed_runs
                 .entry(pr)
-                .and_modify(|current| *current = (*current).max(run.id))
-                .or_insert(run.id);
+                .and_modify(|current| {
+                    if run.id > current.id {
+                        *current = run;
+                    }
+                })
+                .or_insert(run);
         }
     }
 
     let mut poll = MergeQueuePoll::default();
-    for delivery in deliveries {
-        let Some(pr) = pulls.iter().find(|pr| pr.head_branch == delivery.branch) else {
+    let tracked = deliveries
+        .iter()
+        .map(|delivery| (&delivery.task_id, delivery.worker.as_str(), &delivery.branch, false))
+        .chain(
+            supervisor_prs
+                .iter()
+                .map(|epic| (&epic.task_id, "", &epic.branch, true)),
+        );
+    for (task_id, worker, branch, supervisor_owned) in tracked {
+        let Some(pr) = pulls.iter().find(|pr| &pr.head_branch == branch) else {
             // A normally merged PR leaves the open-PR listing; it is never an ejection.
             continue;
         };
@@ -823,7 +1108,8 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
             poll.queued_prs.insert(pr.number);
             continue;
         }
-        let failed_run_id = failed_runs.get(&pr.number).copied();
+        let failed_run = failed_runs.get(&pr.number).copied();
+        let failed_run_id = failed_run.map(|run| run.id);
         let arm_vanished = pr.head_branch.starts_with("factory/")
             && previously_armed.contains(&pr.number)
             && !pr.auto_merge_armed()
@@ -851,11 +1137,17 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
                 .expect("failed run required without an observed queue membership")
         };
         poll.ejections.push(MergeQueueEjection {
-            task_id: delivery.task_id.clone(),
-            worker: delivery.worker.clone(),
+            task_id: task_id.clone(),
+            worker: worker.to_string(),
             pr_number: pr.number,
             failed_run_id,
             occurrence,
+            head_sha: pr.head_sha.clone(),
+            pr_node_id: pr.id.clone(),
+            supervisor_owned,
+            failed_run_completed_at: failed_run
+                .map(|run| run.updated_at.clone())
+                .filter(|at| !at.is_empty()),
         });
     }
     poll.pr_lane_failures = collect_pr_lane_failures(transport, deliveries, &pulls, &runs)?;
@@ -1103,6 +1395,75 @@ mod tests {
         ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
             Ok(self.delivery_pulls.clone())
         }
+        fn runs_for_sha(&self, sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
+            Ok(self.runs.iter().filter(|run| run.head_sha == sha).cloned().collect())
+        }
+    }
+
+    /// cas-0f05: GitHub's runs for fba7a3365 (push, merge_group and
+    /// scheduled), recorded 2026-10-14 and trimmed to the fields read.
+    const FIXTURE_SHA: &str = "fba7a3365eb0cb6403be9d708e8f03151fc42054";
+
+    /// The recorded runs, with the push `CI` run set to `status`/`conclusion`.
+    fn recorded_runs(status: &str, conclusion: Option<&str>) -> FakeTransport {
+        let page: RunsResponse =
+            serde_json::from_str(include_str!("fixtures/ci-runs-fba7a336.json")).unwrap();
+        let mut runs = page.workflow_runs;
+        for run in runs.iter_mut().filter(|run| run.name == "CI" && run.event == "push") {
+            run.status = status.to_string();
+            run.conclusion = conclusion.map(str::to_string);
+        }
+        FakeTransport {
+            runs,
+            pulls: Vec::new(),
+            delivery_pulls: Vec::new(),
+            job: String::new(),
+            log: None,
+            calls: Cell::new(0),
+        }
+    }
+
+    fn ci_completed(workflow: Option<&str>) -> CiCompleted {
+        parse_ci_completed(&serde_json::json!({"sha": FIXTURE_SHA, "workflow": workflow})).unwrap()
+    }
+
+    #[test]
+    fn ci_completed_is_pending_until_every_run_completes() {
+        let running = recorded_runs("in_progress", None);
+        assert!(ci_completed_runs(&running, &ci_completed(None)).unwrap().is_none());
+        assert!(ci_completed_runs(&running, &ci_completed(Some("CI"))).unwrap().is_none());
+        // No runs yet for a just-pushed commit: pending, not vacuously done.
+        let other = CiCompleted { sha: "0".repeat(40), workflow: None };
+        assert!(ci_completed_runs(&running, &other).unwrap().is_none());
+
+        let done = recorded_runs("completed", Some("success"));
+        let runs = ci_completed_runs(&done, &ci_completed(None))
+            .unwrap()
+            .expect("all recorded runs completed");
+        assert!(runs.iter().all(|run| run.event != "schedule"));
+        assert!(runs.iter().any(|run| run.event == "merge_group"));
+    }
+
+    #[test]
+    fn ci_completed_carries_a_failure_conclusion() {
+        let failed = recorded_runs("completed", Some("failure"));
+        let runs = ci_completed_runs(&failed, &ci_completed(Some("CI"))).unwrap().unwrap();
+        assert!(runs.iter().any(|run| run.conclusion.as_deref() == Some("failure")));
+    }
+
+    #[test]
+    fn ci_completed_filter_needs_the_full_sha() {
+        assert!(parse_ci_completed(&serde_json::json!({"sha": "fba7a3365"})).is_err());
+        assert!(parse_ci_completed(&serde_json::json!({"workflow": "CI"})).is_err());
+    }
+
+    /// One watcher interval plus one daemon refresh tick plus the bounded
+    /// origin and run-list `gh` calls stay inside the 60 s contract.
+    #[test]
+    fn ci_completed_wakes_within_a_minute() {
+        let tick = super::super::lifecycle::DAEMON_REFRESH_INTERVAL;
+        let worst = CI_WAKE_INTERVAL + tick + 2 * GH_CALL_TIMEOUT;
+        assert!(worst <= Duration::from_secs(60), "{worst:?}");
     }
 
     fn run(branch: &str, conclusion: Option<&str>) -> CiRun {
@@ -1112,17 +1473,20 @@ mod tests {
     fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
             id,
+            name: String::new(),
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),
             html_url: format!("https://github.test/org/repo/actions/runs/{id}"),
             status: "completed".to_string(),
             conclusion: conclusion.map(str::to_string),
             event: "push".to_string(),
+            updated_at: "2026-10-14T21:15:32Z".to_string(),
         }
     }
 
     fn pull(number: u64, branch: &str, queued: bool, updated_at: &str) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
+            id: format!("PR_node_{number}"),
             number,
             head_branch: branch.to_string(),
             head_sha: "deadbeef".to_string(),
@@ -1141,6 +1505,7 @@ mod tests {
         updated_at: &str,
     ) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
+            id: format!("PR_node_{number}"),
             number,
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),

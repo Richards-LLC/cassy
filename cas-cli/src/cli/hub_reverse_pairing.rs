@@ -290,6 +290,10 @@ pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
     ) {
         anyhow::bail!(refusal);
     }
+    if args.check_launch {
+        println!("launch check: the operator may authorize a Commander pairing");
+        return Ok(());
+    }
     let user_cloud = CloudConfig::load_user().unwrap_or_default();
     let cloud = if user_cloud.is_logged_in() {
         user_cloud
@@ -1355,6 +1359,7 @@ mod tests {
             hub_url: None,
             skip_hub_readiness: false,
             yes: true,
+            check_launch: false,
         }
     }
 

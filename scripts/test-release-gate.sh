@@ -28,6 +28,10 @@ trap 'rm -rf "$tmp"' EXIT
 # default-scratch-base fixture below deliberately runs with it UNSET.
 : "${CAS_RELEASE_GATE_HOME_DIR:=$tmp/gate-scratch/base}"
 export CAS_RELEASE_GATE_HOME_DIR
+# cas-9f61: keep scripts/release_env.py off this host's release profile and
+# `cas config` staging.scratch_root, so Zig and scratch resolve from fixtures.
+export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
+export CAS_RELEASE_ENV_SCRATCH_ROOT=""
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen
@@ -96,19 +100,37 @@ PY_SCRATCH_SWEEP_FIXTURE
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
-path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
+path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ, root)",
     "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()").replace(
     "snapshot = memory_snapshot()",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    cp "$script_dir/release_env.py" "$repo/scripts/release_env.py"
+    cp "$script_dir/release-binary-artifact.py" "$repo/scripts/release-binary-artifact.py"
+    # cas-e719: the smoke itself has its own self-test and real-binary test;
+    # here the row must hand it this tree's recorded release binary.
+    cat >"$repo/scripts/check-operator-launch.sh" <<'EOF_OPERATOR_LAUNCH'
+#!/usr/bin/env bash
+[[ ! -f "$1" ]] || sha256sum <"$1" >>"${GATE_FIXTURE_OPERATOR_LAUNCH_LOG:-/dev/null}"
+[[ -z "${GATE_FIXTURE_SPAN_LOG:-}" ]] || {
+  printf 'start operator-launch-smoke %s\n' "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+  printf 'end operator-launch-smoke %s\n' "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+}
+[[ -f "$1" && "${GATE_FIXTURE_OPERATOR_LAUNCH_FAIL:-}" != 1 ]] || {
+  echo 'FAIL operator: cas factory --check-launch (fixture lockout)'; exit 1;
+}
+echo 'PASS operator launch smoke: fixture'
+EOF_OPERATOR_LAUNCH
+    printf 'fixture license\n' >"$repo/LICENSE"
     cp "$script_dir/release-test-env.sh" "$script_dir/release-integration-gates.py" "$repo/scripts/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
     # Real defects in the new rows are covered by test-fast-release-rows.py.
     for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases \
-        journeys-for-diff check-builtin-skill-limits check-doctor-snapshot check-migration-registry ci-script-tests-for-diff; do
+        journeys-for-diff check-builtin-skill-limits check-doctor-snapshot check-migration-registry ci-script-tests-for-diff \
+        check-call-shapes; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done
     cat >"$repo/cas-cli/Makefile" <<'EOF'
@@ -142,6 +164,19 @@ class ScriptTier(unittest.TestCase):
                        if key.startswith("CAS_RELEASE_GATE_") or key in
                        ("CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR",
                         "VERIFIED_TEST_COUNT_FILE", "VERIFIED_TEST_LOG")}, stream)
+
+    def test_timed_span(self):
+        # cas-dcb4: concurrency fixtures time this row beside the Cargo rows.
+        span_log = os.environ.get("GATE_FIXTURE_SPAN_LOG")
+        if not span_log:
+            return
+        import time
+        with open(span_log, "a") as stream:
+            stream.write(f"start ci-script-tests {time.time()}\n")
+        time.sleep(float(os.environ.get("GATE_FIXTURE_SLEEP_ci_script_tests",
+                                        os.environ.get("GATE_FIXTURE_ROW_SLEEP", "0"))))
+        with open(span_log, "a") as stream:
+            stream.write(f"end ci-script-tests {time.time()}\n")
 
     def test_train_controls_absent(self):
         self.assertFalse([key for key in os.environ if key.startswith(("CAS_RELEASE_TRAIN_", "CAS_RELEASE_GATE_"))])
@@ -179,15 +214,10 @@ print('zigbuild config parsed (gate dispatch fixture)')
 PY_ZIG_FIXTURE
 
     cp -R "$script_dir/release-train.d" "$repo/scripts/"
-    cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
-    # The nested integration fixtures have their own release version. Keep it
-    # distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
-    python3 - "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-path.write_text(path.read_text().replace('9.99.7', '9.98.7'))
-PY_NESTED_VERSION
+    # The assemble-stale-base row runs this suite (~6 s). Only the case that
+    # proves the row installs the real one; every other full-gate fixture
+    # dispatches a stub (cas-e919).
+    printf '%s\n' 'print("assemble-stale-base fixture stub")' >"$repo/scripts/test-release-integration.py"
     cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
@@ -263,6 +293,34 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GATE_FIXTURE_CARGO_LOG:?}"
+# cas-dcb4: concurrency fixtures time the slow suite boundaries as spans.
+if [[ -n "${GATE_FIXTURE_SPAN_LOG:-}" ]]; then
+  span_name=''
+  case "$*" in
+    'zigbuild -p cas '*) span_name=release-binary-isa ;;
+    'check --workspace --tests --target aarch64-apple-darwin') span_name=macos-check ;;
+    'check --workspace --tests') span_name=workspace-tests ;;
+    'nextest run --workspace'*) span_name=nextest ;;
+    'nextest run -p cas --test builtin_archive_portability_test'*) span_name=fixture-paths ;;
+    'nextest archive '*) span_name=archive-build ;;
+    'nextest run --archive-file '*) span_name=archive-run ;;
+  esac
+  case "$span_name" in
+    ?*)
+      printf 'start %s %s\n' "$span_name" "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+      # A fixed temp name, as fixtures and nested tools use: concurrent rows
+      # must not see each other's file.
+      [[ -z "${GATE_FIXTURE_TMP_PROBE:-}" ]] || printf '%s\n' "$span_name" >"${TMPDIR:-/tmp}/gate-fixture-probe"
+      sleep_variable="GATE_FIXTURE_SLEEP_${span_name//-/_}"
+      sleep "${!sleep_variable:-${GATE_FIXTURE_ROW_SLEEP:-0}}"
+      if [[ -n "${GATE_FIXTURE_TMP_PROBE:-}" && "$(cat "${TMPDIR:-/tmp}/gate-fixture-probe")" != "$span_name" ]]; then
+        printf 'temp collision: %s found %s\n' "$span_name" "$(cat "${TMPDIR:-/tmp}/gate-fixture-probe")" >&2
+        exit 1
+      fi
+      printf 'end %s %s\n' "$span_name" "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+      ;;
+  esac
+fi
 if [[ "${GATE_FIXTURE_EXPECT_CLEAN:-}" == 1 ]]; then
   python3 -c 'import os; assert not [k for k in os.environ if k.startswith(("CAS_RELEASE_TRAIN_", "CAS_RELEASE_GATE_"))]'
 fi
@@ -314,12 +372,30 @@ main:
   ret
 .section .note.GNU-stack,"",@progbits
 ASM
+  source "$(dirname "$0")/release-portable.sh"
+  release_portable_x86_64_linux_cc
+  # cas-c096: the build outputs release.sh audits, so the row can audit them
+  # too. Each has a seeded control; the gate must clean earlier copies.
+  ghostty_lib="$destination/build/ghostty_vt_sys-fixture/out/zig-out/lib"
+  blake3_build="$destination/build/blake3-fixture"
+  [[ ! -e "$ghostty_lib" && ! -e "$blake3_build" ]] || {
+    echo 'release binary fixture: stale Ghostty/BLAKE3 outputs were not cleaned' >&2; exit 1;
+  }
+  mkdir -p "$ghostty_lib" "$blake3_build/out"
+  if [[ "${GATE_FIXTURE_GHOSTTY_EVEX:-}" == 1 ]]; then
+    sed 's/xor %eax, %eax/.byte 0x62, 0xf1, 0xff, 0x08, 0x78, 0xc8/' "$destination/fixture.S" >"$destination/ghostty.S"
+  else
+    cp "$destination/fixture.S" "$destination/ghostty.S"
+  fi
+  "${RELEASE_PORTABLE_X86_64_CC[@]}" -c "$destination/ghostty.S" -o "$ghostty_lib/libghostty_vt.a"
+  printf '%s\n' 'cargo::rerun-if-env-changed=CARGO_FEATURE_NO_AVX512' 'cargo::rustc-cfg=blake3_sse41_ffi' >"$blake3_build/output"
+  if [[ "${GATE_FIXTURE_BLAKE3_AVX512:-}" == 1 ]]; then
+    printf '%s\n' 'cargo::rustc-cfg=blake3_avx512_ffi' >>"$blake3_build/output"
+  fi
   if [[ "${GATE_FIXTURE_ISA_EVEX:-}" == 1 ]] || grep -qF 'name = "aes"' Cargo.lock; then
     sed 's/xor %eax, %eax/.byte 0x62, 0xf1, 0xff, 0x08, 0x78, 0xc8/' "$destination/fixture.S" >"$destination/seeded.S"
     mv "$destination/seeded.S" "$destination/fixture.S"
   fi
-  source "$(dirname "$0")/release-portable.sh"
-  release_portable_x86_64_linux_cc
   "${RELEASE_PORTABLE_X86_64_CC[@]}" "$destination/fixture.S" -o "$destination/cas"
   if [[ "${GATE_FIXTURE_ISA_MISSING:-}" == 1 ]]; then rm "$destination/cas"; fi
 fi
@@ -410,6 +486,11 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "${1:-missing-artifact-dir}" >>"${GATE_FIXTURE_VISUAL_QA_LOG:?}"
+if [[ -n "${GATE_FIXTURE_SPAN_LOG:-}" ]]; then
+  printf 'start visual-qa %s\n' "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+  sleep "${GATE_FIXTURE_SLEEP_visual_qa:-${GATE_FIXTURE_ROW_SLEEP:-0}}"
+  printf 'end visual-qa %s\n' "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+fi
 if [[ "${GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL:-}" == 1 ]]; then exit 1; fi
 EOF
     chmod +x "$repo/scripts/hub-web-visual-qa-stub"
@@ -497,6 +578,247 @@ if [[ "${1:-}" == --test-child-env-only ]]; then
     exit $?
 fi
 
+# cas-dcb4: the gate schedules independent rows concurrently under declared
+# resources. Spans come from the fake Cargo, visual-QA and script fixtures;
+# the receipt, timing.tsv and failure reporting keep canonical row order.
+readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
+
+# span_check <log> overlap A B | disjoint A B... | max | wall
+span_check() {
+    python3 - "$@" <<'PY_SPANS'
+import itertools
+import sys
+
+log, mode, names = sys.argv[1], sys.argv[2], sys.argv[3:]
+spans = {}
+for line in open(log):
+    kind, name, at = line.split()
+    spans.setdefault(name, {})[kind] = float(at)
+def overlap(a, b):
+    return spans[a]["start"] < spans[b]["end"] and spans[b]["start"] < spans[a]["end"]
+if mode == "overlap":
+    sys.exit(0 if overlap(*names) else 1)
+if mode == "disjoint":
+    sys.exit(0 if not any(overlap(a, b) for a, b in itertools.combinations(names, 2)) else 1)
+if mode == "alone":
+    sys.exit(0 if not any(overlap(names[0], other) for other in spans if other != names[0]) else 1)
+if mode == "max":
+    events = sorted([(span["start"], 1) for span in spans.values()] + [(span["end"], -1) for span in spans.values()])
+    running = peak = 0
+    for _, delta in events:
+        running += delta
+        peak = max(peak, running)
+    print(peak)
+PY_SPANS
+}
+
+receipt_rows() {
+    grep -oE '^(PASS|FAIL|SKIP) [a-z0-9-]+' <<<"$1" | awk '{print $2}' | paste -sd, -
+}
+
+# Run by run_sections in its own subshell and scratch tree.
+section_concurrency() {
+    local repo output spans logs rows timing_rows
+    unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+    repo="$(new_fixture concurrency)"
+    spans="$tmp/concurrency-spans.log"
+    logs="$tmp/concurrency-rows"
+    : >"$spans"
+    # The release build outlasts the script tier's wait for assemble-stale-base.
+    # Every timed row writes the same fixed temp file name while it overlaps
+    # the others; a shared TMPDIR makes a row fail with "temp collision".
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" GATE_FIXTURE_ROW_SLEEP=2 \
+        GATE_FIXTURE_TMP_PROBE=1 \
+        GATE_FIXTURE_SLEEP_release_binary_isa=12 \
+        run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    rows="$(receipt_rows "$output")"
+    timing_rows="$(awk -F '\t' 'NR > 1 {print $1}' "$logs/timing.tsv" | paste -sd, -)"
+    if grep -qF 'RELEASE GATE PASSED' <<<"$output" && [[ "$rows" == "$gate_canonical_rows" \
+        && "$timing_rows" == "$gate_canonical_rows" ]]; then
+        ok 'concurrent gate keeps canonical receipt and timing.tsv row order, with a private TMPDIR per row'
+    else
+        bad "concurrent gate reordered receipts (rows: $rows; timing: $timing_rows; output: $output)"
+    fi
+    if span_check "$spans" overlap release-binary-isa workspace-tests \
+        && span_check "$spans" overlap release-binary-isa ci-script-tests \
+        && span_check "$spans" overlap release-binary-isa visual-qa \
+        && (( $(span_check "$spans" max) >= 3 )); then
+        ok "independent rows run concurrently (peak $(span_check "$spans" max) timed rows)"
+    else
+        bad "independent rows did not overlap: $(cat "$spans")"
+    fi
+    # cas-e719/cas-dcb4: the smoke extracts the archive the ISA row records,
+    # so it starts only after that row passed.
+    if python3 - "$spans" <<'PY_AFTER'
+import sys
+spans = {}
+for line in open(sys.argv[1]):
+    kind, name, at = line.split()
+    spans.setdefault(name, {})[kind] = float(at)
+assert spans["operator-launch-smoke"]["start"] >= spans["release-binary-isa"]["end"], spans
+PY_AFTER
+    then
+        ok 'operator-launch-smoke starts only after release-binary-isa passed'
+    else
+        bad "operator-launch-smoke overtook release-binary-isa: $(cat "$spans")"
+    fi
+    if span_check "$spans" disjoint ci-script-tests fixture-paths nextest archive-build archive-run; then
+        ok 'host-test rows (script tier, fixture paths, nextest, archive) never overlap'
+    else
+        bad "host-test rows overlapped: $(cat "$spans")"
+    fi
+    if awk -F '\t' '$2 == "start" {n++} END {exit !(n > 0)}' "$logs/schedule.tsv" \
+        && grep -qF "row scheduling: up to " <<<"$output"; then
+        ok 'scheduler names its limits in the receipt and records events in schedule.tsv'
+    else
+        bad "scheduler evidence missing: $(cat "$logs/schedule.tsv" 2>/dev/null)"
+    fi
+    # The writers run alone: no Rust compile may read a half-rebuilt dist or
+    # ledger, and both embed into cas at compile time.
+    if python3 - "$logs/schedule.tsv" <<'PY_WRITERS'
+import csv
+import sys
+rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
+for writer in ("hub-web-dist-drift", "builtin-projections"):
+    start = next(row for row in rows if row["row"] == writer and row["event"] == "start")
+    assert start["running"] == "1", (writer, start)
+    end = next(i for i, row in enumerate(rows) if row["row"] == writer and row["event"].startswith("end"))
+    began = rows.index(start)
+    assert not [row for row in rows[began + 1:end] if row["event"] == "start"], writer
+PY_WRITERS
+    then
+        ok 'tree-writing rows (dist rebuild, ledger regeneration) run alone'
+    else
+        bad "a tree-writing row overlapped another row: $(cat "$logs/schedule.tsv")"
+    fi
+
+    : >"$spans"
+    output="$(CAS_RELEASE_GATE_PARALLEL=1 CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
+        GATE_FIXTURE_ROW_SLEEP=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qF 'RELEASE GATE PASSED' <<<"$output" && [[ "$(receipt_rows "$output")" == "$gate_canonical_rows" ]] \
+        && [[ "$(span_check "$spans" max)" == 1 ]]; then
+        ok 'CAS_RELEASE_GATE_PARALLEL=1 restores strictly sequential rows'
+    else
+        bad "CAS_RELEASE_GATE_PARALLEL=1 overlapped rows: $(cat "$spans"); $output"
+    fi
+
+    # Memory admission: a 10 GiB budget (fixture 60 GiB available, 50 GiB
+    # reserve) holds the 10 GiB release build until no heavy row runs.
+    : >"$spans"
+    output="$(CAS_RELEASE_GATE_ASSEMBLY_RESERVE_GIB=50 CAS_RELEASE_GATE_LOG_DIR="$logs" \
+        GATE_FIXTURE_SPAN_LOG="$spans" GATE_FIXTURE_ROW_SLEEP=2 \
+        run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qF 'RELEASE GATE PASSED' <<<"$output" && grep -qF 'memory budget 10240 MiB' <<<"$output" \
+        && span_check "$spans" alone release-binary-isa \
+        && (( $(span_check "$spans" max) >= 2 )); then
+        ok 'memory admission holds a row that does not fit and still admits rows that do'
+    else
+        bad "memory admission overcommitted or stalled: $(cat "$spans"); $output"
+    fi
+
+    # A failing abort row stops the gate: rows after it are cancelled and
+    # report nothing; rows before it still finish; the failure is named.
+    : >"$spans"
+    local started=$SECONDS
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
+        GATE_FIXTURE_SLEEP_release_binary_isa=60 GATE_FIXTURE_SLEEP_workspace_tests=60 \
+        run_gate "$repo" GATE_FIXTURE_CI_SCRIPT_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    local elapsed=$((SECONDS - started))
+    if (( elapsed < 45 )) && grep -qF 'FAIL ci-script-tests' <<<"$output" \
+        && grep -qE '^cancelled in-flight rows: .*release-binary-isa' <<<"$output" \
+        && grep -qE '^RELEASE GATE FAILED: ci-script-tests \(aborted; build and Rust suite rows cancelled\)$' <<<"$output" \
+        && grep -qF 'PASS assemble-stale-base' <<<"$output" \
+        && ! grep -qE '^(PASS|FAIL) (release-binary-isa|workspace-tests|nextest|archive-mode)' <<<"$output" \
+        && ! awk -F '\t' '$1 == "release-binary-isa"' "$logs/timing.tsv" | grep -q . \
+        && ! grep -q '^end release-binary-isa' "$spans"; then
+        ok "a failing abort row cancels in-flight rows after it (${elapsed}s, not the 60s build)"
+    else
+        bad "abort did not cancel in-flight rows (${elapsed}s): $output"
+    fi
+    sleep 1
+    if ! ps -A -o args= | grep -F "$repo/scripts/cargo-stub" | grep -vq grep; then
+        ok 'cancelled rows leave no Cargo process behind'
+    else
+        bad "cancelled row processes survived: $(ps -A -o pid=,args= | grep -F "$repo/scripts/cargo-stub" | grep -v grep)"
+    fi
+
+    # A failed ISA row aborts the gate; the smoke that needs its archive
+    # never starts and reports nothing.
+    : >"$spans"
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
+        run_gate "$repo" GATE_FIXTURE_ISA_BUILD_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qE '^RELEASE GATE FAILED: .*release-binary-isa.* \(release binary ISA audit refused before pr-body/pipeline\)$' <<<"$output" \
+        && ! grep -qE '^(PASS|FAIL) operator-launch-smoke' <<<"$output" \
+        && ! grep -q 'operator-launch-smoke' "$spans"; then
+        ok 'a failed release-binary-isa leaves operator-launch-smoke unstarted'
+    else
+        bad "operator-launch-smoke ran without a passing ISA row: $output"
+    fi
+
+    # A failing ordinary row still fails the gate without cancelling others.
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" run_gate "$repo" GATE_FIXTURE_CHECK_FAIL \
+        "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qE '^RELEASE GATE FAILED: workspace-tests$' <<<"$output" \
+        && [[ "$(receipt_rows "$output")" == "$gate_canonical_rows" ]]; then
+        ok 'an ordinary failing row fails the gate after every row reports'
+    else
+        bad "ordinary row failure handling drifted: $output"
+    fi
+}
+# Replays a real gate's row durations (timing.tsv) through the fixture at
+# 1/<scale> speed and reports the scheduled wall against the longest row:
+#   scripts/test-release-gate.sh --replay-timing <timing.tsv> [scale]
+replay_timing() {
+    local timing="$1" scale="${2:-10}" repo logs spans started wall
+    local -a sleeps=()
+    mapfile -t sleeps < <(python3 - "$timing" "$scale" <<'PY_REPLAY'
+import csv
+import sys
+rows = {row["row"]: float(row["wall_s"]) for row in csv.DictReader(open(sys.argv[1]), delimiter="\t")}
+scale = float(sys.argv[2])
+spans = {"release-binary-isa": "release_binary_isa", "ci-script-tests": "ci_script_tests",
+         "hub-web-visual-qa": "visual_qa", "nextest": "nextest", "macos-check": "macos_check",
+         "fixture-paths": "fixture_paths", "workspace-tests": "workspace_tests"}
+for row, variable in spans.items():
+    if row in rows:
+        print(f"GATE_FIXTURE_SLEEP_{variable}={rows[row] / scale:.2f}")
+if "archive-mode" in rows:
+    for variable in ("archive_build", "archive_run"):
+        print(f"GATE_FIXTURE_SLEEP_{variable}={rows['archive-mode'] / scale / 2:.2f}")
+PY_REPLAY
+)
+    unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+    repo="$(new_fixture replay)"
+    logs="$tmp/replay-rows"
+    spans="$tmp/replay-spans.log"
+    started="$(python3 -c 'import time; print(time.time())')"
+    CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
+        run_gate "$repo" '' env "${sleeps[@]}" "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/replay.log" 2>&1 || {
+        cat "$tmp/replay.log"
+        return 1
+    }
+    if [[ -n "${GATE_REPLAY_KEEP_DIR:-}" ]]; then
+        mkdir -p "$GATE_REPLAY_KEEP_DIR"
+        cp -R "$logs" "$spans" "$tmp/replay.log" "$GATE_REPLAY_KEEP_DIR/"
+    fi
+    python3 - "$started" "$logs/timing.tsv" "$scale" "${sleeps[@]}" <<'PY_REPLAY_REPORT'
+import csv
+import sys
+import time
+wall = time.time() - float(sys.argv[1])
+rows = list(csv.DictReader(open(sys.argv[2]), delimiter="\t"))
+serial = sum(float(row["wall_s"]) for row in rows)
+longest = max(rows, key=lambda row: float(row["wall_s"]))
+print(f"replay 1/{sys.argv[3]}: gate wall {wall:.1f}s; sequential sum {serial:.1f}s; "
+      f"longest row {longest['row']} {float(longest['wall_s']):.1f}s; "
+      f"wall/longest {wall / float(longest['wall_s']):.2f}")
+PY_REPLAY_REPORT
+}
+if [[ "${1:-}" == --replay-timing ]]; then
+    replay_timing "${2:?timing.tsv}" "${3:-10}"
+    exit
+fi
+
 assert_named_failure() {
     local name="$1" output="$2"
     if grep -qF "FAIL $name" <<<"$output" && grep -qF "RELEASE GATE FAILED" <<<"$output"; then
@@ -509,9 +831,9 @@ assert_named_failure() {
 assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
-        version-literals release-binary-isa fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
+        version-literals release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src \
+        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -532,9 +854,16 @@ run_scenario() {
     assert_named_failure "$3" "$output"
 }
 
+section_release_binary_isa() {
 # The new row must audit the staged executable, including code introduced by
 # dependencies, before the train can authorize pr-body/pipeline.
 repo="$(new_fixture release-binary-isa)"
+# cas-c096: the row records its audited archive for release.sh to reuse.
+release_binary_verdict() {
+    (cd "$1" && env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+        ZIG="$1/.context/zig/zig" PATH="$1/scripts:$PATH" \
+        python3 scripts/release-binary-artifact.py verify "$1" --target x86_64-unknown-linux-gnu --version 9.99.7 2>&1 || true)
+}
 output="$(run_gate "$repo" GATE_FIXTURE_ISA_EVEX "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
 if grep -qF 'FAIL release-binary-isa' <<<"$output" \
     && grep -qF 'forbidden EVEX/AVX-512' <<<"$output" \
@@ -543,12 +872,44 @@ if grep -qF 'FAIL release-binary-isa' <<<"$output" \
 else
     bad "release-binary-isa missed the seeded final ELF: $output"
 fi
+if grep -qF 'MISS key=tree reason=no_artifact_for_tree' <<<"$(release_binary_verdict "$repo")"; then
+    ok 'a refused release binary is never recorded for the publisher'
+else
+    bad "a refused release binary was recorded: $(release_binary_verdict "$repo")"
+fi
+# release.sh's build-output audits run in the row, so its reuse skips none.
+for control in GATE_FIXTURE_GHOSTTY_EVEX:libghostty_vt.a GATE_FIXTURE_BLAKE3_AVX512:'enables forbidden AVX-512 inputs'; do
+    output="$(run_gate "$repo" "${control%%:*}" "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+    assert_named_failure release-binary-isa "$output"
+    if grep -qF "${control#*:}" <<<"$output"; then
+        ok "release-binary-isa names the ${control%%:*} build-output finding"
+    else
+        bad "release-binary-isa missed the ${control%%:*} build-output finding: $output"
+    fi
+done
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
 if grep -qF 'PASS release-binary-isa' <<<"$output" \
     && grep -qF 'RELEASE GATE PASSED' <<<"$output"; then
     ok 'release-binary-isa accepts a baseline executable with locked zigbuild and release flags'
 else
     bad "release-binary-isa rejected the baseline final ELF: $output"
+fi
+verdict="$(release_binary_verdict "$repo")"
+if grep -qF "REUSE release binary tree=$(git -C "$repo" rev-parse 'HEAD^{tree}') version=9.99.7" <<<"$verdict" \
+    && grep -qF 'audits=ghostty-archive-isa,blake3-no-avx512,packaged-binary-isa' <<<"$verdict" \
+    && [[ -f "$repo/.cas/release-binary/target/x86_64-unknown-linux-gnu/release/cas" ]]; then
+    ok 'release-binary-isa builds in the persistent release target and records the audited archive'
+else
+    bad "release-binary-isa did not record a reusable archive: $verdict"
+fi
+: >"$tmp/operator-launch.log"
+output="$(GATE_FIXTURE_OPERATOR_LAUNCH_LOG="$tmp/operator-launch.log" \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only operator-launch-smoke 2>&1 || true)"
+if grep -qF 'PASS operator-launch-smoke' <<<"$output" \
+    && [[ "$(cat "$tmp/operator-launch.log")" == "$(sha256sum <"$repo/.cas/release-binary/target/x86_64-unknown-linux-gnu/release/cas")" ]]; then
+    ok 'operator-launch-smoke smokes the exact release binary the ISA row recorded'
+else
+    bad "operator-launch-smoke did not receive the recorded release binary: $output"
 fi
 for control in GATE_FIXTURE_ISA_BUILD_FAIL GATE_FIXTURE_ISA_MISSING; do
     output="$(run_gate "$repo" "$control" "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
@@ -572,12 +933,10 @@ if grep -qF 'learn=release-binary-isa' "$isa_run/blockers.log" \
 else
     bad "release-binary-isa could not map the publish rescue: $output"
 fi
-if [[ "${1:-}" == --release-binary-isa-only ]]; then
-    printf '\n%s passed, %s failed\n' "$pass" "$fail"
-    test "$fail" -eq 0
-    exit
-fi
 
+}
+
+section_admission_and_script_tier() {
 # cas-728e: copied producers must use real admission in a private pool. The
 # wait case also proves that isolation did not become an admission bypass.
 repo="$(new_fixture host-memory-admission)"
@@ -662,6 +1021,16 @@ assert_named_failure version-literals "$output"
 # The learned assemble-stale-base diagnosis must remain an executable,
 # independently selectable row, not only a parsed failure-log marker.
 repo="$(new_fixture assemble-stale-base-row)"
+# The nested integration fixtures have their own release version. Keep it
+# distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
+python3 - "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
+from pathlib import Path
+import sys
+source, target = map(Path, sys.argv[1:])
+target.write_text(source.read_text().replace('9.99.7', '9.98.7'))
+PY_NESTED_VERSION
+git -C "$repo" add scripts/test-release-integration.py
+git -C "$repo" -c user.email=gate@fixture -c user.name=gate commit -qm 'real integration suite'
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only assemble-stale-base 2>&1 || true)"
 if grep -qF 'PASS assemble-stale-base' <<<"$output" \
     && grep -qF 'RELEASE GATE PASSED: selected checks are green' <<<"$output"; then
@@ -747,13 +1116,20 @@ for make_mode in -n -i -t; do
     output="$(MAKEFLAGS="$make_mode" GNUMAKEFLAGS="$make_mode" MFLAGS="$make_mode" \
         run_gate "$repo" GATE_FIXTURE_CI_SCRIPT_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
     assert_named_failure ci-script-tests "$output"
-    if grep -qF 'test_seeded_ci_script_failure' <<<"$output" && [[ ! -s "$tmp/cargo.log" ]]; then
-        ok "CI script failure keeps its test name and stops before Cargo despite make $make_mode"
+    # cas-dcb4: Cargo rows now run beside the script tier; its failure aborts
+    # the gate and cancels them instead (covered with in-flight rows below).
+    if grep -qF 'test_seeded_ci_script_failure' <<<"$output" \
+        && grep -qE '^RELEASE GATE FAILED: .*ci-script-tests.* \(aborted; build and Rust suite rows cancelled\)$' <<<"$output" \
+        && ! grep -qF 'RELEASE GATE PASSED' <<<"$output"; then
+        ok "CI script failure keeps its test name and aborts the gate despite make $make_mode"
     else
-        bad "CI script failure was hidden or reached Cargo: $output"
+        bad "CI script failure was hidden or did not abort the gate: $output"
     fi
 done
 
+}
+
+section_failure_scenarios() {
 run_scenario workspace-check GATE_FIXTURE_CHECK_FAIL workspace-tests
 run_scenario macos-check-run GATE_FIXTURE_MACOS_FAIL macos-check
 run_scenario macos-target-install GATE_FIXTURE_RUSTUP_FAIL macos-check
@@ -779,6 +1155,7 @@ fi
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
+run_scenario operator-launch-run GATE_FIXTURE_OPERATOR_LAUNCH_FAIL operator-launch-smoke
 run_scenario visual-qa-run GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL hub-web-visual-qa
 
 # The normal visual-QA scenarios above inject a runner stub so the self-test
@@ -837,6 +1214,9 @@ else
     bad "hub-web-visual-qa dependency install contract failed (output: $output; npm log: $(cat "$tmp/npm.log" 2>/dev/null || true))"
 fi
 
+}
+
+section_web_and_source_rows() {
 # cas-83ff. Building Commander web assets must prove committed dist stays in
 # sync with src, and the later visual-QA row must reuse the same npm install.
 repo="$(new_fixture hub-web-dist-drift)"
@@ -1096,6 +1476,9 @@ else
     bad "--learn did not record the nextest factory build-guard diagnosis: $learn_output"
 fi
 
+}
+
+section_scratch_and_selection() {
 # cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
 # test that resolves project config by walking up from its cwd. The gate must
 # neutralize it and name it — never refuse, because blocking a release on the
@@ -1155,15 +1538,18 @@ run_gate_unset_home() {
 
 repo="$(new_fixture default-scratch-base)"
 output="$(run_gate_unset_home "$repo" 2>&1 || true)"
-# cas-db34: the default is per host (/Users/Shared on macOS, where /var/tmp is
-# a Cassy disposable root); ask the gate's own helper which one applies.
-default_scratch_base="$(bash -c 'source "$1"; release_portable_default_scratch_base' _ "$repo/scripts/release-portable.sh")"
-if grep -qF "scratch base: $default_scratch_base (from default)" <<<"$output" \
+# cas-9f61: unset, the gate asks scripts/release_env.py — the resolver the
+# train and assembly-proof share — for this checkout's base; ask it directly
+# which one applies here (the platform default when it shares the checkout's
+# filesystem, else cas-release-gate beside the checkout).
+eval "$(cd "$repo" && env -u CAS_RELEASE_GATE_HOME_DIR python3 scripts/release_env.py resolve --worktree "$repo")"
+if [[ -n "$RELEASE_ENV_SCRATCH" ]] \
+    && grep -qF "scratch base: $RELEASE_ENV_SCRATCH (from release_env.py: $RELEASE_ENV_SCRATCH_SOURCE)" <<<"$output" \
     && grep -qF 'PASS archive-mode' <<<"$output" \
     && grep -qF 'PASS snapshot-portability' <<<"$output"; then
-    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the gate default, and the scratch rows run'
+    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the shared resolver base, and the scratch rows run'
 else
-    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the gate default (output: $output)"
+    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the resolver base ${RELEASE_ENV_SCRATCH:-none} (output: $output)"
 fi
 
 # ...and an explicit value still wins, named in the receipt so a reader can see
@@ -1302,6 +1688,11 @@ else
     bad "archive extraction was not ready before nextest: $archive_gate_output"
 fi
 
+if grep -qE '^INSTA_WORKSPACE_ROOT=.*/workspace-remap :: nextest run --archive-file .*--no-fail-fast' "$archive_env_log"; then
+    ok 'archive consumer pins snapshot workspace and completes all binaries like CI'
+else
+    bad 'archive consumer drifted from CI snapshot-root or no-fail-fast contract'
+fi
 if python3 - "$archive_env_log" "$CAS_RELEASE_GATE_HOME_DIR" <<'PY_TEMP_PLACEMENT'
 from pathlib import Path
 import re
@@ -1358,6 +1749,9 @@ else
     bad "nextest or archive-mode leaked factory identity: $(cat "$factory_env_log") (output: $output)"
 fi
 
+}
+
+section_environment_and_receipts() {
 # cas-c0411. The `cas init` watchdog budget the gate hands its children is the
 # fix for a release that failed on wall clock: a test's child `cas init` hit the
 # 300s default while the box was saturated, and the archive-mode row died with
@@ -1496,12 +1890,10 @@ output="$(run_gate "$repo" GATE_FIXTURE_EMPTY_SUITE "$repo/scripts/release-gate.
 assert_named_failure nextest "$output"
 assert_named_failure archive-mode "$output"
 assert_named_failure doctests "$output"
-if grep -qE '^INSTA_WORKSPACE_ROOT=.*/workspace-remap :: nextest run --archive-file .*--no-fail-fast' "$archive_env_log"; then
-    ok 'archive consumer pins snapshot workspace and completes all binaries like CI'
-else
-    bad 'archive consumer drifted from CI snapshot-root or no-fail-fast contract'
-fi
 
+}
+
+section_row_cache() {
 # Receipts from real fixture executions, never forged PASS to prove success.
 repo="$(new_fixture row-cache)"
 : >"$tmp/cargo.log"
@@ -1537,7 +1929,11 @@ printf 'release prose\n' >"$repo/docs/release-notes/cache.md"
 git -C "$repo" add docs/release-notes/cache.md
 git -C "$repo" commit -qm 'fixture release prose'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-docs.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 11 ]]; then
+# cas-c096: the publisher reuses only an archive of its exact tree, so the
+# prose commit re-packages the release binary while every other row reuses.
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 10 ]] \
+    && awk -F '\t' '$1 == "release-binary-isa" && $7 == "0" {found=1} END {exit !found}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && grep -qF 'MISS key=tree reason=no_artifact_for_tree' "$tmp/cache-docs.log"; then
     ok 'train row cache automatically reuses unchanged code proof after a release-prose commit'
 else
     bad "release prose reran unchanged code rows: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
@@ -1561,8 +1957,10 @@ if run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cac
     bad 'changed Cargo.lock reused a release binary PASS containing seeded EVEX'
 elif grep -qF 'FAIL release-binary-isa' "$tmp/cache-isa-evex.log" \
     && grep -qi 'vcvttsd2usi' "$tmp/cache-isa-evex.log" \
-    && ! grep -qF 'PASS workspace-tests' "$tmp/cache-isa-evex.log"; then
-    ok 'changed Cargo.lock invalidates release ISA PASS and refuses before later rows'
+    && grep -qE '^RELEASE GATE FAILED: .*release-binary-isa.* \(release binary ISA audit refused before pr-body/pipeline\)$' "$tmp/cache-isa-evex.log"; then
+    # cas-dcb4: rows beside the build may already have reported; the gate
+    # still aborts on the ISA row and cancels whatever is still running.
+    ok 'changed Cargo.lock invalidates release ISA PASS and aborts the gate'
 else
     bad "locked EVEX did not fail before pipeline: $(cat "$tmp/cache-isa-evex.log")"
 fi
@@ -1698,6 +2096,9 @@ else
 fi
 unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
 
+}
+
+section_train_proof() {
 # Full train entry point: assemble prove -> prep -> ledger -> detached gate.
 repo="$(new_fixture train-proof)"
 cp -R "$script_dir/release-train.d" "$repo/scripts/"
@@ -1712,7 +2113,7 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 body = path.read_text()
-seam = '    if "$reuse_rows" && [[ -n "$key" ]]; then\n'
+seam = '    if "$row_reuse" && [[ -n "$key" ]]; then\n'
 assert body.count(seam) == 1, 'train ISA receipt seam changed'
 seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir" ]]; then
         printf '%s %s %s PASS %s %s %s %s %s\\n' \\
@@ -1722,6 +2123,18 @@ seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir
     fi
 '''
 path.write_text(body.replace(seam, seed + seam))
+# cas-c096: the receipt is reused only beside this tree's archive. Record a
+# placeholder archive at the run_check seam, before that check reads it.
+body = path.read_text()
+seam = '    row_selected "$name" || return 0\n    log="$row_log_dir/$name.log"\n'
+assert body.count(seam) == 1, 'train ISA archive seam changed'
+seed = '''    if [[ "$name" == release-binary-isa && -z "$only_rows" ]]; then
+        python3 "$repo_root/scripts/release-binary-artifact.py" record "$repo_root" \\
+            --target "$release_binary_target" --binary "$repo_root/Cargo.lock" \\
+            --license "$repo_root/LICENSE" --audit train-fixture >/dev/null
+    fi
+'''
+path.write_text(body.replace(seam, seam + seed))
 PY_TRAIN_ISA_RECEIPT
 # Any accidental execution of the auditor fails this fixture. The separate
 # seeded-EVEX/baseline cases retain the real auditor and zigbuild stub.
@@ -1897,6 +2310,89 @@ if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "
 else
     bad "real-cut prep missed assembly proof: $(cat "$tmp/proof-prep.log")"
 fi
+
+# cas-2970: a from-main gate (no reuse) honors only the integration proof its
+# assemble recorded. `assembly` reuses this run's two-context proof for its
+# three rows; `merge-queue` reuses the queue run that proved an ancestor with
+# the same code input for the suite rows it ran. Everything else runs fresh.
+reused_rows() {
+    awk -F '\t' '$7 == "REUSED" {print $1}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" | sort | paste -sd, -
+}
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=assembly \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-assembly.log" 2>&1 || true
+if [[ "$(reused_rows)" == archive-mode,ci-script-tests,nextest ]] \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'a from-main gate reuses its own fresh assembly proof for exactly its three rows'
+else
+    bad "from-main assembly-proof reuse: $(reused_rows); $(cat "$tmp/mq-assembly.log")"
+fi
+if CAS_RELEASE_GATE_INTEGRATION_PROOF=bogus run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 \
+    >"$tmp/mq-bogus.log" 2>&1; then
+    bad 'an unknown integration proof was accepted'
+elif grep -qF 'must be merge-queue or assembly' "$tmp/mq-bogus.log"; then
+    ok 'an unknown integration proof is refused by name'
+else
+    bad "unknown integration proof failed without naming it: $(cat "$tmp/mq-bogus.log")"
+fi
+cat >"$tmp/fake-gh" <<'PY_FAKE_GH'
+#!/usr/bin/env python3
+import json, os, sys
+responses = json.load(open(os.environ["GATE_FIXTURE_GH_RESPONSES"]))
+path = sys.argv[2] if sys.argv[1:2] == ["api"] and len(sys.argv) == 3 else ""
+if path not in responses and "/actions/artifacts?" in path:
+    responses[path] = {"total_count": 0, "artifacts": []}
+if path not in responses:
+    sys.exit("fixture gh: no response for " + path)
+print(json.dumps(responses[path]))
+PY_FAKE_GH
+chmod +x "$tmp/fake-gh"
+python3 - "$tmp/gh-responses.json" "$proof_sha" "$(git -C "$repo" rev-parse "$proof_sha^{tree}")" <<'PY_GH_RESPONSES'
+import json, sys
+path, sha, tree = sys.argv[1:]
+json.dump({
+    f"/repos/Richards-LLC/cassy/actions/artifacts?name=merge-queue-validated-tree-{tree}&per_page=100":
+        {"artifacts": [{"expired": False, "workflow_run": {"id": 777}}]},
+    "/repos/Richards-LLC/cassy/actions/runs/777":
+        {"event": "merge_group", "status": "completed", "conclusion": "success",
+         "path": ".github/workflows/ci.yml", "head_sha": sha,
+         "html_url": "https://github.com/Richards-LLC/cassy/actions/runs/777"}}, open(path, "w"))
+PY_GH_RESPONSES
+if CAS_RELEASE_TRAIN_GH="$tmp/fake-gh" GATE_FIXTURE_GH_RESPONSES="$tmp/gh-responses.json" \
+    run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" reuse-merge-queue "$repo" >"$tmp/mq-reuse.log" 2>&1 \
+    && grep -qF "PASS merge-queue receipt=" "$tmp/mq-reuse.log" \
+    && grep -qF "source_sha=$proof_sha" "$tmp/mq-reuse.log"; then
+    ok 'reuse-merge-queue walks past the prep delta to the queue-proved commit'
+else
+    bad "reuse-merge-queue: $(cat "$tmp/mq-reuse.log")"
+fi
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-gate.log" 2>&1 || true
+mq_expected=archive-mode,ci-script-tests,doctests,fixture-paths,hub-web-dist-drift,hub-web-tests,hub-web-visual-qa,macos-check,nextest
+if [[ "$(reused_rows)" == "$mq_expected" ]] \
+    && grep -qF 'run=https://github.com/Richards-LLC/cassy/actions/runs/777' "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -q '^workspace-tests' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && grep -q '^builtin-projections' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'a merge-queue from-main gate reuses the queue suite rows and runs the version-delta rows fresh'
+else
+    bad "merge-queue gate reuse: $(reused_rows); $(cat "$tmp/mq-gate.log")"
+fi
+mq_head="$(git -C "$repo" rev-parse HEAD)"
+printf '// code after the queue run\n' >>"$repo/cas-cli/tests/smoke.rs"
+git -C "$repo" add cas-cli/tests/smoke.rs
+git -C "$repo" commit -qm 'fixture code change after the queue run'
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-changed.log" 2>&1 || true
+if [[ -z "$(reused_rows)" ]] && grep -qF 'MISS merge-queue key=' "$tmp/mq-changed.log" \
+    && ! CAS_RELEASE_TRAIN_GH="$tmp/fake-gh" GATE_FIXTURE_GH_RESPONSES="$tmp/gh-responses.json" \
+        run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" reuse-merge-queue "$repo" >"$tmp/mq-miss.log" 2>&1 \
+    && grep -qF 'no_successful_merge_queue_run_for_code_input' "$tmp/mq-miss.log"; then
+    ok 'a code change after the queue run misses the queue receipt and every row runs fresh'
+else
+    bad "changed code reused the queue receipt: $(reused_rows); $(cat "$tmp/mq-changed.log")"
+fi
+git -C "$repo" reset -q --hard "$mq_head"
 for change in manifest-dependency lock-dependency non-member; do
     changed_file=Cargo.lock
     [[ "$change" != manifest-dependency ]] || changed_file=cas-cli/Cargo.toml
@@ -1973,6 +2469,9 @@ else
 fi
 unset CAS_RELEASE_GATE_LOG_DIR
 
+}
+
+section_admission_barriers() {
 # Admission barriers exercise the real shell seam with fake Cargo. A compiled
 # producer must wait for script PASS/test serialization, then abort promptly
 # when another leg fails, keeping compile stderr out of numeric timing fields.
@@ -2050,6 +2549,53 @@ if [[ "$(awk -F '\t' '$1 ~ /^(release-binary-isa|macos-check)$/ && $7 == "REUSED
     ok 'a test-relevant variable refuses row-proof reuse and names the variable'
 else
     bad "row proof reused across a changed test input: $(cat "$tmp/row-proof-miss.log")"
+fi
+
+}
+
+# cas-e919: the sections share no state, so they run in parallel, each in its
+# own scratch tree, and their output is printed in order. A section that
+# stops early (set -e) is a failure, never a lost case.
+run_sections() {
+    local name
+    local -A pids=()
+    for name in "$@"; do
+        (
+            tmp="$tmp/$name"
+            CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base"
+            mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
+            pass=0 fail=0
+            "$name"
+            printf '%s %s\n' "$pass" "$fail" >"$tmp.count"
+        ) >"$tmp/$name.log" 2>&1 &
+        pids[$name]=$!
+    done
+    for name in "$@"; do
+        wait "${pids[$name]}" || true
+        cat "$tmp/$name.log"
+        local p f
+        if read -r p f <"$tmp/$name.count"; then
+            pass=$((pass + p)) fail=$((fail + f))
+        else
+            bad "$name stopped before its last case"
+        fi
+    done
+}
+if [[ "${1:-}" == --release-binary-isa-only ]]; then
+    run_sections section_release_binary_isa
+elif [[ "${1:-}" == --concurrency-only ]]; then
+    run_sections section_concurrency
+else
+    run_sections section_release_binary_isa \
+        section_admission_and_script_tier \
+        section_failure_scenarios \
+        section_web_and_source_rows \
+        section_scratch_and_selection \
+        section_environment_and_receipts \
+        section_row_cache \
+        section_train_proof \
+        section_admission_barriers \
+        section_concurrency
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

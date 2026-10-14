@@ -687,7 +687,7 @@ import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location('proof', sys.argv[1])
 p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 root, scratch = map(pathlib.Path, sys.argv[2:4])
-p.clone_scratch = lambda env: scratch / 'base'
+p.clone_scratch = lambda env, root=None: scratch / 'base'
 p.inputs = lambda root: ({'format': p.FORMAT, 'code_input': 'signal-fixture'}, {})
 p.execution_plan = lambda env: {'mode': 'serial', 'phases': []}
 def contexts(root, clone, env, logs, target, execution):
@@ -898,8 +898,32 @@ p.prove(root)
         with self.assertRaises(ValueError):
             proof.no_cas_ancestor(child)
 
+    def test_unset_clone_scratch_uses_the_shared_durable_resolver(self):
+        # cas-9f61: no hand export; the base release_env.py derives for this
+        # checkout reaches the proof, and a gap refuses before any tool runs.
+        resolved = proof.release_env.ScratchResolution(
+            "/home/cas-release-gate/base", "checkout filesystem cas-release-gate", "/home")
+        for env in ({}, {"CAS_RELEASE_GATE_HOME_DIR": ""}):
+            with self.subTest(env=env), mock.patch.dict(proof.os.environ, env, clear=True), \
+                    mock.patch.object(proof.release_env, "resolve_scratch", return_value=resolved) as resolve, \
+                    mock.patch.object(proof, "no_cas_ancestor"), \
+                    mock.patch.object(proof.release_scratch, "sweep", return_value={}) as sweep, \
+                    mock.patch.object(proof, "inputs", side_effect=RuntimeError("guard accepted")):
+                with self.assertRaisesRegex(RuntimeError, "guard accepted"):
+                    proof.prove(self.root)
+                self.assertTrue(resolve.call_args.kwargs["durable"])
+                self.assertEqual(sweep.call_args.args[1], Path("/home/cas-release-gate/base"))
+        gap = proof.release_env.ScratchResolution(
+            "", "", "/srv", ["platform default /var/tmp/cas-release-gate: under system temporary root"],
+            "no usable scratch base on the checkout filesystem /srv", "sudo install -d /srv/cas-release-gate")
+        with mock.patch.dict(proof.os.environ, {}, clear=True), \
+                mock.patch.object(proof.release_env, "resolve_scratch", return_value=gap), \
+                mock.patch.object(proof, "inputs", side_effect=AssertionError("tools must not run")):
+            with self.assertRaisesRegex(ValueError, "CAS_RELEASE_GATE_HOME_DIR unset.*fix: sudo install"):
+                proof.prove(self.root)
+
     def test_prove_refuses_disposable_clone_scratch_before_any_tool_or_suite(self):
-        cases = [{}, {"CAS_RELEASE_GATE_HOME_DIR": ""}] + [
+        cases = [
             {"CAS_RELEASE_GATE_HOME_DIR": root + "/cas-release-gate/base"}
             for root in ("/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")]
         cases.append({"TMPDIR": str(self.root),
@@ -967,6 +991,173 @@ class CompilerCacheBlockerTests(unittest.TestCase):
                 proof.run_contexts(root, root, env, root, root, {})
         self.assertIn("ENVIRONMENT BLOCKER", str(refused.exception))
         self.assertIn("sccache --stop-server", str(refused.exception))
+
+
+FAKE_GH = """#!{python}
+import json, os, sys
+responses = json.load(open(os.environ["FIXTURE_GH_RESPONSES"]))
+with open(os.environ["FIXTURE_GH_LOG"], "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+path = sys.argv[2] if sys.argv[1:2] == ["api"] and len(sys.argv) == 3 else ""
+if os.environ.get("FIXTURE_GH_FAIL") == "1":
+    sys.stderr.write("fixture gh: HTTP 503\\n")
+    sys.exit(1)
+if path not in responses and "/actions/artifacts?" in path:
+    responses[path] = {"total_count": 0, "artifacts": []}
+if path not in responses:
+    sys.stderr.write("fixture gh: no response for " + path + "\\n")
+    sys.exit(1)
+print(json.dumps(responses[path]))
+"""
+
+
+class MergeQueueReuseTests(unittest.TestCase):
+    """cas-2970: the merge queue is the integration proof. A release cut from
+    main reuses the successful merge-queue run that proved its code input; a
+    code change, or any missing or failed evidence, forces a fresh proof."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name)
+        self.root = base / "repo"
+        self.root.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "user.name", "Fixture")
+        (self.root / ".gitignore").write_text(".cas/\n")
+        (self.root / "src").mkdir()
+        (self.root / "src/lib.rs").write_text("pub fn one() {}\n")
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["member"]\n')
+        (self.root / "member").mkdir()
+        (self.root / "member/Cargo.toml").write_text('[package]\nname = "member"\nversion = "1.0.0"\n')
+        (self.root / "Cargo.lock").write_text('version = 4\n\n[[package]]\nname = "member"\nversion = "1.0.0"\n')
+        self.main_sha = self.commit("main")
+        self.responses = {}
+        self.responses_path = base / "gh-responses.json"
+        self.log = base / "gh.log"
+        gh = base / "gh"
+        gh.write_text(FAKE_GH.replace("{python}", sys.executable))
+        gh.chmod(0o755)
+        self.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CAS_RELEASE_TRAIN_GH": str(gh),
+                    "CAS_RELEASE_TRAIN_REPO": "Example/cassy",
+                    "FIXTURE_GH_RESPONSES": str(self.responses_path), "FIXTURE_GH_LOG": str(self.log)}
+        self.queue(self.main_sha)
+
+    def git(self, *args):
+        return proof.git(self.root, *args).decode().strip()
+
+    def commit(self, message):
+        self.git("add", ".")
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def queue(self, sha, run_id=4242, **run):
+        """Publish the GitHub evidence of a successful merge-queue run on `sha`."""
+        tree = self.git("rev-parse", sha + "^{tree}")
+        self.responses[f"/repos/Example/cassy/actions/artifacts?name=merge-queue-validated-tree-{tree}&per_page=100"] = {
+            "artifacts": [{"expired": run.pop("expired", False), "workflow_run": {"id": run_id}}]}
+        self.responses[f"/repos/Example/cassy/actions/runs/{run_id}"] = {
+            "event": "merge_group", "status": "completed", "conclusion": "success",
+            "path": ".github/workflows/ci.yml", "head_sha": sha,
+            "html_url": f"https://github.com/Example/cassy/actions/runs/{run_id}", **run}
+        self.responses_path.write_text(json.dumps(self.responses))
+
+    def release_delta(self):
+        """What the cut adds on top of main: release prose and a version bump."""
+        (self.root / "CHANGELOG.md").write_text("## [1.1.0]\n- release\n")
+        (self.root / "member/Cargo.toml").write_text('[package]\nname = "member"\nversion = "1.1.0"\n')
+        (self.root / "Cargo.lock").write_text('version = 4\n\n[[package]]\nname = "member"\nversion = "1.1.0"\n')
+        return self.commit("prep")
+
+    def test_reuses_the_queue_run_on_the_exact_tree_and_checks_offline(self):
+        record, path = proof.reuse_merge_queue(self.root, self.env)
+        self.assertEqual((record["status"], record["source"], record["commit"]), ("PASS", "merge-queue", self.main_sha))
+        self.assertEqual(record["run_id"], 4242)
+        self.assertEqual(record["inputs"]["code_input"], proof.code_input(self.root))
+        self.assertTrue(path.is_file())
+        # The gate's check is offline: it never calls GitHub.
+        calls = self.log.read_text()
+        found = proof.merge_queue_matching(self.root)
+        self.assertIsNotNone(found)
+        self.assertEqual(self.log.read_text(), calls)
+        self.assertIn(f"source_sha={self.main_sha}", proof.merge_queue_line(*found))
+
+    def test_release_metadata_and_version_bump_reuse_main_queue_run(self):
+        head = self.release_delta()
+        record, _ = proof.reuse_merge_queue(self.root, self.env)
+        self.assertEqual(record["commit"], self.main_sha, "walks past the release delta to main")
+        self.assertEqual(record["candidate_head"], head)
+        self.assertIsNotNone(proof.merge_queue_matching(self.root))
+
+    def test_code_change_forces_a_fresh_proof(self):
+        proof.reuse_merge_queue(self.root, self.env)
+        (self.root / "src/lib.rs").write_text("pub fn two() {}\n")
+        self.commit("code change")
+        self.assertIsNone(proof.merge_queue_matching(self.root), "the old receipt cannot cover new code")
+        with self.assertRaises(ValueError) as miss:
+            proof.reuse_merge_queue(self.root, self.env)
+        self.assertIn("no_successful_merge_queue_run_for_code_input", str(miss.exception))
+        self.assertIn("checked=" + self.git("rev-parse", "HEAD")[:12], str(miss.exception))
+        self.assertNotIn(self.main_sha[:12], str(miss.exception), "stops at the code change")
+
+    def test_failed_foreign_or_mismatched_runs_never_count(self):
+        for run in ({"conclusion": "failure"}, {"status": "in_progress"}, {"event": "push"},
+                    {"path": ".github/workflows/other.yml"}, {"html_url": "http://insecure"},
+                    {"head_sha": "0" * 40}, {"expired": True}):
+            with self.subTest(run=run):
+                self.queue(self.main_sha, **dict(run))
+                with self.assertRaises(ValueError):
+                    proof.reuse_merge_queue(self.root, self.env)
+
+    def test_queue_run_on_another_tree_is_a_miss(self):
+        other = self.commit_other()
+        self.responses.clear()
+        self.queue(self.main_sha)
+        run = self.responses["/repos/Example/cassy/actions/runs/4242"]
+        run["head_sha"] = other
+        self.responses_path.write_text(json.dumps(self.responses))
+        self.git("checkout", "-q", self.main_sha)
+        with self.assertRaises(ValueError):
+            proof.reuse_merge_queue(self.root, self.env)
+
+    def commit_other(self):
+        (self.root / "src/lib.rs").write_text("pub fn other() {}\n")
+        other = self.commit("other")
+        return other
+
+    def test_github_failure_and_opt_out_are_named_misses(self):
+        with self.assertRaises(ValueError) as miss:
+            proof.reuse_merge_queue(self.root, dict(self.env, FIXTURE_GH_FAIL="1"))
+        self.assertIn("key=github reason=gh_api_failed", str(miss.exception))
+        with self.assertRaises(ValueError) as miss:
+            proof.reuse_merge_queue(self.root, dict(self.env, CAS_RELEASE_TRAIN_MERGE_QUEUE_REUSE="0"))
+        self.assertIn("disabled", str(miss.exception))
+
+    def test_expired_tampered_or_non_ancestor_receipts_miss(self):
+        record, path = proof.reuse_merge_queue(self.root, self.env)
+        for change in ({"checked_epoch": int(time.time()) - proof.MAX_AGE - 10},
+                       {"checked_epoch": int(time.time()) + 3600},
+                       {"status": "FAIL"}, {"source": "assembly"}, {"tree": "0" * 40},
+                       {"run_url": "file:///tmp/x"}):
+            with self.subTest(change=change):
+                proof.write(path, dict(record, **change))
+                self.assertIsNone(proof.merge_queue_matching(self.root))
+        proof.write(path, record)
+        self.assertIsNotNone(proof.merge_queue_matching(self.root))
+        # A receipt naming a commit outside HEAD's history cannot stand for it,
+        # even when that commit has the same code input.
+        self.git("checkout", "-q", "--orphan", "elsewhere")
+        sibling = self.commit("same code, other history")
+        self.assertEqual(proof.code_input(self.root, sibling), record["inputs"]["code_input"])
+        self.assertIsNone(proof.merge_queue_matching(self.root))
+
+    def test_dirty_checkout_refuses_reuse(self):
+        (self.root / "src/lib.rs").write_text("pub fn dirty() {}\n")
+        with self.assertRaises(ValueError) as miss:
+            proof.reuse_merge_queue(self.root, self.env)
+        self.assertIn("dirty_checkout", str(miss.exception))
+        self.assertIsNone(proof.merge_queue_matching(self.root))
 
 
 if __name__ == "__main__":

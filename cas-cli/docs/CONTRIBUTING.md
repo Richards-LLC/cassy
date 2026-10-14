@@ -596,15 +596,25 @@ against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
-The supervisor runs the full build and Rust suite once per release candidate at
-assembly it runs `python3 scripts/assembly-proof.py prove <epic-worktree>` and
-records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic. Workers still cannot run build/test/clippy/run or unfiltered nextest,
-`rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
-proof rather than scoped `--proof` or `loaded_proof` notes. That holds for a
-worker's close and for a supervisor closing an epic child whose delivery is
-already on the integration branch: close records a pending-assembly note when
-the epic has no covering `ASSEMBLY_PROOF` yet. Standalone tasks still carry
+The merge queue is the integration proof (cas-2970). The path from a green
+lane to `main` runs no local full suite: lane CI (Scoped Validation) and the
+supervisor's lane compile admit each lane to the epic; the epic PR enters the
+merge queue; the queue's Fast Validation runs the CI script tiers, the
+Commander web checks, the complete workspace suite sharded from an archive in
+a plain checkout, doctests and macOS Check on the exact merged tree; that tree
+becomes `main`. Do not run `python3 scripts/assembly-proof.py prove
+<epic-worktree>` before opening the PR. It stays an opt-in diagnostic: run it
+when a queue run fails and the failure needs a local two-context reproduction,
+and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
+log=<path>` on the epic when you do. An epic closes once its tip is contained
+in the default branch, or with a covering `ASSEMBLY_PROOF`.
+Workers still cannot run build/test/clippy/run or unfiltered nextest,
+`rustc`, scoped-test scripts, or `make test*`. Child closes reference the
+epic's integration proof rather than scoped `--proof` or `loaded_proof` notes.
+That holds for a worker's close and for a supervisor closing an epic child
+whose delivery is already on the integration branch: close records a
+pending-integration note until the epic lands through the queue or carries a
+covering `ASSEMBLY_PROOF`. Standalone tasks still carry
 their own receipts. A scoped receipt may be the runner's `SCOPED_PROOF:
 targets=…` or `command=…` line, or, when that exceeds the task-note limit, the
 short `SCOPED_PROOF_RECEIPT: id=… path=…` line; `--proof` always writes that
@@ -612,11 +622,12 @@ file (default `<git-common-dir>/cas/scoped-proof/<head>.receipt`) and close
 verifies its digest. Non-Rust suites are unaffected. An older runtime that denies the check exception requires parking
 with the unverified crates and test filters named for assembly.
 
-The assembly command runs the gate's `ci-script-tests` row:
+The opt-in assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
 dry-run/ignore-error modes removed. A failing script suite retains its output
 and stops assembly before either Rust suite. The full release gate runs this
-same mandatory row before build and Rust test rows. The short `--fast-rows`
+same mandatory row beside its build rows; a failure aborts the gate and
+cancels the build and Rust suite rows still running. The short `--fast-rows`
 lane checks run only `ci-script-tests-changed`: the tier entries whose script
 or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
@@ -638,6 +649,38 @@ Each runs when the lane changes its inputs, and the full gate always runs it:
 
 Contract phrases were already part of `builtin-doc-hygiene`. On this host a
 lane spanning that release's three epics ran every fast row in about 25 seconds.
+
+Each second-scale failure that reached CI or the merge queue on 2026-10-14
+is refused at park (cas-7bce). `scripts/test-fast-release-rows.py` holds one
+fixture per failure:
+
+- `test-shape`: integration tests under `cas-cli/tests` and `crates/*/tests`
+  may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
+  archive shards lack.
+- `version-literals`: fast mode also refuses the next patch, minor and major
+  version in the lane's changed files, comments included. The release gate
+  scans for the bumped version. Pre-existing next-version literals elsewhere
+  are printed as a NOTE.
+- `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
+- `test-env` and `fixture-paths-src`: the environment failures.
+- `builtin-projections-src`: the no-build half of `builtin-projections`. It
+  checks that the root task-verifier projection matches its embedded body.
+
+A failed row prints `FIX <row>: …`. On a committed tree the run writes a FAIL
+receipt that names the rows and those fixes, and the park refusal quotes them.
+
+The `call-shapes` row is the only implementation of the MCP call-shape lint
+(cas-043b). It runs `scripts/check-call-shapes.py` over shipped builtins and
+runtime Rust templates, using the committed `scripts/mcp-call-surface.json`.
+`mcp_action_surface_test::call_shape_surface_snapshot_matches_the_published_surface`
+keeps that snapshot equal to the live surface. On drift the test prints the
+`cp` command that refreshes the snapshot.
+
+The worker pre-push guard runs `scripts/fast-rows-pre-push.sh` for pushes of
+`refs/heads/factory/*`. A same-tip PASS receipt is reused. Otherwise the guard
+runs the fast rows against the CI push base and refuses a failure with its
+`FIX` lines. `CAS_SKIP_FAST_ROWS=<reason> git push` skips the guard. Each skip
+is appended to `<git-common-dir>/cas/fast-rows/overrides.log`.
 
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
@@ -760,6 +803,11 @@ cargo-zigbuild and objdump for the ISA audit; Zig is keyed by its bytes). A full
 runs `assembly-proof.py check-row` before the row cache: a hit records the row
 `REUSED` with its source SHA, and a miss prints the differing key and runs the
 row as before. `--only` and a no-reuse full gate never consume a row proof.
+A `release-binary-isa` hit, from either source, counts only while
+`scripts/release-binary-artifact.py verify` finds this tree's audited archive
+(cas-c096). release.sh reuses that archive instead of rebuilding the tree, so
+without it the row rebuilds in its persistent release target
+(`<main checkout>/.cas/release-binary/target`).
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.
@@ -794,15 +842,22 @@ An unset or blank key reports `NOT CONFIGURED`, names the key, and skips
 the suite and failure attribution. Other projects and configured sweep commands
 retain their detected or configured runner without requiring this key.
 
-For manual assembly commands, set `CAS_RELEASE_GATE_HOME_DIR` to a scratch
-base on the checkout filesystem
-outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
-`TMPDIR`, and every `.cas` ancestor (for example,
-`CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or
-`/Users/Shared/cas-release-gate/base` on macOS). The plain clone must be outside
-Cassy's disposable roots so discovery and update tests exercise durable
-projects. Assembly refuses an unsafe base before tool probing or either suite;
-its legacy `/var/tmp` default requires this explicit override.
+Manual assembly commands need no exported scratch base or Zig (cas-9f61).
+`scripts/release_env.py` resolves both for every release tool (assembly-proof,
+lane compile, the release gate and the release train). Its scratch base is on
+the checkout filesystem, outside `/tmp`, `/var/tmp`, `/private/tmp`,
+`/private/var/tmp`, the configured `TMPDIR`, and every `.cas` ancestor. Candidates
+in order: an exported `CAS_RELEASE_GATE_HOME_DIR`; `<staging.scratch_root>/cas-release-gate`;
+`<mount>/cas/scratch/cas-release-gate`; `<mount>/cas-release-gate/base`
+(for example `/home/cas-release-gate/base`); the platform default; and
+`cas-release-gate` beside the checkout. The plain clone must be outside Cassy's
+disposable roots so discovery and update tests exercise durable projects.
+Assembly refuses an unsafe or missing base before tool probing or either suite
+and names the provisioning command. Zig resolves from `ZIG`, then the
+checkout's `.context/zig`, the main checkout's, then `PATH`. Both resolve
+every time; nothing is persisted. `python3 scripts/release_env.py doctor`
+checks Zig, scratch per filesystem, the toolchain, the env file, `gh auth` and
+the merge-queue query in seconds, with one fix command per gap.
 
 The script tier must pass, and both Rust contexts must report nonzero passed
 tests, before an atomic PASS is written
@@ -823,8 +878,38 @@ restores the checkout and prints a named blocker with a recovery command.
 After a valid pipeline/publish receipt exists, resume finishes that landed
 release without adopting a newer integration tip.
 
-The first full release gate automatically reuses its nextest and archive-mode
-rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
+A release cut assembles from `main` (`--assemble --from-main`), so its code
+input is one the merge queue already proved. Assemble runs
+`python3 scripts/assembly-proof.py reuse-merge-queue <release-worktree>`: it
+walks the release checkout's first parents while the code input is unchanged
+(release prose, journey reports, member-version bumps and the ledger keep it)
+and accepts the first commit whose exact tree has a successful `merge_group`
+run of `.github/workflows/ci.yml` that published
+`merge-queue-validated-tree-<tree>`. It writes a receipt under
+`.cas/merge-sweeps/merge-queue-proofs/` and records
+`integration_proof.source=merge-queue` in `assemble.integration.json`. No local
+suite runs. A miss names its cause (a code change since the queue run, no
+successful run, an expired artifact, GitHub unavailable, or
+`CAS_RELEASE_TRAIN_MERGE_QUEUE_REUSE=0`) and assemble runs the two-context
+proof fresh once, recording `integration_proof.source=assembly`.
+
+The from-main full gate still reuses no row cache, sweep receipt or row proof
+(cas-846f), and refuses `--reuse` and `--only`. It reuses only the recorded
+integration proof, through `CAS_RELEASE_GATE_INTEGRATION_PROOF`. A
+`merge-queue` proof stands for the rows the queue ran: `ci-script-tests`,
+`hub-web-tests`, `hub-web-dist-drift`, `hub-web-visual-qa`, `macos-check`,
+`fixture-paths`, `nextest`, `doctests` and `archive-mode`. The gate's offline
+`assembly-proof.py check-merge-queue` revalidates the receipt: same repository
+and code input, under 24 hours old, the queue-proved commit's tree and code
+input, and that commit an ancestor of HEAD. An `assembly` proof stands for its
+three rows (`ci-script-tests`, `nextest`, `archive-mode`). Every other row runs
+fresh, including the version-delta rows: `workspace-tests` (the compile check of
+the bumped manifests and lock), `release-binary-isa`, `builtin-projections`,
+`snapshot-portability`, `version-literals` and `changelog-and-versions`. A
+receipt miss prints `MISS merge-queue key=…` and runs that row fresh.
+
+The first full release gate of a sweep-backed assembly automatically reuses its
+nextest and archive-mode rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
 expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,
 toolchain or test environment cause a miss. `CHANGELOG.md`, release prose under
 `docs/release-notes/` and `docs/release-reports/`, and Markdown under
@@ -838,6 +923,50 @@ including dependency and non-member versions, still requires a new proof.
 The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
+
+The gate runs independent rows concurrently. The 3.51.1 gate ran its rows one
+after another for 29 minutes; its longest row, `release-binary-isa`, took about
+10 minutes. Each row in `scripts/release-gate.sh` declares the resources it
+needs:
+
+- `cpu`: it builds or checks Rust. At most one such row runs per eight cores,
+  and never fewer than two.
+- `mem=<GiB>`: its estimated peak. Admission uses the assembly proof's memory
+  budget, which is MemAvailable minus the reserve and the taste lane. With no
+  heavy row running, one row is always admitted.
+- `excl=host-tests`: it runs test binaries or script fixtures, so only one such
+  row runs at a time, because they share host ports, hub processes and tmpfs.
+- `excl=hub-web`: it uses `hub-web/node_modules`.
+- `writes-tree`: it rewrites an input that `cas` embeds at compile time:
+  `hub-web/dist` or the reference-history ledger. Such a row runs alone, so
+  every other row's reuse lookup and cache receipt see a stable tree.
+- `abort`: its failure cancels every running row after it in canonical order.
+  Every row before it still runs and reports.
+
+The receipt and `timing.tsv` keep canonical row order. Scheduling events go to
+`schedule.tsv` in the row log directory. `CAS_RELEASE_GATE_PARALLEL=1` restores
+sequential execution. `scripts/test-release-gate.sh --replay-timing
+<timing.tsv> [scale]` replays a real gate's row durations through the fixture
+at the given speed-up, and reports the gate's wall time against its longest
+row.
+
+Every train stage has a time budget in `scripts/release-stage-budgets.json`.
+Loosening a budget is a reviewed change. `release-metrics.py` compares each
+completed stage in `stage-events.tsv` with its budget, and writes the results
+to `release-latency.receipt` as `STAGE_SECS`, `STAGE_BUDGETS` and
+`BUDGET_BREACHES`. The first measured stage, `commit-to-main`, covers the
+tasks merged since the previous release tag. Each task is timed from its last
+park (`Task awaiting merge` in `.cas/cas.db`) before its epic merge, to the
+main commit that landed that merge. The receipt's `COMMIT_TO_MAIN` holds the
+task count, the median and the worst task, and the worst task is the value
+budgeted. When a stage is over budget:
+
+- `cas release report` marks its Pipeline latency subsection (under Evidence and scope) FAILED and names the
+  stage. The section also shows each stage's times from the previous five
+  release receipts.
+- post-publication files one P0 task in the budget file's epic, through
+  `cas serve`. A marker in the run directory keeps a resumed stage from filing
+  it twice.
 
 ### Release delivery completion
 
@@ -867,7 +996,8 @@ An embargo never waives the publication or install requirement.
 
 ### Supervisor proof targets
 
-Run `python3 scripts/assembly-proof.py prove <epic-worktree>` for assembly.
+Run `python3 scripts/assembly-proof.py prove <epic-worktree>` for an opt-in
+assembly diagnostic (for example, after a merge-queue failure).
 Native and archive-clone producers each use their own `<worktree>/target`;
 `CARGO_TARGET_DIR` inherited from a different lane is replaced. For a scoped
 check, use `python3 scripts/proof_target.py run <worktree> -- cargo check --workspace --tests`.
@@ -1057,10 +1187,16 @@ Standing operator policy: factory/* pushes and epic-targeted PRs run
 import/dependency-selected tests in Scoped Validation. Protected-default PRs run
 only the required Fast Validation and macOS Check admission lanes. The release
 merge queue runs the complete workspace suite on its synthetic tree once; when its
-successful tree is pushed unchanged to main, the main-push Fast Validation and
-macOS lanes reuse that receipt and name the validating run. Direct pushes,
-bypass merges, receipt lookup failures, and changed trees still run those
-lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
+successful tree is pushed unchanged to main, the main-push Fast Validation lane
+reuses that receipt and names the validating run. The main-push macOS Check
+still runs, after the merge, because only main's Darwin cargo and sccache entries
+are readable by later queue entries. Without them every queue entry compiled
+cold, taking 12–14 minutes and making macOS the queue's slowest required check.
+The trade-off is one post-merge macOS compile per Rust-touching main push.
+Only main saves the macOS cargo cache, so queue and tag refs don't evict it
+(see [branch protection](../../docs/branch-protection/README.md#macos-check-latency-a-warm-cache-from-main)).
+Direct pushes, bypass merges, receipt lookup failures, and changed trees still
+run every lane. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
@@ -1381,12 +1517,19 @@ test, and one passing result; intentional signal/atexit children instead prove
 entry into the test body before their early exit.
 
 The full release gate's `hub-web-tests` row runs `npm ci`, `npm run typecheck`,
-and `npm test` before build and Rust suite rows. A failure prevents pipeline
-admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
+and `npm test` beside the build and Rust suite rows. A failure aborts the gate,
+cancels the rows after it, and prevents pipeline admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
 including the repo-level `scripts/visual-qa.mjs` that web tests import and read.
-Both scoped CI lanes use the same conservative paths for `web-check-needed`;
-Markdown fixtures beneath those paths still require web tests. The no-build
-fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
+CI's `web-check-needed` (both scoped lanes and the merge-queue Commander step:
+build, visual QA, dist drift and journeys) is narrower: `scripts/classify-web-inputs.py`
+lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
+worker-memory wrapper with its imports, and the classifier itself. Any other
+`scripts/` or `.github/` change skips them, including a `.github/workflows/ci.yml`
+edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead; a
+classifier failure runs them. The release train still runs the full journeys.
+`scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
+the list omits. Markdown fixtures beneath hub-web still require web tests. The
+no-build fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
 
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires one task decision note per

@@ -15,15 +15,23 @@ version and worktree, never a version-keyed path.
    hazards no gate row catches. Every other entry names a `release-gate.sh` row
    that already enforces it, so on a gate failure grep the log for that row id
    instead of reading it all. Learn an absent failure with
-   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`; it
-   appends to the failure log and regenerates the builtin reference ledger,
-   so commit them with the new check. Store the same text with
-   `memory action=remember entry_type=learning tags=release`.
+   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"
+   --rung <rung>`; it appends to the failure log and regenerates the builtin
+   reference ledger, so commit them with the new check. Climb the ladder
+   prevention-first: a default or auto-fix, then a seconds-long preflight,
+   then a late gate row, and prose only when nothing executable fits. A class
+   already learned twice is refused unless `--task` names an open P0/P1 task
+   whose acceptance removes the cause; receipts refuse its `learn=` mapping the
+   same way. Store the lesson with `memory action=remember entry_type=learning
+   tags=release,operation:release-cut`; starting the next cut surfaces it.
 2. Before merging a release-bound lane, run `scripts/release-train.sh <version>
    <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,
    pending, or malformed evidence refuses the merge. Supervisors monitor CI;
    workers never poll CI.
+   Wait on CI with `remind_event=ci_completed` (`{"sha":"<full-sha>"}`) and
+   on a queue landing with `remind_event=branch_contained_in`, both with
+   `cross_session=true` — never a delay reminder.
 3. Start a clean detached or `release/` worktree from `origin/main`. Copy the
    reviewed dated CHANGELOG section and draft from the epic into this worktree
    and commit them; preflight reads the release checkout. Confirm
@@ -35,8 +43,10 @@ version and worktree, never a version-keyed path.
    Zig, the `x86_64-unknown-linux-gnu` Rust target); a `report-renderer`
    whose headless Chromium launches (its blocker names the pinned
    `playwright install chromium-headless-shell` command); and a passing
-   integration receipt. With no configured scratch base, a checkout on another
-   filesystem than the platform default gets `cas-release-gate` beside it. A macOS host needs only
+   integration receipt. Run `python3 scripts/release_env.py doctor` first (seconds,
+   one fix per gap): Zig and the per-filesystem scratch base come from that
+   resolver, which assembly-proof, the gate and the train share, so nothing is
+   exported by hand. A macOS host needs only
    Homebrew `jq binutils`, those Cargo tools and that target: the train
    supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself,
    and defaults its scratch base to `/Users/Shared/cas-release-gate` there
@@ -57,7 +67,10 @@ version and worktree, never a version-keyed path.
    It runs `preflight, assemble, prep, ledger, gate, pr-body, pipeline,
    publish, post-publication, announce, report, receipts, host-update` in that
    order. The ledger is the last prep step. `assemble` invokes stale-base heal
-   when required. The gate is a detached process group; inspect its recorded PID
+   when required. From main, `assemble` reuses the merge-queue run that proved
+   main's code input (`assembly-proof.py reuse-merge-queue`) and proves fresh
+   only on a named miss; the gate reuses that one proof for its suite rows and
+   runs the cheap and version-delta rows fresh. The gate is a detached process group; inspect its recorded PID
    with `kill -0`, never by process-name search. Every stage writes a SHA
    receipt, and the train preserves pipeline/publisher hand-off epochs.
    `post-publication` fills the draft with
@@ -87,12 +100,14 @@ version and worktree, never a version-keyed path.
    `--run-dir` and `--evidence file:line` options annotate the evidence line.
    Preflight warns about release tooling on unreleased epic or parked branches;
    bring those fixes onto main before the next cut. The checklist also needs the
-   full exact-SHA gate (the full suite on the assembled tree), queue/pipeline landed SHA, `annotated tag peels`,
+   full exact-SHA gate (every row on the assembled tree; suite rows may cite its recorded integration proof), queue/pipeline landed SHA, `annotated tag peels`,
    `release.tag-complete.epoch`, `release-published.receipt`, the matching
    workflow and asset proofs, `four Slack POSTED` entries through the
    `Violet` hub (never a personal Slack route), report HTML/PDF evidence,
    `cas --version`, and host JSON with `refresh_binary_version`.
    The report's green-to-published latency is named only from verified receipts.
+   A stage over `scripts/release-stage-budgets.json` fails the report's Pipeline
+   latency section, and post-publication files a P0 task in the budget's epic.
 7. Add one epic note per gate run with tip, failed rows, cause class, and
    blocking step. Close only after merge and stranded-branch inspection;
    `stranded_branch_override` requires supervisor proof. Preserve the draft and

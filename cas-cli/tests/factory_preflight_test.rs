@@ -342,3 +342,32 @@ fn cli_missing_cas_mcp_registration_prints_json_then_exits_nonzero() {
             })
     );
 }
+
+/// cas-e719: 3.51.0 refused `cas factory` and `cas claude <account>` for every
+/// operator on the default `factory.nice_cargo=true`, and no test launched the
+/// real binary from a clean operator shell. Run the release gate's operator
+/// launch smoke on this build: from a throwaway HOME and `cas init` project,
+/// each operator-only entry point passes its launch gate for the operator and
+/// refuses the same invocation with `CAS_AGENT_ROLE` set.
+#[test]
+fn operator_launch_smoke_passes_the_operator_and_refuses_an_agent_cas_e719() {
+    let scratch = TempDir::new().unwrap();
+    let script = scratch.path().join("check-operator-launch.sh");
+    // Embedded at compile time: archive-mode runs outside the checkout.
+    std::fs::write(&script, include_str!("../../scripts/check-operator-launch.sh")).unwrap();
+    let started = Instant::now();
+    let output = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(cas::test_paths::cas_binary())
+        .env("TMPDIR", scratch.path())
+        .output()
+        .unwrap();
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{transcript}");
+    assert!(transcript.contains("PASS operator launch smoke: 4 entry points"), "{transcript}");
+    assert!(started.elapsed() < Duration::from_secs(60), "smoke took {:?}", started.elapsed());
+}

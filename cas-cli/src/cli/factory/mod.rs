@@ -340,6 +340,13 @@ pub struct FactoryArgs {
     /// Claude with a loud warning — see `apply_codex_fallback`.
     #[arg(long = "strict-cli", global = true)]
     pub strict_cli: bool,
+
+    /// cas-e719: stop at the launch boundary. Runs the terminal check and the
+    /// operator-only launch gate exactly as a launch would, prints
+    /// `launch check: ...` and exits without starting a factory. The release
+    /// gate's operator launch smoke drives it from a clean operator shell.
+    #[arg(long, hide = true)]
+    pub check_launch: bool,
 }
 
 impl FactoryArgs {
@@ -420,6 +427,7 @@ impl Default for FactoryArgs {
             supervisor_cli_explicit: false,
             supervisor_config_dir: None,
             strict_cli: false,
+            check_launch: false,
         }
     }
 }
@@ -1401,6 +1409,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         &crate::config::operator_policy::InvocationContext::from_process(),
     ) {
         bail!(refusal);
+    }
+    if args.check_launch {
+        println!("launch check: the operator may launch a factory");
+        return Ok(());
     }
 
     // Apply [llm] config harness defaults when CLI args are at their defaults.

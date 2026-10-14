@@ -7,6 +7,201 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — the merge queue skips the Commander journeys when only the CI workflow changes (cas-c846)
+
+- `.github/workflows/ci.yml` no longer counts as a Commander web input. A PR
+  whose only non-Commander change is the workflow used to run about 13 minutes
+  of Commander build and journeys in the merge queue. It now skips them.
+  `scripts/test-hub-web-gate.py` pins the step's wiring instead, and the
+  release train still runs the full journeys before publication.
+
+### Fixed — the memory guard no longer stops CI jobs mid-run (cas-f632)
+
+- `scripts/worker-memory.py` stops a local worker suite when free memory
+  falls into the reserve kept for the supervisor's assembly proof. On the
+  self-hosted runner, that rule stopped the merge queue's Commander journeys
+  twice with no test failing, and ejected PR #1198 both times. A CI job
+  (`GITHUB_ACTIONS=true`) is still admitted and still waits for memory, but it
+  is never stopped mid-run. Local worker behaviour is unchanged.
+
+### Added — a merge-queue ejection of an epic PR wakes the supervisor and is retried once (cas-e369)
+
+- The CI watcher now tracks open epics' PRs, not only parked worker
+  deliveries. When the queue ejects one, the supervisor gets a typed wake
+  naming the failing job, the step, the error line and whether the failure
+  touches the PR's diff.
+- A failure outside the diff is re-enqueued once automatically. Examples are an
+  infrastructure stop, or a Commander step failing when no Commander input
+  changed. A second failure on the same head escalates instead of looping.
+  Each decision is recorded in the epic's notes.
+
+### Changed — The release gate runs independent rows concurrently (cas-dcb4)
+
+- The 3.51.1 gate ran its rows one at a time and took 29 minutes. Its longest
+  row, the release-binary ISA build, took about 10 minutes. Rows now declare
+  what they need: CPU, a memory estimate, a shared test host or web install,
+  or a rewrite of an input that `cas` embeds. Independent rows run together
+  under the assembly proof's memory budget. Replaying the 3.51.1 row timings
+  puts the gate close to its longest row.
+- The receipt and `timing.tsv` keep their canonical row order. A failing row
+  still fails the gate. When a script-tier, web-test or ISA row fails, the
+  gate stops and cancels the rows running after it. Scheduling events go to
+  `schedule.tsv`, and `CAS_RELEASE_GATE_PARALLEL=1` restores sequential rows.
+
+### Changed — factory pushes run the fast rows; the call-shape lint is one Python row (cas-043b)
+
+- A worker's push of its factory branch runs `release-gate.sh --fast-rows`
+  first and is refused on failure with the `FIX` lines. A same-tip PASS
+  receipt makes a repeat push free. `CAS_SKIP_FAST_ROWS=<reason>` skips the
+  check, and every skip is logged.
+- The builtin and runtime MCP call-shape lint is now
+  `scripts/check-call-shapes.py`, the new `call-shapes` fast row (about 2.5 s).
+  A Rust test keeps its committed surface snapshot current.
+
+### Added — release-notes drafts are linted at park (cas-e7d4)
+
+- A new `release-notes-draft` fast row runs the announce lint on each
+  `docs/release-notes/*-slack.md` that a lane changes. It uses the same
+  implementation as the cut preflight and the announce stage
+  (`release-train-announce.py --lint`), with placeholders allowed, and prints
+  a `FIX:` line naming the failing body. A lane that leaves the drafts alone
+  pays nothing. The v3.52.0 cut stopped at preflight on a 26-word Dev
+  top-level that had been committed hours earlier.
+
+### Added — map a release blocker to an open task with one command (cas-297d)
+
+- `scripts/release-gate.sh --learn-task <task-id> --run-dir <dir> --evidence
+  <file:line>` records `task=<id>` on a `blockers.log` or
+  `supervisor-interventions.md` row after checking that the task is open.
+  This uses the same `release-learning.py` map path as `--learn`.
+- A refused receipts stage now prints this command next to `--learn`. A
+  supervisor no longer hand-edits the release run directory, which the
+  factory workspace hook refuses because it sits outside the write roots.
+
+### Added — a release can no longer ship that the operator cannot launch (cas-e719)
+
+- 3.51.0 refused `cas factory` and `cas claude <account>` for every operator
+  on the default `factory.nice_cargo=true`, and no gate launched the real
+  binary. The new `operator-launch-smoke` gate row runs
+  `scripts/check-operator-launch.sh` on the tree's audited release binary,
+  as does the post-publication install-path proof (macOS and Linux) on the
+  installed binary.
+- The smoke uses a throwaway HOME and a `cas init` project with default config.
+  It runs in a clean shell that keeps only the Claude Code preferences
+  operators export (`CLAUDE_CODE_NATIVE_CURSOR`, `CLAUDE_CODE_NO_FLICKER`). It
+  runs in a login shell on a pseudo-terminal and, on Linux, in a transient
+  systemd user unit, outside the caller's agent ancestry and cgroup.
+  `cas factory`, `cas claude <account>`, `cas hub pair` and
+  `cas hub authorize` must pass their operator-only gate, and the same
+  commands must be refused with `CAS_AGENT_ROLE` set. Each stops at the
+  launch boundary through a new hidden `--check-launch` flag. The real binary
+  runs it in 3.2 s.
+
+### Changed — the publisher reuses the gate's release binary (cas-c096)
+
+- The gate's `release-binary-isa` row builds in a persistent release target
+  (`<main checkout>/.cas/release-binary/target`, or
+  `CAS_RELEASE_BINARY_TARGET_DIR`), under a lock that concurrent gates share.
+  It now runs release.sh's Ghostty-archive and BLAKE3 build audits as well as
+  the packaged-binary ISA audit. It then records the archive with a manifest
+  binding the tree, version, target, build identity (rustc, cargo-zigbuild,
+  Zig, rustflags) and digests (`scripts/release-binary-artifact.py`).
+- `scripts/release.sh` reuses that archive when every bound input matches,
+  re-runs the packaged-binary ISA audit on it, and skips its own clean build.
+  Any mismatch prints `MISS key=<input>` and rebuilds as before.
+  `--manual-publish` always rebuilds, because it ships the local bytes. On
+  3.51.1 the publisher's clean rebuild of the gated tree took 10 m 55 s of a
+  23.5 min publish stage.
+- A row PASS proved on another tree is reused only alongside this tree's
+  archive. Otherwise the row rebuilds, warm, so the build happens in the gate
+  rather than the publisher.
+
+### Changed — cheap release-gate failures are refused at park, with the fix named (cas-7bce)
+
+- `release-gate.sh --fast-rows` now also refuses:
+  - the next patch, minor or major version in a lane's changed files;
+  - `env!("CARGO_BIN_EXE_<name>")` in any crate's integration tests;
+  - a root task-verifier projection that drifted from its embedded body.
+- Each of the five failures of 2026-10-14 that cost a CI or merge-queue round
+  has a fixture: the two_machine binary path, a next-version comment, two
+  Markdown reports, and test environment.
+- A failed row prints `FIX <row>: …`. A failed run on a committed tip writes
+  a FAIL receipt, and the worker park refusal quotes its rows and fixes.
+
+### Added — Release stage budgets fail the report and file a P0 (cas-2bef)
+
+- Every release-train stage has a versioned budget in
+  `scripts/release-stage-budgets.json`. The latency receipt records each
+  stage's time, its budget and any breach. Commit to main is measured too:
+  each task's park to the main commit that landed it, reported as the median
+  and the worst task, with the worst task budgeted at 30 minutes.
+- The release report has a new Pipeline latency part, under Evidence and scope. It shows each stage
+  against its budget and the stage's times in the previous five releases. A
+  stage over budget fails the section and is named. The 3.52.0 cut, for
+  example, had a 50-minute gate against a 15-minute budget.
+- A release over budget files one P0 task in the pipeline epic, carrying the
+  measured time, the budget and the receipt paths. Before this, regressions
+  had to be reconstructed by hand from logs.
+
+### Changed — lessons must remove their cause (cas-9734)
+
+- A release failure class that has been learned twice or more can no longer
+  be marked learned again with `learn=<row>`. It needs `task=<id>` naming an
+  open P0 or P1 task whose fix removes the cause. Failure-log entries now
+  record `Recurrence`, `Rung` and `Task`.
+- Lessons tagged `operation:<op>` (`release-cut`, `spawn`, `report`,
+  `epic-close`) are shown as a short checklist when that operation starts.
+- Background-task notices are no longer saved as memories. Migration `m270`
+  backs up and then deletes the existing ones (958 on the reference store);
+  real memories are kept.
+- Each release run records its lesson recurrence rate. The release report
+  shows it, and `cas doctor` shows a five-release trend.
+
+### Changed — the release environment resolves itself (cas-9f61)
+
+- Zig, the scratch base and the toolchain now come from one resolver,
+  `scripts/release_env.py`, shared by the cut preflight, the release gate,
+  the assembly proof and lane compile checks. It is recomputed on every run;
+  nothing has to be exported by hand. `scripts/release_env.py doctor` reports
+  gaps in about a second. A fresh shell on either filesystem of the reference
+  host went from three environment blockers to none.
+
+### Changed — the close gate checks proof scope at park (cas-d6eb)
+
+- A risk=blast-radius delivery whose changes reach a source module that
+  neither its `proof_targets` nor a passing worker test covers is now refused
+  at park, while the worker can still widen the scope. The refusal names the
+  modules and the exact `task action=update proof_targets=…` command. Before
+  this, every such task in 3.51.1 passed verification and then needed a
+  supervisor scope fix.
+- A supervisor scope widening that only adds modules already covered by the
+  worker's test receipts keeps the reviewed proof cycle instead of reopening
+  the task.
+
+### Changed — faster CI and release builds
+
+- Scoped CI on factory branches no longer widens to the whole workspace.
+  nextest's progress counter had broken the failure parser, so every lane ran
+  all 11,850 tests; one real run went from 876 s to 332 s (cas-38ac).
+- The published macOS asset builds without LTO: 1686 s to 912 s cold, 3%
+  larger, same startup (cas-d8ec, measured in cas-f627).
+- The release prebuild starts at the `release/**` push and is adopted when
+  its tree matches, so the publisher no longer waits for it (cas-28eb). Its
+  cache key survives version bumps (cas-542e).
+- The merge queue reuses the release train's proof receipt for the same tree
+  (cas-2970) and runs the Commander web step only when its inputs change
+  (cas-7822). macOS Check runs on main pushes so queue entries compile warm
+  (cas-861c0).
+- `scripts/test-release-gate.sh` runs its sections in parallel: 2165 s to
+  about 115 s. The scratch guard's process scan dropped from 7.6 s to 1.2 s
+  per gate run (cas-e919).
+
+### Added — CI-completed reminders (cas-0f05)
+
+- `coordination action=remind remind_event=ci_completed` with a filter of
+  `{"sha": "<sha>"}`, and optionally `workflow`, fires once when that commit's
+  CI run completes, using the existing CI watcher.
+
 ## [3.52.0] - 2026-10-14
 
 ### Fixed — "Jump to latest" on a phone thread (cas-6a9b)

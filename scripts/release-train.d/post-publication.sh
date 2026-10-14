@@ -124,6 +124,13 @@ release_train_post_publication() {
         return 1
     fi
     mv "$tmp" "$run_dir/release-latency.receipt"
+    # cas-2bef: a stage over its versioned budget files one P0 task. The
+    # release stays published; a filing failure keeps the stage resumable.
+    if ! python3 "$script_dir/release-budget-breach.py" "$tag" "$run_dir" \
+        --cas-bin "${CAS_RELEASE_TRAIN_CAS:-cas}"; then
+        printf 'ERROR post-publication: could not file the stage-budget breach for %s\n' "$tag" >&2
+        return 1
+    fi
 }
 
 cut_stage_post_publication() {

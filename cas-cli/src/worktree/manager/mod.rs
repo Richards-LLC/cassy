@@ -615,6 +615,11 @@ impl WorktreeManager {
         {
             std::fs::write(scope.path().join("check-lane-compile.py"), compiler)?;
         }
+        // The compile verifier loads its Zig resolver beside __file__ too
+        // (cas-9f61), from the same approved commit.
+        if let Some(resolver) = self.committed_lane_script(policy_sha, "scripts/release_env.py")? {
+            std::fs::write(scope.path().join("release_env.py"), resolver)?;
+        }
         self.require_lane_refs(worktree, &target_sha, &source_sha)?;
         let output = std::process::Command::new("python3")
             .arg(&runner)

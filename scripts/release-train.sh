@@ -53,7 +53,7 @@
 #   CAS_RELEASE_TRAIN_REPORT_POST_CMD default <checkout>/scripts/release-report-post.py
 #   CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS and _DEV_THREAD_TS supplied to the adapter
 #   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
-#   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal and --host-update)
+#   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal, --host-update, budget breach task)
 #   CAS_RELEASE_TRAIN_WORKER_CACHE_CMD  default refresh-worker-build-cache.sh (host-update)
 #   CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS  default 1800 (warn-only cache refresh)
 #   CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO  explicit reason; persists across resumes;
@@ -105,11 +105,11 @@ pid_file="$run_dir/gate.pid"
 # by `--gate --only` again (cas-704a: hub-web-tests and eight more were).
 readonly -a gate_rows=(
     scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src
+    fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
 # Cross-cutting audit hook. The --cut dispatcher marks nested calls with
@@ -1123,6 +1123,8 @@ run_report() {
         fi
         printf 'report start %s version=%s worktree=%s\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$version" "$worktree"
+        # cas-9734: the report's Lesson recurrence row reads lesson-recurrence.json.
+        python3 "$script_dir/release-learning.py" --measure "$worktree" "$run_dir" || true
         set +e
         (cd "$worktree" && "$report_cmd" release report "$version" --pdf) \
             >"$run_dir/report.log" 2>&1
@@ -1202,10 +1204,8 @@ case "$action" in
         fi
         CAS_RELEASE_RECEIPTS_RUN_DIR="${CAS_RELEASE_RECEIPTS_RUN_DIR:-$run_dir}" \
         CAS_RELEASE_TRAIN_RUN_DIR="${CAS_RELEASE_TRAIN_RUN_DIR:-$run_dir}" \
-            python3 "$script_dir/release-integrate.py" "$worktree" "$assemble_action"
-        if [[ -f "$worktree/Cargo.toml" ]]; then
-            python3 "$script_dir/assembly-proof.py" prove "$worktree"
-        fi
+            python3 "$script_dir/release-integrate.py" "$worktree" "$assemble_action" || exit $?
+        assemble_integration_proof
         exit $?
         ;;
     --print-run-dir)
@@ -1392,18 +1392,37 @@ if [[ -n "${only_rows:-}" ]]; then
     printf 'diagnostic receipt directory: %s\n' "$receipt_dir"
 fi
 
-# cas-be3a: the same checkout-filesystem default preflight validated.
-export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-$(release_portable_checkout_scratch_base "$worktree")}"
+# cas-9f61: the scratch base and Zig preflight validated, from the resolver
+# assembly-proof and the gate share. Left unset when no durable base exists, so
+# the gate's own resolution names the gap.
+if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" || -z "${ZIG:-}" ]] \
+    && release_env_assignments="$(python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
+        --durable --create --link-zig)"; then
+    eval "$release_env_assignments"
+    if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" && -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
+        export CAS_RELEASE_GATE_HOME_DIR="$RELEASE_ENV_SCRATCH"
+    fi
+    [[ -n "${ZIG:-}" || -z "$RELEASE_ENV_ZIG" ]] || export ZIG="$RELEASE_ENV_ZIG"
+fi
 export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 # Keep every attempt's successful row logs and timings, even when gate.log is
 # replaced on the next full run. Only full gates populate/read row PASS cache.
 export CAS_RELEASE_GATE_LOG_DIR="$receipt_dir/rows/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export CAS_RELEASE_GATE_CACHE_DIR="$run_dir/row-cache"
 if [[ "${full_gate_fresh:-false}" == true ]]; then
-    # cas-846f: from-main releases prove every row fresh (see --gate above).
+    # cas-846f: from-main releases reuse no row cache, sweep or row proof (see
+    # --gate above). cas-2970: the suite rows accept only the integration proof
+    # this run's assemble recorded for the code input; every other row is fresh.
     unset CAS_RELEASE_GATE_CACHE_DIR
     export CAS_RELEASE_GATE_NO_REUSE=1
-    printf 'from-main assembly: full gate, every row runs fresh (no row, sweep or assembly reuse)\n'
+    unset CAS_RELEASE_GATE_INTEGRATION_PROOF
+    if integration_source="$(integration_proof_source)"; then
+        export CAS_RELEASE_GATE_INTEGRATION_PROOF="$integration_source"
+        printf 'from-main assembly: full gate; suite rows reuse the %s proof of this code input, every other row runs fresh\n' \
+            "$integration_source"
+    else
+        printf 'from-main assembly: full gate, every row runs fresh (no row, sweep or assembly reuse)\n'
+    fi
 fi
 gate_args=("$version")
 if [[ -n "${only_rows:-}" ]]; then
@@ -1422,7 +1441,7 @@ release_portable_setsid_prefix || {
 nohup "${RELEASE_PORTABLE_SETSID[@]}" bash -c '
     worktree=$1; done_file=$2; green_file=$3; sha_file=$4; expected_sha=$5; mode=$6; shift 6
     cd "$worktree" || exit 125
-    [[ -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
+    [[ -z "${ZIG:-}" && -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
     set +e
     "$@"
     rc=$?

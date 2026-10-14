@@ -100,7 +100,7 @@ EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can b
 
 Supervisor has rejection authority. Work is sent back with specific, actionable reasons.
 
-- **Tests added or updated** — No untested code ships; the tests run once at Phase 4 assembly
+- **Tests added or updated** — No untested code ships; the tests run once at the Phase 4 final gate (the merge queue, where base has one)
 - **Failure paths tested** — Test suite covers error states and edge cases, not just happy path
 - **DRY violation scan** — Duplication flagged and sent back; "clean up later" is not accepted
 - **SRP violation scan** — Multi-responsibility modules or functions are sent back
@@ -111,7 +111,7 @@ Supervisor has rejection authority. Work is sent back with specific, actionable 
 - **Flag obvious SOLID violations** — with specifics; don't rubber-stamp "SOLID compliance verified"
 - **Verify, don't trust** — Read the actual diff and delivery evidence before accepting. Worker self-reports are inputs, not verdicts.
 - **Rejection format** — Every rejection names: (1) which gate failed, (2) the specific code/file, (3) what needs to change. "SRP violation" alone is not actionable; "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split into two functions" is.
-- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): read the diff against the task spec and acceptance criteria, check ownership boundaries, contracts, lane CI, and receipts, and record a verification receipt. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once for cross-task integration. Do not dispatch a separate review workflow or require worker-supplied review output.
+- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): read the diff against the task spec and acceptance criteria, check ownership boundaries, contracts, lane CI, and receipts, and record a verification receipt. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once for cross-task integration, and a merge queue that runs the full suite on the merged tree is that gate. Do not dispatch a separate review workflow or require worker-supplied review output.
 
 ## Ongoing Discipline
 

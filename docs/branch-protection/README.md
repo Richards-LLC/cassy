@@ -100,6 +100,45 @@ the failing required context. Record the PR URL and queue entry; do not retry ma
 `bypass_actors` entry. `bypass_actors` is deliberately left `[]`, so this rule applies to
 repository admins as well.
 
+### Queue ejections: wake, diagnose, re-enqueue once (cas-e369)
+
+The factory daemon's CI watcher tracks two kinds of PR through the queue: parked worker
+deliveries targeting `main`, and the PR of each open epic's `epic/` branch. It polls GitHub
+every 30 s while a tracked PR is queued, otherwise every 60 s. When a tracked PR leaves the
+queue unmerged, the next poll sends the supervisor a typed `merge_queue_ejected` wake. On
+2026-10-14 PR #1198 sat ejected for four minutes because the epic PR was not tracked. The
+wake names:
+
+- the failed `merge_group` run, its failing job and step, and the error line. The error line
+  is an infrastructure stop, a failed Rust test, a failed Playwright test (`✘`), or else the
+  last `##[error]` line;
+- the failure scope: `outside-diff`, `touches-diff` or `unclassified`;
+- the recovery decision.
+
+A failure is **outside the diff** in two cases:
+
+- An infrastructure stop: a memory-admission stop, a runner that lost contact or shut down,
+  or a full disk. A memory-admission stop is in the diff when the PR edits
+  `scripts/host_memory.py` or `scripts/worker-memory.py`.
+- A Commander step failure on a PR whose diff touches none of `hub-web/`,
+  `docs/qa/journeys.md`, `docs/design/design-tokens.json` or `scripts/visual-qa.mjs`.
+
+An unreadable diff is never outside. An outside-diff failure whose run finished within the
+last 15 minutes is re-enqueued **once**, automatically, with `enqueuePullRequest` bound to
+the ejected head. A second failure on that same head escalates instead of looping. So does
+any `touches-diff` or `unclassified` failure, and the supervisor diagnoses it. A new push
+(new head) starts a fresh one-retry budget.
+
+Each decision is recorded once per failed run in the epic's notes, as a ✅ DECISION line
+ending `(merge-queue-recovery pr=#N head=<sha> run=<id> decision=<auto-requeued|escalated|requeue-failed|supervisor-decides>)`.
+That line is also the ledger, so repeated polls and daemon restarts never re-enqueue twice.
+A parked delivery records the decision in its parent epic's notes, and in its own notes
+when it has no epic.
+
+Tests in `cas-cli/src/ui/factory/daemon/runtime/merge_queue_recovery_tests.rs` replay the
+real ejections of PR #1198. The HUB-J4 flake is re-enqueued once, and the memory-admission
+stop that followed escalates.
+
 ## 5. Check names are pinned
 
 The two context strings in the JSON are exact matches for job `name:` values in
@@ -149,6 +188,46 @@ Measuring the real saving takes one live queue run, recorded under the next
 release's `release-latency.receipt`. With a matching full-journeys receipt
 (cas-9f70, below) the journeys are skipped too, and the queue waits on
 `macOS Check` and the compile checks.
+
+### macOS Check latency: a warm cache from main
+
+Once the Commander step skips diffs that leave hub-web alone, `macOS Check`
+becomes the queue's slowest required check. PR #1191's Linux path ended at
+about 8m20s; its macOS Check ended at 16m16s. The cause was a cold cache, not
+the work. A queue ref reads only its own and main's Actions caches, and main
+never ran the job, because a deduplicated main push skipped it. On 2026-10-14
+every first-attempt queue entry sampled restored "No cache found", with 0 hits
+and 698 misses, and took 11m51s–13m54s in `cargo check`. The sample was
+PRs #1187, #1189, #1191, #1192 and #1193. The one warm run measured was the PR #1187
+retry (cargo cache restored, 90% sccache hits). It took 5m27s in `cargo check`
+and 404 s for the whole job. Starting 44 s into the run, the job ends at about
+7m30s. That is below the Linux path, so the entry lands in about 8.5 minutes.
+
+| Option | Darwin coverage per queue entry | Expected queue wall | Decision |
+| --- | --- | --- | --- |
+| (a) Run macOS only for "platform" diffs | Lost for most Rust diffs. A diff classifier cannot see an unchanged `cfg(target_os = "macos")` caller broken by a shared-API change. The only macOS-only queue failure since 2026-09-10 (PR #809) was inside such a block. | ~8m20s | Rejected: unsafe classification |
+| (b) Warm the cache from main | Unchanged: every Rust diff is still compiled on Darwin. | ~8.5 min warm; today's ~16 min if the cache is evicted | **Chosen** |
+| (c) Move it to release/nightly | Lost per entry; breakage is found after it lands. | ~8m20s | Rejected |
+
+How (b) works (cas-861c0):
+
+- `macos-check` also runs on every push to main, after the merge and off the
+  queue's critical path, so main saves the Darwin cargo cache and sccache
+  entries.
+- `Swatinem/rust-cache` saves only on `refs/heads/main`. Each queue or tag ref
+  used to save its own 333 MiB copy that no later entry could read. The
+  repository sits at its 10 GB Actions cache cap, so those copies only evicted
+  main's cache.
+- `scripts/ci_tiers/test-policy.py` evaluates the real job condition for each
+  event and the `save-if` expression, with a mutation control.
+
+**Operator note: the required set is unchanged.** `Fast Validation` and
+`macOS Check` stay required, and `main-ruleset.json` is untouched, so no live
+ruleset update is needed. The cost is one macOS compile per Rust-touching push
+to main, about 7–14 runner-minutes. It runs after the merge, so it adds no
+merge latency. A red result there flags Darwin drift on main.
+To verify after merge, the next queue entry's macOS Check log should show
+"Cache restored successfully" and an sccache hit rate above 50%.
 
 ### What counts as a receipt
 

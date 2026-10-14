@@ -701,6 +701,43 @@ impl CasCore {
             let parked_anchor = task.deliverables.factory_branch_anchor.clone()
                 .or_else(|| task.deliverables.historical_factory_branch_anchors.last().cloned());
 
+            // cas-d6eb: a widening that only adds crate-qualified modules the
+            // worker's test receipts at the parked delivery already cover
+            // changes nothing the close gate accepts, so it keeps the
+            // reviewed proof cycle instead of reopening the task.
+            if proof_targets_fix
+                && let Some(anchor) = parked_anchor.as_deref()
+                && let Some(context) = task.deliverables.work_target.as_ref()
+                    .and_then(|target| super::repo_context::resolve_repo_context(&self.cas_root, target).ok())
+            {
+                let existing = cas_types::normalize_proof_targets(&task.proof_targets);
+                let added: Vec<String> = effective_proof_targets.iter()
+                    .filter(|target| !existing.contains(target)).cloned().collect();
+                let repo = self.resolve_worker_worktree_path(&task, Some(&context)).ok().flatten()
+                    .unwrap_or_else(|| context.repo_root.clone());
+                if let Some(packages) = super::lifecycle::close_ops::receipts_cover_targets(
+                    &self.cas_root, &repo, anchor, &added,
+                ) {
+                    task.proof_targets = effective_proof_targets.clone();
+                    task.updated_at = chrono::Utc::now();
+                    let note = format!(
+                        "[{}] DECISION: proof targets widened by supervisor {} ({}): {} Added {} are covered by passing worker test receipts at {} for {}, so the reviewed proof cycle is kept (cas-d6eb).",
+                        task.updated_at.format("%Y-%m-%d %H:%M"),
+                        supervisor.name, supervisor.id, reason, added.join(", "), anchor, packages.join(", "),
+                    );
+                    task.notes = if task.notes.is_empty() { note } else { format!("{}\n\n{}", task.notes, note) };
+                    task.updated_at = task_store.update(&task).map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to widen proof targets: {error}")),
+                        data: None,
+                    })?;
+                    return Ok(Self::success(format!(
+                        "Widened proof targets for task {} to {}. The added modules are covered by worker test receipts at {anchor}, so its verification and {} status are kept.",
+                        task.id, task.proof_targets.join(", "), task.status,
+                    )));
+                }
+            }
+
             let corrected_target = if proof_targets_fix || risk_fix || methodology_fix {
                 task.deliverables.work_target.clone()
             } else if target_repo.is_some_and(|repo| repo.trim().is_empty()) {

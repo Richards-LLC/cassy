@@ -360,11 +360,21 @@ def main(argv: list[str]) -> int:
         if len(argv) == 5 and argv[1] == "--validate" and argv[4] == "--pre-publication":
             validate(argv[2], argv[3], pre_publication=True)
             return 0
+        if len(argv) >= 3 and argv[1] == "--lint":
+            # cas-e7d4: the gate's fast row lints changed drafts at park with
+            # this same implementation; placeholders are still allowed.
+            for draft in argv[2:]:
+                try:
+                    extract_bodies(Path(draft), allow_digest_tokens=True)
+                except ValueError as exc:
+                    raise ValueError(f"{draft}: {exc}") from None
+                print(f"announce lint PASS · bodies=4 · draft={draft}")
+            return 0
         if len(argv) == 6 and argv[1] == "--post":
             post(argv[2], argv[3], argv[4], argv[5])
             return 0
         print(
-            "usage: release-train-announce.py --validate DRAFT BODY_DIR [--pre-publication] | "
+            "usage: release-train-announce.py --validate DRAFT BODY_DIR [--pre-publication] | --lint DRAFT... | "
             "--check-token | --post VERSION DRAFT RECEIPT BODY_DIR | --record-latency TAG RECEIPT DRAFT",
             file=sys.stderr,
         )

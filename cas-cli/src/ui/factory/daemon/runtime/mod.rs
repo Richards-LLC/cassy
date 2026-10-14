@@ -1,4 +1,5 @@
-mod ci_watch;
+pub(crate) mod ci_watch;
+pub(crate) mod merge_queue_recovery;
 mod client_input;
 mod cloud;
 mod commander_mirror;

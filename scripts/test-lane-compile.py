@@ -30,6 +30,7 @@ class LaneCompile(unittest.TestCase):
             self.write(f"{package}/src/lib.rs", "pub fn original() {}\n")
         self.write("crates/ghostty_vt_sys/build.rs", "// Zig toolchain consumer\n")
         self.write("scripts/check-lane-compile.py", SCRIPT.read_text())
+        self.write("scripts/release_env.py", SCRIPT.with_name("release_env.py").read_text())
         self.git("init", "-q", "-b", "target")
         self.git("config", "user.email", "fixture@example.invalid")
         self.git("config", "user.name", "Fixture")
@@ -96,6 +97,7 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
             (self.bin / name).symlink_to(path)
         self.zig = self.make_zig(self.repo / ".context/zig/zig")
         self.env = dict(os.environ, ZIG="", PATH=str(self.bin),
+                        CAS_RELEASE_ENV_FILE=str(Path(self.temp.name) / "release.env"),
                         CAS_LANE_CHECK_CAS=str(self.fake), LANE_FIXTURE_LOG=str(self.log))
 
     def make_zig(self, path):
@@ -130,9 +132,15 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
         self.env["ZIG"] = ".context/custom-zig"
         self.assert_preview_zig(expected)
 
-    def test_path_zig_precedes_source_repo_and_invalid_configured_zig(self):
-        expected = self.make_zig(self.bin / "zig")
+    def test_source_repo_zig_precedes_path_and_invalid_configured_zig(self):
+        # cas-9f61: one order for every release tool; PATH is the last resort.
+        self.make_zig(self.bin / "zig")
         self.env["ZIG"] = "missing-zig"
+        self.assert_preview_zig(self.zig)
+
+    def test_path_zig_is_the_fallback_without_a_checkout_zig(self):
+        expected = self.make_zig(self.bin / "zig")
+        self.zig.unlink()
         self.assert_preview_zig(expected)
 
     def test_linked_source_repo_resolves_main_checkout_zig(self):

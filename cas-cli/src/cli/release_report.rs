@@ -150,6 +150,17 @@ struct ReleaseEvidence {
     /// (stage, seconds, resolved); empty with `blocker_count` set means the
     /// run predates priced blockers.
     blocker_costs: Vec<(String, i64, bool)>,
+    /// cas-9734: rescues that repeated an already-learned lesson.
+    lesson_recurrence: Option<String>,
+    /// cas-2bef: each completed train stage, its versioned budget, the stages
+    /// over budget (None when the receipt predates budgets), and earlier
+    /// releases' stage times, oldest first.
+    stage_seconds: Vec<(String, i64)>,
+    stage_budgets: Vec<(String, i64)>,
+    budget_breaches: Option<Vec<String>>,
+    stage_trend: Vec<(String, Vec<(String, i64)>)>,
+    /// (tasks, median seconds, worst task, worst seconds) from park to main.
+    commit_to_main: Option<(u64, i64, String, i64)>,
 }
 
 impl ReleaseEvidence {
@@ -174,6 +185,36 @@ impl ReleaseEvidence {
             .get("BLOCKER_COSTS")
             .map(|costs| parse_blocker_costs(costs))
             .unwrap_or_default();
+        self.stage_seconds = values
+            .get("STAGE_SECS")
+            .map(|pairs| parse_stage_pairs(pairs))
+            .unwrap_or_default();
+        self.stage_budgets = values
+            .get("STAGE_BUDGETS")
+            .map(|pairs| parse_stage_pairs(pairs))
+            .unwrap_or_default();
+        self.budget_breaches = values
+            .get("BUDGET_BREACHES")
+            .filter(|value| value.as_str() != "unavailable")
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|item| item.split_once(':').map(|(stage, _)| stage.to_string()))
+                    .collect()
+            });
+        self.commit_to_main = values.get("COMMIT_TO_MAIN").and_then(|value| {
+            let fields: HashMap<&str, &str> = value
+                .split(',')
+                .filter_map(|item| item.split_once(':'))
+                .collect();
+            let (task, worst) = fields.get("worst")?.split_once(':')?;
+            Some((
+                fields.get("tasks")?.parse().ok()?,
+                fields.get("median")?.parse().ok()?,
+                task.to_string(),
+                worst.parse().ok()?,
+            ))
+        });
         self.interventions = values
             .get("INTERVENTIONS")
             .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
@@ -262,6 +303,136 @@ impl ReleaseEvidence {
             None => format!("{timing} — budget unavailable"),
         }
     }
+}
+
+/// `stage:secs,…` from the latency receipt's STAGE_SECS or STAGE_BUDGETS.
+fn parse_stage_pairs(pairs: &str) -> Vec<(String, i64)> {
+    pairs
+        .split(',')
+        .filter_map(|item| {
+            let (stage, seconds) = item.trim().rsplit_once(':')?;
+            let seconds = seconds
+                .parse::<i64>()
+                .ok()
+                .filter(|seconds| *seconds >= 0)?;
+            (!stage.is_empty()).then(|| (stage.to_string(), seconds))
+        })
+        .collect()
+}
+
+/// The report's latency section (cas-2bef): each stage against its versioned
+/// budget with the earlier releases' times, FAILED naming every overrun.
+fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
+    let mut output = String::from("### Pipeline latency\n\n");
+    if evidence.stage_seconds.is_empty() {
+        output.push_str(
+            "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n",
+        );
+        return output;
+    }
+    let budget = |stage: &str| {
+        evidence
+            .stage_budgets
+            .iter()
+            .find(|(name, _)| name == stage)
+            .map(|(_, seconds)| *seconds)
+    };
+    let over: Vec<&(String, i64)> = evidence
+        .stage_seconds
+        .iter()
+        .filter(|(stage, seconds)| budget(stage).is_some_and(|limit| *seconds > limit))
+        .collect();
+    match &evidence.budget_breaches {
+        None => output.push_str(
+            "Budgets are unavailable: this receipt predates scripts/release-stage-budgets.json.\n\n",
+        ),
+        Some(_) if over.is_empty() => output.push_str(
+            "Within budget: every measured stage met its budget in scripts/release-stage-budgets.json.\n\n",
+        ),
+        Some(_) => output.push_str(&format!(
+            "FAILED: {} over budget. {}. Post-publication files a P0 task for each over-budget release.\n\n",
+            over.len(),
+            over.iter()
+                .map(|(stage, seconds)| format!(
+                    "{stage} took {} against a {} budget",
+                    format_duration(*seconds),
+                    format_duration(budget(stage).unwrap_or_default())
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    }
+    if let Some((tasks, median, task, worst)) = &evidence.commit_to_main {
+        output.push_str(&format!(
+            "Commit to main, from each task's park to the main commit that landed it: {tasks} tasks, median {}, worst {task} at {}. The worst task is budgeted as commit-to-main.\n\n",
+            format_duration(*median),
+            format_duration(*worst)
+        ));
+    }
+    for (stage, seconds) in &evidence.stage_seconds {
+        let limit = budget(stage);
+        let status = match limit {
+            Some(limit) if *seconds > limit => format!("FAILED, budget {}", format_duration(limit)),
+            Some(limit) => format!("ok, budget {}", format_duration(limit)),
+            None => "no budget".to_string(),
+        };
+        let trend = evidence
+            .stage_trend
+            .iter()
+            .filter_map(|(tag, stages)| {
+                stages
+                    .iter()
+                    .find(|(name, _)| name == stage)
+                    .map(|(_, seconds)| format!("{tag} {}", format_duration(*seconds)))
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&format!(
+            "- {stage}: {} ({status}); earlier releases, oldest first: {}\n",
+            format_duration(*seconds),
+            if trend.is_empty() {
+                "unavailable".to_string()
+            } else {
+                trend.join(" · ")
+            }
+        ));
+    }
+    output.push('\n');
+    output
+}
+
+/// Earlier releases' STAGE_SECS from their latency receipts, oldest first.
+fn stage_trend(files: &[PathBuf], tag: &str, limit: usize) -> Vec<(String, Vec<(String, i64)>)> {
+    let version = |tag: &str| -> Option<(u64, u64, u64)> {
+        let mut parts = tag
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    };
+    let Some(current) = version(tag) else {
+        return Vec::new();
+    };
+    let mut releases: Vec<((u64, u64, u64), String, Vec<(String, i64)>)> = files
+        .iter()
+        .filter(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("release-latency.receipt")
+        })
+        .filter_map(|path| {
+            let values = parse_key_values(&fs::read_to_string(path).ok()?);
+            let tag = values.get("TAG")?.clone();
+            let stages = parse_stage_pairs(values.get("STAGE_SECS")?);
+            let version = version(&tag).filter(|version| *version < current)?;
+            (!stages.is_empty()).then_some((version, tag, stages))
+        })
+        .collect();
+    releases.sort_by(|left, right| left.0.cmp(&right.0));
+    releases.dedup_by(|left, right| left.0 == right.0);
+    let skip = releases.len().saturating_sub(limit);
+    releases
+        .into_iter()
+        .skip(skip)
+        .map(|(_, tag, stages)| (tag, stages))
+        .collect()
 }
 
 /// `stage:secs[+],…` from the latency receipt's BLOCKER_COSTS; a trailing `+`
@@ -746,6 +917,20 @@ fn acquire_sources(
     }
 
     let release_evidence = find_release_evidence(tag, &release);
+    if release_evidence
+        .budget_breaches
+        .as_ref()
+        .is_some_and(|breaches| !breaches.is_empty())
+    {
+        warnings.push(format!(
+            "pipeline latency: FAILED, over budget: {}",
+            release_evidence
+                .budget_breaches
+                .as_deref()
+                .unwrap_or_default()
+                .join(", ")
+        ));
+    }
     if release_evidence.green_to_published_seconds.is_none() {
         warnings.push(
             "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/"
@@ -1374,6 +1559,10 @@ fn assemble_markdown(
         sources.release_evidence.blocker_summary()
     ));
     output.push_str(&format!(
+        "| Lesson recurrence | {} | Rescues whose learn= lesson was already in the failure log; lesson-recurrence.json |\n",
+        sources.release_evidence.lesson_recurrence.as_deref().map_or("unavailable".to_string(), escape_table)
+    ));
+    output.push_str(&format!(
         "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
         sources
             .release_evidence
@@ -1463,6 +1652,9 @@ fn assemble_markdown(
     } else {
         output.push_str("Release receipt: unavailable.\n\n");
     }
+    // cas-2bef: the renderer fixes the top-level sections, so the stage
+    // budgets are a subsection of the evidence.
+    output.push_str(&pipeline_latency_section(&sources.release_evidence));
     if sources.warnings.is_empty() {
         output.push_str("No source warnings.\n");
     } else {
@@ -2096,7 +2288,10 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
     let mut files = Vec::new();
     collect_files(&root, &mut files);
     files.sort();
-    let mut evidence = ReleaseEvidence::default();
+    let mut evidence = ReleaseEvidence {
+        stage_trend: stage_trend(&files, tag, 5),
+        ..ReleaseEvidence::default()
+    };
     let mut green_epoch = None;
     let mut published_at = release
         .as_ref()
@@ -2119,6 +2314,11 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         if values.contains_key("PUBLISH_LATENCY_SECONDS") {
             evidence.record_latency(&values);
         }
+        if path.file_name().and_then(|name| name.to_str()) == Some("lesson-recurrence.json") {
+            evidence.lesson_recurrence = serde_json::from_str::<LessonRecurrence>(&content)
+                .ok()
+                .map(|recurrence| recurrence.summary());
+        }
         if values.contains_key("PUBLISH_LATENCY_SECONDS") || path_text.contains("published.receipt")
         {
             evidence.receipt_path = Some(path.display().to_string());
@@ -2136,6 +2336,52 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         }
     }
     evidence
+}
+
+/// cas-9734: `<run-dir>/lesson-recurrence.json`, written by release-learning.py.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct LessonRecurrence {
+    pub version: String,
+    pub rescues: u64,
+    pub recurrences: u64,
+    pub rate: f64,
+    pub classes: Vec<String>,
+}
+
+impl LessonRecurrence {
+    /// `2 of 4 rescues (50%) repeated a learned lesson: scratch-base, version-literals`
+    pub(crate) fn summary(&self) -> String {
+        let mut summary = format!(
+            "{} of {} rescue{} ({:.0}%) repeated a learned lesson",
+            self.recurrences,
+            self.rescues,
+            if self.rescues == 1 { "" } else { "s" },
+            self.rate * 100.0
+        );
+        if !self.classes.is_empty() {
+            summary.push_str(&format!(": {}", self.classes.join(", ")));
+        }
+        summary
+    }
+}
+
+/// Every recorded release run's lesson recurrence, newest version first.
+pub(crate) fn lesson_recurrences() -> Vec<LessonRecurrence> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let mut runs: Vec<LessonRecurrence> = fs::read_dir(home.join(".cas/artifacts/release"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|run| fs::read_to_string(run.path().join("lesson-recurrence.json")).ok())
+        .filter_map(|json| serde_json::from_str(&json).ok())
+        .collect();
+    let key = |run: &LessonRecurrence| -> Vec<u64> {
+        run.version.split('.').map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    runs.sort_by_key(|run| std::cmp::Reverse(key(run)));
+    runs
 }
 
 fn parse_key_values(content: &str) -> HashMap<String, String> {
@@ -2362,6 +2608,80 @@ fn playwright_module_missing(detail: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// cas-2bef: a release over a stage budget fails the latency section,
+    /// with every stage's earlier releases read from their receipts.
+    #[test]
+    fn pipeline_latency_section_fails_an_over_budget_stage_with_its_trend() {
+        let root = tempfile::tempdir().unwrap();
+        for (dir, receipt) in [
+            (
+                "v9.97.1-release",
+                "TAG=v9.97.1\nSTAGE_SECS=gate:840,publish:600\n",
+            ),
+            (
+                "v9.98.1-release",
+                "TAG=v9.98.1\nSTAGE_SECS=gate:1797,publish:169\n",
+            ),
+            ("v9.99.1-release", "TAG=v9.99.1\nSTAGE_SECS=gate:300\n"),
+            (
+                "v9.99.0-release",
+                "TAG=v9.99.0\nSTAGE_SECS=gate:3029,publish:1526\n",
+            ),
+        ] {
+            fs::create_dir_all(root.path().join(dir)).unwrap();
+            fs::write(
+                root.path().join(dir).join("release-latency.receipt"),
+                receipt,
+            )
+            .unwrap();
+        }
+        let mut files = Vec::new();
+        collect_files(root.path(), &mut files);
+        let mut evidence = ReleaseEvidence {
+            stage_trend: stage_trend(&files, "v9.99.0", 5),
+            ..ReleaseEvidence::default()
+        };
+        evidence.record_latency(&parse_key_values(
+            "COMMIT_TO_MAIN=tasks:13,median:302911,worst:cas-462b:319886\n\
+             STAGE_SECS=gate:3029,publish:1526,pr-body:0\n\
+             STAGE_BUDGETS=gate:900,publish:1200\n\
+             BUDGET_BREACHES=gate:3029/900,publish:1526/1200\n",
+        ));
+        let section = pipeline_latency_section(&evidence);
+        assert!(
+            section.contains("FAILED: 2 over budget. gate took 50m 29s against a 15m 0s budget; publish took 25m 26s against a 20m 0s budget."),
+            "{section}"
+        );
+        assert!(
+            section.contains(
+                "- gate: 50m 29s (FAILED, budget 15m 0s); earlier releases, oldest first: v9.97.1 14m 0s · v9.98.1 29m 57s"
+            ),
+            "{section}"
+        );
+        assert!(
+            section
+                .contains("- pr-body: 0s (no budget); earlier releases, oldest first: unavailable"),
+            "{section}"
+        );
+        assert!(
+            section.contains("13 tasks, median 5048m 31s, worst cas-462b at 5331m 26s."),
+            "{section}"
+        );
+
+        evidence.record_latency(&parse_key_values(
+            "STAGE_SECS=gate:600\nSTAGE_BUDGETS=gate:900\nBUDGET_BREACHES=none\n",
+        ));
+        let section = pipeline_latency_section(&evidence);
+        assert!(section.contains("Within budget: every measured stage"), "{section}");
+        assert!(
+            section.contains("- gate: 10m 0s (ok, budget 15m 0s);"),
+            "{section}"
+        );
+
+        evidence.record_latency(&parse_key_values("PUBLISH_LATENCY_SECONDS=169\n"));
+        assert!(pipeline_latency_section(&evidence).contains("Stage timings are unavailable"));
+    }
+
     #[test]
     fn publication_receipt_interventions_preserve_unknown_and_real_counts() {
         let mut evidence = ReleaseEvidence::default();
@@ -2550,6 +2870,21 @@ Dev reply
             report.contains("| Blockers | 2 — 38m 20s blocked: gate 10m 0s; pipeline 28m 20s |"),
             "{report}"
         );
+        // cas-9734: the release's lesson recurrence rate.
+        assert!(report.contains("| Lesson recurrence | unavailable |"), "{report}");
+        let recorded: LessonRecurrence = serde_json::from_str(
+            r#"{"version":"9.98.0","rescues":4,"recurrences":2,"rate":0.5,"classes":["scratch-base","version-literals"]}"#,
+        )
+        .unwrap();
+        sources.release_evidence.lesson_recurrence = Some(recorded.summary());
+        let measured = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(
+            measured.contains(
+                "| Lesson recurrence | 2 of 4 rescues (50%) repeated a learned lesson: scratch-base, version-literals |"
+            ),
+            "{measured}"
+        );
+        sources.release_evidence.lesson_recurrence = None;
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(unavailable.contains("| Manual interventions | unavailable |"));

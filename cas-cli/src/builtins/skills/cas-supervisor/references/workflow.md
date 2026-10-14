@@ -303,7 +303,8 @@ naming its result and integration tip.
 Before landing a worker lane, do these two checks. Workers may carry capped
 `check: PASS <sha>` and targeted `test: PASS <sha> <package> <filter> <count>`
 evidence; verify they name the delivered commit and affected scope. The full
-Rust build and suite run once, at Phase 4 assembly.
+Rust build and suite run once, at the Phase 4 final gate: the merge queue where
+base has one, otherwise local assembly.
 
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
@@ -411,7 +412,7 @@ After the rebase, run the same command against the new base.
   `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
 
 A matching patch-id proves the diff is the same. It does not prove the diff
-still integrates with the new base: the merge sweep and the Phase 4 assembly
+still integrates with the new base: the merge sweep and the Phase 4 final
 gate still run. A green CI run is not a review verdict.
 
 ## Phase 3: Review (Shared Mode)
@@ -423,6 +424,10 @@ When workers share the main directory, there's no branch merging — workers com
 1. Worker closes their own task
 2. Review their commits
 3. Clear worker context and assign next task
+
+### Lessons must remove causes
+
+Fix a recurring failure on the highest rung that fits — a default or auto-fix, then a seconds-long preflight, then a gate row, prose last. A lesson learned twice needs an open P0/P1 task that removes the cause, not another note. Tag lessons `operation:release-cut|spawn|report|epic-close`; starting that operation surfaces them.
 
 ## Handling Blockers
 
@@ -440,11 +445,18 @@ When workers share the main directory, there's no branch merging — workers com
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
-2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate.
+2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate. Where a merge queue is the final gate (step 3), enqueueing the reviewed PR is the hold: the queue lands it only after its run passes.
 3. Run the final assembled-tree gate. This is the epic's single build + test:
    targeted worker tests complement one full assembly gate run
    on the epic tip proves every child and checks cross-task integration.
-   In a project with `scripts/assembly-proof.py`, the assembly command is
+   **When the base branch lands through a merge queue that runs the full suite
+   on the merged tree, that queue run is this gate.** Do not run a local full
+   suite before the PR: lane CI and the lane compile admit lanes, the epic PR
+   enters the queue, and the queue proves the exact tree that becomes base. The
+   epic closes once its tip is contained in base.
+   Without such a queue, run the project's assembly gate locally. In a project
+   with `scripts/assembly-proof.py` that gate, and the opt-in diagnostic after a
+   failed queue run, is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
    nextest in the worktree and archive-mode in a plain clone. Both use their
    own `<worktree>/target`, seeding immutable dependencies from the worker
@@ -457,13 +469,14 @@ When workers share the main directory, there's no branch merging — workers com
    On exit 0, record a progress note on the epic:
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
-   reference this proof; worker closes carry targeted receipts alongside the full assembly proof.
+   reference the epic's integration proof; worker closes carry targeted receipts alongside it.
 4. Turn any final-gate failure or review gap that needs worker action into a
    bounded epic-child fix-round task before messaging a worker. Put the finding,
    required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
-5. After the fix lands, rerun the final assembled-tree gate yourself on the new
-   tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
+5. After the fix lands, rerun the final assembled-tree gate on the new tip:
+   re-enqueue the PR, or for a local gate capture the real exit code and record
+   a fresh `ASSEMBLY_PROOF` for it:
 
    ```bash
    <assembly gate command> > <artifacts_root>/<project-key>/<epic-id>/assembly-gate.log 2>&1; echo $?
@@ -471,7 +484,7 @@ When workers share the main directory, there's no branch merging — workers com
 
    Never pipe the test run to `tail`; that captures the pipe status, not the
    test status.
-6. **Isolated mode only**: every lane already landed on the epic branch in Phase 3, before the gate ran. Once the review loop is clean and the gate exits 0, reclaim each lane's worktree (can be 10GB+ each); this end-of-lane consume is where `cleanup=true` is correct:
+6. **Isolated mode only**: every lane already landed on the epic branch in Phase 3, before the gate ran. Once the review loop is clean and the gate passes (the local gate exits 0, or the queue lands the PR), reclaim each lane's worktree (can be 10GB+ each); this end-of-lane consume is where `cleanup=true` is correct:
 
    ```text
    # One per worker lane — removes the worktree and deletes factory/<worker>

@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.51.0] - 2026-10-14
+
 ### Security — guard-relaxing config keys are operator-only (cas-0d4f0)
 
 - `verification.enabled`, `verification.force_bypass_allowed`, `slack.transport`,

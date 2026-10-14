@@ -163,10 +163,37 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
                 self.assertNotEqual(result['class'], 'docs-only')
                 self.base = self.git('rev-parse', 'HEAD').stdout.strip()
 
-    def test_ci_workflow_change_runs_web_tests(self):
+    # cas-c846: PR #1198 changed only ci.yml outside hub-web and spent ~13 min
+    # in the journeys. ci.yml is not an input; the wiring tests below pin it.
+    def test_ci_workflow_only_change_skips_web_tests(self):
         self.write('.github/workflows/ci.yml', 'on: push\n')
         self.commit()
-        self.assertEqual(self.classify()['web-check-needed'], 'true')
+        self.assertEqual(self.classify()['web-check-needed'], 'false')
+
+    def test_classifier_cli_ci_workflow_false_and_web_inputs_true(self):
+        script = str(ROOT / 'scripts/classify-web-inputs.py')  # the fixture copy may be overwritten below
+        cases = [('.github/workflows/ci.yml', 'false')]
+        cases += [(entry + 'src/main.ts' if entry.endswith('/') else entry, 'true') for entry in WEB.WEB_INPUTS]
+        for path, expected in cases:
+            with self.subTest(path=path):
+                self.write(path, ('# ' if path.endswith(('.py', '.sh', '.yml')) else '') + 'changed\n')
+                self.commit()
+                result = subprocess.run(['python3', script, self.base, 'HEAD'], cwd=self.repo,
+                                        text=True, capture_output=True)
+                self.assertEqual((result.returncode, result.stdout), (0, expected + '\n'), result.stderr)
+                self.base = self.git('rev-parse', 'HEAD').stdout.strip()
+
+    def test_merge_queue_commander_step_consumes_web_signal(self):
+        # Cheap wiring proof for a ci.yml edit; the journeys themselves do not run.
+        steps = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())['jobs']['fast-validation-preflight']['steps']
+        by_name = {step.get('name', ''): step for step in steps}
+        self.assertEqual(by_name['Build and test Commander web assets']['if'],
+                         "steps.classify-diff.outputs.web-check-needed == 'true'")
+        self.assertEqual(by_name['Build and test Commander web assets']['working-directory'], 'hub-web')
+        self.assertIn("steps.classify-diff.outputs.web-check-needed == 'true'",
+                      by_name['Upload Commander journey evidence on failure']['if'])
+        classify = [step for step in steps if step.get('id') == 'classify-diff']
+        self.assertEqual([step.get('uses') for step in classify], ['./.github/actions/classify-required-diff'])
 
     def test_failed_web_classifier_runs_web_tests(self):
         self.write('scripts/classify-web-inputs.py', 'raise SystemExit(1)\n')

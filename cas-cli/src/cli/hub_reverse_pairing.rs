@@ -1359,6 +1359,7 @@ mod tests {
             hub_url: None,
             skip_hub_readiness: false,
             yes: true,
+            check_launch: false,
         }
     }
 

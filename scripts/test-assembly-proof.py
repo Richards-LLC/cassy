@@ -687,7 +687,7 @@ import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location('proof', sys.argv[1])
 p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 root, scratch = map(pathlib.Path, sys.argv[2:4])
-p.clone_scratch = lambda env: scratch / 'base'
+p.clone_scratch = lambda env, root=None: scratch / 'base'
 p.inputs = lambda root: ({'format': p.FORMAT, 'code_input': 'signal-fixture'}, {})
 p.execution_plan = lambda env: {'mode': 'serial', 'phases': []}
 def contexts(root, clone, env, logs, target, execution):
@@ -898,8 +898,32 @@ p.prove(root)
         with self.assertRaises(ValueError):
             proof.no_cas_ancestor(child)
 
+    def test_unset_clone_scratch_uses_the_shared_durable_resolver(self):
+        # cas-9f61: no hand export; the base release_env.py derives for this
+        # checkout reaches the proof, and a gap refuses before any tool runs.
+        resolved = proof.release_env.ScratchResolution(
+            "/home/cas-release-gate/base", "checkout filesystem cas-release-gate", True, "/home", "K")
+        for env in ({}, {"CAS_RELEASE_GATE_HOME_DIR": ""}):
+            with self.subTest(env=env), mock.patch.dict(proof.os.environ, env, clear=True), \
+                    mock.patch.object(proof.release_env, "resolve_scratch", return_value=resolved) as resolve, \
+                    mock.patch.object(proof, "no_cas_ancestor"), \
+                    mock.patch.object(proof.release_scratch, "sweep", return_value={}) as sweep, \
+                    mock.patch.object(proof, "inputs", side_effect=RuntimeError("guard accepted")):
+                with self.assertRaisesRegex(RuntimeError, "guard accepted"):
+                    proof.prove(self.root)
+                self.assertTrue(resolve.call_args.kwargs["durable"])
+                self.assertEqual(sweep.call_args.args[1], Path("/home/cas-release-gate/base"))
+        gap = proof.release_env.ScratchResolution(
+            "", "", True, "/srv", "K", ["platform default /var/tmp/cas-release-gate: under system temporary root"],
+            "no usable scratch base on the checkout filesystem /srv", "sudo install -d /srv/cas-release-gate")
+        with mock.patch.dict(proof.os.environ, {}, clear=True), \
+                mock.patch.object(proof.release_env, "resolve_scratch", return_value=gap), \
+                mock.patch.object(proof, "inputs", side_effect=AssertionError("tools must not run")):
+            with self.assertRaisesRegex(ValueError, "CAS_RELEASE_GATE_HOME_DIR unset.*fix: sudo install"):
+                proof.prove(self.root)
+
     def test_prove_refuses_disposable_clone_scratch_before_any_tool_or_suite(self):
-        cases = [{}, {"CAS_RELEASE_GATE_HOME_DIR": ""}] + [
+        cases = [
             {"CAS_RELEASE_GATE_HOME_DIR": root + "/cas-release-gate/base"}
             for root in ("/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")]
         cases.append({"TMPDIR": str(self.root),

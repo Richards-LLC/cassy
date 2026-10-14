@@ -84,19 +84,6 @@ cut_preflight_check_competing_release() {
     fi
 }
 
-cut_preflight_env_value() {
-    local key="$1" env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" line value
-    [[ -r "$env_file" ]] || return 1
-    line="$(grep -E "^(export )?${key}=" "$env_file" | head -n1 || true)"
-    [[ -n "$line" ]] || return 1
-    value="${line#*=}"
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    printf '%s\n' "$value"
-}
-
 cut_preflight_check_tag() {
     local tag="v$version" remote_tags
     if git -C "$worktree" show-ref --tags --verify --quiet "refs/tags/$tag"; then
@@ -117,16 +104,33 @@ cut_preflight_check_tag() {
     fi
 }
 
+# cas-9f61: Zig and the scratch base come from scripts/release_env.py, the
+# resolver assembly-proof, the gate and lane compile also use, so nothing is
+# exported by hand. Durable: assembly-proof refuses system temporary roots.
+cut_preflight_resolve_env() {
+    local resolved
+    # Shell variables a caller set without exporting still count.
+    resolved="$(CAS_RELEASE_ENV_FILE="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" \
+        CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-}" ZIG="${ZIG:-}" \
+        CAS_RELEASE_PORTABLE_STAT="${CAS_RELEASE_PORTABLE_STAT:-}" \
+        python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
+        --durable --create --link-zig --format shell)" || {
+        cut_preflight_block release-env "scripts/release_env.py could not resolve the release environment"
+        return $?
+    }
+    eval "$resolved"
+}
+
 cut_preflight_check_scratch() {
-    local scratch="${CAS_RELEASE_GATE_HOME_DIR:-}" configured
+    local scratch
     local probe archive required available previous scratch_parent checkout_device scratch_device
     local env_file_hint="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
+    cut_preflight_resolve_env || return $?
+    scratch="$RELEASE_ENV_SCRATCH"
     if [[ -z "$scratch" ]]; then
-        configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
-        # cas-be3a: unset means a base on the checkout's filesystem when the
-        # platform default is across a boundary (release-train.sh exports the
-        # same value to the gate).
-        scratch="${configured:-$(release_portable_checkout_scratch_base "$worktree")}"
+        cut_preflight_block scratch-space \
+            "${RELEASE_ENV_SCRATCH_PROBLEM}; tried ${RELEASE_ENV_SCRATCH_REJECTED}; fix: ${RELEASE_ENV_SCRATCH_FIX}"
+        return $?
     fi
     probe="$scratch/.release-train-write.$$"
     mkdir -p "$scratch" 2>/dev/null || {
@@ -143,10 +147,10 @@ cut_preflight_check_scratch() {
     scratch_device="${CAS_RELEASE_TRAIN_SCRATCH_DEVICE:-$(release_portable_stat_device "$scratch_parent" || true)}"
     if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
         local fix main_root
-        if fix="$(release_portable_sibling_scratch_base "$worktree")"; then
-            fix="set CAS_RELEASE_GATE_HOME_DIR=$fix (in the environment or $env_file_hint)"
+        if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
+            fix="unset CAS_RELEASE_GATE_HOME_DIR so scripts/release_env.py derives a base on the checkout's filesystem"
         else
-            fix="set CAS_RELEASE_GATE_HOME_DIR to a directory on the checkout's filesystem with no .cas ancestor"
+            fix="pin a base on the checkout's filesystem with \`cas release setup\` (writes $env_file_hint)"
         fi
         # cas-52de: or move the release worktree onto the scratch filesystem.
         # The main checkout's .cas/release-v<version> is the usual place.
@@ -181,59 +185,33 @@ cut_preflight_check_scratch() {
             "scratch base $scratch has ${available:-unknown} bytes free; need at least $required"
         return $?
     fi
+    export CAS_RELEASE_GATE_HOME_DIR="$scratch"
+    printf 'scratch base: %s (%s)\n' "$scratch" "$RELEASE_ENV_SCRATCH_SOURCE"
 }
 
 cut_preflight_check_env() {
-    local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" names configured
+    local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" names
     [[ -r "$env_file" ]] || {
-        cut_preflight_block release-env "release env file $env_file is not readable"
+        cut_preflight_block release-env "release env file $env_file is not readable; create it with \`cas release setup\`"
         return $?
     }
-    names="$(grep -oE '^(export )?[A-Z_]+=' "$env_file" | sed 's/=$//; s/^export //' | tr '\n' ' ')"
-    if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
-        configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
-        [[ -z "$configured" ]] || export CAS_RELEASE_GATE_HOME_DIR="$configured"
-    fi
+    # Names only: the file holds release secrets. Its scratch and Zig pins are
+    # read by scripts/release_env.py in the scratch and Zig checks below.
+    names="$(grep -oE '^(export )?[A-Z_][A-Z0-9_]*=' "$env_file" | sed 's/=$//; s/^export //' | tr '\n' ' ')"
     printf 'release env names: %s\n' "$names"
 }
 
 cut_preflight_check_zig() {
-    local zig="${ZIG:-}" main_checkout zig_dir
-    if [[ -n "$zig" && -x "$zig" ]]; then
-        export ZIG="$zig"
-        return 0
-    fi
-    if [[ -d "$worktree/.context/zig" && -x "$worktree/.context/zig/zig" ]]; then
-        export ZIG="$worktree/.context/zig/zig"
-        return 0
-    fi
-    main_checkout="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
-        | sed 's#/\.git$##')"
-    zig_dir="$worktree/.context/zig"
-    if [[ -d "$main_checkout/.context/zig" && -x "$main_checkout/.context/zig/zig" ]]; then
-        mkdir -p "$worktree/.context"
-        if [[ -L "$zig_dir" ]]; then
-            rm -f "$zig_dir"
-        elif [[ -e "$zig_dir" && ! -d "$zig_dir" ]]; then
-            cut_preflight_block zig "$zig_dir exists but is not a Zig toolchain directory"
-            return $?
-        fi
-        if [[ ! -e "$zig_dir" ]]; then
-            ln -s "$main_checkout/.context/zig" "$zig_dir"
-        fi
-        if [[ -d "$zig_dir" && -x "$zig_dir/zig" ]]; then
-            export ZIG="$zig_dir/zig"
-            return 0
-        fi
-        cut_preflight_block zig "could not link the main checkout Zig toolchain directory into $zig_dir"
+    # Resolved by cut_preflight_check_scratch's resolver call; resolve again
+    # only when this check runs on its own.
+    [[ -n "${RELEASE_ENV_ZIG_SOURCE+set}" ]] || cut_preflight_resolve_env || return $?
+    if [[ -z "$RELEASE_ENV_ZIG" ]]; then
+        cut_preflight_block zig \
+            "zig is not resolvable (${RELEASE_ENV_ZIG_TRIED}); fix: ${RELEASE_ENV_ZIG_FIX}"
         return $?
     fi
-    if command -v zig >/dev/null 2>&1; then
-        export ZIG="$(command -v zig)"
-        return 0
-    fi
-    cut_preflight_block zig "zig is not resolvable from ZIG, the release worktree, or the main checkout"
-    return $?
+    export ZIG="$RELEASE_ENV_ZIG"
+    printf 'zig: %s (%s)\n' "$ZIG" "$RELEASE_ENV_ZIG_SOURCE"
 }
 
 # cas-fed5: name every host tool the gate and publish stages need, before

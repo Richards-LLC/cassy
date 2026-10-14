@@ -1392,8 +1392,18 @@ if [[ -n "${only_rows:-}" ]]; then
     printf 'diagnostic receipt directory: %s\n' "$receipt_dir"
 fi
 
-# cas-be3a: the same checkout-filesystem default preflight validated.
-export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-$(release_portable_checkout_scratch_base "$worktree")}"
+# cas-9f61: the scratch base and Zig preflight validated, from the resolver
+# assembly-proof and the gate share. Left unset when no durable base exists, so
+# the gate's own resolution names the gap.
+if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" || -z "${ZIG:-}" ]] \
+    && release_env_assignments="$(python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
+        --durable --create --link-zig --format shell)"; then
+    eval "$release_env_assignments"
+    if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" && -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
+        export CAS_RELEASE_GATE_HOME_DIR="$RELEASE_ENV_SCRATCH"
+    fi
+    [[ -n "${ZIG:-}" || -z "$RELEASE_ENV_ZIG" ]] || export ZIG="$RELEASE_ENV_ZIG"
+fi
 export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 # Keep every attempt's successful row logs and timings, even when gate.log is
 # replaced on the next full run. Only full gates populate/read row PASS cache.
@@ -1422,7 +1432,7 @@ release_portable_setsid_prefix || {
 nohup "${RELEASE_PORTABLE_SETSID[@]}" bash -c '
     worktree=$1; done_file=$2; green_file=$3; sha_file=$4; expected_sha=$5; mode=$6; shift 6
     cd "$worktree" || exit 125
-    [[ -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
+    [[ -z "${ZIG:-}" && -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
     set +e
     "$@"
     rc=$?

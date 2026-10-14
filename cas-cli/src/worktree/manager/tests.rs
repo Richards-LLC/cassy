@@ -2251,7 +2251,7 @@ fn lane_fast_rows_uses_committed_target_runner_and_preserves_root_wip_cas_6029()
             .unwrap();
         manager.git.checkout(&epic).unwrap();
         let target_runner = if target_passes {
-            "from pathlib import Path\nassert Path(__file__).with_name('check-lane-compile.py').read_text() == 'approved compiler\\n'\nprint('TARGET RUNNER PASS')\n"
+            "from pathlib import Path\nassert Path(__file__).with_name('check-lane-compile.py').read_text() == 'approved compiler\\n'\nassert Path(__file__).with_name('release_env.py').read_text() == 'approved resolver\\n'\nprint('TARGET RUNNER PASS')\n"
         } else {
             "import sys\nprint('FAIL test-env: target row')\nsys.exit(1)\n"
         };
@@ -2266,6 +2266,12 @@ fn lane_fast_rows_uses_committed_target_runner_and_preserves_root_wip_cas_6029()
             "scripts/check-lane-compile.py",
             "approved compiler\n",
             "target compile verifier",
+        );
+        commit_file(
+            &repo_path,
+            "scripts/release_env.py",
+            "approved resolver\n",
+            "target release environment resolver",
         );
         manager.git.checkout(&trunk).unwrap();
         let mut worktree = manager

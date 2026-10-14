@@ -32,6 +32,7 @@ mod known_repos;
 mod peers;
 mod project_overview_cmd;
 mod provider_default;
+mod release_env;
 mod release_report;
 mod sweep;
 mod worktree;
@@ -419,6 +420,10 @@ pub enum Commands {
 pub enum ReleaseCommands {
     /// Assemble a Markdown, standalone HTML, and optional PDF release report
     Report(ReleaseReportArgs),
+    /// Check Zig, scratch per filesystem, toolchain, release env and gh in seconds; one fix per gap
+    Doctor(release_env::ReleaseEnvArgs),
+    /// Pin discovered Zig and per-filesystem scratch bases in ~/.cas/release.env
+    Setup(release_env::ReleaseEnvArgs),
 }
 
 /// Authentication requirement for a command.
@@ -824,6 +829,12 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
+        Commands::Release(ReleaseCommands::Doctor(args)) => {
+            release_env::execute(release_env::ReleaseEnvCommand::Doctor, args)
+        }
+        Commands::Release(ReleaseCommands::Setup(args)) => {
+            release_env::execute(release_env::ReleaseEnvCommand::Setup, args)
+        }
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Queue(cmd) => queue::execute(cmd, cli),

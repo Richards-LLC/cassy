@@ -35,8 +35,10 @@ version and worktree, never a version-keyed path.
    Zig, the `x86_64-unknown-linux-gnu` Rust target); a `report-renderer`
    whose headless Chromium launches (its blocker names the pinned
    `playwright install chromium-headless-shell` command); and a passing
-   integration receipt. With no configured scratch base, a checkout on another
-   filesystem than the platform default gets `cas-release-gate` beside it. A macOS host needs only
+   integration receipt. Run `cas release doctor` first (seconds, one fix per
+   gap) and `cas release setup` once per host: Zig and the per-filesystem
+   scratch base come from `scripts/release_env.py`, which assembly-proof, the
+   gate and the train share, so nothing is exported by hand. A macOS host needs only
    Homebrew `jq binutils`, those Cargo tools and that target: the train
    supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself,
    and defaults its scratch base to `/Users/Shared/cas-release-gate` there

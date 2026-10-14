@@ -9,10 +9,17 @@ name: Release Prebuild
 # operator waits on a pushed tag. Release then only publishes bytes that
 # already exist.
 #
-# SECURITY BOUNDARY (cas-6981/cas-f5638): this workflow is push-to-main only.
-# A fork cannot emit a push in Richards-LLC/cassy, so untrusted code can never
-# reach the persistent runner through it. Do not add pull_request,
-# pull_request_target, workflow_run, issue_comment, or repository_dispatch.
+# cas-28eb: it also runs on the release train's `release/**` push, which carries
+# the exact tree that later lands on main (12 of 12 recent release PRs).
+# The build then starts before the merge queue, not after it, and
+# find-release-prebuild.sh adopts a run whose head commit has the tagged
+# commit's tree. An equal tree also means an equal workflow file.
+#
+# SECURITY BOUNDARY (cas-6981/cas-f5638): this workflow is push-only. A fork
+# cannot emit a push in Richards-LLC/cassy, so untrusted code can never reach
+# it. The persistent runner is routed for main alone; a release/** push builds
+# on hosted runners. Do not add pull_request, pull_request_target,
+# workflow_run, issue_comment, or repository_dispatch.
 #
 # CI-LOAD POLICY: the heavy tier here is gated on a *pending release tree*.
 # Ordinary main pushes pay one ~20s ubuntu gate job and stop. factory/*,
@@ -21,6 +28,7 @@ on:
   push:
     branches:
       - main
+      - "release/**"
 
 permissions:
   contents: read
@@ -93,7 +101,7 @@ jobs:
         env:
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
         run: |
-          if [[ "$SELF_HOSTED_ENABLED" == enabled ]]; then
+          if [[ "$SELF_HOSTED_ENABLED" == enabled && "$GITHUB_REF" == refs/heads/main ]]; then
             echo 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' >> "$GITHUB_OUTPUT"
             echo 'mode=self-hosted' >> "$GITHUB_OUTPUT"
           else
@@ -179,7 +187,7 @@ jobs:
         if: needs.prebuild-runner-route.outputs.mode == 'hosted'
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-linux-x86_64-${{ hashFiles('Cargo.lock') }}
+          key: release-linux-x86_64
           cache-on-failure: true
 
       - name: Install Zig
@@ -273,10 +281,14 @@ jobs:
               "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
+      # cas-542e: no Cargo.lock hash in `key`. Every release bumps workspace
+      # versions in Cargo.lock, and `key` is part of the restore prefix, so the
+      # previous release's dependencies never restored (8 of 9 runs were cold,
+      # 21-25 min). rust-cache appends its own lockfile hash to the saved key.
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-macos-aarch64-${{ hashFiles('Cargo.lock') }}
+          key: release-macos-aarch64
           cache-on-failure: true
 
       - name: Build

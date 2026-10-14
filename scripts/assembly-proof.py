@@ -955,9 +955,153 @@ def prove_rows(root, rows=ROW_PROOF_ROWS):
     return results
 
 
+# cas-2970: the merge queue is the integration proof. A successful merge_group
+# run of ci.yml proves the exact tree that lands on main (preflight with the CI
+# script tiers and Commander web checks, the sharded workspace suite from an
+# archive in a plain CI checkout, doctests and macOS Check); it publishes a
+# `merge-queue-validated-tree-<tree>` artifact only after that fan-in passes.
+# A release cut from main reuses that run for its code input instead of
+# re-running the suite locally. Any missing, failed or ambiguous evidence is a
+# MISS and the caller proves fresh.
+MERGE_QUEUE_WORKFLOW = ".github/workflows/ci.yml"
+MERGE_QUEUE_ANCESTORS = 25
+DEFAULT_REPOSITORY_SLUG = "Richards-LLC/cassy"
+
+
+def merge_queue_receipt_path(root, expected):
+    key = digest(json.dumps(expected, sort_keys=True).encode())
+    return common_dir(root).parent / ".cas/merge-sweeps/merge-queue-proofs" / (key + ".json")
+
+
+def merge_queue_inputs(root, revision="HEAD"):
+    if not clean(root):
+        raise ValueError("key=checkout reason=dirty_checkout")
+    return {"format": 1, "repository": str(common_dir(root)), "code_input": code_input(root, revision)}
+
+
+def gh_json(env, path):
+    command = [env.get("CAS_RELEASE_TRAIN_GH") or "gh", "api", path]
+    result = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+    if result.returncode:
+        detail = " ".join((result.stderr or result.stdout).split())[:200]
+        raise ValueError(f"key=github reason=gh_api_failed path={path} detail={detail}")
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise ValueError(f"key=github reason=invalid_json path={path}") from exc
+
+
+def merge_queue_run(root, tree, env):
+    """The newest successful merge_group run of ci.yml that proved `tree`."""
+    slug = (env.get("CAS_RELEASE_TRAIN_REPO") or DEFAULT_REPOSITORY_SLUG).strip("/")
+    artifacts = gh_json(env, f"/repos/{slug}/actions/artifacts"
+                             f"?name=merge-queue-validated-tree-{tree}&per_page=100")
+    for artifact in artifacts.get("artifacts") or []:
+        run_id = (artifact.get("workflow_run") or {}).get("id")
+        if artifact.get("expired") or not isinstance(run_id, int):
+            continue
+        run = gh_json(env, f"/repos/{slug}/actions/runs/{run_id}")
+        if not (run.get("event") == "merge_group" and run.get("status") == "completed"
+                and run.get("conclusion") == "success"
+                and str(run.get("path", "")).split("@", 1)[0] == MERGE_QUEUE_WORKFLOW
+                and str(run.get("html_url", "")).startswith("https://")):
+            continue
+        head = run.get("head_sha")
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+            continue
+        tested = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                                 head + "^{tree}"], capture_output=True, text=True, check=False)
+        if tested.returncode or tested.stdout.strip() != tree:
+            continue
+        return {"run_id": run_id, "run_url": run["html_url"], "run_head": head}
+    return None
+
+
+def reuse_merge_queue(root, env=None):
+    """Bind HEAD's code input to the merge-queue run that proved an ancestor.
+
+    Walk HEAD's first parents while the code input is unchanged (the release
+    metadata and version bump the cut adds on top of main keep it), and accept
+    the first commit whose exact tree has a successful merge-queue run.
+    Returns (record, path) or raises ValueError naming the miss.
+    """
+    env = dict(os.environ if env is None else env)
+    if env.get("CAS_RELEASE_TRAIN_MERGE_QUEUE_REUSE") == "0":
+        raise ValueError("key=policy reason=disabled_by_CAS_RELEASE_TRAIN_MERGE_QUEUE_REUSE")
+    expected = merge_queue_inputs(root)
+    head = git(root, "rev-parse", "HEAD").decode().strip()
+    revision, checked = head, []
+    for _ in range(MERGE_QUEUE_ANCESTORS):
+        if code_input(root, revision) != expected["code_input"]:
+            break
+        tree = git(root, "rev-parse", revision + "^{tree}").decode().strip()
+        checked.append(revision[:12])
+        found = merge_queue_run(root, tree, env)
+        if found:
+            path = merge_queue_receipt_path(root, expected)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"inputs": expected, "status": "PASS", "source": "merge-queue",
+                      "commit": revision, "tree": tree, "candidate_head": head,
+                      "checked_epoch": int(time.time()), **found}
+            write(path, record)
+            return record, path
+        parent = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                                 revision + "^"], capture_output=True, text=True, check=False)
+        if parent.returncode:
+            break
+        revision = parent.stdout.strip()
+    raise ValueError("key=merge_queue_run reason=no_successful_merge_queue_run_for_code_input "
+                     f"code_input={expected['code_input']} checked={','.join(checked) or 'none'}")
+
+
+def merge_queue_matching(root, diagnostic=False):
+    """Offline check of a recorded merge-queue receipt for HEAD's code input."""
+    try:
+        expected = merge_queue_inputs(root)
+        path = merge_queue_receipt_path(root, expected)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        if diagnostic:
+            print(f"MISS merge-queue {exc}", file=sys.stderr)
+        return None
+
+    def miss(key, reason):
+        if diagnostic:
+            print(f"MISS merge-queue key={key} reason={reason} receipt={path}", file=sys.stderr)
+        return None
+
+    try:
+        record = json.loads(path.read_text())
+        if record["inputs"] != expected:
+            return miss("inputs", "different")
+        if record["status"] != "PASS" or record["source"] != "merge-queue":
+            return miss("status", "not_PASS")
+        if not 0 <= time.time() - record["checked_epoch"] <= MAX_AGE:
+            return miss("checked_epoch", "future_or_expired")
+        if not str(record["run_url"]).startswith("https://"):
+            return miss("run_url", "invalid")
+        if git(root, "rev-parse", record["commit"] + "^{tree}").decode().strip() != record["tree"]:
+            return miss("commit", "tested_tree_differs")
+        if code_input(root, record["commit"]) != expected["code_input"]:
+            return miss("code_input", "tested_commit_differs")
+        if subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
+                           record["commit"], "HEAD"], check=False).returncode:
+            return miss("commit", "not_an_ancestor_of_HEAD")
+        return record, path
+    except FileNotFoundError:
+        return miss("receipt", "no_matching_receipt")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+        return miss("receipt", "malformed_or_unavailable_object")
+
+
+def merge_queue_line(record, path):
+    return (f"PASS merge-queue receipt={path} source_sha={record['commit']} tree={record['tree']} "
+            f"code_input={record['inputs']['code_input']} run={record['run_url']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prove", "check", "input", "prove-rows", "check-row"))
+    parser.add_argument("action", choices=("prove", "check", "input", "prove-rows", "check-row",
+                                           "reuse-merge-queue", "check-merge-queue"))
     parser.add_argument("root", type=Path)
     parser.add_argument("row", nargs="?")
     args = parser.parse_args()
@@ -965,6 +1109,15 @@ def main():
         root = args.root.resolve()
         if args.action == "input":
             print(code_input(root))
+            return 0
+        if args.action == "reuse-merge-queue":
+            print(merge_queue_line(*reuse_merge_queue(root)))
+            return 0
+        if args.action == "check-merge-queue":
+            found = merge_queue_matching(root, diagnostic=True)
+            if not found:
+                return 1
+            print(merge_queue_line(*found))
             return 0
         if args.action == "prove-rows":
             results = prove_rows(root)
@@ -996,6 +1149,8 @@ def main():
             print(f"MISS row-proof row={args.row} key=checkout reason=" + str(exc), file=sys.stderr)
         elif args.action == "prove-rows":
             print("FAIL row proof: " + str(exc), file=sys.stderr)
+        elif args.action in ("reuse-merge-queue", "check-merge-queue"):
+            print("MISS merge-queue " + str(exc), file=sys.stderr)
         return 1
 
 

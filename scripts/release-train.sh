@@ -109,7 +109,7 @@ readonly -a gate_rows=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src
+    fixture-paths-src builtin-projections-src
 )
 
 # Cross-cutting audit hook. The --cut dispatcher marks nested calls with
@@ -1202,10 +1202,8 @@ case "$action" in
         fi
         CAS_RELEASE_RECEIPTS_RUN_DIR="${CAS_RELEASE_RECEIPTS_RUN_DIR:-$run_dir}" \
         CAS_RELEASE_TRAIN_RUN_DIR="${CAS_RELEASE_TRAIN_RUN_DIR:-$run_dir}" \
-            python3 "$script_dir/release-integrate.py" "$worktree" "$assemble_action"
-        if [[ -f "$worktree/Cargo.toml" ]]; then
-            python3 "$script_dir/assembly-proof.py" prove "$worktree"
-        fi
+            python3 "$script_dir/release-integrate.py" "$worktree" "$assemble_action" || exit $?
+        assemble_integration_proof
         exit $?
         ;;
     --print-run-dir)
@@ -1400,10 +1398,19 @@ export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 export CAS_RELEASE_GATE_LOG_DIR="$receipt_dir/rows/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export CAS_RELEASE_GATE_CACHE_DIR="$run_dir/row-cache"
 if [[ "${full_gate_fresh:-false}" == true ]]; then
-    # cas-846f: from-main releases prove every row fresh (see --gate above).
+    # cas-846f: from-main releases reuse no row cache, sweep or row proof (see
+    # --gate above). cas-2970: the suite rows accept only the integration proof
+    # this run's assemble recorded for the code input; every other row is fresh.
     unset CAS_RELEASE_GATE_CACHE_DIR
     export CAS_RELEASE_GATE_NO_REUSE=1
-    printf 'from-main assembly: full gate, every row runs fresh (no row, sweep or assembly reuse)\n'
+    unset CAS_RELEASE_GATE_INTEGRATION_PROOF
+    if integration_source="$(integration_proof_source)"; then
+        export CAS_RELEASE_GATE_INTEGRATION_PROOF="$integration_source"
+        printf 'from-main assembly: full gate; suite rows reuse the %s proof of this code input, every other row runs fresh\n' \
+            "$integration_source"
+    else
+        printf 'from-main assembly: full gate, every row runs fresh (no row, sweep or assembly reuse)\n'
+    fi
 fi
 gate_args=("$version")
 if [[ -n "${only_rows:-}" ]]; then

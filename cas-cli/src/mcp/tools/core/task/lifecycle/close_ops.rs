@@ -2368,8 +2368,8 @@ fn epic_journey_binding(
 /// cas-74cb: why an epic's own close may defer its build proof to assembly,
 /// or `None` when it must still carry the scoped proof. Either the epic's
 /// latest passing ASSEMBLY_PROOF head contains the epic tip, or the tip is
-/// already contained in the default branch, whose release ran the full
-/// assembly gate (cas-459b / cas-a25c: lane deleted, content on main).
+/// already contained in the default branch, whose merge queue proved the
+/// landed tree (cas-2970; cas-459b / cas-a25c: lane deleted, content on main).
 fn epic_build_proof_basis(
     task: &Task,
     commit_receipt: Option<&str>,
@@ -2386,7 +2386,7 @@ fn epic_build_proof_basis(
         .find(|target| git_ref_exists(repo, target) && git_commit_is_ancestor(repo, &tip, target))
         .map(|target| {
             format!(
-                "its tip {short} is already contained in {target}, whose release ran the full assembly gate"
+                "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
             )
         })
 }
@@ -2395,7 +2395,7 @@ fn epic_build_proof_basis(
 /// the scoped-proof gate, naming the proof an epic is expected to carry.
 fn epic_assembly_proof_instruction(epic_id: &str) -> String {
     format!(
-        "An epic's build proof is its assembly (CONTRIBUTING): run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}, or merge the epic into the default branch, then retry close. Epic {epic_id} has no passing ASSEMBLY_PROOF covering its tip and its tip is not contained in the default branch."
+        "An epic's build proof is its integration proof (CONTRIBUTING): land the epic on the default branch through the merge queue, which proves the exact merged tree, then retry close. An opt-in local assembly also counts: run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}. Epic {epic_id} has no passing ASSEMBLY_PROOF covering its tip and its tip is not contained in the default branch."
     )
 }
 
@@ -9648,7 +9648,7 @@ impl CasCore {
                     }
                     (Some((epic_id, line)), _) => format!("covered by {epic_id}'s {line}"),
                     (None, Some(epic)) => format!(
-                        "pending the supervisor's ASSEMBLY_PROOF on {} (one build and test of the epic tip)",
+                        "pending {}'s integration proof (its merge-queue landing on the default branch, or an ASSEMBLY_PROOF of the epic tip)",
                         epic.id
                     ),
                     (None, None) => {
@@ -13880,12 +13880,45 @@ pub(crate) fn fast_rows_receipt_refusal(
     let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .map(|out| std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))?;
     let receipt = common.join("cas").join("fast-rows").join(format!("{head}.pass"));
-    if std::fs::read_to_string(&receipt)
-        .is_ok_and(|text| text.starts_with(&format!("fast-rows: PASS {head} ")))
-    {
+    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
+    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
         return None;
     }
     let target = target.strip_prefix("origin/").unwrap_or(target);
+    // cas-7bce: a failed run on this exact tip names its rows and fixes; quote
+    // them so the refusal says what to change, not only what to rerun.
+    if let Some(header) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(&format!("fast-rows: FAIL {head} ")))
+    {
+        let rows = header
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("rows="))
+            .unwrap_or("unknown");
+        let fixes: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .filter(|line| line.starts_with("FIX "))
+            .take(20)
+            .collect();
+        let fixes = if fixes.is_empty() {
+            "- read the failed row logs in the gate output".to_string()
+        } else {
+            fixes
+                .iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        return Some(format!(
+            "⚠️ FAST ROWS FAILED before {task_id} parks: `release-gate.sh --fast-rows` failed on the \
+             delivered tip {} (rows: {rows}).\n\nFix:\n{fixes}\n\nCommit the fix, rerun \
+             `./scripts/release-gate.sh --fast-rows --base origin/{target}` until it passes, then \
+             push and close again (cas-7bce).",
+            &head[..head.len().min(12)],
+        ));
+    }
     Some(format!(
         "⚠️ FAST ROWS REQUIRED before {task_id} parks: no `release-gate.sh --fast-rows` PASS \
          receipt covers the delivered tip {}.\n\nIn your worktree, with everything committed, run \

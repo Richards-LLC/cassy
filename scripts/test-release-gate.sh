@@ -102,6 +102,8 @@ path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    cp "$script_dir/release-binary-artifact.py" "$repo/scripts/release-binary-artifact.py"
+    printf 'fixture license\n' >"$repo/LICENSE"
     cp "$script_dir/release-test-env.sh" "$script_dir/release-integration-gates.py" "$repo/scripts/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
@@ -309,12 +311,30 @@ main:
   ret
 .section .note.GNU-stack,"",@progbits
 ASM
+  source "$(dirname "$0")/release-portable.sh"
+  release_portable_x86_64_linux_cc
+  # cas-c096: the build outputs release.sh audits, so the row can audit them
+  # too. Each has a seeded control; the gate must clean earlier copies.
+  ghostty_lib="$destination/build/ghostty_vt_sys-fixture/out/zig-out/lib"
+  blake3_build="$destination/build/blake3-fixture"
+  [[ ! -e "$ghostty_lib" && ! -e "$blake3_build" ]] || {
+    echo 'release binary fixture: stale Ghostty/BLAKE3 outputs were not cleaned' >&2; exit 1;
+  }
+  mkdir -p "$ghostty_lib" "$blake3_build/out"
+  if [[ "${GATE_FIXTURE_GHOSTTY_EVEX:-}" == 1 ]]; then
+    sed 's/xor %eax, %eax/.byte 0x62, 0xf1, 0xff, 0x08, 0x78, 0xc8/' "$destination/fixture.S" >"$destination/ghostty.S"
+  else
+    cp "$destination/fixture.S" "$destination/ghostty.S"
+  fi
+  "${RELEASE_PORTABLE_X86_64_CC[@]}" -c "$destination/ghostty.S" -o "$ghostty_lib/libghostty_vt.a"
+  printf '%s\n' 'cargo::rerun-if-env-changed=CARGO_FEATURE_NO_AVX512' 'cargo::rustc-cfg=blake3_sse41_ffi' >"$blake3_build/output"
+  if [[ "${GATE_FIXTURE_BLAKE3_AVX512:-}" == 1 ]]; then
+    printf '%s\n' 'cargo::rustc-cfg=blake3_avx512_ffi' >>"$blake3_build/output"
+  fi
   if [[ "${GATE_FIXTURE_ISA_EVEX:-}" == 1 ]] || grep -qF 'name = "aes"' Cargo.lock; then
     sed 's/xor %eax, %eax/.byte 0x62, 0xf1, 0xff, 0x08, 0x78, 0xc8/' "$destination/fixture.S" >"$destination/seeded.S"
     mv "$destination/seeded.S" "$destination/fixture.S"
   fi
-  source "$(dirname "$0")/release-portable.sh"
-  release_portable_x86_64_linux_cc
   "${RELEASE_PORTABLE_X86_64_CC[@]}" "$destination/fixture.S" -o "$destination/cas"
   if [[ "${GATE_FIXTURE_ISA_MISSING:-}" == 1 ]]; then rm "$destination/cas"; fi
 fi
@@ -506,7 +526,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src \
+        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -531,6 +551,12 @@ section_release_binary_isa() {
 # The new row must audit the staged executable, including code introduced by
 # dependencies, before the train can authorize pr-body/pipeline.
 repo="$(new_fixture release-binary-isa)"
+# cas-c096: the row records its audited archive for release.sh to reuse.
+release_binary_verdict() {
+    (cd "$1" && env -u CARGO_ENCODED_RUSTFLAGS -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+        ZIG="$1/.context/zig/zig" PATH="$1/scripts:$PATH" \
+        python3 scripts/release-binary-artifact.py verify "$1" --target x86_64-unknown-linux-gnu --version 9.99.7 2>&1 || true)
+}
 output="$(run_gate "$repo" GATE_FIXTURE_ISA_EVEX "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
 if grep -qF 'FAIL release-binary-isa' <<<"$output" \
     && grep -qF 'forbidden EVEX/AVX-512' <<<"$output" \
@@ -539,12 +565,35 @@ if grep -qF 'FAIL release-binary-isa' <<<"$output" \
 else
     bad "release-binary-isa missed the seeded final ELF: $output"
 fi
+if grep -qF 'MISS key=tree reason=no_artifact_for_tree' <<<"$(release_binary_verdict "$repo")"; then
+    ok 'a refused release binary is never recorded for the publisher'
+else
+    bad "a refused release binary was recorded: $(release_binary_verdict "$repo")"
+fi
+# release.sh's build-output audits run in the row, so its reuse skips none.
+for control in GATE_FIXTURE_GHOSTTY_EVEX:libghostty_vt.a GATE_FIXTURE_BLAKE3_AVX512:'enables forbidden AVX-512 inputs'; do
+    output="$(run_gate "$repo" "${control%%:*}" "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
+    assert_named_failure release-binary-isa "$output"
+    if grep -qF "${control#*:}" <<<"$output"; then
+        ok "release-binary-isa names the ${control%%:*} build-output finding"
+    else
+        bad "release-binary-isa missed the ${control%%:*} build-output finding: $output"
+    fi
+done
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
 if grep -qF 'PASS release-binary-isa' <<<"$output" \
     && grep -qF 'RELEASE GATE PASSED' <<<"$output"; then
     ok 'release-binary-isa accepts a baseline executable with locked zigbuild and release flags'
 else
     bad "release-binary-isa rejected the baseline final ELF: $output"
+fi
+verdict="$(release_binary_verdict "$repo")"
+if grep -qF "REUSE release binary tree=$(git -C "$repo" rev-parse 'HEAD^{tree}') version=9.99.7" <<<"$verdict" \
+    && grep -qF 'audits=ghostty-archive-isa,blake3-no-avx512,packaged-binary-isa' <<<"$verdict" \
+    && [[ -f "$repo/.cas/release-binary/target/x86_64-unknown-linux-gnu/release/cas" ]]; then
+    ok 'release-binary-isa builds in the persistent release target and records the audited archive'
+else
+    bad "release-binary-isa did not record a reusable archive: $verdict"
 fi
 for control in GATE_FIXTURE_ISA_BUILD_FAIL GATE_FIXTURE_ISA_MISSING; do
     output="$(run_gate "$repo" "$control" "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
@@ -1556,7 +1605,11 @@ printf 'release prose\n' >"$repo/docs/release-notes/cache.md"
 git -C "$repo" add docs/release-notes/cache.md
 git -C "$repo" commit -qm 'fixture release prose'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-docs.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 11 ]]; then
+# cas-c096: the publisher reuses only an archive of its exact tree, so the
+# prose commit re-packages the release binary while every other row reuses.
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 10 ]] \
+    && awk -F '\t' '$1 == "release-binary-isa" && $7 == "0" {found=1} END {exit !found}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && grep -qF 'MISS key=tree reason=no_artifact_for_tree' "$tmp/cache-docs.log"; then
     ok 'train row cache automatically reuses unchanged code proof after a release-prose commit'
 else
     bad "release prose reran unchanged code rows: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
@@ -1734,7 +1787,7 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 body = path.read_text()
-seam = '    if "$reuse_rows" && [[ -n "$key" ]]; then\n'
+seam = '    if "$row_reuse" && [[ -n "$key" ]]; then\n'
 assert body.count(seam) == 1, 'train ISA receipt seam changed'
 seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir" ]]; then
         printf '%s %s %s PASS %s %s %s %s %s\\n' \\
@@ -1744,6 +1797,18 @@ seed = '''    if [[ "$name" == release-binary-isa && -n "$key" && -n "$cache_dir
     fi
 '''
 path.write_text(body.replace(seam, seed + seam))
+# cas-c096: the receipt is reused only beside this tree's archive. Record a
+# placeholder archive at the run_check seam, before that check reads it.
+body = path.read_text()
+seam = '    row_selected "$name" || return 0\n    log="$row_log_dir/$name.log"\n'
+assert body.count(seam) == 1, 'train ISA archive seam changed'
+seed = '''    if [[ "$name" == release-binary-isa && -z "$only_rows" ]]; then
+        python3 "$repo_root/scripts/release-binary-artifact.py" record "$repo_root" \\
+            --target "$release_binary_target" --binary "$repo_root/Cargo.lock" \\
+            --license "$repo_root/LICENSE" --audit train-fixture >/dev/null
+    fi
+'''
+path.write_text(body.replace(seam, seam + seed))
 PY_TRAIN_ISA_RECEIPT
 # Any accidental execution of the auditor fails this fixture. The separate
 # seeded-EVEX/baseline cases retain the real auditor and zigbuild stub.
@@ -1919,6 +1984,89 @@ if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "
 else
     bad "real-cut prep missed assembly proof: $(cat "$tmp/proof-prep.log")"
 fi
+
+# cas-2970: a from-main gate (no reuse) honors only the integration proof its
+# assemble recorded. `assembly` reuses this run's two-context proof for its
+# three rows; `merge-queue` reuses the queue run that proved an ancestor with
+# the same code input for the suite rows it ran. Everything else runs fresh.
+reused_rows() {
+    awk -F '\t' '$7 == "REUSED" {print $1}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" | sort | paste -sd, -
+}
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=assembly \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-assembly.log" 2>&1 || true
+if [[ "$(reused_rows)" == archive-mode,ci-script-tests,nextest ]] \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'a from-main gate reuses its own fresh assembly proof for exactly its three rows'
+else
+    bad "from-main assembly-proof reuse: $(reused_rows); $(cat "$tmp/mq-assembly.log")"
+fi
+if CAS_RELEASE_GATE_INTEGRATION_PROOF=bogus run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 \
+    >"$tmp/mq-bogus.log" 2>&1; then
+    bad 'an unknown integration proof was accepted'
+elif grep -qF 'must be merge-queue or assembly' "$tmp/mq-bogus.log"; then
+    ok 'an unknown integration proof is refused by name'
+else
+    bad "unknown integration proof failed without naming it: $(cat "$tmp/mq-bogus.log")"
+fi
+cat >"$tmp/fake-gh" <<'PY_FAKE_GH'
+#!/usr/bin/env python3
+import json, os, sys
+responses = json.load(open(os.environ["GATE_FIXTURE_GH_RESPONSES"]))
+path = sys.argv[2] if sys.argv[1:2] == ["api"] and len(sys.argv) == 3 else ""
+if path not in responses and "/actions/artifacts?" in path:
+    responses[path] = {"total_count": 0, "artifacts": []}
+if path not in responses:
+    sys.exit("fixture gh: no response for " + path)
+print(json.dumps(responses[path]))
+PY_FAKE_GH
+chmod +x "$tmp/fake-gh"
+python3 - "$tmp/gh-responses.json" "$proof_sha" "$(git -C "$repo" rev-parse "$proof_sha^{tree}")" <<'PY_GH_RESPONSES'
+import json, sys
+path, sha, tree = sys.argv[1:]
+json.dump({
+    f"/repos/Richards-LLC/cassy/actions/artifacts?name=merge-queue-validated-tree-{tree}&per_page=100":
+        {"artifacts": [{"expired": False, "workflow_run": {"id": 777}}]},
+    "/repos/Richards-LLC/cassy/actions/runs/777":
+        {"event": "merge_group", "status": "completed", "conclusion": "success",
+         "path": ".github/workflows/ci.yml", "head_sha": sha,
+         "html_url": "https://github.com/Richards-LLC/cassy/actions/runs/777"}}, open(path, "w"))
+PY_GH_RESPONSES
+if CAS_RELEASE_TRAIN_GH="$tmp/fake-gh" GATE_FIXTURE_GH_RESPONSES="$tmp/gh-responses.json" \
+    run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" reuse-merge-queue "$repo" >"$tmp/mq-reuse.log" 2>&1 \
+    && grep -qF "PASS merge-queue receipt=" "$tmp/mq-reuse.log" \
+    && grep -qF "source_sha=$proof_sha" "$tmp/mq-reuse.log"; then
+    ok 'reuse-merge-queue walks past the prep delta to the queue-proved commit'
+else
+    bad "reuse-merge-queue: $(cat "$tmp/mq-reuse.log")"
+fi
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-gate.log" 2>&1 || true
+mq_expected=archive-mode,ci-script-tests,doctests,fixture-paths,hub-web-dist-drift,hub-web-tests,hub-web-visual-qa,macos-check,nextest
+if [[ "$(reused_rows)" == "$mq_expected" ]] \
+    && grep -qF 'run=https://github.com/Richards-LLC/cassy/actions/runs/777' "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -q '^workspace-tests' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && grep -q '^builtin-projections' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'a merge-queue from-main gate reuses the queue suite rows and runs the version-delta rows fresh'
+else
+    bad "merge-queue gate reuse: $(reused_rows); $(cat "$tmp/mq-gate.log")"
+fi
+mq_head="$(git -C "$repo" rev-parse HEAD)"
+printf '// code after the queue run\n' >>"$repo/cas-cli/tests/smoke.rs"
+git -C "$repo" add cas-cli/tests/smoke.rs
+git -C "$repo" commit -qm 'fixture code change after the queue run'
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-changed.log" 2>&1 || true
+if [[ -z "$(reused_rows)" ]] && grep -qF 'MISS merge-queue key=' "$tmp/mq-changed.log" \
+    && ! CAS_RELEASE_TRAIN_GH="$tmp/fake-gh" GATE_FIXTURE_GH_RESPONSES="$tmp/gh-responses.json" \
+        run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" reuse-merge-queue "$repo" >"$tmp/mq-miss.log" 2>&1 \
+    && grep -qF 'no_successful_merge_queue_run_for_code_input' "$tmp/mq-miss.log"; then
+    ok 'a code change after the queue run misses the queue receipt and every row runs fresh'
+else
+    bad "changed code reused the queue receipt: $(reused_rows); $(cat "$tmp/mq-changed.log")"
+fi
+git -C "$repo" reset -q --hard "$mq_head"
 for change in manifest-dependency lock-dependency non-member; do
     changed_file=Cargo.lock
     [[ "$change" != manifest-dependency ]] || changed_file=cas-cli/Cargo.toml

@@ -132,6 +132,9 @@ impl Respond for FakeCloud {
 struct Fixture {
     _env: TestEnvGuard,
     cas_root: PathBuf,
+    /// Another clone observes cloud registration without treating this
+    /// project's own locally registered supervisor as a peer (cas-559c).
+    peer_root: PathBuf,
     cloud: FakeCloud,
     _server: MockServer,
 }
@@ -156,6 +159,16 @@ async fn fixture(focus: &str) -> (Fixture, EmbeddedDaemon) {
     config.endpoint = server.uri();
     config.token = Some("synthetic-test-token".to_string());
     config.save_to_cas_dir(&cas_root).unwrap();
+    let peer_root = init_cas_dir(&home.join("peer-clone")).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&peer_root, REPO).unwrap();
+    config.save_to_cas_dir(&peer_root).unwrap();
+    assert!(
+        crate::store::open_agent_store(&peer_root)
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .is_empty()
+    );
 
     let metadata_path = crate::ui::factory::metadata_path(SESSION);
     std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
@@ -180,6 +193,7 @@ async fn fixture(focus: &str) -> (Fixture, EmbeddedDaemon) {
         Fixture {
             _env: env,
             cas_root,
+            peer_root,
             cloud,
             _server: server,
         },
@@ -248,7 +262,7 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
         shown.starts_with("Cloud presence: failing: Failed to register agent (503)"),
         "the failure and its cause are visible in peers: {shown}"
     );
-    assert!(peer_ids(&fx.cas_root, "someone-else").is_empty());
+    assert!(peer_ids(&fx.peer_root, "someone-else").is_empty());
 
     // The next heartbeat tick retries and the cloud accepts it.
     heartbeat_tick(&daemon).await;
@@ -275,7 +289,7 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
 
     // Discoverable by a peer, with its focus; registered in peers.
     assert_eq!(
-        peer_ids(&fx.cas_root, "someone-else"),
+        peer_ids(&fx.peer_root, "someone-else"),
         vec![(me.to_string(), Some("cas-571d".to_string()))]
     );
     let shown = crate::cloud::peers::peers_section(&fx.cas_root, Some(me));
@@ -334,7 +348,7 @@ async fn cas_f707_eager_registration_path_pushes_to_the_cloud() {
         PresenceState::Registered
     );
     assert_eq!(
-        peer_ids(&fx.cas_root, "someone-else"),
+        peer_ids(&fx.peer_root, "someone-else"),
         vec![(me.to_string(), Some("cas-571d".to_string()))]
     );
 }
@@ -392,7 +406,7 @@ async fn cas_f707_focus_epic_refreshes_the_registered_focus() {
     // The heartbeat carried the cleared focus; the cloud merged it.
     assert_eq!(state.heartbeat_metadata.last().unwrap()[META_FOCUS], json!(""));
     drop(state);
-    assert_eq!(peer_ids(&fx.cas_root, "someone-else"), vec![(me.to_string(), None)]);
+    assert_eq!(peer_ids(&fx.peer_root, "someone-else"), vec![(me.to_string(), None)]);
 }
 
 /// The real factory sequence (daring-eagle-74's repro at c25f0e3db): `cas
@@ -438,7 +452,7 @@ async fn cas_f707_eager_supervisor_then_session_start_registers_once() {
         assert_eq!(body["metadata"]["role"], json!("supervisor"));
     }
     assert_eq!(
-        peer_ids(&fx.cas_root, "someone-else"),
+        peer_ids(&fx.peer_root, "someone-else"),
         vec![(me.to_string(), Some("cas-571d".to_string()))]
     );
 
@@ -447,7 +461,7 @@ async fn cas_f707_eager_supervisor_then_session_start_registers_once() {
     heartbeat_tick(&daemon).await;
     assert_eq!(fx.cloud.state().heartbeats.last(), Some(&(me.to_string(), 404)));
     assert_eq!(fx.cloud.state().registrations.len(), 2);
-    assert_eq!(peer_ids(&fx.cas_root, "someone-else").len(), 1);
+    assert_eq!(peer_ids(&fx.peer_root, "someone-else").len(), 1);
 }
 
 #[tokio::test]

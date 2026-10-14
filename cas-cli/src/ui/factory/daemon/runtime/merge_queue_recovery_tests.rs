@@ -430,7 +430,7 @@ fn unrelated_failure_requeues_once_and_a_second_failure_escalates() {
 }
 
 #[test]
-fn a_failure_touching_the_diff_or_an_old_red_run_is_not_requeued() {
+fn a_failure_touching_the_diff_is_not_requeued() {
     let factory = factory();
     let mut files = pr_1198_files();
     files.push("hub-web/e2e/journeys/read-history.journey.ts".to_string());
@@ -444,8 +444,11 @@ fn a_failure_touching_the_diff_or_an_old_red_run_is_not_requeued() {
     ));
     assert!(fake.enqueues.borrow().is_empty());
     assert!(epic_notes(&factory).contains("run=38635679146 decision=supervisor-decides"));
+}
 
-    let factory = self::factory();
+#[test]
+fn an_old_red_run_is_not_requeued() {
+    let factory = factory();
     let fake = Fake::new(Some(pr_1198_files()));
     let (queued, _) = poll(&factory, &fake, &BTreeSet::new());
     fake.fail(38635679146, "2026-10-14T20:00:00Z", HUB_J4_LOG);

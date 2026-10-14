@@ -257,21 +257,21 @@ mod tests {
     #[test]
     fn classifies_operation_starts_literally() {
         assert_eq!(
-            bash("scripts/release-train.sh 3.53.0 /wt --cut > run.log 2>&1 &"),
+            bash("scripts/release-train.sh 9.99.3 /wt --cut > run.log 2>&1 &"),
             Some(Operation::ReleaseCut)
         );
         assert_eq!(
-            bash("cd /wt && ./scripts/release-train.sh 3.53.0 /wt --cut"),
+            bash("cd /wt && ./scripts/release-train.sh 9.99.3 /wt --cut"),
             Some(Operation::ReleaseCut)
         );
-        assert_eq!(bash("scripts/release-train.sh 3.53.0 /wt --check-lane factory/x"), Some(Operation::Merge));
+        assert_eq!(bash("scripts/release-train.sh 9.99.3 /wt --check-lane factory/x"), Some(Operation::Merge));
         assert_eq!(bash("git merge --no-ff factory/gentle-kestrel-51"), Some(Operation::Merge));
         assert_eq!(bash("gh pr merge 1193 --squash"), Some(Operation::Merge));
-        assert_eq!(bash("cas release report 3.52.0 --pdf"), Some(Operation::Report));
+        assert_eq!(bash("cas release report 9.99.0 --pdf"), Some(Operation::Report));
         assert_eq!(bash("git merge --abort"), None);
         assert_eq!(bash("git merge-base HEAD main"), None);
         assert_eq!(bash("grep -n release-train.sh docs/x.md"), None);
-        assert_eq!(bash("scripts/release-train.sh 3.53.0 /wt --status"), None);
+        assert_eq!(bash("scripts/release-train.sh 9.99.3 /wt --status"), None);
 
         let skill = |name: &str| {
             classify(&input("Skill", serde_json::json!({ "skill": name })), "mcp__cas__", |_| false)
@@ -330,7 +330,7 @@ mod tests {
 
         let start = input(
             "Bash",
-            serde_json::json!({ "command": "scripts/release-train.sh 3.53.0 /wt/release --cut > cut.log 2>&1 &" }),
+            serde_json::json!({ "command": "scripts/release-train.sh 9.99.3 /wt/release --cut > cut.log 2>&1 &" }),
         );
         let context = context_for_tool(temp.path(), &start).expect("release-cut lessons surfaced");
         assert!(context.starts_with("[operation lessons: release-cut]"), "{context}");

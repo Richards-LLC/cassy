@@ -290,11 +290,11 @@ not an entry
     #[test]
     fn a_rescue_recurs_only_when_its_lesson_was_already_learned() {
         let history = FailureHistory::parse(LOG);
-        // The 3.51.0 run: two rows mapped to existing lessons, one to a task.
+        // The 9.98.0 run: two rows mapped to existing lessons, one to a task.
         let rescues = parse_rescues(
             "preflight learn=scratch-base\ngate learn=version-literals\n\n# note\nreceipts task=cas-1543\n",
         );
-        let measured = ReleaseRecurrence::measure("v3.51.0", &rescues, &history, date("2026-10-14"));
+        let measured = ReleaseRecurrence::measure("v9.98.0", &rescues, &history, date("2026-10-14"));
         assert_eq!(measured.rescues, 3);
         assert_eq!(measured.recurred, ["scratch-base", "version-literals"]);
         assert_eq!(measured.rate_percent(), Some(67));
@@ -306,11 +306,11 @@ not an entry
         // A rescue whose --learn appended the only entry is new, not a repeat;
         // an entry dated after the cut is not prior knowledge.
         let rescues = parse_rescues("assemble learn=assemble-stale-base recurrence=1\ngate learn=nextest\n");
-        let measured = ReleaseRecurrence::measure("v3.52.0", &rescues, &history, date("2026-10-14"));
+        let measured = ReleaseRecurrence::measure("v9.99.0", &rescues, &history, date("2026-10-14"));
         assert!(measured.recurred.is_empty());
         assert_eq!(measured.summary(), "0 of 2 rescues (0%) repeated a learned lesson");
 
-        let none = ReleaseRecurrence::measure("v3.52.1", &[], &history, date("2026-10-14"));
+        let none = ReleaseRecurrence::measure("v9.99.1", &[], &history, date("2026-10-14"));
         assert_eq!((none.rate_percent(), none.summary().as_str()), (None, "0 rescues"));
     }
 
@@ -322,22 +322,22 @@ not an entry
             fs::create_dir_all(root.join(dir)).unwrap();
             fs::write(root.join(dir).join(file), text).unwrap();
         };
-        write("v3.51.0-release-3.51.0", "blockers.log", "preflight learn=scratch-base\ngate learn=version-literals\nreceipts task=cas-1543\n");
+        write("v9.98.0-release-9.98.0", "blockers.log", "preflight learn=scratch-base\ngate learn=version-literals\nreceipts task=cas-1543\n");
         // 2026-10-14T12:00:00Z
-        write("v3.51.0-release-3.51.0", "cut.start.epoch", "1791979200\n");
-        write("v3.51.1-release-3.51.1", "rows", "");
-        write("v3.52.0-release-3.52.0", "blockers.log", "preflight\n");
-        write("v3.52.0-release-3.52.0", "run.env", "started_at=2026-10-14T16:00:00Z\n");
-        write("v3.52.0-attempt2", "supervisor-interventions.md", "# Rescues\n- gate: learn=version-literals\n");
+        write("v9.98.0-release-9.98.0", "cut.start.epoch", "1791979200\n");
+        write("v9.98.1-release-9.98.1", "rows", "");
+        write("v9.99.0-release-9.99.0", "blockers.log", "preflight\n");
+        write("v9.99.0-release-9.99.0", "run.env", "started_at=2026-10-14T16:00:00Z\n");
+        write("v9.99.0-attempt2", "supervisor-interventions.md", "# Rescues\n- gate: learn=version-literals\n");
         write("notes", "blockers.log", "gate learn=version-literals\n");
 
         let history = FailureHistory::parse(LOG);
         let recent = recent_releases(root, &history, 5, date("2026-10-30"));
         let names: Vec<&str> = recent.iter().map(|release| release.release.as_str()).collect();
-        assert_eq!(names, ["v3.52.0", "v3.51.0"], "3.51.1 has no rescue evidence");
+        assert_eq!(names, ["v9.99.0", "v9.98.0"], "9.98.1 has no rescue evidence");
         assert_eq!((recent[0].rescues, recent[0].recurred.len()), (2, 1));
         assert_eq!(recent[1].summary(), "2 of 3 rescues (67%) repeated a learned lesson: scratch-base, version-literals");
-        assert!(for_release(root, "v3.51.1", &history, date("2026-10-30")).is_none());
+        assert!(for_release(root, "v9.98.1", &history, date("2026-10-30")).is_none());
     }
 
     #[test]

@@ -7011,21 +7011,21 @@ mod tests {
         assert!(matches!(none.status, CheckStatus::Ok));
 
         let check = lesson_recurrence_check_for(&[
-            release("v3.51.0", 3, &["scratch-base", "version-literals"]),
-            release("v3.50.1", 1, &[]),
+            release("v9.98.0", 3, &["scratch-base", "version-literals"]),
+            release("v9.97.1", 1, &[]),
         ]);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
             check.message.starts_with(
-                "Lesson recurrence: v3.51.0 2 of 3 rescues (67%) repeated a learned lesson: scratch-base, version-literals; last 2 releases: 2 of 4 rescues (50%)"
+                "Lesson recurrence: v9.98.0 2 of 3 rescues (67%) repeated a learned lesson: scratch-base, version-literals; last 2 releases: 2 of 4 rescues (50%)"
             ),
             "{}",
             check.message
         );
 
-        let clean = lesson_recurrence_check_for(&[release("v3.52.0", 1, &[]), release("v3.51.0", 3, &["scratch-base"])]);
+        let clean = lesson_recurrence_check_for(&[release("v9.99.0", 1, &[]), release("v9.98.0", 3, &["scratch-base"])]);
         assert!(matches!(clean.status, CheckStatus::Ok), "{}", clean.message);
-        assert!(clean.message.contains("v3.52.0 0 of 1 rescue (0%)"), "{}", clean.message);
+        assert!(clean.message.contains("v9.99.0 0 of 1 rescue (0%)"), "{}", clean.message);
         // Outside cas-src the row is absent rather than empty.
         assert!(lesson_recurrence_check(std::path::Path::new("/nonexistent-project")).is_none());
     }

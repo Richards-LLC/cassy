@@ -189,7 +189,7 @@ async fn widening_covered_by_worker_receipts_keeps_the_parked_delivery_cas_d6eb(
     )
     .await;
     let after = f.task();
-    assert!(kept.contains("verification and AwaitingMerge status are kept"), "{kept}");
+    assert!(kept.contains("verification and awaiting_merge status are kept"), "{kept}");
     assert_eq!(after.status, TaskStatus::AwaitingMerge);
     assert_eq!(after.proof_targets, ["unrelated", "widget::gear"]);
     assert_eq!(after.deliverables.factory_branch_anchor, before.deliverables.factory_branch_anchor);

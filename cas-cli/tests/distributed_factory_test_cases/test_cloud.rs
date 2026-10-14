@@ -598,6 +598,24 @@ fn forward(run: &Mutex<Run>, method: &str, url: &str, raw: &str) -> (u16, Value)
             }
         }
     }
+    // An account-wide listing shows only this run: parallel tests share one
+    // account, and one test's agents or claims are never another's.
+    let mut answer = answer;
+    let prefix = format!("cc-{}-", run.id);
+    let suffix = format!(".r{}", run.id);
+    let account_wide = method == "GET"
+        && (path == "/api/agents/locks"
+            || (path == "/api/agents" && !original_query.iter().any(|(key, _)| key == "project")));
+    if account_wide {
+        for list in ["locks", "agents"] {
+            if let Some(items) = answer[list].as_array_mut() {
+                items.retain(|item| {
+                    item["task_id"].as_str().is_some_and(|key| key.ends_with(&suffix))
+                        || (list == "agents" && item["id"].as_str().is_some_and(|id| id.starts_with(&prefix)))
+                });
+            }
+        }
+    }
     let unmapped = run.unmap(&answer);
     run.transcript.push(json!({
         "method": method,

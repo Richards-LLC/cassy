@@ -61,6 +61,12 @@ pub(crate) fn is_scrubbed_ambient_env_key(key: &str) -> bool {
     ) {
         return false;
     }
+    // cas-c7c7: real-cloud run controls for the distributed tests. Only test
+    // code reads them, and scrubbing them made guarded tests fall back to the
+    // in-process fake silently.
+    if key.starts_with("CAS_TEST_CLOUD_") {
+        return false;
+    }
     key.starts_with("CAS_")
         || matches!(
             key,

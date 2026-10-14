@@ -100,6 +100,45 @@ the failing required context. Record the PR URL and queue entry; do not retry ma
 `bypass_actors` entry. `bypass_actors` is deliberately left `[]`, so this rule applies to
 repository admins as well.
 
+### Queue ejections: wake, diagnose, re-enqueue once (cas-e369)
+
+The factory daemon's CI watcher tracks two kinds of PR through the queue: parked worker
+deliveries targeting `main`, and the PR of each open epic's `epic/` branch. It polls GitHub
+every 30 s while a tracked PR is queued, otherwise every 60 s. When a tracked PR leaves the
+queue unmerged, the next poll sends the supervisor a typed `merge_queue_ejected` wake. On
+2026-10-14 PR #1198 sat ejected for four minutes because the epic PR was not tracked. The
+wake names:
+
+- the failed `merge_group` run, its failing job and step, and the error line. The error line
+  is an infrastructure stop, a failed Rust test, a failed Playwright test (`✘`), or else the
+  last `##[error]` line;
+- the failure scope: `outside-diff`, `touches-diff` or `unclassified`;
+- the recovery decision.
+
+A failure is **outside the diff** in two cases:
+
+- An infrastructure stop: a memory-admission stop, a runner that lost contact or shut down,
+  or a full disk. A memory-admission stop is in the diff when the PR edits
+  `scripts/host_memory.py` or `scripts/worker-memory.py`.
+- A Commander step failure on a PR whose diff touches none of `hub-web/`,
+  `docs/qa/journeys.md`, `docs/design/design-tokens.json` or `scripts/visual-qa.mjs`.
+
+An unreadable diff is never outside. An outside-diff failure whose run finished within the
+last 15 minutes is re-enqueued **once**, automatically, with `enqueuePullRequest` bound to
+the ejected head. A second failure on that same head escalates instead of looping. So does
+any `touches-diff` or `unclassified` failure, and the supervisor diagnoses it. A new push
+(new head) starts a fresh one-retry budget.
+
+Each decision is recorded once per failed run in the epic's notes, as a ✅ DECISION line
+ending `(merge-queue-recovery pr=#N head=<sha> run=<id> decision=<auto-requeued|escalated|requeue-failed|supervisor-decides>)`.
+That line is also the ledger, so repeated polls and daemon restarts never re-enqueue twice.
+A parked delivery records the decision in its parent epic's notes, and in its own notes
+when it has no epic.
+
+Tests in `cas-cli/src/ui/factory/daemon/runtime/merge_queue_recovery_tests.rs` replay
+#1198's real ejections. The HUB-J4 flake is re-enqueued once, and the memory-admission stop
+that followed escalates.
+
 ## 5. Check names are pinned
 
 The two context strings in the JSON are exact matches for job `name:` values in

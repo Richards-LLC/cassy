@@ -2123,6 +2123,10 @@ impl FactoryDaemon {
                     (
                         Vec<super::ci_watch::CiFailure>,
                         super::ci_watch::MergeQueuePoll,
+                        Vec<(
+                            super::ci_watch::MergeQueueEjection,
+                            Option<super::merge_queue_recovery::EjectionReport>,
+                        )>,
                         Vec<super::ci_watch::DeliveryPrObservation>,
                         (Vec<super::ci_watch::CiWake>, bool),
                     ),

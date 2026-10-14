@@ -622,8 +622,9 @@ sleep 2
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
         """The v3.52.0 cut stopped at preflight on a draft committed hours earlier."""
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
-        draft = (ROOT / "docs/release-notes/2026-10-14-v3.51.1-slack.md").read_text()
-        punch = next(line for line in draft.splitlines() if line.startswith("Was: the operator-only gate"))
+        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text()
+        # The Dev top-level punch: the second line of the third fenced body.
+        punch = draft.split("```")[5].strip("\n").splitlines()[2]
         self.write(path, draft)
         self.commit()
         self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()

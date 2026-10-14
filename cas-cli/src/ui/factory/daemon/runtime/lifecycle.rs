@@ -1,5 +1,9 @@
 use crate::ui::factory::daemon::imports::*;
 
+/// The daemon's refresh tick: reminders and GitHub watcher results are
+/// handled at this cadence.
+pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Persist one worker-health incident and hand it to the supervisor's durable
 /// prompt queue. The detector has already debounced the episode and the event
 /// has already been delivery-revalidated when this runs.
@@ -1983,6 +1987,7 @@ impl FactoryDaemon {
             spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
             last_external_wake_scan: None,
+            pending_ci_wakes: Vec::new(),
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
         })
     }
@@ -2090,12 +2095,15 @@ impl FactoryDaemon {
                         Vec<super::ci_watch::CiFailure>,
                         super::ci_watch::MergeQueuePoll,
                         Vec<super::ci_watch::DeliveryPrObservation>,
+                        (Vec<super::ci_watch::CiWake>, bool),
                     ),
                     super::ci_watch::CiWatchError,
                 >,
             >,
         > = None;
         let mut ci_watch_unavailable_reported = false;
+        // cas-0f05: poll faster while a `ci_completed` reminder is pending.
+        let mut ci_wake_pending = false;
         // Queue membership is intentionally process-local: the durable relay
         // key is the recovery boundary. A failed merge_group run also lets the
         // first poll after a daemon restart recover a real ejection.
@@ -2132,7 +2140,7 @@ impl FactoryDaemon {
             self.app.cas_dir(),
             &self.session_name,
         );
-        let refresh_interval = Duration::from_secs(2);
+        let refresh_interval = DAEMON_REFRESH_INTERVAL;
         let poll_interval = Duration::from_millis(100);
 
         let mut prompt_notified = false;
@@ -2286,8 +2294,14 @@ impl FactoryDaemon {
                 // No supervisor action is required to notice a red run: the
                 // completed result below becomes a lifecycle-wake relay.
                 if ci_watch_task.is_none()
-                    && last_ci_watch.elapsed() >= super::ci_watch::CI_WATCH_INTERVAL
+                    && last_ci_watch.elapsed()
+                        >= if ci_wake_pending {
+                            super::ci_watch::CI_WAKE_INTERVAL
+                        } else {
+                            super::ci_watch::CI_WATCH_INTERVAL
+                        }
                 {
+                    let session_name = self.session_name.clone();
                     let project = self.app.project_path().to_path_buf();
                     // GH #1165: the AwaitingMerge read runs with the GitHub
                     // calls on the blocking pool, not on this loop.
@@ -2317,6 +2331,14 @@ impl FactoryDaemon {
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
                         let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
+                        let candidates = super::queue_and_events::ci_completed_candidates(
+                            &watch_cas_dir,
+                            &session_name,
+                        );
+                        let ci_wakes = (
+                            super::ci_watch::collect_ci_wakes(&transport, &candidates),
+                            !candidates.is_empty(),
+                        );
                         let failures =
                             super::ci_watch::collect_failures(&transport, &watched_branches)?;
                         let queue_poll = super::ci_watch::collect_merge_queue_ejections_with_arm_state(
@@ -2330,7 +2352,7 @@ impl FactoryDaemon {
                                 &transport,
                                 &deliveries,
                             )?;
-                        Ok((failures, queue_poll, delivery_pr_observations))
+                        Ok((failures, queue_poll, delivery_pr_observations, ci_wakes))
                     }));
                     last_ci_watch = std::time::Instant::now();
                 }
@@ -2338,8 +2360,15 @@ impl FactoryDaemon {
                 if ci_watch_task.as_ref().is_some_and(JoinHandle::is_finished) {
                     let task = ci_watch_task.take().expect("checked above");
                     match task.await {
-                        Ok(Ok((failures, queue_poll, delivery_pr_observations))) => {
+                        Ok(Ok((
+                            failures,
+                            queue_poll,
+                            delivery_pr_observations,
+                            (ci_wakes, pending),
+                        ))) => {
                             ci_watch_unavailable_reported = false;
+                            ci_wake_pending = pending;
+                            self.pending_ci_wakes.extend(ci_wakes);
                             last_merge_queue_membership = queue_poll.queued_prs;
                             last_auto_merge_membership = queue_poll.auto_merge_prs;
                             // GH #1165: persisting the results is store work;

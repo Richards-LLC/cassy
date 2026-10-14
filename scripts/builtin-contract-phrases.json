@@ -3538,6 +3538,10 @@
         {
           "text": "release-published.receipt",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "remind_event=ci_completed",
+          "reason": "CI waits are event reminders, not delay reminders (cas-0f05)."
         }
       ],
       "absent": [
@@ -4231,6 +4235,10 @@
         {
           "text": "MERGE REQUIRED",
           "reason": "Retain the load-bearing policy term from reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "remind_event=ci_completed",
+          "reason": "CI waits are event reminders, not delay reminders (cas-0f05)."
         }
       ],
       "absent": [],

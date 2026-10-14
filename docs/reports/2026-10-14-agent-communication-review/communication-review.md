@@ -426,6 +426,7 @@ Measure the result with the queries in §2 as release SLOs:
 **Evidence notes on existing tasks**: cas-5c89, cas-00d5, cas-8063, cas-6eec.
 
 ## 8. Limits of this review
+
 - Cross-machine peer messaging could not be measured live: the outbox has 0 rows on this machine. The far machine's database was not read.
 - shutdown_workers (lead 9) is confirmed from code only.
 - The SendMessage bypass is a code finding, not observed in data.

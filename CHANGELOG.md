@@ -20,6 +20,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   gate stops and cancels the rows running after it. Scheduling events go to
   `schedule.tsv`, and `CAS_RELEASE_GATE_PARALLEL=1` restores sequential rows.
 
+### Changed — the publisher reuses the gate's release binary (cas-c096)
+
+- The gate's `release-binary-isa` row builds in a persistent release target
+  (`<main checkout>/.cas/release-binary/target`, or
+  `CAS_RELEASE_BINARY_TARGET_DIR`), under a lock that concurrent gates share.
+  It now runs release.sh's Ghostty-archive and BLAKE3 build audits as well as
+  the packaged-binary ISA audit. It then records the archive with a manifest
+  binding the tree, version, target, build identity (rustc, cargo-zigbuild,
+  Zig, rustflags) and digests (`scripts/release-binary-artifact.py`).
+- `scripts/release.sh` reuses that archive when every bound input matches,
+  re-runs the packaged-binary ISA audit on it, and skips its own clean build.
+  Any mismatch prints `MISS key=<input>` and rebuilds as before.
+  `--manual-publish` always rebuilds, because it ships the local bytes. On
+  3.51.1 the publisher's clean rebuild of the gated tree took 10 m 55 s of a
+  23.5 min publish stage.
+- A row PASS proved on another tree is reused only alongside this tree's
+  archive. Otherwise the row rebuilds, warm, so the build happens in the gate
+  rather than the publisher.
+
+### Changed — cheap release-gate failures are refused at park, with the fix named (cas-7bce)
+
+- `release-gate.sh --fast-rows` now also refuses:
+  - the next patch, minor or major version in a lane's changed files;
+  - `env!("CARGO_BIN_EXE_<name>")` in any crate's integration tests;
+  - a root task-verifier projection that drifted from its embedded body.
+- Each of the five failures of 2026-10-14 that cost a CI or merge-queue round
+  has a fixture: the two_machine binary path, a next-version comment, two
+  Markdown reports, and test environment.
+- A failed row prints `FIX <row>: …`. A failed run on a committed tip writes
+  a FAIL receipt, and the worker park refusal quotes its rows and fixes.
+
 ### Fixed — QA browser runs are no longer starved by a background assembly proof (cas-833e)
 
 - One positively bounded worker run (a Playwright run capped at four workers,

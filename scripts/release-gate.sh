@@ -22,7 +22,7 @@ readonly -a gate_check_ids=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src
+    fixture-paths-src builtin-projections-src
 )
 
 usage() {
@@ -451,10 +451,19 @@ run_check() {
     local name="$1" command="$2" function_name="$3" log status=0
     local started ended wall user system key='' source_sha="$cache_head"
     local receipt_key='' receipt_sha='' receipt_epoch='' receipt_status='' now receipt_path='' receipt_origin=''
-    local env_fingerprint input_hash
+    local env_fingerprint input_hash artifact_miss='' artifact_verdict='' row_reuse="$reuse_rows"
     row_selected "$name" || return 0
     log="$row_log_dir/$name.log"
     started="$(date -u +%FT%TZ)"
+    # cas-c096: the publisher reuses this row's audited archive, so a PASS
+    # proved on another tree is reused only alongside this tree's archive.
+    if [[ "$name" == release-binary-isa && -z "$only_rows" && "$no_reuse" == false ]] \
+        && ! artifact_verdict="$(release_binary_artifact_ready 2>&1)"; then
+        artifact_miss=1
+        row_reuse=false
+        printf '  %s (release binary archive; the row rebuilds it for the publisher)\n' \
+            "$(head -n1 <<<"$artifact_verdict")"
+    fi
     # Assembly/recovery already proved the CI script tiers, the native suite
     # and the queue's archive runner in a plain clone of the same code input
     # (the proof refuses a PASS unless all three passed on its tree). Consume
@@ -489,7 +498,8 @@ run_check() {
             return 0
         fi
         printf '  %s\n' "$assembly_pass"
-    elif [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(release-binary-isa|macos-check)$ \
+    elif [[ -z "$only_rows" && "$no_reuse" == false && -z "$artifact_miss" \
+        && "$name" =~ ^(release-binary-isa|macos-check)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         # cas-398c: the factory daemon proves these rows in the background on
         # a green integration tip, keyed on code input, toolchain, target and
@@ -513,7 +523,7 @@ run_check() {
     key="$(row_cache_key "$name" || true)"
     env_fingerprint="$(cache_environment)"
     input_hash="$(cache_input_hash "$name" || true)"
-    if "$reuse_rows" && [[ -n "$key" ]]; then
+    if "$row_reuse" && [[ -n "$key" ]]; then
         receipt_path=''
         receipt_origin=''
         if [[ -n "$cache_dir" && -f "$cache_dir/$name.$key" ]]; then
@@ -821,8 +831,54 @@ check_version_literals() {
 
     if [[ "$found" == true ]]; then
         printf 'version-literals: source/test files contain %s; use env!("CARGO_PKG_VERSION") or a fixture value\n' "$version"
+        printf 'FIX: replace each %s above with env!("CARGO_PKG_VERSION") or a 9.99.x fixture value; comments count too\n' "$version"
         return 1
     fi
+    [[ "$fast_rows" == true ]] || return 0
+    check_next_version_literals "${roots[@]}"
+}
+
+# The next release's version, written into a lane before the bump, passes the
+# current-version scan at park and fails the release gate after the bump
+# (3.51.0: a comment naming the coming version). Fast mode refuses every next
+# patch, minor and major literal in the files this lane changes, and only notes
+# pre-existing ones elsewhere: another lane's literal is not this lane's fix.
+next_release_versions() {
+    local major minor patch
+    IFS=. read -r major minor patch <<<"$version"
+    printf '%s\n' "$major.$minor.$((patch + 1))" "$major.$((minor + 1)).0" "$((major + 1)).0.0"
+}
+
+check_next_version_literals() {
+    local file hits='' elsewhere
+    local -a patterns=() changed=()
+    while IFS= read -r file; do
+        patterns+=(-e "$file")
+    done < <(next_release_versions)
+    while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
+        case "$file" in
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+        esac
+        changed+=("$file")
+    done < <(git diff -z --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- "$@" 2>/dev/null)
+    if [[ "${#changed[@]}" -gt 0 ]]; then
+        hits="$(grep -nHIF "${patterns[@]}" -- "${changed[@]}" 2>/dev/null || true)"
+    fi
+    if [[ -n "$hits" ]]; then
+        printf '%s\n' "$hits"
+        printf 'version-literals: this lane writes a next release version (%s); it fails the release gate once the version is bumped\n' \
+            "$(next_release_versions | paste -sd, -)"
+        printf 'FIX: replace each next-version literal above with env!("CARGO_PKG_VERSION"), a 9.99.x fixture value, or prose without the number (comments count too)\n'
+        return 1
+    fi
+    elsewhere="$(git grep -nIF "${patterns[@]}" -- "$@" ':(exclude)*.md' ':(exclude)*/reference-history.json' \
+        ':(exclude)*/Cargo.toml' ':(exclude)*/Cargo.lock' 2>/dev/null || true)"
+    if [[ -n "$elsewhere" ]]; then
+        printf 'version-literals: NOTE pre-existing next-version literals outside this lane (not refused here; they fail the release gate after the bump):\n%s\n' \
+            "$elsewhere"
+    fi
+    printf 'version-literals: no %s or next-version literal in %s changed file(s)\n' "$version" "${#changed[@]}"
 }
 
 # Runtime reads of the producer checkout through CARGO_MANIFEST_DIR pass on
@@ -971,24 +1027,84 @@ release_binary_isa_toolchain() {
     printf '%s\n' "$zigbuild_version" "$zig_version" "$objdump_version" | sha256sum | cut -d' ' -f1
 }
 
+readonly release_binary_target=x86_64-unknown-linux-gnu
+
+# cas-c096: one local release build per release tree. This row's build is the
+# one release.sh reuses, so it lives in a persistent release target (warm
+# dependencies across releases) rather than the fresh epic worktree's own.
+# Precedence: CAS_RELEASE_BINARY_TARGET_DIR, a configured CARGO_TARGET_DIR,
+# then <main checkout>/.cas/release-binary/target.
+release_binary_target_dir() {
+    printf '%s\n' "${CAS_RELEASE_BINARY_TARGET_DIR:-${CARGO_TARGET_DIR:-$cache_repository_root/.cas/release-binary/target}}"
+}
+
+# A row PASS from another tree (row cache, daemon row proof) proves the ISA but
+# leaves the publisher nothing to reuse, so it is reused only while an audited
+# archive for this exact tree exists; otherwise the row rebuilds, warm.
+release_binary_artifact_ready() {
+    python3 "$repo_root/scripts/release-binary-artifact.py" verify "$repo_root" \
+        --target "$release_binary_target"
+}
+
 check_release_binary_isa() {
-    local target=x86_64-unknown-linux-gnu staging="$tmp_dir/release-binary-isa"
-    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local target="$release_binary_target" target_dir lock_fd status=0
     # --only does not dispatch the separate Zig discovery row. Resolve it here
     # too; zigbuild discovers the selected compiler through PATH, like release.sh.
     check_epic_worktree_zig || return $?
+    target_dir="$(release_binary_target_dir)"
+    mkdir -p "$target_dir" || return $?
+    # Concurrent gates share the persistent target. Hold its lock from the
+    # stale-output clean through packaging, so one gate never audits or records
+    # another's build. The lock lives on this shell's descriptor only: every
+    # command below runs with it closed, so a daemon a build spawns (sccache)
+    # cannot keep holding it.
+    exec {lock_fd}>>"$target_dir/.cas-release-binary.lock" || return $?
+    printf 'release target %s: acquiring build lock\n' "$target_dir"
+    python3 -c 'import fcntl, sys; fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX)' "$lock_fd" \
+        || { exec {lock_fd}>&-; return 1; }
+    build_audit_record_release_binary "$target" "$target_dir" {lock_fd}>&- || status=$?
+    exec {lock_fd}>&-
+    return "$status"
+}
+
+build_audit_record_release_binary() {
+    local target="$1" target_dir="$2" staging="$tmp_dir/release-binary-isa" ghostty_archive
+    local release_build="$target_dir/$target/release/build"
+    local -a ghostty_archives=()
+    # Same duplicate-output contract as release.sh: an earlier release's build
+    # outputs for these packages must not be what the audits below find.
+    rm -rf "$release_build"/blake3-* "$target_dir/$target/release/.fingerprint"/blake3-* \
+        "$release_build"/ghostty_vt_sys-* "$target_dir/$target/release/.fingerprint"/ghostty_vt_sys-* \
+        || return $?
     # Use the same locked target/profile and C/C++ baseline as release.sh.
     # Keep the publisher's linker/rustflags: the native assembly compiler guard
     # installs its own linker and would change the cross-target artifact.
     release_test_child env PATH="$(dirname "$ZIG"):$PATH" \
+        CARGO_TARGET_DIR="$target_dir" \
         CFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         CXXFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         "$cargo_bin" zigbuild -p cas --release --target "$target" --locked || return $?
+    # release.sh's audits, so its reuse of this build skips none of them.
+    mapfile -t ghostty_archives < <(find "$release_build" -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print)
+    if [[ "${#ghostty_archives[@]}" -ne 1 ]]; then
+        printf 'release-binary-isa: expected one built Ghostty archive under %s; found %s\n' \
+            "$release_build" "${#ghostty_archives[@]}"
+        return 1
+    fi
+    ghostty_archive="${ghostty_archives[0]}"
+    release_test_child "$repo_root/scripts/check-portable-x86_64-isa.sh" "$ghostty_archive" || return $?
+    release_test_child "$repo_root/scripts/check-blake3-no-avx512-build.sh" "$release_build" || return $?
     mkdir -p "$staging" || return $?
     cp "$target_dir/$target/release/cas" "$staging/cas" || return $?
     # Audit the packaging copy rather than a dev/test executable. This also
     # retains the auditor's deterministic baseline and seeded-EVEX self-tests.
-    release_test_child "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas"
+    release_test_child "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas" || return $?
+    # The archive is an accelerator, never a proof input: failing to record it
+    # costs the publisher a rebuild, not this row.
+    python3 "$repo_root/scripts/release-binary-artifact.py" record "$repo_root" \
+        --target "$target" --binary "$staging/cas" --license "$repo_root/LICENSE" \
+        --audit ghostty-archive-isa --audit blake3-no-avx512 --audit packaged-binary-isa \
+        || printf 'WARN release binary not recorded; the publisher will rebuild this tree\n'
 }
 
 check_macos() {
@@ -1455,6 +1571,7 @@ check_changelog_and_versions() {
         current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$file" | head -n1)"
         if [[ "$current" != "$version" ]]; then
             printf 'version-alignment: %s is %s; expected %s\n' "$file" "${current:-missing}" "$version"
+            printf 'FIX: set version = "%s" in %s; only the release cut bumps versions\n' "$version" "$file"
             return 1
         fi
     done
@@ -1619,9 +1736,51 @@ check_fixture_paths_src() {
     hits="$(src_runtime_manifest_dir_hits "${changed[@]}")"
     if [[ -n "$hits" ]]; then
         printf 'fixture-paths-src: cas-cli/src test modules read the producer checkout at runtime; use include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
+        printf 'FIX: embed each file above with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/<path>")), or read it through cas::test_paths::workspace_root() with an explicit SKIP when absent\n'
         return 1
     fi
     printf 'fixture-paths-src: no runtime CARGO_MANIFEST_DIR reads in %s changed file(s)\n' "${#changed[@]}"
+}
+
+# The no-build half of builtin-projections: the root Claude projection of the
+# task-verifier agent is its frontmatter plus the embedded body, byte for byte,
+# and Codex carries no .md agents. The init-generated settings and the
+# reference-history ledger need the binary or release prep, so they stay in
+# the full gate's builtin-projections row.
+check_builtin_projections_src() {
+    local body='cas-cli/src/builtins/agents/task-verifier.body.md'
+    local projection='.claude/agents/task-verifier.md' stray
+    if ! lane_touches cas-cli/src/builtins/agents cas-cli/src/builtins.rs .claude/agents .codex/agents; then
+        printf 'builtin-projections-src: no builtin agent or root projection change\n'
+        return 0
+    fi
+    [[ -f "$body" ]] || {
+        printf 'builtin-projections-src: %s is missing\n' "$body"
+        return 0
+    }
+    if ! python3 - "$projection" "$body" <<'PY'
+import sys
+projection, body = sys.argv[1:]
+try:
+    actual = open(projection).read()
+except OSError as error:
+    sys.exit(f"builtin-projections-src: missing {projection}: {error}")
+expected = open(body).read()
+if not actual.startswith("---\nname: task-verifier\n") or not actual.endswith("\n---\n" + expected):
+    sys.exit(f"builtin-projections-src: {projection} diverged from its embedded body {body}")
+PY
+    then
+        printf 'FIX: rewrite %s as its frontmatter followed by %s verbatim (cp the body under the closing ---), then commit both\n' \
+            "$projection" "$body"
+        return 1
+    fi
+    stray="$(find .codex/agents -maxdepth 1 -name '*.md' 2>/dev/null || true)"
+    if [[ -n "$stray" ]]; then
+        printf 'builtin-projections-src: root .codex/agents carries .md agents:\n%s\n' "$stray"
+        printf 'FIX: git rm the .md files above; Codex installs no .md agents\n'
+        return 1
+    fi
+    printf 'builtin-projections-src: %s matches %s\n' "$projection" "$body"
 }
 
 check_ci_script_tests_changed() (
@@ -1811,6 +1970,7 @@ gate_emit() {
     [[ "$(cat "$sched_dir/$1.status")" == 0 ]] || failures+=("$1")
 }
 
+gate_abort=''
 run_gate_rows() {
     local name total="${#gate_rows[@]}" emitted=0 abort_index abort_row='' timing_lines progress
     cancelled_rows=()
@@ -1877,8 +2037,8 @@ run_gate_rows() {
     if [[ "${#cancelled_rows[@]}" -gt 0 ]]; then
         printf 'cancelled in-flight rows: %s\n' "${cancelled_rows[*]}"
     fi
-    printf 'RELEASE GATE FAILED: %s (%s)\n' "${failures[*]}" "${row_abort[$abort_row]}"
-    exit 1
+    # The caller writes the failure receipt (and the fast-row FIX receipt).
+    gate_abort="${row_abort[$abort_row]}"
 }
 
 printf '=== CAS RELEASE GATE RECEIPT ===\n'
@@ -1932,7 +2092,7 @@ gate_row hub-web-tests \
     'npm ci --no-audit --no-fund && npm run typecheck && npm test' \
     check_hub_web_tests excl=hub-web mem=2 'abort=aborted; build and Rust suite rows cancelled'
 gate_row release-binary-isa \
-    "$cargo_bin zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked (baseline C/C++ flags); scripts/test-check-portable-x86_64-isa.sh <packaged-cas>" \
+    "$cargo_bin zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked (baseline C/C++ flags, persistent release target); Ghostty/BLAKE3 build audits; scripts/test-check-portable-x86_64-isa.sh <packaged-cas>; record the archive release.sh reuses" \
     check_release_binary_isa cpu mem=10 'abort=release binary ISA audit refused before pr-body/pipeline'
 gate_row fixture-paths \
     "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src, crates/*/src or crates/*/tests" \
@@ -1999,20 +2159,56 @@ gate_row ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (s
     check_ci_script_tests_changed excl=host-tests
 gate_row fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src, crates/*/src, crates/*/tests (changed files in fast mode)' \
     check_fixture_paths_src
+gate_row builtin-projections-src 'task-verifier root projection equals its embedded body; no .md Codex agents (lane change only in fast mode)' \
+    check_builtin_projections_src
 run_gate_rows
-run_check working-tree \
-    'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
-    check_working_tree
-
-if [[ "${#failures[@]}" -gt 0 ]]; then
-    printf 'RELEASE GATE FAILED: %s\n' "${failures[*]}"
-    exit 1
+# After an abort no row after it reports, including the final tree check.
+if [[ -z "$gate_abort" ]]; then
+    run_check working-tree \
+        'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
+        check_working_tree
 fi
+
+# cas-7bce: the fix a failed fast row needs, when its log does not print a
+# specific `FIX:` line itself. The park refusal quotes these verbatim.
+fast_row_fix() {
+    case "$1" in
+        failure-log) printf 'give every entry in %s a **<gate-row-id>** that exists in release-gate.sh, or a manual: marker' "$failure_log_rel" ;;
+        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section (with a bullet) in CHANGELOG.md; put new bullets under [Unreleased]' ;;
+        release-script) printf 'restore the guarded contract lines in scripts/release.sh that the row log names' ;;
+        release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
+        procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
+        test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
+        test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
+        builtin-doc-hygiene) printf 'remove the operator data, or restore the contract phrase listed in scripts/builtin-contract-phrases.json, as the row log names' ;;
+        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
+        builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
+        doctor-snapshot) printf 'add the new doctor phase to its row group and update the reviewed doctor snapshot' ;;
+        migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
+        ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;
+        *) printf 'read the row log and rerun this command after fixing' ;;
+    esac
+}
+
+# Prints `FIX <row>: <text>` for each failed row: the row's own FIX lines
+# (file:line specific) first, otherwise the generic fix above.
+fast_row_fixes() {
+    local row fixes
+    for row in "${failures[@]}"; do
+        fixes="$(grep -h 'FIX: ' "$row_log_dir/$row.log" 2>/dev/null | sed 's/.*FIX: //' | head -n 5 || true)"
+        [[ -n "$fixes" ]] || fixes="$(fast_row_fix "$row")"
+        while IFS= read -r line; do
+            printf 'FIX %s: %s\n' "$row" "$line"
+        done <<<"$fixes"
+    done
+}
 
 # cas-12ab: a factory park requires this receipt for the exact delivered tip.
 # Only a committed tree earns it: uncommitted work is not what was checked.
+# cas-7bce: a failed run on a committed tree writes a FAIL receipt naming the
+# rows and their fixes, so the park refusal can quote the exact fix.
 record_fast_rows_receipt() {
-    local head common dir
+    local outcome="$1" head common dir
     if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
         printf 'fast rows: no receipt written: tracked files have uncommitted changes; commit, then rerun\n'
         return 0
@@ -2021,12 +2217,30 @@ record_fast_rows_receipt() {
     common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
     dir="$common/cas/fast-rows"
     mkdir -p "$dir" || return 0
-    printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
+    if [[ "$outcome" == PASS ]]; then
+        printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
+    else
+        {
+            printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$head" "$(IFS=,; printf '%s' "${failures[*]}")" \
+                "${fast_base:-HEAD^}" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            fast_row_fixes
+        } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
+    fi
     printf 'fast rows: receipt %s\n' "$dir/$head.pass"
 }
+
+if [[ "${#failures[@]}" -gt 0 ]]; then
+    if [[ "$fast_rows" == true ]]; then
+        fast_row_fixes
+        record_fast_rows_receipt FAIL
+    fi
+    printf 'RELEASE GATE FAILED: %s%s\n' "${failures[*]}" "${gate_abort:+ ($gate_abort)}"
+    exit 1
+fi
+
 if [[ "$fast_rows" == true ]]; then
-    record_fast_rows_receipt
+    record_fast_rows_receipt PASS
 fi
 
 if [[ -n "$only_rows" ]]; then

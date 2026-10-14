@@ -650,6 +650,25 @@ Each runs when the lane changes its inputs, and the full gate always runs it:
 Contract phrases were already part of `builtin-doc-hygiene`. On this host a
 lane spanning that release's three epics ran every fast row in about 25 seconds.
 
+Each second-scale failure that reached CI or the merge queue on 2026-10-14
+is refused at park (cas-7bce). `scripts/test-fast-release-rows.py` holds one
+fixture per failure:
+
+- `test-shape`: integration tests under `cas-cli/tests` and `crates/*/tests`
+  may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
+  archive shards lack.
+- `version-literals`: fast mode also refuses the next patch, minor and major
+  version in the lane's changed files, comments included. The release gate
+  scans for the bumped version. Pre-existing next-version literals elsewhere
+  are printed as a NOTE.
+- `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
+- `test-env` and `fixture-paths-src`: the environment failures.
+- `builtin-projections-src`: the no-build half of `builtin-projections`. It
+  checks that the root task-verifier projection matches its embedded body.
+
+A failed row prints `FIX <row>: …`. On a committed tree the run writes a FAIL
+receipt that names the rows and those fixes, and the park refusal quotes them.
+
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
 results on Linux and falls back to Python for timezone-qualified ISO values
@@ -771,6 +790,11 @@ cargo-zigbuild and objdump for the ISA audit; Zig is keyed by its bytes). A full
 runs `assembly-proof.py check-row` before the row cache: a hit records the row
 `REUSED` with its source SHA, and a miss prints the differing key and runs the
 row as before. `--only` and a no-reuse full gate never consume a row proof.
+A `release-binary-isa` hit, from either source, counts only while
+`scripts/release-binary-artifact.py verify` finds this tree's audited archive
+(cas-c096). release.sh reuses that archive instead of rebuilding the tree, so
+without it the row rebuilds in its persistent release target
+(`<main checkout>/.cas/release-binary/target`).
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.

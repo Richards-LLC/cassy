@@ -84,6 +84,20 @@ class Shapes(unittest.TestCase):
                 self.assertFalse(self.hits(code, 'cas-cli/tests/probe.rs'))
         self.assertFalse(self.hits('const BIN: &str = env!("CARGO_BIN_EXE_cas");', 'cas-cli/src/lib.rs'))
 
+    def test_archive_binary_rule_covers_every_crate_and_binary_cas_7bce(self):
+        # The workspace archive carries every crate's integration tests.
+        self.assertEqual([kind for _, kind in self.hits(
+            'fn bin() -> &\'static str { env!("CARGO_BIN_EXE_test_tui") }', 'crates/cas-tui-test/tests/e2e.rs')],
+            ['archive-unsafe Cargo binary path (test_tui)'])
+        self.assertEqual([kind for _, kind in self.hits(
+            'const BIN: &str = env!("CARGO_BIN_EXE_cas-hub");', 'cas-cli/tests/hub.rs')],
+            ['archive-unsafe Cargo binary path (cas-hub)'])
+        for code in ['const KEYS: [&str; 1] = ["CARGO_BIN_EXE_test_tui"];',
+                     'fn bin() { let _ = option_env!("CARGO_BIN_EXE_test_tui"); }']:
+            with self.subTest(code=code):
+                self.assertFalse(self.hits(code, 'crates/cas-tui-test/tests/e2e.rs'))
+        self.assertFalse(self.hits('const BIN: &str = env!("CARGO_BIN_EXE_x");', 'crates/cas-core/src/lib.rs'))
+
     def test_archive_binary_cli_rejects_reintroduction_in_changed_files(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

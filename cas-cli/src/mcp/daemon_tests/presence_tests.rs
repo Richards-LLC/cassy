@@ -647,3 +647,69 @@ async fn cas_66c7_a_fixed_or_rotated_token_reregisters_without_a_restart() {
     );
     assert_eq!(state.agents.len(), 1);
 }
+
+/// Cloud sync also follows the login: a daemon started logged out syncs
+/// after `cas login`, and a rotated token is used from the next cycle.
+#[tokio::test]
+async fn cas_66c7_cloud_sync_follows_a_late_login_and_a_rotated_token() {
+    use wiremock::matchers::{method, path};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "specs": [], "events": [], "prompts": [],
+            "file_changes": [], "commit_links": [],
+            "pulled_at": chrono::Utc::now().to_rfc3339(),
+        })))
+        .mount(&server)
+        .await;
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("CAS_USER_CLOUD_JSON", home.join("no-user-cloud.json"));
+    let cas_root = init_cas_dir(&home).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&cas_root, REPO).unwrap();
+    let mut config = CloudConfig::default();
+    config.endpoint = server.uri();
+    config.token = None;
+    config.save_to_cas_dir(&cas_root).unwrap();
+
+    let daemon = daemon_for(&cas_root);
+    assert!(daemon.trigger_cloud_sync().await.is_err(), "logged out: no syncer");
+
+    let tokens_since = |from: usize| {
+        let server = &server;
+        async move {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .skip(from)
+                .map(|request| {
+                    request
+                        .headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+
+    write_token(&cas_root, Some("first-token"));
+    daemon.trigger_cloud_sync().await.unwrap();
+    let after_login = tokens_since(0).await;
+    assert!(!after_login.is_empty(), "the late login syncs");
+    assert!(after_login.iter().all(|t| t == "Bearer first-token"), "{after_login:?}");
+
+    write_token(&cas_root, Some("rotated-token"));
+    daemon.trigger_cloud_sync().await.unwrap();
+    let after_rotation = tokens_since(after_login.len()).await;
+    assert!(!after_rotation.is_empty());
+    assert!(
+        after_rotation.iter().all(|t| t == "Bearer rotated-token"),
+        "{after_rotation:?}"
+    );
+}

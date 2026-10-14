@@ -77,8 +77,10 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
       expect(await y(), "the reader's turn is below the page they loaded, not above it").toBeGreaterThan(before.y);
       return;
     }
-    await expect.poll(y, { message: `"${before.key}" stays where the reader left it` }).toBeGreaterThanOrEqual(before.y - 3);
-    expect(await y()).toBeLessThanOrEqual(before.y + 3);
+    // cas-6b5c: poll the whole ±3 px band. Scroll restoration can still be
+    // settling after the lower bound first holds, so a one-shot upper-bound
+    // read raced it (Expected <= 70, Received 543 in queue runs 1 and 5).
+    await expect.poll(async () => Math.abs((await y()) - before.y), { message: `"${before.key}" stays where the reader left it (px from ${before.y})` }).toBeLessThanOrEqual(3);
     // The older turns are above, off screen until the reader scrolls up.
     expect(await page.locator(".conversation-reading.thread").evaluate((thread) => thread.scrollTop)).toBeGreaterThan(0);
   };
@@ -164,8 +166,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     }, key);
     /** The reader's turn stays where it was (within 3 px) across what follows. */
     const holds = async (anchor: { key: string; y: number }, what: string) => {
-      await expect.poll(() => anchorY(anchor.key), { message: `"${anchor.key}" stays where the reader left it ${what}` }).toBeGreaterThanOrEqual(anchor.y - 3);
-      expect(await anchorY(anchor.key)).toBeLessThanOrEqual(anchor.y + 3);
+      await expect.poll(async () => Math.abs((await anchorY(anchor.key)) - anchor.y), { message: `"${anchor.key}" stays where the reader left it ${what} (px from ${anchor.y})` }).toBeLessThanOrEqual(3);
     };
     const beforeDrop = await reading();
     // cas-c945 QA F01: what a screen reader would hear. Each change of text

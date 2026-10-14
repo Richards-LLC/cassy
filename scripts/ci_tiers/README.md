@@ -23,7 +23,9 @@ The parser requires `pyyaml==6.0.3` from `requirements.txt`. Missing PyYAML is a
 hard failure, with an installation message. The existing publication-guard step
 reuses importable YAML; otherwise it creates a venv under `RUNNER_TEMP`, installs
 the pinned dependency there and puts that venv first on `PATH` before
-`make -C cas-cli test-ci-tiers`. System Python packages are never modified. Its
+`make -C cas-cli test-ci-tiers`. When `markdownlint-cli2` is not on `PATH` (the
+self-hosted runner), it installs the pinned 0.18.1 under `RUNNER_TEMP` the same way.
+System Python packages are never modified. Its
 triggers,
 runner selection, gates, jobs and required contexts are unchanged.
 

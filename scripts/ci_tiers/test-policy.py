@@ -134,6 +134,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
 [[ "$MODE" != install-failure ]]
 ''')
                 (fixture / 'venv-python').write_text(f'#!/usr/bin/env bash\nexec {interpreter} "$@"\n')
+                # cas-bf89: a runner that has the linter installs nothing.
+                (bin_dir / 'markdownlint-cli2').write_text('#!/usr/bin/env bash\n')
                 (bin_dir / 'make').write_text(f'''#!/usr/bin/env bash
 set -euo pipefail
 [[ "$*" == '-C cas-cli test-ci-tiers' ]]
@@ -166,6 +168,27 @@ fi
                         self.assertEqual(calls, ['import', 'venv',
                             'pip install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt',
                             'make', str(runner_temp / 'ci-tiers-venv/bin/python3')])
+
+    def test_cas_bf89_missing_markdownlint_is_installed_under_runner_temp(self):
+        step = next(s for s in self.ci()['jobs']['fast-validation-preflight']['steps']
+                    if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
+        bin_dir = self.root / 'bin';bin_dir.mkdir()
+        runner_temp = self.root / 'runner';runner_temp.mkdir()
+        log = self.root / 'calls'
+        (bin_dir / 'python3').write_text('#!/usr/bin/env bash\n')  # YAML importable
+        (bin_dir / 'npm').write_text('''#!/usr/bin/env bash
+set -euo pipefail
+printf 'npm %s\\n' "$*" >> "$CALLS"
+mkdir -p "$3/node_modules/.bin" && printf '#!/usr/bin/env bash\\n' > "$3/node_modules/.bin/markdownlint-cli2"
+chmod +x "$3/node_modules/.bin/markdownlint-cli2"
+''')
+        (bin_dir / 'make').write_text('#!/usr/bin/env bash\ncommand -v markdownlint-cli2 >> "$CALLS"\n')
+        for child in bin_dir.iterdir(): child.chmod(0o755)
+        result = self.run_body(step['run'], dict(PATH=f'{bin_dir}:/usr/bin:/bin', RUNNER_TEMP=str(runner_temp), CALLS=str(log)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.read_text().splitlines(), [
+            f'npm install --prefix {runner_temp}/markdownlint markdownlint-cli2@0.18.1 --no-audit --no-fund --silent',
+            str(runner_temp / 'markdownlint/node_modules/.bin/markdownlint-cli2')])
 
     def test_parsed_archive_fail_open_contract_and_all_four_mutations(self):
         job = self.ci()['jobs']['fast-validation-suite-build']

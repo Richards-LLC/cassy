@@ -861,6 +861,11 @@ jobs:
             "$RUNNER_TEMP/ci-tiers-venv/bin/pip" install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt
             export PATH="$RUNNER_TEMP/ci-tiers-venv/bin:$PATH"
           fi
+          # cas-bf89: test-fast-release-rows.py runs the markdown-lint row.
+          if ! command -v markdownlint-cli2 >/dev/null; then
+            npm install --prefix "$RUNNER_TEMP/markdownlint" markdownlint-cli2@0.18.1 --no-audit --no-fund --silent
+            export PATH="$RUNNER_TEMP/markdownlint/node_modules/.bin:$PATH"
+          fi
           make -C cas-cli test-ci-tiers
 
       - name: Build (without MCP proxy)

@@ -26,16 +26,6 @@ impl Config {
                     .unwrap_or(true)
                     .to_string(),
             ),
-            "jev.gate.shadow" => Some(self.jev.clone().unwrap_or_default().gate.shadow.to_string()),
-            "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
-            "jev.key_file" => Some(
-                self.jev
-                    .clone()
-                    .unwrap_or_default()
-                    .key_file
-                    .unwrap_or_default(),
-            ),
-            "jev.enabled" => Some(self.jev.clone().unwrap_or_default().enabled.to_string()),
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",

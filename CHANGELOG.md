@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Removed — Jev decision support
+
+- The Jev client is gone: the `cas jev` command, the `jev` MCP tool, the
+  PreToolUse shadow observer and the builtin `cas-jev` skill. `cas update`
+  prunes installed managed `cas-jev` skill copies.
+- The `jev.*` config keys are gone. A config file that still has a `[jev]`
+  section loads normally; the section is ignored with a one-line note and is
+  dropped the next time Cassy writes the file.
+
 ## [3.51.0] - 2026-10-14
 
 ### Security — guard-relaxing config keys are operator-only (cas-0d4f0)

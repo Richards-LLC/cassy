@@ -25,13 +25,9 @@ pub(crate) const CI_WAKE_EVENTS: [&str; 2] = [
     EXTERNAL_MERGE_QUEUE_LANDED_EVENT,
 ];
 
-/// The contract: a CI-completion reminder fires within this long of the run
-/// completing on GitHub.
-pub(crate) const CI_WAKE_MAX_LATENCY: Duration = Duration::from_secs(60);
-
-/// Probe cadence while a CI reminder is pending. One interval, one daemon
-/// refresh tick (2 s) and the bounded `gh` calls (8 s each) stay inside
-/// [`CI_WAKE_MAX_LATENCY`]. GitHub cost: one run-list call per pending SHA (or
+/// Probe cadence while a CI reminder is pending. The contract is delivery
+/// within 60 s of the run completing: one interval, one daemon refresh tick
+/// (2 s) and the bounded `gh` calls (8 s each) stay inside it. GitHub cost: one run-list call per pending SHA (or
 /// one PR read per pending PR) every 30 s, and nothing when no row is pending.
 pub(crate) const CI_WAKE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -670,6 +666,8 @@ mod tests {
     const RUNS_FIXTURE: &str = include_str!("fixtures/ci_wake/runs-fba7a336-completed.json");
     const PULL_FIXTURE: &str = include_str!("fixtures/ci_wake/pull-1193-merged.json");
     const FIXTURE_SHA: &str = "fba7a3365eb0cb6403be9d708e8f03151fc42054";
+    /// The acceptance contract: delivered within 60 s of the run completing.
+    const CI_WAKE_MAX_LATENCY: Duration = Duration::from_secs(60);
 
     fn fixture_runs() -> WorkflowRunPage {
         serde_json::from_str(RUNS_FIXTURE).unwrap()

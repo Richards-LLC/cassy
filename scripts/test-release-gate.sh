@@ -1828,8 +1828,10 @@ if run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cac
     bad 'changed Cargo.lock reused a release binary PASS containing seeded EVEX'
 elif grep -qF 'FAIL release-binary-isa' "$tmp/cache-isa-evex.log" \
     && grep -qi 'vcvttsd2usi' "$tmp/cache-isa-evex.log" \
-    && ! grep -qF 'PASS workspace-tests' "$tmp/cache-isa-evex.log"; then
-    ok 'changed Cargo.lock invalidates release ISA PASS and refuses before later rows'
+    && grep -qE '^RELEASE GATE FAILED: .*release-binary-isa.* \(release binary ISA audit refused before pr-body/pipeline\)$' "$tmp/cache-isa-evex.log"; then
+    # cas-dcb4: rows beside the build may already have reported; the gate
+    # still aborts on the ISA row and cancels whatever is still running.
+    ok 'changed Cargo.lock invalidates release ISA PASS and aborts the gate'
 else
     bad "locked EVEX did not fail before pipeline: $(cat "$tmp/cache-isa-evex.log")"
 fi

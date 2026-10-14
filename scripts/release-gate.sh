@@ -29,6 +29,26 @@ usage() {
     printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
     printf '       %s --fast-rows [--base <ref>]\n' "$0"
     printf '       %s --learn "<symptom>" "<cause>" "<check-id>" [--run-dir <dir> --evidence <file:line> ...]\n' "$0"
+    printf '       %s --learn-task <open-task-id> --run-dir <dir> --evidence <file:line> ...\n' "$0"
+}
+
+# cas-297d: map a release blocker to the open task that owns its fix, as
+# `task=<id>` on the evidence row. The run directory sits outside the factory
+# write roots, so this command, not a hand edit, is how a supervisor records it.
+learn_task() {
+    local task_id="${1:-}" run_dir=''
+    local -a rows=()
+    shift || true
+    while (($#)); do
+        case "$1" in
+            --run-dir) [[ $# -ge 2 ]] || return 2; run_dir="$2"; shift 2 ;;
+            --evidence) [[ $# -ge 2 ]] || return 2; rows+=("$2"); shift 2 ;;
+            *) printf 'error: unknown --learn-task option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$task_id" && -n "$run_dir" && ${#rows[@]} -gt 0 ]] || { usage >&2; return 2; }
+    python3 "$repo_root/scripts/release-learning.py" --map-task "$repo_root" "$run_dir" "$task_id" "${rows[@]}" \
+        && printf 'Mapped %s to open task %s in %s\n' "${rows[*]}" "$task_id" "$run_dir"
 }
 
 learn() {
@@ -91,6 +111,11 @@ learn() {
     printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release before retrying.\n' "$check_id"
 }
 
+if [[ "${1:-}" == '--learn-task' ]]; then
+    shift
+    learn_task "$@"
+    exit $?
+fi
 if [[ "${1:-}" == '--learn' ]]; then
     [[ "$#" -ge 4 ]] || {
         usage >&2

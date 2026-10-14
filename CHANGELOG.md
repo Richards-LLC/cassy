@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — map a release blocker to an open task with one command (cas-297d)
+
+- `scripts/release-gate.sh --learn-task <task-id> --run-dir <dir> --evidence
+  <file:line>` records `task=<id>` on a `blockers.log` or
+  `supervisor-interventions.md` row after checking that the task is open.
+  This uses the same `release-learning.py` map path as `--learn`.
+- A refused receipts stage now prints this command next to `--learn`. A
+  supervisor no longer hand-edits the release run directory, which the
+  factory workspace hook refuses because it sits outside the write roots.
+
 ### Added — a release can no longer ship that the operator cannot launch (cas-e719)
 
 - 3.51.0 refused `cas factory` and `cas claude <account>` for every operator

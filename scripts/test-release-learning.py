@@ -126,6 +126,32 @@ cut_run_stage receipts
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.log.read_bytes(), before)
 
+    def test_learn_task_maps_an_open_task_and_refuses_a_closed_one(self):
+        """cas-297d: one supported command maps a blocker to an open task."""
+        shutil.copy(HELPER, self.repo / 'scripts/release-learning.py')
+        database = self.repo / 'tasks.db'
+        with sqlite3.connect(database) as connection:
+            connection.execute('CREATE TABLE tasks(id TEXT, status TEXT)')
+            connection.executemany('INSERT INTO tasks VALUES (?,?)', [('cas-61dc', 'open'), ('cas-dead', 'closed')])
+        self.env['CAS_RELEASE_LEARNING_TASK_DB'] = str(database)
+        (self.run_dir / 'blockers.log').write_text('preflight\n')
+        self.assertIn('--learn-task', self.check().stdout)
+
+        def learn_task(identifier):
+            return self.command('bash', 'scripts/release-gate.sh', '--learn-task', identifier,
+                                '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
+
+        result = learn_task('cas-dead')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cas-dead is not an open task', result.stdout)
+        self.assertEqual((self.run_dir / 'blockers.log').read_text(), 'preflight\n')
+        self.assertNotEqual(self.check().returncode, 0)
+
+        result = learn_task('cas-61dc')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((self.run_dir / 'blockers.log').read_text(), 'preflight task=cas-61dc\n')
+        self.assertEqual(self.check().returncode, 0)
+
     def warn(self):
         return self.command('python3', str(HELPER), '--warn-tooling', str(self.repo))
 

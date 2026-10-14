@@ -78,14 +78,22 @@ def check(root, run_dir):
                    + ' --run-dir ' + shlex.quote(str(run_dir))
                    + ' --evidence ' + shlex.quote(f'{filename}:{number}'))
         print(f'  → {command}', file=sys.stderr)
+        print('  → or, when an open task owns the fix: scripts/release-gate.sh --learn-task'
+              ' "${RELEASE_FAILURE_TASK:?set open task id}"'
+              f' --run-dir {shlex.quote(str(run_dir))} --evidence {shlex.quote(f"{filename}:{number}")}',
+              file=sys.stderr)
     if failures:
         return 1
     print('receipts release-learning: every rescue maps to a learned gate row or an open task')
     return 0
 
 
-def map_rows(root, run_dir, check_id, references, validate_only=False):
-    if not validate_only and check_id not in executable_lessons(root):
+def map_rows(root, run_dir, check_id, references, validate_only=False, key='learn'):
+    if key == 'task':
+        # cas-297d: a blocker owned by follow-up work maps to an open task.
+        if not re.fullmatch(r'cas-[a-z0-9]+', check_id) or not task_open(root, check_id):
+            raise ValueError(f'{check_id} is not an open task')
+    elif not validate_only and check_id not in executable_lessons(root):
         raise ValueError(f'{check_id} has no failure-log entry with an executable gate row')
     changes = {}
     for reference in references:
@@ -97,7 +105,7 @@ def map_rows(root, run_dir, check_id, references, validate_only=False):
         index = int(number) - 1
         if index >= len(rows) or not rows[index].strip() or rows[index].lstrip().startswith('#'):
             raise ValueError(f'missing evidence row: {reference}')
-        rows[index] = re.sub(r'\s+learn=\S+', '', rows[index]) + f' learn={check_id}'
+        rows[index] = re.sub(rf'\s+{key}=\S+', '', rows[index]) + f' {key}={check_id}'
     if validate_only:
         return
     # Validate all requested rows before writing any annotation.
@@ -219,8 +227,9 @@ def main():
     try:
         if mode == '--check':
             return check(root, Path(args[0]))
-        if mode in ('--map', '--validate-map'):
-            map_rows(root, Path(args[0]), args[1], args[2:], mode == '--validate-map')
+        if mode in ('--map', '--validate-map', '--map-task'):
+            map_rows(root, Path(args[0]), args[1], args[2:], mode == '--validate-map',
+                     'task' if mode == '--map-task' else 'learn')
             return 0
         if mode == '--warn-tooling':
             warn_tooling(root)

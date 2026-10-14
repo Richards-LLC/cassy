@@ -655,7 +655,8 @@ async fn cas_66c7_cloud_sync_follows_a_late_login_and_a_rotated_token() {
     use wiremock::matchers::{method, path};
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/sync/pull"))
+        // The syncer's own constant: the cas-2eb3 guard allows one pull URL.
+        .and(path(crate::cloud::syncer::pull::PULL_PATH))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
             "specs": [], "events": [], "prompts": [],

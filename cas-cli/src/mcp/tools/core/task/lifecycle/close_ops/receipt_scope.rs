@@ -78,6 +78,83 @@ pub(super) fn for_close(
     (!scope.is_empty()).then(|| (scope.widen(task), scope.note(head)))
 }
 
+/// cas-d6eb: the refusal a blast-radius delivery gets at park, before parking
+/// locks its proof scope, when it reaches modules that neither its declared
+/// `proof_targets` nor a passing worker test receipt at `head` covers. The
+/// close gate would refuse the same modules after verification, when only a
+/// supervisor scope fix (and a fresh verification round) could repair them.
+pub(super) fn park_refusal(
+    cas_root: &Path,
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+) -> Option<String> {
+    if !task.risk.contains(&TaskRisk::BlastRadius) {
+        return None;
+    }
+    let judged = for_close(cas_root, proof_repo, task, changed_paths, Some(head));
+    let targets = judged.as_ref().map_or(&task.proof_targets, |(judged, _)| &judged.proof_targets);
+    let uncovered = super::uncovered_blast_radius_modules(changed_paths, targets);
+    if uncovered.is_empty() {
+        return None;
+    }
+    let mut widened = cas_types::normalize_proof_targets(&task.proof_targets);
+    for module in &uncovered {
+        if !widened.contains(module) {
+            widened.push(module.clone());
+        }
+    }
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let short = &head[..head.len().min(12)];
+    Some(format!(
+        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
+        id = task.id,
+        modules = uncovered.join(", "),
+        targets = widened.join(","),
+    ))
+}
+
+/// cas-d6eb: the tested packages that cover every target a proof-scope
+/// widening adds, when each target is crate-qualified (`<crate>::<path>`) and
+/// its crate has a passing worker test receipt at `head`. Such a widening only
+/// names what the close gate already accepts at that head ([`for_close`]), so
+/// it need not invalidate the reviewed proof cycle. `None` otherwise.
+pub(super) fn receipts_cover_targets(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    added: &[String],
+) -> Option<Vec<String>> {
+    let tested = crate::factory_worker_check::passing_test_packages(cas_root, repo, head);
+    if tested.is_empty() || added.is_empty() {
+        return None;
+    }
+    let package_dirs = workspace_package_dirs(repo);
+    let mut packages = Vec::new();
+    for target in added {
+        let segments = super::proof_target_segments(target);
+        let (first, rest) = segments.split_first()?;
+        if rest.is_empty() {
+            return None;
+        }
+        // A crate directory, or a package name the manifests map to one.
+        let crate_dir = if package_dirs.values().any(|dir| dir == first) {
+            first.clone()
+        } else {
+            package_dirs.get(first)?.clone()
+        };
+        let module = SourceModule { crate_dir, segments: rest.to_vec() };
+        let package = tested
+            .iter()
+            .find(|package| package_covers(package, &module, &package_dirs))?;
+        if !packages.contains(package) {
+            packages.push(package.clone());
+        }
+    }
+    Some(packages)
+}
+
 /// Delivered source modules the declared `proof_targets` miss but a passing
 /// targeted test in the same crate covers. `tested_packages` are the Cargo
 /// package names of the receipts at the delivered head.
@@ -377,6 +454,88 @@ mod tests {
                 Some(&head)
             )
             .is_none()
+        );
+    }
+
+    /// cas-d6eb AC1: at park, a delivery reaching a crate nobody tested is
+    /// told which modules to cover and how, while proof_targets can still be
+    /// widened; once it widens them, or tests that crate, it parks.
+    #[test]
+    fn park_names_uncovered_modules_while_the_worker_can_fix_them_cas_d6eb() {
+        let repo = workspace();
+        let cas_root = tempfile::tempdir().unwrap();
+        let head = "e".repeat(40);
+        let mut task = blast_radius_task(&["close_ops"]);
+        let changed = delivered();
+        crate::factory_worker_check::record_passing_test_for_tests(
+            cas_root.path(), repo.path(), &head, "cas", "test(worker)",
+        );
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head)
+            .expect("an untested crate is refused at park");
+        assert!(refusal.contains("PROOF SCOPE INCOMPLETE"), "{refusal}");
+        // Only the untested crate's module; the tested crate is covered.
+        assert!(refusal.contains("covers: prompt_queue_store::operator_cloud."), "{refusal}");
+        assert!(
+            refusal.contains(&format!(
+                "task action=update id={} proof_targets=\"close_ops,prompt_queue_store::operator_cloud\"",
+                task.id
+            )),
+            "{refusal}"
+        );
+
+        // Following the suggested update clears the refusal.
+        task.proof_targets.push("prompt_queue_store::operator_cloud".into());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head).is_none());
+        // So does a test receipt in the untested crate instead.
+        task.proof_targets.pop();
+        crate::factory_worker_check::record_passing_test_for_tests(
+            cas_root.path(), repo.path(), &head, "cas-store", "test(worker)",
+        );
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head).is_none());
+        // A task without blast-radius risk is never refused here.
+        let mut plain = blast_radius_task(&[]);
+        plain.risk = vec![TaskRisk::None];
+        assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &"f".repeat(40)).is_none());
+    }
+
+    /// cas-d6eb AC2: a widening that adds only crate-qualified modules of
+    /// crates tested at the parked head is covered by those receipts; one
+    /// naming an untested crate, or no crate at all, is not.
+    #[test]
+    fn widening_covered_by_receipts_is_recognised_cas_d6eb() {
+        let repo = workspace();
+        let cas_root = tempfile::tempdir().unwrap();
+        let head = "a".repeat(40);
+        let added = |targets: &[&str]| targets.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            receipts_cover_targets(cas_root.path(), repo.path(), &head, &added(&["cas-cli::cli::factory"])),
+            None,
+            "no receipts at the head"
+        );
+        crate::factory_worker_check::record_passing_test_for_tests(
+            cas_root.path(), repo.path(), &head, "cas", "test(worker)",
+        );
+        crate::factory_worker_check::record_passing_test_for_tests(
+            cas_root.path(), repo.path(), &head, "code-mode-mcp", "test(worker)",
+        );
+        assert_eq!(
+            receipts_cover_targets(
+                cas_root.path(), repo.path(), &head,
+                &added(&["cas-cli::cli::factory", "cas::lib", "cas-mcp-proxy::lib"]),
+            ),
+            Some(vec!["cas".to_string(), "code-mode-mcp".to_string()]),
+        );
+        for uncovered in [&["cas-store::prompt_queue_store"][..], &["factory"], &["cas-cli::cli::factory", "cas-store::x"]] {
+            assert_eq!(
+                receipts_cover_targets(cas_root.path(), repo.path(), &head, &added(uncovered)),
+                None,
+                "{uncovered:?}"
+            );
+        }
+        assert_eq!(
+            receipts_cover_targets(cas_root.path(), repo.path(), &"b".repeat(40), &added(&["cas::lib"])),
+            None,
+            "another head's receipts do not count"
         );
     }
 }

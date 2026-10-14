@@ -2095,6 +2095,17 @@ pub(crate) fn changed_source_modules(paths: &[String]) -> Vec<SourceModule> {
     modules.into_iter().collect()
 }
 
+/// cas-d6eb: the tested packages covering every proof target a widening adds,
+/// when each is crate-qualified and tested at `head` in `repo`.
+pub(crate) fn receipts_cover_targets(
+    cas_root: &std::path::Path,
+    repo: &std::path::Path,
+    head: &str,
+    added: &[String],
+) -> Option<Vec<String>> {
+    receipt_scope::receipts_cover_targets(cas_root, repo, head, added)
+}
+
 /// Return the source modules (crate-relative `a::b` paths) absent from the
 /// declared close proof scope.
 pub(crate) fn uncovered_blast_radius_modules(
@@ -7916,6 +7927,24 @@ impl CasCore {
                             tip,
                             &resolved_parent_branch,
                             &task.id,
+                        )
+                    {
+                        return Ok(Self::tool_error(refusal));
+                    }
+                    // cas-d6eb: the blast-radius module check, made while the
+                    // worker can still widen proof_targets (parking locks the
+                    // scope; after verification only a supervisor fix could).
+                    if task.status != TaskStatus::AwaitingMerge
+                        && let Some(tip) = anchor.as_deref()
+                        && let Some(paths) = commit_receipt_window.as_ref().and_then(|window| {
+                            task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
+                        })
+                        && let Some(refusal) = receipt_scope::park_refusal(
+                            &self.cas_root,
+                            worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                            &task,
+                            &paths,
+                            tip,
                         )
                     {
                         return Ok(Self::tool_error(refusal));
@@ -39356,3 +39385,6 @@ mod recovery_delivery_tests;
 #[cfg(test)]
 #[path = "close_ops/no_code_close_tests.rs"]
 mod no_code_close_tests;
+#[cfg(test)]
+#[path = "close_ops/blast_radius_park_tests.rs"]
+mod blast_radius_park_tests;

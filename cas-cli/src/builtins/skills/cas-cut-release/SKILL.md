@@ -15,10 +15,15 @@ version and worktree, never a version-keyed path.
    hazards no gate row catches. Every other entry names a `release-gate.sh` row
    that already enforces it, so on a gate failure grep the log for that row id
    instead of reading it all. Learn an absent failure with
-   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`; it
-   appends to the failure log and regenerates the builtin reference ledger,
-   so commit them with the new check. Store the same text with
-   `memory action=remember entry_type=learning tags=release`.
+   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"
+   --rung <rung>`; it appends to the failure log and regenerates the builtin
+   reference ledger, so commit them with the new check. Climb the ladder
+   prevention-first: a default or auto-fix, then a seconds-long preflight,
+   then a late gate row, and prose only when nothing executable fits. A class
+   already learned twice is refused unless `--task` names an open P0/P1 task
+   whose acceptance removes the cause; receipts refuse its `learn=` mapping the
+   same way. Store the lesson with `memory action=remember entry_type=learning
+   tags=release,op:release-cut`; starting the next cut surfaces it.
 2. Before merging a release-bound lane, run `scripts/release-train.sh <version>
    <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,

@@ -11,10 +11,17 @@ pub fn handle_post_tool_use(
         handle_post_tool_use_with_guardrail(input, cas_root, |cas_root, input, stores| {
             maybe_tmpfs_guardrail_warning(cas_root, input, stores.config())
         })?;
-    let Some(context) =
-        cas_root.and_then(|root| crate::hooks::turn_context::fallback_context(root, input))
-    else {
-        return Ok(output);
+    // cas-9734: a tool call that starts a tagged operation (release cut,
+    // spawn, report, epic close, merge) surfaces that operation's lessons.
+    let lessons = cas_root.and_then(|root| {
+        crate::hooks::operation_lessons::context_for_tool(root, &normalize_post_tool_input(input))
+    });
+    let fallback =
+        cas_root.and_then(|root| crate::hooks::turn_context::fallback_context(root, input));
+    let context = match (lessons, fallback) {
+        (Some(lessons), Some(fallback)) => format!("{lessons}\n{fallback}"),
+        (Some(context), None) | (None, Some(context)) => context,
+        (None, None) => return Ok(output),
     };
     Ok(HookOutput::with_post_tool_context(
         merge_post_tool_contexts(Some(&output), context),

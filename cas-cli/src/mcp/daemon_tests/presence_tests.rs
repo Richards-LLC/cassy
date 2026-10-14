@@ -615,7 +615,7 @@ async fn cas_66c7_a_late_login_registers_without_a_restart() {
         PresenceState::Registered
     );
     assert_eq!(
-        peer_ids(&fx.cas_root, "someone-else"),
+        peer_ids(&fx.peer_root, "someone-else"),
         vec![(me.to_string(), Some("cas-571d".to_string()))]
     );
 }

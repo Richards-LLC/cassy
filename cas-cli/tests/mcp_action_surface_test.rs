@@ -453,7 +453,7 @@ fn call_shape_surface_snapshot_matches_the_published_surface() {
         })
         .collect();
     let live = serde_json::to_string_pretty(&serde_json::json!({ "tools": tools })).unwrap() + "\n";
-    let committed = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/mcp-call-surface.json"));
+    let committed = include_str!("../../scripts/mcp-call-surface.json");
     if committed != live {
         let fresh = std::env::temp_dir().join("mcp-call-surface.json");
         std::fs::write(&fresh, &live).unwrap();

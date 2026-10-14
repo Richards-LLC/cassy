@@ -295,8 +295,10 @@ async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     {
         let mut state = cloud.state.lock().unwrap();
+        // b's agents belong to another member of a team project.
         for id in ["b", "bw"] {
             state.agents.get_mut(id).unwrap()["user_id"] = serde_json::json!("other-user");
+            state.agents.get_mut(id).unwrap()["team_id"] = serde_json::json!("test-team");
         }
     }
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);

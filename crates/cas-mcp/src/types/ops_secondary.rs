@@ -621,7 +621,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'sweep_tasks' (preview or accept one fix task per integration failure class), 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'sweep_tasks' (preview or accept one fix task per integration failure class), 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=, answer or cancel with id=<split> decision=, list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
     )]
     pub action: String,
 
@@ -888,6 +888,35 @@ pub struct FactoryRequest {
     )]
     #[serde(default)]
     pub shared: Option<bool>,
+
+    // ========== Epic split between peer supervisors (cas-4736) ==========
+    /// Children of the epic the caller takes.
+    #[schemars(
+        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+    )]
+    #[serde(default)]
+    pub mine: Option<String>,
+
+    /// Children of the epic offered to the peer.
+    #[schemars(
+        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+    )]
+    #[serde(default)]
+    pub theirs: Option<String>,
+
+    /// Answer to, or end of, an epic split.
+    #[schemars(
+        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+    )]
+    #[serde(default)]
+    pub decision: Option<String>,
+
+    /// Lifetime of an unanswered epic split proposal.
+    #[schemars(
+        description = "epic_split propose: seconds the proposal stays open unanswered (default 1800, max 86400)"
+    )]
+    #[serde(default, deserialize_with = "deser::option_i64")]
+    pub ttl_secs: Option<i64>,
 }
 
 /// Unified coordination operations request combining agent, factory, and worktree operations.
@@ -1340,6 +1369,35 @@ pub struct CoordinationRequest {
     )]
     #[serde(default)]
     pub shared: Option<bool>,
+
+    // ========== Epic split between peer supervisors (cas-4736) ==========
+    /// Children of the epic the caller takes.
+    #[schemars(
+        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+    )]
+    #[serde(default)]
+    pub mine: Option<String>,
+
+    /// Children of the epic offered to the peer.
+    #[schemars(
+        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+    )]
+    #[serde(default)]
+    pub theirs: Option<String>,
+
+    /// Answer to, or end of, an epic split.
+    #[schemars(
+        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+    )]
+    #[serde(default)]
+    pub decision: Option<String>,
+
+    /// Lifetime of an unanswered epic split proposal.
+    #[schemars(
+        description = "epic_split propose: seconds the proposal stays open unanswered (default 1800, max 86400)"
+    )]
+    #[serde(default, deserialize_with = "deser::option_i64")]
+    pub ttl_secs: Option<i64>,
 }
 
 /// Request type for MCP proxy execute/search operations.
@@ -1448,6 +1506,10 @@ impl CoordinationRequest {
             cwd: self.cwd.clone(),
             port: self.port,
             shared: self.shared,
+            mine: self.mine.clone(),
+            theirs: self.theirs.clone(),
+            decision: self.decision.clone(),
+            ttl_secs: self.ttl_secs,
         }
     }
 }

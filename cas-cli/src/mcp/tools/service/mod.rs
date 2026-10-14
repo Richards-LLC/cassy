@@ -603,7 +603,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
     )]
     pub async fn factory(
         &self,
@@ -1379,7 +1379,7 @@ impl CasService {
                 "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
                 | "worker_status" | "worker_activity" | "sweep_tasks"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
-                | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
+                | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"
                 | "restart_spawn_queue" => {
                     let factory_req = req.to_factory_request();
@@ -1402,6 +1402,8 @@ impl CasService {
                         // and gate cannot disagree.
                         "epic_status" => this.factory_epic_status(factory_req).await,
                         "focus_epic" => this.factory_focus_epic(factory_req).await,
+                        // cas-4736: split an epic with a peer supervisor.
+                        "epic_split" => this.factory_epic_split(factory_req).await,
                         "remind" => this.factory_remind(factory_req).await,
                         "remind_list" => this.factory_remind_list(factory_req).await,
                         "remind_cancel" => this.factory_remind_cancel(factory_req).await,
@@ -1577,6 +1579,7 @@ impl CasService {
                     | "gc_cleanup"
                     | "epic_status"
                     | "focus_epic"
+                    | "epic_split"
                     | "remind"
                     | "remind_list"
                     | "remind_cancel"
@@ -1625,6 +1628,7 @@ impl CasService {
             "gc_cleanup" => self.factory_gc_cleanup(req).await,
             "epic_status" => self.factory_epic_status(req).await,
             "focus_epic" => self.factory_focus_epic(req).await,
+            "epic_split" => self.factory_epic_split(req).await,
             "remind" => self.factory_remind(req).await,
             "remind_list" => self.factory_remind_list(req).await,
             "restart_spawn_queue" => self.factory_restart_spawn_queue(req).await,
@@ -1652,6 +1656,7 @@ pub(crate) mod agent_search_system;
 mod artifact_post;
 mod core;
 mod db_branch_ops;
+mod epic_split_ops;
 #[cfg(feature = "mcp-proxy")]
 mod external_verification;
 pub(crate) mod factory_ops;

@@ -284,6 +284,10 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 

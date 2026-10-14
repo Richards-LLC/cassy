@@ -6,11 +6,13 @@ no `DESIGN.md` in this repo, so `design-spec/references/tokens.css` (Petrastella
 `:root` by name.
 
 ## Single idea
+
 Cassy moves messages in 0.1–0.2 s, then records the wrong outcome: most "abandoned" messages
 were read, and the operator's replies never arrive. (Rendered verdict, 17 words: "Cassy moves
 messages in 0.1–0.2 s, then records the wrong outcome — and the operator's replies *never arrive*.")
 
 ## Hero form
+
 **Stacked bar**, drawn as a two-row *receipt gap*: the top bar is what the queue recorded for this
 session's 228 rows (one solid bar, labelled `abandoned`); the bar beneath it, on the same scale, is
 what actually happened: 128 rows the worker had read and 100 supervisor→operator replies the sweep
@@ -22,17 +24,20 @@ about *when* something changed but about a record that disagrees with reality, w
 composition-of-a-whole question.
 
 ## Emotional register
+
 Calm, forensic, unarguable — sandstone hero, serif verdict with *never arrive* in the indigo
 italic, the queue's own word set in mono and struck through; no status colour above the fold except
 the single danger-labelled operator segment.
 
 ## Distinctive move
+
 The queue's vocabulary is quoted and **struck through** wherever the record is wrong: the hero's
 `abandoned` label, and once more below in the stage-distribution figure where the `abandoned` bar
 is struck and annotated "128 of these were read". The reader learns one notation — struck mono =
 what Cassy believes, serif = what happened — and meets it twice.
 
 ## Deliberately omitted
+
 - No KPI card row or stat strip above the fold: "0.1 s transport" and "228 abandoned" as boxed
   numbers would read as a dashboard, not an argument.
 - No table of contents or channel list before the verdict; the architecture table is relegated to
@@ -44,6 +49,7 @@ what Cassy believes, serif = what happened — and meets it twice.
   carries a hatch, so the hero survives grayscale print.
 
 ## Section forms (reader's task → form)
+
 | Section | Form | Why |
 | --- | --- | --- |
 | Hero | Verdict hero + stacked bar (receipt gap) | the split of one label is the claim |

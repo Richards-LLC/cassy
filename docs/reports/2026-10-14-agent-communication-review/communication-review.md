@@ -2,7 +2,8 @@
 
 Task cas-447d · 2026-10-14 · crisp-sparrow-96 · Cassy 3.51.0 (1c201ff) on soundwave
 
-**Sources**
+## Sources
+
 - Data: a read-only `.backup` snapshot of `.cas/cas.db` taken 2026-10-14 11:51Z, at `/mnt/rewind/cas/scratch/cas447d/snap.db`.
   - `.cas/prompt_queue.db` is a 0-byte file. The live queue tables are in `cas.db`.
 - Transcripts: the zen-viper-42 supervisor transcript, plus six Claude worker transcripts.
@@ -14,7 +15,8 @@ Task cas-447d · 2026-10-14 · crisp-sparrow-96 · Cassy 3.51.0 (1c201ff) on sou
 
 ## Executive summary
 
-**What works**
+### What works
+
 - The routing core is fast and well guarded. Worker-to-supervisor and supervisor-to-worker transport completes in 0.1–0.2 s on average.
 - Every row carries a stage and a pending reason.
 - Unknown targets fail at once with a named error instead of queueing silently.
@@ -23,7 +25,8 @@ Task cas-447d · 2026-10-14 · crisp-sparrow-96 · Cassy 3.51.0 (1c201ff) on sou
 - External reminders fired on time; #2904 fired 26 minutes after it was set, when the PR landed.
 - The worker return contract, when followed, produces messages that can be checked in one read. 71% of worker delivery messages followed it.
 
-**What is broken**
+### What is broken
+
 1. **The operator never gets the supervisor's replies, and the queue says they were abandoned.**
    - 100 of 105 supervisor→operator rows this session were swept as `abandoned_unknown_target` about 930 s after creation, because "operator" is missing from the sweep's list of valid targets.
    - All 202 operator outbox events ever recorded have no relay receipt, and the cloud outbox has never held a row.
@@ -47,7 +50,8 @@ Task cas-447d · 2026-10-14 · crisp-sparrow-96 · Cassy 3.51.0 (1c201ff) on sou
    - Two supervisors' conflicting integrations triggered no notice to either.
    - The 3.51 cloud peer mailbox has never carried a live send from this machine: `peer_message_outbox` has 0 rows.
 
-**Highest-leverage fixes, in order**
+### Highest-leverage fixes, in order
+
 1. cas-d88c: operator lane sweep
 2. cas-f7b0: honest receipts
 3. cas-1f0c: one body per message
@@ -97,6 +101,7 @@ This is `queries/lat.sql`. It classifies rows by source and target and computes 
 | supervisor → all_workers | 12 | 12 | 11 | 0 | 0 | 0.1 | 0.0 |
 
 Reading the table:
+
 - Transport is fast.
 - 56% of supervisor→worker messages were deferred by "pane has not been silent long enough".
 - The "seen" latency is an artifact. For gated rows the receipt source is `transport_claimed`, written about 0.1 s after enqueue (`queries/gate.sql`). For example, 4185905 was "seen" at +0.05 s, but the worker answered 9 min later (4185932).
@@ -122,6 +127,7 @@ select last_pending_reason, count(*) from prompt_queue where W group by 1;
 | suppressed | 1 |
 
 The reasons behind the 228 abandoned rows:
+
 - `operator` target, never seen: 100. These are caused by the sweep and filed as cas-d88c.
 - Worker targets, *seen*, never transported: 128. The average age at sweep was 40,455 s. These are false and filed as cas-f7b0.
 
@@ -155,6 +161,7 @@ This is `queries/xs.sql`.
 | keen-tiger-11 | 275 | 9 | 97 | 0 | 97 | 92 | 15 | 0 | 0 |
 
 Month-wide, from 2026-09-15:
+
 - 1,990 rows were `abandoned_unknown_target`, and 1,376 of them had a seen receipt. Of those 1,376, 1,122 were "stale 86400s+ quarantined" and 254 were "target no longer belongs to factory session".
 - 7 abandoned with "No such file or directory (os error 2) … 16 failed attempts / ~900s".
 
@@ -186,6 +193,7 @@ from supervisor_queue where created_at>='2026-10-13T20:48' and event_type='task_
 | task_ready | 1 |
 
 Other event types:
+
 - reminder_fired: 62 (none processed or prompted)
 - worker_died: 12
 - worker_idle: 11, exactly one per worker
@@ -204,6 +212,7 @@ where a.created_at>='2026-10-13T20:48' and json_extract(a.payload,'$.transition'
 ```
 
 Dead letters:
+
 - All-time, 2,514 `reminder_fired` rows have `processed_at` and `prompt_delivered_at` both NULL.
 - All 116 task_lifecycle rows this session were never marked processed.
 
@@ -251,7 +260,8 @@ from reminders where created_at>='2026-10-13T20:48' group by 1,2,3,4;
 
 Method: Python extractors over the model-visible text (`transcript-scripts/`); tokens are estimated as chars/4.
 
-**Supervisor (zen-viper-42)**
+### Supervisor (zen-viper-42)
+
 - About 534K chars (~133K tokens) of communication.
 - Including hook overhead (ambient recall ~68K tokens, supervisor-reminder hook ~13K tokens), about 870K chars (~218K tokens).
 - **Repeats**:
@@ -268,7 +278,8 @@ Method: Python extractors over the model-visible text (`transcript-scripts/`); t
   - supervisor_stalled once said "actionable-idle for **0m**", while the supervisor was correctly waiting for CI.
   - A liveness relay told a Claude supervisor to call `mcp__cs__task`, which is the Codex prefix.
 
-**Workers (6 Claude transcripts)**
+### Workers (6 Claude transcripts)
+
 - Inbound communication is 2.7–8.3% of each worker's context.
 - About 47 off-task broadcasts reached them (~8K tokens), and 105 "gone quiet" nudges (~19K tokens).
 - young-newt-54 alone got 67 nudges, 23 in one prompt at 00:02:19, during `sleep 290`.
@@ -276,7 +287,8 @@ Method: Python extractors over the model-visible text (`transcript-scripts/`); t
 - Return-contract compliance: 52% of all worker→supervisor messages, 71% of delivery messages.
 - Weakest: fierce-cheetah-73, 8 of 22.
 
-**Clarity**
+### Clarity
+
 - Good:
   - Supervisor briefs are specific and bounded (4185886).
   - Contract-form status messages can be checked in one read (4185226).
@@ -309,6 +321,7 @@ Method: Python extractors over the model-visible text (`transcript-scripts/`); t
 | 17 | Event reminders need cross_session, and the filter fields aren't discoverable | **Confirmed** | Error text at `factory_remind.rs:37-41, 64-70`. The served schema omits both, and its TTL text is wrong for external reminders (`tool_schema.rs:105-113`). Filed as cas-3349. |
 
 Also found in my own spawn (not one of the supervisor's leads):
+
 - This worker's spawn message 4185939 arrived twice: once in `[incoming messages]` and again as a teammate turn.
 - Task start was refused until 11 stale broadcasts had been read.
 - The supervisor's brief 4185941 arrived only after task start.
@@ -318,6 +331,7 @@ Also found in my own spawn (not one of the supervisor's leads):
 ## 5. Good / Bad / Needs improvement
 
 ### Good
+
 - **The staged delivery model is explicit.** There are 10 stages and 16 pending reasons, each with legal transitions (`prompt_queue_store.rs:845-1077`). Rows record wake attempts with readable reasons, so every gated row says *why*.
 - **Transport is fast.** 0.1–0.2 s from enqueue to transport on every live channel (§2.1).
 - **Unknown targets fail fast with a named error.** This fixes the silent half of GH #1186 (`message.rs:1499-1506`). The cloud peer outbox has honest outcomes and abandon notices (`outbox.rs:124-211`).
@@ -329,6 +343,7 @@ Also found in my own spawn (not one of the supervisor's leads):
 - **Peer-worker traffic is visible to the supervisor** through the copy lane.
 
 ### Bad (defects, each with a filed task)
+
 | Problem | Evidence | Task |
 |---|---|---|
 | Operator replies are swept as abandoned at about 930 s | 100 of 105 this session. "operator" is missing from `prompt_poison_sweep_targets` (`queue_and_events.rs:271-286`). | cas-d88c |
@@ -346,6 +361,7 @@ Also found in my own spawn (not one of the supervisor's leads):
 | Two sessions on one clone kill each other's Violet watches | `violet_activity.rs:384-399` | cas-639c |
 
 ### Needs improvement (design gaps)
+
 | Gap | Evidence | Task |
 |---|---|---|
 | The sender gets no outcome when the wake gate defers, and the stall detector ignores the gate's evidence that the recipient is busy | 4185905 / 16496 | cas-d5ab |
@@ -385,11 +401,13 @@ Impact: H, M or L, judged by how many agents or decisions it touches and its tok
 | 18 | Per-session Violet watches and owner-routed claims | L | S | cas-639c |
 
 **How to make it great.** Make three properties hold everywhere:
+
 1. **One truth per message.** Make a row's stage the single source of what happened. Each reader then sees one body, and dashboards, banners and notices all agree with what the agent actually read.
 2. **Every alarm is an episode.** Each alert is keyed to a real episode, debounced, aware of activity, and coalesced when the reader is busy. A supervisor-initiated action produces one receipt, not alarms.
 3. **Every party has a live address.** Operator, peer supervisor and dead owner each have a delivery lane, a liveness check and a named failure. Identity follows the name across restarts.
 
 Measure the result with the queries in §2 as release SLOs:
+
 - false-abandon rate = 0;
 - operator relay receipts = 100%;
 - duplicate body reads = 0;
@@ -399,7 +417,8 @@ Measure the result with the queries in §2 as release SLOs:
 
 ## 7. Filed tasks
 
-**New tasks**
+### New tasks
+
 - **P1**
   - cas-d88c: operator rows swept as abandoned
   - cas-f7b0: receipt honesty

@@ -152,7 +152,8 @@ def sources(root: Path) -> list[tuple[str, str]]:
     found = []
     shipped = set()
     for catalog in ("cas-cli/src/builtins.rs", "cas-cli/src/maintenance_jobs.rs"):
-        shipped |= set(re.findall(r'include_str!\(\s*"(builtins/[^"]+)"', (root / catalog).read_text()))
+        if (root / catalog).is_file():
+            shipped |= set(re.findall(r'include_str!\(\s*"(builtins/[^"]+)"', (root / catalog).read_text()))
     for path in sorted(shipped):
         found.append(("cas-cli/src/" + path, (root / "cas-cli/src" / path).read_text()))
     for base in [root / "cas-cli/src", *sorted((root / "crates").glob("*/src"))]:

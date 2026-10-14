@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — The release gate runs independent rows concurrently (cas-dcb4)
+
+- The 3.51.1 gate ran its rows one at a time and took 29 minutes. Its longest
+  row, the release-binary ISA build, took about 10 minutes. Rows now declare
+  what they need: CPU, a memory estimate, a shared test host or web install,
+  or a rewrite of an input that `cas` embeds. Independent rows run together
+  under the assembly proof's memory budget. Replaying the 3.51.1 row timings
+  puts the gate close to its longest row.
+- The receipt and `timing.tsv` keep their canonical row order. A failing row
+  still fails the gate. When a script-tier, web-test or ISA row fails, the
+  gate stops and cancels the rows running after it. Scheduling events go to
+  `schedule.tsv`, and `CAS_RELEASE_GATE_PARALLEL=1` restores sequential rows.
+
 ### Changed — factory pushes run the fast rows; the call-shape lint is one Python row (cas-043b)
 
 - A worker's push of its factory branch runs `release-gate.sh --fast-rows`

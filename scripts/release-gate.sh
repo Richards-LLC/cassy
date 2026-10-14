@@ -352,6 +352,8 @@ row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
 mkdir -p "$row_log_dir"
 rm -f "$row_log_dir/compile-timing.tsv" "$row_log_dir/memory-admission.json"
 rm -f "$row_log_dir/compile-memory.jsonl" "$row_log_dir/link-rss.jsonl"
+sched_dir="$tmp_dir/schedule"
+mkdir -p "$sched_dir"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
 [[ "$no_reuse" == false ]] || cache_dir=''
@@ -400,7 +402,7 @@ def ignored(name):
         "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE",
         "CAS_RELEASE_GATE_CACHE_DIR", "CAS_RELEASE_GATE_SWEEP_CACHE_DIR",
         "CAS_RELEASE_GATE_HOME_DIR", "CAS_RELEASE_GATE_SCRATCH_RUN_DIR",
-        "CAS_RELEASE_GATE_SCRATCH_LEASE_FDS",
+        "CAS_RELEASE_GATE_SCRATCH_LEASE_FDS", "CAS_RELEASE_GATE_PARALLEL",
     } or name.startswith("CAS_RELEASE_TRAIN_")
 
 material = "".join(
@@ -1920,6 +1922,257 @@ check_working_tree() {
     fi
 }
 
+# Row scheduler (cas-dcb4). The gate measured on 2026-10-14 ran its rows one after another
+# for 29 minutes. Each scheduled row now declares what it needs, and
+# independent rows run together:
+#   cpu          builds or checks Rust: at most one per 8 cores (minimum 2).
+#   mem=<GiB>    estimated peak, admitted against the assembly proof's memory
+#                budget. With no heavy row running, one is always admitted.
+#   excl=<group> one row of the group at a time. host-tests: test binaries and
+#                script fixtures, which share host ports, hub processes and
+#                tmpfs (as in the assembly proof). hub-web: hub-web/node_modules.
+#   writes-tree  rewrites hub-web/dist or the reference ledger, both embedded
+#                in cas at compile time, so it runs alone. Every other row's
+#                reuse lookup and receipt write therefore sees a stable tree.
+#   after=<row>  starts only once that row passed; if it failed, this row
+#                fails without running. An unselected row imposes nothing.
+#   abort=<why>  failure stops the gate: running rows after it are cancelled
+#                and nothing after it starts; earlier rows still report.
+# Each row gets a private TMPDIR. Output and timing keep canonical row order;
+# events go to schedule.tsv.
+# CAS_RELEASE_GATE_PARALLEL=1 restores sequential rows.
+declare -a gate_rows=()
+declare -A row_command=() row_function=() row_index=() row_cpu=() row_mem=() row_excl=()
+declare -A row_abort=() row_writer=() row_state=() row_pid=() group_owner=() row_after=()
+
+gate_row() {
+    local name="$1" spec
+    [[ -z "$3" ]] || row_selected "$name" || return 0
+    row_index[$name]="${#gate_rows[@]}"
+    gate_rows+=("$name")
+    row_command[$name]="$2" row_function[$name]="$3"
+    row_cpu[$name]=0 row_mem[$name]=0 row_excl[$name]='' row_abort[$name]='' row_writer[$name]=0
+    for spec in "${@:4}"; do
+        case "$spec" in
+            cpu) row_cpu[$name]=1 ;;
+            mem=*) row_mem[$name]=$(( ${spec#mem=} * 1024 )) ;;
+            excl=*) row_excl[$name]="${spec#excl=}" ;;
+            abort=*) row_abort[$name]="${spec#abort=}" ;;
+            after=*) row_after[$name]="${spec#after=}" ;;
+            writes-tree) row_writer[$name]=1 ;;
+            *) printf 'error: row %s declares unknown resource %s\n' "$name" "$spec" >&2; exit 2 ;;
+        esac
+    done
+}
+
+# Available memory minus reserve and taste lane, in MiB (assembly-proof.py).
+gate_memory_budget_mib() {
+    python3 - "$repo_root/scripts/assembly-proof.py" 2>/dev/null <<'PY_GATE_MEMORY'
+import contextlib, importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("assembly_proof", sys.argv[1])
+proof = importlib.util.module_from_spec(spec)
+with contextlib.redirect_stdout(sys.stderr):
+    spec.loader.exec_module(proof)
+    budget = proof.memory_budget(dict(os.environ))
+print(budget["budget_bytes"] // (1024 * 1024))
+PY_GATE_MEMORY
+}
+
+gate_event() {
+    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$(date -u +%FT%TZ)" "$sched_running" "$sched_mem" \
+        >>"$row_log_dir/schedule.tsv"
+}
+
+gate_admissible() {
+    local name="$1" group="${row_excl[$1]}" mem="${row_mem[$1]}"
+    (( sched_running < sched_limit )) && [[ -z "$sched_writer" ]] || return 1
+    [[ "${row_writer[$name]}" == 0 ]] || (( sched_running == 0 )) || return 1
+    [[ -z "$group" || -z "${group_owner[$group]:-}" ]] || return 1
+    [[ "${row_cpu[$name]}" == 0 ]] || (( sched_cpu < sched_cpu_slots )) || return 1
+    (( mem > 0 && sched_mem > 0 )) || return 0
+    # Unknown memory admits one heavy row at a time, like the sequential gate.
+    [[ "$sched_budget" =~ ^[0-9]+$ ]] && (( sched_mem + mem <= sched_budget )) || return 1
+    if (( SECONDS - sched_fresh_at >= 2 )); then
+        sched_fresh="$(gate_memory_budget_mib || true)" sched_fresh_at="$SECONDS"
+    fi
+    [[ "$sched_fresh" =~ ^[0-9]+$ ]] && (( mem <= sched_fresh ))
+}
+
+gate_account() {
+    local name="$1" sign="$2" group="${row_excl[$1]}"
+    sched_running=$(( sched_running + sign ))
+    sched_cpu=$(( sched_cpu + sign * ${row_cpu[$name]} ))
+    sched_mem=$(( sched_mem + sign * ${row_mem[$name]} ))
+    if [[ -n "$group" ]]; then
+        if (( sign > 0 )); then group_owner[$group]="$name"; else unset 'group_owner[$group]'; fi
+    fi
+    if [[ "${row_writer[$name]}" == 1 ]]; then
+        if (( sign > 0 )); then sched_writer="$name"; else sched_writer=''; fi
+    fi
+}
+
+# A private TMPDIR per row: concurrent rows (and their fixtures and nested
+# gates) never share a temp tree. It applies to the check only, so reuse keys
+# that fingerprint the environment are unchanged. The guardian removes it with
+# the gate's registered scratch.
+gate_row_in_private_tmp() (
+    export TMPDIR="$sched_dir/$name.tmp"
+    mkdir -p "$TMPDIR"
+    "$row_body"
+)
+
+gate_launch() {
+    local name="$1"
+    (
+        trap - EXIT
+        known="${#failures[@]}"
+        if [[ -z "${row_function[$name]}" ]]; then
+            print_result SKIP "$name" "${row_command[$name]}"
+        else
+            row_body="${row_function[$name]}"
+            run_check "$name" "${row_command[$name]}" gate_row_in_private_tmp
+        fi >"$sched_dir/$name.out" 2>&1
+        printf '%s\n' "$(( ${#failures[@]} > known ))" >"$sched_dir/$name.status.tmp"
+        mv "$sched_dir/$name.status.tmp" "$sched_dir/$name.status"
+    ) &
+    row_pid[$name]=$!
+    row_state[$name]=running
+    gate_account "$name" 1
+    gate_event "$name" start
+}
+
+# Rows share the gate's process group, so the scratch guardian's signals reach
+# them. Cancelling a row walks its process tree from one ps snapshot: freeze,
+# collect late children, then terminate and resume.
+gate_cancel_after() {
+    local after="$1" name pass
+    local -a names=() pids=()
+    for name in "${gate_rows[@]}"; do
+        if [[ "${row_state[$name]:-}" == running ]] && (( ${row_index[$name]} > after )); then
+            names+=("$name")
+        fi
+    done
+    [[ "${#names[@]}" -gt 0 ]] || return 0
+    for pass in 1 2; do
+        for name in "${names[@]}"; do
+            mapfile -t -O "${#pids[@]}" pids < <(ps -A -o pid= -o ppid= | awk -v root="${row_pid[$name]}" '
+                { parent[$1] = $2; order[NR] = $1 }
+                END {
+                    keep[root] = 1; print root
+                    for (changed = 1; changed;) {
+                        changed = 0
+                        for (i = 1; i <= NR; i++) if (!(order[i] in keep) && (parent[order[i]] in keep)) {
+                            keep[order[i]] = 1; print order[i]; changed = 1
+                        }
+                    }
+                }')
+        done
+        kill -STOP "${pids[@]}" 2>/dev/null || true
+    done
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    kill -CONT "${pids[@]}" 2>/dev/null || true
+    for name in "${names[@]}"; do
+        wait "${row_pid[$name]}" 2>/dev/null || true
+        gate_account "$name" -1
+        row_state[$name]=cancelled
+        gate_event "$name" cancel
+        cancelled_rows+=("$name")
+    done
+}
+# A forwarded signal or shell error must not leave scheduled rows behind.
+trap 'gate_cancel_after -1' EXIT
+
+gate_emit() {
+    cat "$sched_dir/$1.out"
+    [[ "$(cat "$sched_dir/$1.status")" == 0 ]] || failures+=("$1")
+}
+
+gate_abort=''
+run_gate_rows() {
+    local name total="${#gate_rows[@]}" emitted=0 abort_index abort_row='' timing_lines progress after
+    cancelled_rows=()
+    [[ "$total" -gt 0 ]] || return 0
+    abort_index="$total"
+    sched_limit="${CAS_RELEASE_GATE_PARALLEL:-$total}"
+    [[ "$sched_limit" =~ ^[1-9][0-9]*$ ]] || { printf 'error: CAS_RELEASE_GATE_PARALLEL must be a positive integer\n' >&2; exit 2; }
+    sched_cpu_slots=$(( ($(python3 -c 'import os; print(len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count())') + 7) / 8 ))
+    (( sched_cpu_slots >= 2 )) || sched_cpu_slots=2
+    sched_running=0 sched_cpu=0 sched_mem=0 sched_writer=''
+    sched_budget="$(gate_memory_budget_mib || true)" sched_fresh="$sched_budget" sched_fresh_at="$SECONDS"
+    timing_lines="$(wc -l <"$row_log_dir/timing.tsv")"
+    printf 'row\tevent\tutc\trunning\tadmitted_mib\n' >"$row_log_dir/schedule.tsv"
+    printf 'row scheduling: up to %s concurrent rows, %s cpu-heavy, memory budget %s MiB; events in %s\n' \
+        "$sched_limit" "$sched_cpu_slots" "${sched_budget:-unknown}" "$row_log_dir/schedule.tsv"
+    for name in "${gate_rows[@]}"; do row_state[$name]=pending; done
+    while (( emitted < abort_index )); do
+        progress=false
+        for name in "${gate_rows[@]}"; do
+            [[ "${row_state[$name]}" == running ]] || continue
+            if [[ ! -f "$sched_dir/$name.status" ]]; then
+                kill -0 "${row_pid[$name]}" 2>/dev/null && continue
+                [[ -f "$sched_dir/$name.status" ]] || {
+                    print_result FAIL "$name" "${row_command[$name]}" >>"$sched_dir/$name.out"
+                    printf '  | row process exited without reporting a status\n' >>"$sched_dir/$name.out"
+                    printf '1\n' >"$sched_dir/$name.status"
+                }
+            fi
+            wait "${row_pid[$name]}" 2>/dev/null || true
+            gate_account "$name" -1
+            row_state[$name]=done progress=true
+            gate_event "$name" "end:$(cat "$sched_dir/$name.status")"
+            if [[ "$(cat "$sched_dir/$name.status")" != 0 && -n "${row_abort[$name]}" ]] \
+                && (( ${row_index[$name]} < abort_index )); then
+                abort_index="${row_index[$name]}" abort_row="$name"
+                gate_cancel_after "$abort_index"
+            fi
+        done
+        while (( emitted < abort_index )) && [[ "${row_state[${gate_rows[$emitted]}]}" == done ]]; do
+            gate_emit "${gate_rows[$emitted]}"
+            emitted=$(( emitted + 1 ))
+        done
+        for name in "${gate_rows[@]:0:abort_index}"; do
+            [[ "${row_state[$name]}" == pending ]] || continue
+            after="${row_after[$name]:-}"
+            if [[ -n "$after" && -n "${row_index[$after]:-}" ]]; then
+                [[ "${row_state[$after]}" == done ]] || continue
+                if [[ "$(cat "$sched_dir/$after.status")" != 0 ]]; then
+                    {
+                        print_result FAIL "$name" "${row_command[$name]}"
+                        printf '  | not run: %s did not pass\n' "$after"
+                    } >"$sched_dir/$name.out"
+                    printf '1\n' >"$sched_dir/$name.status"
+                    row_state[$name]=done progress=true
+                    gate_event "$name" "end:1"
+                    continue
+                fi
+            fi
+            if gate_admissible "$name"; then
+                gate_launch "$name"
+                progress=true
+            fi
+        done
+        [[ "$progress" == true ]] || sleep 0.2
+    done
+    # Rows after an abort that already finished keep their receipts.
+    for name in "${gate_rows[@]:emitted}"; do
+        if [[ "${row_state[$name]}" == done ]]; then gate_emit "$name"; fi
+    done
+    # Concurrent rows append timing as they finish; restore canonical order.
+    {
+        head -n "$timing_lines" "$row_log_dir/timing.tsv"
+        tail -n +"$(( timing_lines + 1 ))" "$row_log_dir/timing.tsv" | while IFS= read -r line; do
+            printf '%06d\t%s\n' "${row_index[${line%%$'\t'*}]:-999999}" "$line"
+        done | sort -s -n -k1,1 | cut -f2-
+    } >"$row_log_dir/timing.tsv.tmp"
+    mv "$row_log_dir/timing.tsv.tmp" "$row_log_dir/timing.tsv"
+    [[ -n "$abort_row" ]] || return 0
+    if [[ "${#cancelled_rows[@]}" -gt 0 ]]; then
+        printf 'cancelled in-flight rows: %s\n' "${cancelled_rows[*]}"
+    fi
+    # The caller writes the failure receipt (and the fast-row FIX receipt).
+    gate_abort="${row_abort[$abort_row]}"
+}
+
 printf '=== CAS RELEASE GATE RECEIPT ===\n'
 printf 'version: %s\n' "$version"
 printf 'repository: %s\n' "$repo_root"
@@ -1945,119 +2198,115 @@ run_check epic-worktree-fresh \
 run_check epic-worktree-zig \
     'resolve and export an executable Zig from env, epic worktree, or main checkout' \
     check_epic_worktree_zig
-run_check publish-toolchain \
+# Every remaining row except the final tree check is scheduled. Resources
+# are declared next to each row; see the scheduler above. Memory estimates
+# (GiB) are rounded up from the 2026-10-14 gate and assembly-proof figures: an 8 GiB cold
+# producer, about 4 GiB plus threads for a test run, 2 GiB for script tiers.
+gate_row publish-toolchain \
     'python3 scripts/check-release-publish-toolchain.py (real zigbuild parser, no build)' \
     check_publish_toolchain
-run_check failure-log \
+gate_row failure-log \
     "parse $failure_log_rel; every entry maps to a gate check id or manual:" \
     check_failure_log
-run_check assemble-stale-base \
+gate_row assemble-stale-base \
     'python3 scripts/test-release-integration.py (stale origin/main recovery and identity-safe base-only heal)' \
-    check_assemble_stale_base
-run_check ancestor-proxy-config \
+    check_assemble_stale_base excl=host-tests
+gate_row ancestor-proxy-config \
     'no populated .cas/proxy.toml above this worktree that ancestor-walking tests could read' \
     check_ancestor_proxy_config
-run_check version-literals \
+gate_row version-literals \
     'find source/test files for <version> (excluding manifests, CHANGELOG, reference-history, failure-log)' \
     check_version_literals
-run_check ci-script-tests \
+gate_row ci-script-tests \
     'make -C cas-cli test-ci-tiers (factory identity scrubbed)' \
-    check_ci_script_tests
-if row_selected ci-script-tests && [[ "${failures[*]}" == *ci-script-tests* ]]; then
-    printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
-    exit 1
-fi
-run_check hub-web-tests \
+    check_ci_script_tests excl=host-tests mem=2 'abort=aborted; build and Rust suite rows cancelled'
+gate_row hub-web-tests \
     'npm ci --no-audit --no-fund && npm run typecheck && npm test' \
-    check_hub_web_tests
-if row_selected hub-web-tests && [[ "${failures[*]}" == *hub-web-tests* ]]; then
-    printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
-    exit 1
-fi
-run_check release-binary-isa \
+    check_hub_web_tests excl=hub-web mem=2 'abort=aborted; build and Rust suite rows cancelled'
+gate_row release-binary-isa \
     "$cargo_bin zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked (baseline C/C++ flags, persistent release target); Ghostty/BLAKE3 build audits; scripts/test-check-portable-x86_64-isa.sh <packaged-cas>; record the archive release.sh reuses" \
-    check_release_binary_isa
-if row_selected release-binary-isa && [[ "${failures[*]}" == *release-binary-isa* ]]; then
-    printf 'RELEASE GATE FAILED: %s (release binary ISA audit refused before pr-body/pipeline)\n' "${failures[*]}"
-    exit 1
-fi
-run_check operator-launch-smoke \
+    check_release_binary_isa cpu mem=10 'abort=release binary ISA audit refused before pr-body/pipeline'
+gate_row operator-launch-smoke \
     'scripts/check-operator-launch.sh <release-binary-isa archive cas> (throwaway HOME, cas init defaults, clean operator shell; agent refused)' \
-    check_operator_launch_smoke
-run_check fixture-paths \
+    check_operator_launch_smoke after=release-binary-isa excl=host-tests mem=2
+gate_row fixture-paths \
     "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src, crates/*/src or crates/*/tests" \
-    check_fixture_paths
-run_check workspace-tests \
+    check_fixture_paths cpu mem=8 excl=host-tests
+gate_row workspace-tests \
     "$cargo_bin check --workspace --tests" \
-    check_workspace_tests
-run_check macos-check \
+    check_workspace_tests cpu mem=6
+gate_row macos-check \
     "$cargo_bin check --workspace --tests --target aarch64-apple-darwin (rustup target add preflight)" \
-    check_macos
-run_check hub-web-dist-drift \
+    check_macos cpu mem=6
+gate_row hub-web-dist-drift \
     'npm ci --no-audit --no-fund && npm run build && git diff --exit-code -- dist' \
-    check_hub_web_dist_drift
-run_check hub-web-visual-qa \
+    check_hub_web_dist_drift excl=hub-web mem=1 writes-tree
+gate_row hub-web-visual-qa \
     'npm exec --yes --package=playwright -- node scripts/visual-qa.mjs --artifact-dir <gate-scratch>/hub-web-visual-qa' \
-    check_hub_web_visual_qa
-run_check nextest \
+    check_hub_web_visual_qa excl=hub-web mem=2
+gate_row nextest \
     "$cargo_bin nextest run --workspace (factory environment scrubbed; archive-selected: snapshot complement)" \
-    check_nextest
-run_check doctests \
+    check_nextest cpu mem=12 excl=host-tests
+gate_row doctests \
     "$cargo_bin test -p cas --doc" \
-    check_doctests
-run_check archive-mode \
+    check_doctests cpu mem=6 excl=host-tests
+gate_row archive-mode \
     "env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID $cargo_bin nextest archive --workspace --archive-file <home-disk>/suite.tar.zst; archive run outside checkout with remap and rg removed" \
-    check_archive_mode
-run_check snapshot-portability \
+    check_archive_mode cpu mem=12 excl=host-tests
+gate_row snapshot-portability \
     'env -u COLUMNS TMPDIR=<deep path> cargo nextest run -p cas --test component_output_test' \
-    check_snapshot_portability
-run_check builtin-projections \
+    check_snapshot_portability cpu mem=4 excl=host-tests
+gate_row builtin-projections \
     "$cargo_bin nextest run -p cas --test builtin_flavor_drift_test root_managed_projections...; regenerate ledger; git diff --quiet" \
-    check_builtin_projections
-run_check changelog-and-versions \
+    check_builtin_projections cpu mem=4 excl=host-tests writes-tree
+gate_row changelog-and-versions \
     'CHANGELOG [Unreleased]/[version] bullet plus six release-train Cargo.toml versions' \
     check_changelog_and_versions
-run_check release-script \
+gate_row release-script \
     'release.sh stale duplicate cleanup and audit-only pre-warm contract' \
     check_release_script
-run_check release-notes-shell-injection \
+gate_row release-notes-shell-injection \
     'all workflow run blocks reject GitHub expression interpolation' \
     check_release_notes_shell_injection
-run_check procedure-guardrails \
+gate_row procedure-guardrails \
     'cas-cut-release reconciliation, queue, PID, receipt, and host guardrails' \
     check_procedure_guardrails
-run_check test-targets 'python3 scripts/cas-test-targets.py cas-cli --check' check_test_targets
-run_check markdown-lint 'markdownlint-cli2 on changed Markdown (repository policy)' check_markdown_lint
+gate_row test-targets 'python3 scripts/cas-test-targets.py cas-cli --check' check_test_targets
+gate_row markdown-lint 'markdownlint-cli2 on changed Markdown (repository policy)' check_markdown_lint
 if [[ "$fast_rows" == true && ! -f scripts/check-test-shape.py ]]; then
     # Either sibling lane may merge first. A missing checker is visible rather
     # than manufactured green evidence; the full gate always requires it.
-    print_result SKIP test-shape 'checker not installed yet (sibling lint lane)'
+    gate_row test-shape 'checker not installed yet (sibling lint lane)' ''
 else
-    run_check test-shape 'python3 scripts/check-test-shape.py (changed lane in fast mode)' check_test_shape
+    gate_row test-shape 'python3 scripts/check-test-shape.py (changed lane in fast mode)' check_test_shape
 fi
-run_check test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
-run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
-run_check journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
+gate_row test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
+gate_row builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
+gate_row journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
     check_journey_catalog
-run_check builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
+gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
     check_builtin_skill_limits
-run_check doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
+gate_row doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
     check_doctor_snapshot
-run_check migration-registry 'python3 scripts/check-migration-registry.py (every migration declared, registered, in order)' \
+gate_row migration-registry 'python3 scripts/check-migration-registry.py (every migration declared, registered, in order)' \
     check_migration_registry
-run_check ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \
-    check_ci_script_tests_changed
-run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src, crates/*/src, crates/*/tests (changed files in fast mode)' \
+gate_row ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \
+    check_ci_script_tests_changed excl=host-tests
+gate_row fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src, crates/*/src, crates/*/tests (changed files in fast mode)' \
     check_fixture_paths_src
-run_check builtin-projections-src 'task-verifier root projection equals its embedded body; no .md Codex agents (lane change only in fast mode)' \
+gate_row builtin-projections-src 'task-verifier root projection equals its embedded body; no .md Codex agents (lane change only in fast mode)' \
     check_builtin_projections_src
-run_check call-shapes 'python3 scripts/check-call-shapes.py (builtin and runtime MCP calls match scripts/mcp-call-surface.json)' \
+gate_row call-shapes 'python3 scripts/check-call-shapes.py (builtin and runtime MCP calls match scripts/mcp-call-surface.json)' \
     check_call_shapes
-run_check release-notes-draft 'python3 scripts/release-train-announce.py --lint <changed docs/release-notes/*-slack.md> (fast mode; the cut preflight lints the release draft)' \
+gate_row release-notes-draft 'python3 scripts/release-train-announce.py --lint <changed docs/release-notes/*-slack.md> (fast mode; the cut preflight lints the release draft)' \
     check_release_notes_draft
-run_check working-tree \
-    'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
-    check_working_tree
+run_gate_rows
+# After an abort no row after it reports, including the final tree check.
+if [[ -z "$gate_abort" ]]; then
+    run_check working-tree \
+        'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
+        check_working_tree
+fi
 
 # cas-7bce: the fix a failed fast row needs, when its log does not print a
 # specific `FIX:` line itself. The park refusal quotes these verbatim.
@@ -2125,7 +2374,7 @@ if [[ "${#failures[@]}" -gt 0 ]]; then
         fast_row_fixes
         record_fast_rows_receipt FAIL
     fi
-    printf 'RELEASE GATE FAILED: %s\n' "${failures[*]}"
+    printf 'RELEASE GATE FAILED: %s%s\n' "${failures[*]}" "${gate_abort:+ ($gate_abort)}"
     exit 1
 fi
 

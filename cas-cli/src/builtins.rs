@@ -353,22 +353,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
-        path: "skills/cas-jev/SKILL.md",
-        content: include_str!("builtins/skills/cas-jev/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/references/triage.md",
-        content: include_str!("builtins/skills/cas-jev/references/triage.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/references/triage-questions.json",
-        content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/scripts/triage.py",
-        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1037,22 +1021,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
-        path: "skills/cas-jev/SKILL.md",
-        content: include_str!("builtins/skills/cas-jev/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/references/triage.md",
-        content: include_str!("builtins/skills/cas-jev/references/triage.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/references/triage-questions.json",
-        content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/scripts/triage.py",
-        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1713,22 +1681,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
-        path: "skills/cas-jev/SKILL.md",
-        content: include_str!("builtins/skills/cas-jev/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/references/triage.md",
-        content: include_str!("builtins/skills/cas-jev/references/triage.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/references/triage-questions.json",
-        content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
-    },
-    BuiltinFile {
-        path: "skills/cas-jev/scripts/triage.py",
-        content: include_str!("builtins/skills/cas-jev/scripts/triage.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -2360,13 +2312,6 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-html-reports"),
         codex: Some("skills/cas-html-reports"),
         grok: Some("skills/cas-html-reports"),
-        note: "",
-    },
-    RequiredCapability {
-        id: "cas-jev",
-        claude: Some("skills/cas-jev"),
-        codex: Some("skills/cas-jev"),
-        grok: Some("skills/cas-jev"),
         note: "",
     },
     RequiredCapability {
@@ -7335,6 +7280,54 @@ This is the body content."#;
         // A second sync is a no-op and leaves the user's file alone.
         sync_all_builtins_for_project(SupervisorCli::Claude, project.path()).unwrap();
         assert!(user_workflow.exists());
+    }
+
+    /// cas-4971: Jev was removed in 3.51.1. No catalog ships `cas-jev`, and
+    /// both refresh paths (`cas update` project sync and the user-level
+    /// prune) remove an installed managed copy while sparing a personal one.
+    #[test]
+    fn refresh_prunes_retired_cas_jev_skill_cas_4971() {
+        use tempfile::tempdir;
+
+        for (harness, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            assert!(
+                !builtin_skill_dir_names(catalog).contains("cas-jev"),
+                "{harness} catalog still ships the retired cas-jev skill"
+            );
+        }
+
+        let managed = "---\nname: cas-jev\nmanaged_by: cas\n---\n# retired\n";
+        let project = tempdir().unwrap();
+        let retired_skill = project.path().join(".claude/skills/cas-jev");
+        std::fs::create_dir_all(retired_skill.join("references")).unwrap();
+        std::fs::write(retired_skill.join("SKILL.md"), managed).unwrap();
+        std::fs::write(retired_skill.join("references/triage.md"), "# triage\n").unwrap();
+
+        sync_all_builtins_for_project(SupervisorCli::Claude, project.path()).unwrap();
+        assert!(!retired_skill.exists(), "project refresh prunes the managed cas-jev copy");
+
+        let user_skills = tempdir().unwrap();
+        let managed_copy = user_skills.path().join("cas-jev");
+        std::fs::create_dir_all(&managed_copy).unwrap();
+        std::fs::write(managed_copy.join("SKILL.md"), managed).unwrap();
+        let removed =
+            prune_stale_cas_skill_dirs(user_skills.path(), &builtin_skill_dir_names(BUILTIN_SKILLS))
+                .unwrap();
+        assert_eq!(removed, vec!["cas-jev".to_string()]);
+        assert!(!managed_copy.exists());
+
+        let personal = user_skills.path().join("cas-jev");
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::write(personal.join("SKILL.md"), "---\nname: cas-jev\n---\n# mine\n").unwrap();
+        let removed =
+            prune_stale_cas_skill_dirs(user_skills.path(), &builtin_skill_dir_names(BUILTIN_SKILLS))
+                .unwrap();
+        assert!(removed.is_empty(), "an unmanaged personal cas-jev is never removed");
+        assert!(personal.exists());
     }
 
     // cas-e0d1: builtin_skill_dir_names extracts `<dir>` from `skills/<dir>/...`

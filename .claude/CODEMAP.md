@@ -56,7 +56,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/cli/{history_cmd,index_cmd,retrieval_parity}.rs` — Git history search, code indexes, and retrieval parity commands.
 - `cas-cli/src/cli/integrate/{violet,violet_retirement}.rs` — `cas integrate violet`; `cas-cli/src/cli/doctor/slack_transport.rs` checks the Slack route.
 - `cas-cli/src/cli/violet_cmd/{mod,hub,files}.rs` — `cas violet post|thread|read`: post local files to Slack by path (inline ≤1 MiB or `file_external`) through the Violet hub.
-- `cas-cli/src/cli/{jev,hub_operator,store_choice}.rs` — `cas jev`, operator-inbox commands, and store selection.
+- `cas-cli/src/cli/{hub_operator,store_choice}.rs` — operator-inbox commands, and store selection.
 - `cas-cli/src/artifacts/` — publishable-path guard, streaming digest, and the Cloud begin/PUT/complete upload client for published artifacts.
 - `cas-cli/src/artifacts/slack.rs` — `artifact action=post`: Cloud-resolved, sha256-checked artifact post to Slack via Violet `file_external`.
 - `cas-cli/src/cloud/` — cloud sync, devices, teams, proposals, embeddings, aliases, and queued push/pull; `cas-cli/src/cloud/sync_queue/unauthored.rs` ledgers pulled rows this project did not author.
@@ -77,7 +77,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/factory_target_cache/` — per-worker build-cache seeding (`lane.rs`, `owner.rs`, `parked.rs`, `retirement.rs`, `scratch.rs`).
 - `cas-cli/src/factory_daemon_health.rs` — daemon loop-health file readable outside the daemon; `cas-cli/src/factory_permission_relay.rs` relays worker permission prompts parked for a team lead.
 - `cas-cli/src/{qa_pass,qa_evidence,qa_journeys}.rs` + `cas-cli/src/qa_pass/{github_gate,preflight}.rs` — independent QA-pass eligibility, journey selection, and close-time evidence checks.
-- `cas-cli/src/jev/` — Jev calibrated decisions (`gate.rs`, `files.rs`); `cas-cli/src/git_evidence/` — shared git measurement for close gates.
+- `cas-cli/src/git_evidence/` — shared git measurement for close gates.
 - `cas-cli/src/{github_issue_attach,github_repo,task_assignment,light_lane}.rs` — cited-issue attach, repo resolution, assignment wake, and one-shot light-lane work.
 - `cas-cli/src/{db_branch,ops/fleet,maintenance_jobs,server_signals,review_body}.rs` — per-task Neon branches, fleet ops, scheduled jobs, server signals, PR review bodies; `store/foreign_project_guard.rs` blocks cross-project writes.
 - `cas-cli/src/retrieval_eval.rs` and `cas-cli/src/retrieval_parity/` — labeled scoring against committed retrieval fixtures and diffs.
@@ -104,7 +104,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/mcp/tools/core/task/` — task queries, notes, proposals, dependencies, updates, and lifecycle proof/close gates.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/{qa_dispatch,qa_evidence_gate}.rs` — independent-QA dispatch at merge park and the QA evidence close gate.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — close gates incl. `evidence_only.rs`, `snapshot_approval.rs`, `delivery_evolution.rs`, `epic_verdict_cache.rs`; `task/integration_batch.rs` pins batch-squash deliveries.
-- `cas-cli/src/mcp/tools/core/{jev.rs,workflow/shadow_review/,agent_coordination/branch_adoption.rs}` — Jev tool, shadow Spec/Standards review, and task branch adoption.
+- `cas-cli/src/mcp/tools/core/{workflow/shadow_review/,agent_coordination/branch_adoption.rs}` — shadow Spec/Standards review, and task branch adoption.
 - `cas-cli/src/mcp/tools/service/` — factory/reminder ops, liveness, orphan recovery, external verification, server/worktree ops, patterns/specs, and panic containment.
 - `cas-cli/src/mcp/tools/service/qa_pass_ops.rs` — `verification action=qa_record|qa_waive|qa_status`.
 - `cas-cli/src/mcp/tools/service/{db_branch_ops,mutation_receipt,tool_schema}.rs` — Neon branch actions, idempotent mutation receipts, and served tool schemas.
@@ -119,7 +119,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/builtins/` — embedded managed prompts, agents, skills, harness mirrors, and `cas-cli/src/builtins/reference-history.json` sync manifest.
 - `cas-cli/src/builtins/agents/task-verifier.body.md` — the only managed agent; `cas-cli/src/builtins/jobs/` — duplicate, learning, rule, and session-summary job prompts (formerly agents).
 - `cas-cli/src/builtins/codex/skills/` — Codex-only skills (e.g. `cas-codex-supervisor-checklist.md`, `cas-retro/`); the Grok tree was removed.
-- `cas-cli/src/builtins/skills/` — canonical shared skills (e.g. `cas-qa-craft/`, `cas-supervisor/`, `violet/`, `cas-release-notes/`, `cas-jev/`, `cas-shadow-review/`), references, scripts, and assets rendered to harness mirrors.
+- `cas-cli/src/builtins/skills/` — canonical shared skills (e.g. `cas-qa-craft/`, `cas-supervisor/`, `violet/`, `cas-release-notes/`, `cas-shadow-review/`), references, scripts, and assets rendered to harness mirrors.
 - `cas-cli/tests/` — integration targets for CLI, hooks, cloud, factory/MCP, hub, search, verification, e2e, and multi-agent behavior.
 - `cas-cli/tests/hooks_test/main.rs` — integration-test entrypoint that includes the hooks test module tree.
 - `cas-cli/tests/mcp_tools_test/` — MCP action coverage; `cas-cli/tests/mcp_tools_test/task_tools/` holds lifecycle, dependency, close-gate, QA (`independent_qa.rs`, `qa_evidence_gate.rs`), cited-issue, and verification suites.

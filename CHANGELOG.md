@@ -103,6 +103,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   original reviewer and ledger, and is logged as a task note. A supervisor's
   `qa_request` still opens a fresh round.
 
+## [3.51.1] - 2026-10-14
+
 ### Fixed — operators could not launch Cassy on 3.51.0
 
 - `cas factory` and `cas claude <account>` refused to start from the

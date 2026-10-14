@@ -1957,20 +1957,26 @@ gate_account() {
     fi
 }
 
+# A private TMPDIR per row: concurrent rows (and their fixtures and nested
+# gates) never share a temp tree. It applies to the check only, so reuse keys
+# that fingerprint the environment are unchanged. The guardian removes it with
+# the gate's registered scratch.
+gate_row_in_private_tmp() (
+    export TMPDIR="$sched_dir/$name.tmp"
+    mkdir -p "$TMPDIR"
+    "$row_body"
+)
+
 gate_launch() {
     local name="$1"
     (
         trap - EXIT
-        # A private TMPDIR per row: concurrent rows (and their test fixtures
-        # and nested gates) never share a temp tree. The guardian removes it
-        # with the gate's registered scratch.
-        export TMPDIR="$sched_dir/$name.tmp"
-        mkdir -p "$TMPDIR"
         known="${#failures[@]}"
         if [[ -z "${row_function[$name]}" ]]; then
             print_result SKIP "$name" "${row_command[$name]}"
         else
-            run_check "$name" "${row_command[$name]}" "${row_function[$name]}"
+            row_body="${row_function[$name]}"
+            run_check "$name" "${row_command[$name]}" gate_row_in_private_tmp
         fi >"$sched_dir/$name.out" 2>&1
         printf '%s\n' "$(( ${#failures[@]} > known ))" >"$sched_dir/$name.status.tmp"
         mv "$sched_dir/$name.status.tmp" "$sched_dir/$name.status"

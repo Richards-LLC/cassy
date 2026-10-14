@@ -39,7 +39,7 @@ FAKE_CAS = textwrap.dedent('''\
                               "result": {"content": [{"type": "text", "text": text}]}}), flush=True)
 ''')
 
-# 2026-10-14's 3.52.0 cut: gate 3029 s and publish 1526 s.
+# The 2026-10-14 cut: gate 3029 s and publish 1526 s.
 STAGE_EVENTS = """\
 1791997675\tpreflight\tstart
 1791997712\tpreflight\tdone

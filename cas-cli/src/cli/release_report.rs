@@ -2619,17 +2619,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         for (dir, receipt) in [
             (
-                "v3.50.1-release",
-                "TAG=v3.50.1\nSTAGE_SECS=gate:840,publish:600\n",
+                "v9.97.1-release",
+                "TAG=v9.97.1\nSTAGE_SECS=gate:840,publish:600\n",
             ),
             (
-                "v3.51.1-release",
-                "TAG=v3.51.1\nSTAGE_SECS=gate:1797,publish:169\n",
+                "v9.98.1-release",
+                "TAG=v9.98.1\nSTAGE_SECS=gate:1797,publish:169\n",
             ),
-            ("v3.53.0-release", "TAG=v3.53.0\nSTAGE_SECS=gate:300\n"),
+            ("v9.99.1-release", "TAG=v9.99.1\nSTAGE_SECS=gate:300\n"),
             (
-                "v3.52.0-release",
-                "TAG=v3.52.0\nSTAGE_SECS=gate:3029,publish:1526\n",
+                "v9.99.0-release",
+                "TAG=v9.99.0\nSTAGE_SECS=gate:3029,publish:1526\n",
             ),
         ] {
             fs::create_dir_all(root.path().join(dir)).unwrap();
@@ -2642,7 +2642,7 @@ mod tests {
         let mut files = Vec::new();
         collect_files(root.path(), &mut files);
         let mut evidence = ReleaseEvidence {
-            stage_trend: stage_trend(&files, "v3.52.0", 5),
+            stage_trend: stage_trend(&files, "v9.99.0", 5),
             ..ReleaseEvidence::default()
         };
         evidence.record_latency(&parse_key_values(
@@ -2658,7 +2658,7 @@ mod tests {
         );
         assert!(
             section.contains(
-                "| gate | 50m 29s | 15m 0s | FAILED | v3.50.1 14m 0s · v3.51.1 29m 57s |"
+                "| gate | 50m 29s | 15m 0s | FAILED | v9.97.1 14m 0s · v9.98.1 29m 57s |"
             ),
             "{section}"
         );

@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.52.0] - 2026-10-14
+
+### Fixed — "Jump to latest" on a phone thread (cas-6a9b)
+
+- Scrolling up through a long conversation on a phone no longer pulls you
+  back to the newest message while new messages arrive, and "Jump to latest"
+  appears reliably once you have scrolled away from the bottom.
+
 ### Fixed — QA browser runs are no longer starved by a background assembly proof (cas-833e)
 
 - One positively bounded worker run (a Playwright run capped at four workers,

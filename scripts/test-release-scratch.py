@@ -579,6 +579,19 @@ while not pathlib.Path(sys.argv[5]).exists(): time.sleep(.01)
             self.assertFalse((owner / 'paths').exists())
             self.assertTrue((unsafe / 'output').exists())
 
+    def test_process_uses_matches_any_spelling_but_not_a_name_prefix_sibling(self):
+        # cas-e919: the fast containment check must keep Path semantics.
+        if not self.proc.is_dir():
+            self.skipTest('Linux /proc inventory')
+        path = self.parent / 'base.live'
+        sibling = self.parent / 'base.live-other'
+        path.mkdir()
+        sibling.mkdir()
+        spelled = str(self.parent) + '//./base.live/inner/'
+        self.spawn([sys.executable, '-c', 'import time; time.sleep(30)', f'--out={spelled}'])
+        self.assertTrue(scratch.process_uses(path))
+        self.assertFalse(scratch.process_uses(sibling))
+
     def test_macos_lsof_exempts_only_own_exact_lease_fd(self):
         path = self.parent / 'base.mac'
         path.mkdir()

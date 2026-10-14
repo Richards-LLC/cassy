@@ -224,6 +224,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
+	cd .. && python3 scripts/test-check-call-shapes.py
 	cd .. && python3 scripts/test-live-check-peer-collab.py
 	cd .. && python3 scripts/test-hub-web-gate.py
 	cd .. && python3 scripts/test-release-portable.py
@@ -235,6 +236,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-release-learning.py
 	cd .. && python3 scripts/test-release-publish-toolchain.py
 	cd .. && python3 scripts/test-release-binary-artifact.py
+	cd .. && ./scripts/test-check-operator-launch.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && python3 scripts/test-release-completion.py

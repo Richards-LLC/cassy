@@ -2468,9 +2468,11 @@ fn init_cloud_syncer(cas_root: &std::path::Path) -> Option<Arc<CloudSyncer>> {
 fn init_cloud_coordinator(cas_root: &std::path::Path) -> Option<CloudCoordinator> {
     let cloud_config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
     let canonical_id = crate::cloud::resolve_canonical_id(cas_root);
-    CloudCoordinator::new(cloud_config)
-        .ok()
-        .map(|coordinator| coordinator.with_canonical_id(canonical_id))
+    CloudCoordinator::new(cloud_config).ok().map(|coordinator| {
+        coordinator
+            .with_canonical_id(canonical_id)
+            .with_machine_label(Some(crate::cloud::peers::machine_label_for(cas_root)))
+    })
 }
 
 /// Initialize code watcher if code indexing is enabled

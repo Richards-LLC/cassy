@@ -18,7 +18,7 @@ use cas::types::{Agent, AgentRole};
 use cas_store::QueueOrigin;
 
 use super::TestMachine;
-use super::fake_cloud::FakeCloud;
+use super::test_cloud::TestCloud;
 
 const WIDGETS: &str = "github.com/acme/widgets";
 
@@ -37,7 +37,7 @@ fn operator_cli(machine: &TestMachine, args: &[&str]) -> std::process::Command {
 #[test]
 fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     register(
         &alpha,
@@ -79,7 +79,7 @@ fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
 #[test]
 fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     let PeerDiscovery::Found { peers, .. } = discover_peers(&alpha.cas_dir, None).unwrap() else {
         panic!("expected project peer discovery");
@@ -96,7 +96,7 @@ fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
 #[test]
 fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     for via_pid in [false, true] {
         let mut caller = alpha.agent_store().get("a").unwrap();
@@ -122,7 +122,7 @@ fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
 #[test]
 fn cas_1caa_cli_without_self_resolves_token_account_and_worker_claims() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     CloudCoordinator::new(cloud.config())
         .unwrap()
@@ -147,7 +147,7 @@ fn cas_1caa_cli_without_self_resolves_token_account_and_worker_claims() {
 #[tokio::test]
 async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     let now = chrono::Utc::now();
     for (id, state) in [
@@ -291,12 +291,13 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
 #[tokio::test]
 async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
-    {
-        let mut state = cloud.state.lock().unwrap();
-        for id in ["b", "bw"] {
-            state.agents.get_mut(id).unwrap()["user_id"] = serde_json::json!("other-user");
+    // b's agents belong to another member of a team project. One real
+    // account cannot stage that, so the real-cloud leg records a skip.
+    for id in ["b", "bw"] {
+        if !cloud.set_account(id, "other-user", "test-team") {
+            return;
         }
     }
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
@@ -336,7 +337,7 @@ async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
 #[tokio::test]
 async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importing_workers() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
     for n in 1..4 {
         register(
@@ -372,12 +373,8 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
     let mut task = cas::types::Task::new("cas-active".into(), "Implement peer awareness".into());
     task.status = cas::types::TaskStatus::InProgress;
     alpha.task_store().add(&task).unwrap();
-    {
-        let mut state = cloud.state.lock().unwrap();
-        for id in ["bw", "bw1", "bw2", "bw3"] {
-            state.agents.get_mut(id).unwrap()["metadata"]["branch"] =
-                serde_json::json!(format!("factory/{id}"));
-        }
+    for id in ["bw", "bw1", "bw2", "bw3"] {
+        cloud.set_metadata(id, "branch", &format!("factory/{id}"));
     }
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("a".into());
@@ -492,6 +489,7 @@ fn register(
     CloudCoordinator::new(config)
         .unwrap()
         .with_canonical_id(resolve_canonical_id(&machine.cas_dir))
+        .with_machine_label(Some(cas::cloud::peers::machine_label_for(&machine.cas_dir)))
         .register_with_focus(&agent, Some(focus))
         .unwrap();
     open_agent_store(&machine.cas_dir)
@@ -529,9 +527,23 @@ fn inbox(machine: &TestMachine) -> Vec<QueuedPrompt> {
     rows
 }
 
+/// The label `machine` shows people: unlike its registered machine id
+/// (`machine-beta`) and the test host's hostname, e.g. `beta-host`.
+fn label_of(machine: &TestMachine) -> String {
+    format!("{}-host", machine.name.trim_start_matches("machine-"))
+}
+
+/// Give `machine`'s project its own machine label (`[cloud] machine_label`).
+fn label_machine(machine: &TestMachine) {
+    let path = machine.cas_dir.join("config.toml");
+    let mut config = std::fs::read_to_string(&path).unwrap_or_default();
+    config.push_str(&format!("\n[cloud]\nmachine_label = \"{}\"\n", label_of(machine)));
+    std::fs::write(path, config).unwrap();
+}
+
 /// alpha and beta work github.com/acme/widgets (beta's clone spelled as its
 /// git remote); gamma works another repo. beta also runs a worker.
-fn three_machines(cloud: &FakeCloud) -> (TestMachine, TestMachine, TestMachine) {
+fn three_machines(cloud: &TestCloud) -> (TestMachine, TestMachine, TestMachine) {
     let (alpha, beta, gamma) = (
         TestMachine::new("machine-alpha"),
         TestMachine::new("machine-beta"),
@@ -540,6 +552,11 @@ fn three_machines(cloud: &FakeCloud) -> (TestMachine, TestMachine, TestMachine) 
     cloud.seed(&alpha.cas_dir, WIDGETS);
     cloud.seed(&beta.cas_dir, "git@github.com:acme/widgets.git");
     cloud.seed(&gamma.cas_dir, "github.com/acme/gadgets");
+    // Three simulated machines on one host: each project names its machine
+    // (cas-c7c7), as a real host's hostname would.
+    for machine in [&alpha, &beta, &gamma] {
+        label_machine(machine);
+    }
     register(&alpha, "a", "sup-a", AgentRole::Supervisor, "a", "cas-571d");
     register(&beta, "b", "sup-b", AgentRole::Supervisor, "b", "cas-f9c7");
     register(
@@ -556,7 +573,7 @@ fn three_machines(cloud: &FakeCloud) -> (TestMachine, TestMachine, TestMachine) 
 
 #[test]
 fn two_supervisors_discover_claim_message_reply_and_release() {
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
 
     // 1. Discovery: each sees the other, with machine and focus; never the
@@ -603,9 +620,10 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     let rows_a = inbox(&alpha);
     assert_eq!(rows_a.len(), 1);
     let envelope = parse_envelope(&rows_a[0].prompt).unwrap();
+    // cas-c7c7: the sender's label, not its registered machine id.
     assert_eq!(
         (envelope.sender_name.as_str(), envelope.machine.as_str()),
-        ("sup-b", "machine-beta")
+        ("sup-b", "beta-host")
     );
     assert_eq!(rows_a[0].target, "sup-a");
     assert_eq!(rows_a[0].origin, Some(QueueOrigin::Daemon));
@@ -624,7 +642,7 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     )
     .unwrap()
     .expect("a peer message row");
-    assert_eq!(reply.to, "sup-b@machine-beta");
+    assert_eq!(reply.to, "sup-b@beta-host");
     assert_eq!(tick(&beta, "b").delivered, 1);
     let rows_b = inbox(&beta);
     assert_eq!(rows_b.len(), 1);
@@ -659,7 +677,7 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
 /// request, an urgent interrupt or an operator instruction.
 #[test]
 fn a_peer_supervisor_cannot_spawn_or_direct_the_other_machines_workers() {
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
 
     // Discovery never offers beta's worker as an addressable peer.
@@ -741,7 +759,7 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
     // ambient CAS_* environment.
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     // The fake serves on its own thread, so blocking setup here is safe.
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("a".to_string());
@@ -778,4 +796,67 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
         "nothing was sent toward beta's worker"
     );
     assert!(cloud.messages_to("b").is_empty());
+}
+
+/// cas-c7c7 (O2): one machine label everywhere a peer's machine is named.
+/// Discovery, peer detail, a claim refusal, and a received peer message's
+/// envelope and reply target all name beta's machine the same way (a
+/// received epic split: `epic_split::a_received_split_names_the_proposer_by_its_machine_label`).
+#[tokio::test(flavor = "multi_thread")]
+async fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = TestCloud::start();
+    let (alpha, beta, _gamma) = three_machines(&cloud);
+
+    let peers_a = peers_of(&alpha.cas_dir, "a");
+    let discovered = peers_a[0].machine.clone();
+    assert_eq!(discovered, label_of(&beta), "discovery shows beta's own label");
+
+    // A claim refusal names the holder's machine.
+    let claims_a = PeerClaims::for_project(&alpha.cas_dir).unwrap();
+    let claims_b = PeerClaims::for_project(&beta.cas_dir).unwrap();
+    assert_eq!(
+        claims_b.acquire("cas-t300", ClaimKind::Task, "b", "sup-b", 600, &|id| id == "b" || id == "bw"),
+        Acquire::Claimed
+    );
+    let refused = match claims_a.acquire("cas-t300", ClaimKind::Task, "a", "sup-a", 600, &|id| id == "a") {
+        Acquire::PeerHolds(hold) => hold.holder.expect("the holder is named").machine,
+        other => panic!("alpha must be refused while beta holds cas-t300: {other:?}"),
+    };
+
+    // A peer message's envelope and its reply target name the sender's machine.
+    let peers_b = peers_of(&beta.cas_dir, "b");
+    let to_a = resolve_peer_target(&peers_b, "sup-a").unwrap().unwrap();
+    send_to_peer(&beta.cas_dir, "b", to_a, "label check", Some("label"), None).unwrap();
+    assert_eq!(tick(&alpha, "a").delivered, 1);
+    let envelope = parse_envelope(&inbox(&alpha)[0].prompt).unwrap();
+
+    assert_eq!(
+        [refused.as_str(), envelope.machine.as_str()],
+        [discovered.as_str(), discovered.as_str()],
+        "discovery, the claim refusal and the envelope must name beta's machine alike"
+    );
+    assert!(
+        inbox(&alpha)[0].prompt.contains(&format!("target=sup-b@{discovered}")),
+        "the reply target uses the same label: {}",
+        inbox(&alpha)[0].prompt
+    );
+
+    // Peer detail shows the same label.
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "peers", "peer": "sup-b", "detail": true, "json": true
+    }))
+    .unwrap();
+    let result = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    let detail: serde_json::Value =
+        serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+    assert_eq!(detail["peers"][0]["supervisor"]["machine"], discovered.as_str(), "{detail}");
+    // The stable identity is kept, and still addresses the peer.
+    assert_eq!(detail["peers"][0]["supervisor"]["machine_id"], "machine-beta", "{detail}");
 }

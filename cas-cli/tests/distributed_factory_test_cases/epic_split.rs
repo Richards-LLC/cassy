@@ -40,6 +40,7 @@ fn register(machine: &TestMachine, agent: &Agent) {
     CloudCoordinator::new(config)
         .unwrap()
         .with_canonical_id(resolve_canonical_id(&machine.cas_dir))
+        .with_machine_label(Some(cas::cloud::peers::machine_label_for(&machine.cas_dir)))
         .register_with_focus(agent, Some(EPIC))
         .unwrap();
     open_agent_store(&machine.cas_dir).unwrap().register(agent).unwrap();
@@ -50,7 +51,11 @@ fn side(cloud: &FakeCloud, machine_name: &str, id: &'static str, name: &str) -> 
     cloud.seed(&machine.cas_dir, WIDGETS);
     std::fs::write(
         machine.cas_dir.join("config.toml"),
-        format!("[project]\ncanonical_id = {WIDGETS:?}\n[verification]\nenabled = false\n"),
+        format!(
+            "[project]\ncanonical_id = {WIDGETS:?}\n[verification]\nenabled = false\n\
+             [cloud]\nmachine_label = {:?}\n",
+            format!("{}-host", machine_name.trim_start_matches("machine-"))
+        ),
     )
     .unwrap();
     // A supervisor and one of its workers, in one factory session.
@@ -467,4 +472,30 @@ async fn epic_split_never_takes_a_claim_from_its_holder() {
         Some("pr"),
         "receiving the cancel never releases prowl's claim"
     );
+}
+
+/// cas-c7c7 (O2): the split prowl receives names soundwave by the machine
+/// label prowl's discovery shows for it, not by its registered machine id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_received_split_names_the_proposer_by_its_machine_label() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let proposed = soundwave
+        .factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1", "theirs": "cas-d1"}))
+        .await
+        .unwrap();
+    let id = split_id(&proposed);
+    assert_eq!(prowl.tick().await.delivered, 1);
+
+    let received = cas_store::get_epic_split(&prowl.machine.cas_dir, &id).unwrap().unwrap();
+    let discovered = match cas::cloud::peers::discover_peers(&prowl.machine.cas_dir, Some("pr")).unwrap() {
+        cas::cloud::peers::PeerDiscovery::Found { peers, .. } => {
+            peers.into_iter().find(|peer| peer.agent_id == "sw").unwrap().machine
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(discovered, "soundwave-host", "discovery shows soundwave's own label");
+    assert_eq!(received.peer_machine, discovered, "the split names soundwave by the same label");
 }

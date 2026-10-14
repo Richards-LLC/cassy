@@ -57,6 +57,9 @@ pub struct CloudCoordinator {
     /// The repo's canonical id, registered in each agent's metadata so peer
     /// supervisors of the same repo can find each other (cas-e477).
     canonical_id: Option<String>,
+    /// The machine label registrations publish; `None` means
+    /// [`crate::cloud::peers::machine_label`] (cas-c7c7).
+    machine_label: Option<String>,
 }
 
 /// Response from agent registration
@@ -172,7 +175,22 @@ impl CloudCoordinator {
             timeout: DEFAULT_TIMEOUT,
             agent_id: None,
             canonical_id: None,
+            machine_label: None,
         })
+    }
+
+    /// Publish `label` as this machine's label instead of the hostname
+    /// (a project's `[cloud] machine_label`, cas-c7c7).
+    pub fn with_machine_label(mut self, label: Option<String>) -> Self {
+        self.machine_label = label.filter(|label| !label.trim().is_empty());
+        self
+    }
+
+    /// The machine label this coordinator publishes.
+    pub fn machine_label(&self) -> String {
+        self.machine_label
+            .clone()
+            .unwrap_or_else(crate::cloud::peers::machine_label)
     }
 
     /// Register agents under this repo identity (cas-e477).
@@ -259,7 +277,7 @@ impl CloudCoordinator {
         let url = format!("{}/api/agents/register", self.config.endpoint);
 
         let factory_id = std::env::var("CAS_FACTORY_ID").ok();
-        let machine = crate::cloud::peers::machine_label();
+        let machine = self.machine_label();
         let mut metadata = crate::cloud::peers::identity_metadata(
             agent,
             self.canonical_id.as_deref(),

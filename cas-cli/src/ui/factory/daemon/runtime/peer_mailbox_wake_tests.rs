@@ -53,6 +53,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         sender_agent_id: "remote".into(),
         sender_name: "far-heron-3".into(),
         sender_machine_id: Some("box-b".into()),
+        sender_label: None,
         sender_session: None,
         body: "can you take cas-1234?".into(),
         summary: None,

@@ -290,11 +290,8 @@ pub fn ingest(
                 local_agent_id: recipient.id.clone(),
                 peer_agent_id: message.sender_agent_id.clone(),
                 peer_name: message.sender_name.clone(),
-                peer_machine: message
-                    .sender_machine_id
-                    .clone()
-                    .filter(|machine| !machine.trim().is_empty())
-                    .unwrap_or_else(|| "unknown".to_string()),
+                // cas-c7c7: the sender's label, as everywhere else.
+                peer_machine: message.sender_machine(),
                 direction: SplitDirection::Incoming,
                 mine: line.peer_takes.clone(),
                 theirs: line.proposer_takes.clone(),
@@ -1071,6 +1068,7 @@ mod tests {
             sender_agent_id: sender.into(),
             sender_name: format!("sup-{sender}"),
             sender_machine_id: Some(format!("machine-{sender}")),
+            sender_label: None,
             sender_session: None,
             body,
             summary: None,

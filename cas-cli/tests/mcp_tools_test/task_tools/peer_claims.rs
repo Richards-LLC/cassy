@@ -23,6 +23,8 @@ const PROJECT: &str = "github.com/acme/widget";
 
 #[derive(Clone, Debug)]
 struct FakeLock {
+    id: String,
+    epoch: u64,
     agent_id: String,
     status: String,
     expires_at: DateTime<Utc>,
@@ -54,14 +56,14 @@ impl Drop for FakeCloud {
 
 fn lock_json(key: &str, lock: &FakeLock) -> serde_json::Value {
     serde_json::json!({
-        "id": format!("lock-{key}"),
+        "id": lock.id,
         "task_id": key,
         "agent_id": lock.agent_id,
         "status": lock.status,
         "expires_at": lock.expires_at.to_rfc3339(),
         "renewed_at": lock.renewed_at.to_rfc3339(),
         "renewal_count": lock.renewal_count,
-        "epoch": 1,
+        "epoch": lock.epoch,
         "claim_reason": lock.claim_reason,
     })
 }
@@ -123,39 +125,29 @@ impl FakeCloud {
         let active = state.locks.get(&key).filter(|lock| lock.status == "active").cloned();
         match (method, action) {
             ("POST", "claim") => match active {
-                // The production contract (petra-stella-cloud #150, PR #153): a
-                // live lock refuses with a body that names the holder and the
-                // expiry and has no `status`; an expired lock is free and a
-                // claim takes it over.
+                // The production contract (petra-stella-cloud #150, PR #153, as
+                // captured by cas-2911): a live lock refuses with the legacy
+                // envelope, naming the holder in both owner_agent_id and
+                // agent_id; a same-agent re-claim returns the lock unextended;
+                // an expired lock is free, and a claim takes it over with the
+                // next epoch.
                 Some(lock) if lock.agent_id != agent_id && lock.expires_at > now => (
                     409,
-                    serde_json::json!({"error": "already_claimed",
-                        "owner_agent_id": lock.agent_id, "agent_id": agent_id,
-                        "expires_at": lock.expires_at.to_rfc3339()}),
+                    serde_json::json!({"status": "conflict", "result": null, "lock": null,
+                        "error": "already_claimed", "owner_agent_id": lock.agent_id,
+                        "agent_id": lock.agent_id, "expires_at": lock.expires_at.to_rfc3339()}),
                 ),
-                Some(lock) if lock.agent_id != agent_id => {
-                    let secs = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
-                    let lock = FakeLock {
-                        agent_id,
-                        status: "active".into(),
-                        expires_at: now + Duration::seconds(secs),
-                        renewed_at: now,
-                        renewal_count: 0,
-                        claim_reason: body["reason"].as_str().map(str::to_string),
-                    };
-                    let json = lock_json(&key, &lock);
-                    state.locks.insert(key, lock);
-                    (200, serde_json::json!({"status": "success", "result": "claimed",
-                        "lock": json, "error": null, "owner_agent_id": null}))
-                }
-                Some(lock) => (
+                Some(lock) if lock.agent_id == agent_id && lock.expires_at > now => (
                     200,
                     serde_json::json!({"status": "success", "result": "claimed",
                         "lock": lock_json(&key, &lock), "error": null, "owner_agent_id": null}),
                 ),
-                None => {
+                _ => {
                     let secs = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
+                    let epoch = state.locks.get(&key).map(|lock| lock.epoch).unwrap_or(0) + 1;
                     let lock = FakeLock {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        epoch,
                         agent_id,
                         status: "active".into(),
                         expires_at: now + Duration::seconds(secs),
@@ -185,7 +177,7 @@ impl FakeCloud {
                     lock.renewed_at = now;
                     lock.renewal_count += 1;
                     let json = lock_json(&key, lock);
-                    (200, serde_json::json!({"status": "success", "lock": json}))
+                    (200, serde_json::json!({"lock": json}))
                 }
                 _ => (404, serde_json::json!({"error": "No active lock found"})),
             },
@@ -859,4 +851,25 @@ async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
     let expected = format!("claim on cas-pb02 lost to bravo-sup@{}; stop work or coordinate", hostname());
     assert!(prompts[0].contains(&expected), "{prompts:?}");
     assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
+}
+
+/// cas-c7c7: this fake's claim routes answer every recorded production
+/// claim exchange (cas-2911 fixtures) with the same status, keys and
+/// literals.
+#[test]
+fn contract_parity_claims_fake_matches_production() {
+    use crate::cloud_contract_replay::{Replay, fixtures};
+    let cloud = FakeCloud::start();
+    let mut replay = Replay::new(&cloud.url, "0c7c7a12");
+    for exchange in fixtures("claims")
+        .into_iter()
+        .filter(|exchange| exchange.path.starts_with("/api/agents/tasks/"))
+    {
+        if exchange.name == "claim_takeover_after_expiry" {
+            // The capture claimed for one second and waited for it to run out.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+        }
+        replay.check(&exchange);
+    }
+    replay.assert_clean();
 }

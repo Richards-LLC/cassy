@@ -26600,6 +26600,136 @@ mod merge_state_gate_tests {
         git(p, &["checkout", "-q", "factory/worker"]);
     }
 
+    /// cas-e6038 fixture: origin/main holds the merged lane `epic/shipped`
+    /// plus a later trunk commit; `epic/open` is unmerged. Returns the repo,
+    /// its bare origin, the shipped tip and the open tip.
+    fn epic_journey_binding_repo_cas_e6038() -> (TempDir, TempDir, String, String) {
+        let (dir, bare) = handoff_repo();
+        let p = dir.path();
+        let commit_file = |name: &str| {
+            std::fs::write(p.join(name), format!("// {name}\n")).unwrap();
+            git(p, &["add", name]);
+            git(p, &["commit", "-q", "-m", name]);
+            rev_parse_local(p, "HEAD")
+        };
+        git(p, &["checkout", "-q", "-b", "epic/shipped", "main"]);
+        let shipped = commit_file("shipped.rs");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "epic/shipped", "-m", "merge shipped epic"]);
+        commit_file("later.rs");
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic/open", "main"]);
+        let open = commit_file("open.rs");
+        git(p, &["checkout", "-q", "main"]);
+        (dir, bare, shipped, open)
+    }
+
+    fn epic_cas_e6038(branch: Option<&str>) -> Task {
+        Task {
+            id: "cas-e6038-epic".to_string(),
+            task_type: TaskType::Epic,
+            status: TaskStatus::Open,
+            branch: branch.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn child_cas_e6038(id: &str, status: TaskStatus, anchor: &str) -> Task {
+        let mut child = Task {
+            id: id.to_string(),
+            status,
+            ..Default::default()
+        };
+        child.deliverables.factory_branch_anchor = Some(anchor.to_string());
+        child
+    }
+
+    fn unread_children_cas_e6038() -> Result<Vec<Task>, String> {
+        panic!("a readable epic tip must not read children")
+    }
+
+    /// cas-e6038: an epic tip contained in origin/main binds to trunk; an
+    /// unmerged tip keeps the exact-tip rule, and a merge only in the local
+    /// trunk does not count while origin is configured.
+    #[test]
+    fn merged_epic_binds_to_trunk_and_unmerged_keeps_exact_tip_cas_e6038() {
+        let (dir, _bare, shipped, open) = epic_journey_binding_repo_cas_e6038();
+        let p = dir.path();
+        let origin_main = rev_parse_local(p, "origin/main");
+        match epic_journey_binding(&epic_cas_e6038(Some("epic/shipped")), None, p, unread_children_cas_e6038) {
+            Ok(EpicJourneyBinding::Trunk { trunk, trunk_tip, contained, basis }) => {
+                assert_eq!(trunk, "origin/main");
+                assert_eq!(trunk_tip, origin_main);
+                assert_eq!(contained, vec![shipped.clone()]);
+                assert!(basis.contains(&shipped), "{basis}");
+            }
+            other => panic!("a merged epic binds to trunk: {other:?}"),
+        }
+        // An explicit commit receipt is the tip it answers for.
+        assert!(matches!(
+            epic_journey_binding(&epic_cas_e6038(None), Some(&shipped), p, unread_children_cas_e6038),
+            Ok(EpicJourneyBinding::Trunk { .. })
+        ));
+        assert_eq!(
+            epic_journey_binding(&epic_cas_e6038(Some("epic/open")), None, p, unread_children_cas_e6038),
+            Ok(EpicJourneyBinding::ExactTip(open.clone()))
+        );
+        git(p, &["merge", "-q", "--no-ff", "epic/open", "-m", "local-only merge"]);
+        assert_eq!(
+            epic_journey_binding(&epic_cas_e6038(Some("epic/open")), None, p, unread_children_cas_e6038),
+            Ok(EpicJourneyBinding::ExactTip(open)),
+            "a local trunk merge must not masquerade as landed"
+        );
+        assert_eq!(
+            epic_journey_binding(&epic_cas_e6038(None), Some("f".repeat(40).as_str()), p, unread_children_cas_e6038),
+            Err("epic journey tip is unreadable".to_string())
+        );
+    }
+
+    /// cas-e6038: a branchless epic (or one whose lane was deleted) with
+    /// terminal children binds to trunk commits containing every child
+    /// anchor that trunk holds; with none, trunk membership alone binds.
+    #[test]
+    fn branchless_epic_binds_to_child_anchors_in_trunk_cas_e6038() {
+        let (dir, _bare, shipped, open) = epic_journey_binding_repo_cas_e6038();
+        let p = dir.path();
+        let children = || {
+            Ok(vec![
+                child_cas_e6038("cas-e6038-a", TaskStatus::Closed, &shipped),
+                child_cas_e6038("cas-e6038-b", TaskStatus::Cancelled, &open),
+                child_cas_e6038("cas-e6038-c", TaskStatus::Closed, &"f".repeat(40)),
+            ])
+        };
+        match epic_journey_binding(&epic_cas_e6038(None), None, p, children) {
+            Ok(EpicJourneyBinding::Trunk { trunk, contained, basis, .. }) => {
+                assert_eq!(trunk, "origin/main");
+                assert_eq!(contained, vec![shipped.clone()]);
+                assert!(basis.starts_with("branchless epic with 3 terminal"), "{basis}");
+                assert!(basis.contains("cas-e6038-b, cas-e6038-c"), "{basis}");
+            }
+            other => panic!("a branchless epic binds to its children's trunk anchors: {other:?}"),
+        }
+        // A deleted lane with only off-trunk anchors: any trunk commit binds.
+        match epic_journey_binding(&epic_cas_e6038(Some("epic/deleted")), None, p, || {
+            Ok(vec![child_cas_e6038("cas-e6038-b", TaskStatus::Closed, &open)])
+        }) {
+            Ok(EpicJourneyBinding::Trunk { contained, basis, .. }) => {
+                assert!(contained.is_empty());
+                assert!(basis.starts_with("epic lane is unreadable"), "{basis}");
+                assert!(basis.contains("any origin/main commit stands in"), "{basis}");
+            }
+            other => panic!("trunk membership binds when no anchor is in trunk: {other:?}"),
+        }
+        let refused = epic_journey_binding(&epic_cas_e6038(None), None, p, || {
+            Ok(vec![child_cas_e6038("cas-e6038-open", TaskStatus::InProgress, &shipped)])
+        })
+        .unwrap_err();
+        assert!(refused.contains("cas-e6038-open is not terminal"), "{refused}");
+        let refused = epic_journey_binding(&epic_cas_e6038(None), None, p, || Err("store down".to_string()))
+            .unwrap_err();
+        assert!(refused.contains("store down"), "{refused}");
+    }
+
     /// GH #1004 regression: worker merges to the target, transfers the task
     /// to the supervisor, supervisor closes. The gate must measure the
     /// worker's branch (merged) — not `factory/<supervisor>`, which does not

@@ -103,6 +103,20 @@ path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     cp "$script_dir/release-binary-artifact.py" "$repo/scripts/release-binary-artifact.py"
+    # cas-e719: the smoke itself has its own self-test and real-binary test;
+    # here the row must hand it this tree's recorded release binary.
+    cat >"$repo/scripts/check-operator-launch.sh" <<'EOF_OPERATOR_LAUNCH'
+#!/usr/bin/env bash
+[[ ! -f "$1" ]] || sha256sum <"$1" >>"${GATE_FIXTURE_OPERATOR_LAUNCH_LOG:-/dev/null}"
+[[ -z "${GATE_FIXTURE_SPAN_LOG:-}" ]] || {
+  printf 'start operator-launch-smoke %s\n' "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+  printf 'end operator-launch-smoke %s\n' "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+}
+[[ -f "$1" && "${GATE_FIXTURE_OPERATOR_LAUNCH_FAIL:-}" != 1 ]] || {
+  echo 'FAIL operator: cas factory --check-launch (fixture lockout)'; exit 1;
+}
+echo 'PASS operator launch smoke: fixture'
+EOF_OPERATOR_LAUNCH
     printf 'fixture license\n' >"$repo/LICENSE"
     cp "$script_dir/release-test-env.sh" "$script_dir/release-integration-gates.py" "$repo/scripts/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
@@ -559,7 +573,7 @@ fi
 # cas-dcb4: the gate schedules independent rows concurrently under declared
 # resources. Spans come from the fake Cargo, visual-QA and script fixtures;
 # the receipt, timing.tsv and failure reporting keep canonical row order.
-readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,working-tree'
+readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,working-tree'
 
 # span_check <log> overlap A B | disjoint A B... | max | wall
 span_check() {
@@ -622,6 +636,21 @@ test_concurrency() (
         ok "independent rows run concurrently (peak $(span_check "$spans" max) timed rows)"
     else
         bad "independent rows did not overlap: $(cat "$spans")"
+    fi
+    # cas-e719/cas-dcb4: the smoke extracts the archive the ISA row records,
+    # so it starts only after that row passed.
+    if python3 - "$spans" <<'PY_AFTER'
+import sys
+spans = {}
+for line in open(sys.argv[1]):
+    kind, name, at = line.split()
+    spans.setdefault(name, {})[kind] = float(at)
+assert spans["operator-launch-smoke"]["start"] >= spans["release-binary-isa"]["end"], spans
+PY_AFTER
+    then
+        ok 'operator-launch-smoke starts only after release-binary-isa passed'
+    else
+        bad "operator-launch-smoke overtook release-binary-isa: $(cat "$spans")"
     fi
     if span_check "$spans" disjoint ci-script-tests fixture-paths nextest archive-build archive-run; then
         ok 'host-test rows (script tier, fixture paths, nextest, archive) never overlap'
@@ -701,6 +730,19 @@ PY_WRITERS
         ok 'cancelled rows leave no Cargo process behind'
     else
         bad "cancelled row processes survived: $(ps -A -o pid=,args= | grep -F "$repo/scripts/cargo-stub" | grep -v grep)"
+    fi
+
+    # A failed ISA row aborts the gate; the smoke that needs its archive
+    # never starts and reports nothing.
+    : >"$spans"
+    output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" \
+        run_gate "$repo" GATE_FIXTURE_ISA_BUILD_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    if grep -qE '^RELEASE GATE FAILED: .*release-binary-isa.* \(release binary ISA audit refused before pr-body/pipeline\)$' <<<"$output" \
+        && ! grep -qE '^(PASS|FAIL) operator-launch-smoke' <<<"$output" \
+        && ! grep -q 'operator-launch-smoke' "$spans"; then
+        ok 'a failed release-binary-isa leaves operator-launch-smoke unstarted'
+    else
+        bad "operator-launch-smoke ran without a passing ISA row: $output"
     fi
 
     # A failing ordinary row still fails the gate without cancelling others.
@@ -792,7 +834,7 @@ assert_named_failure() {
 assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
-        version-literals release-binary-isa fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
+        version-literals release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
         journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
@@ -861,6 +903,15 @@ if grep -qF "REUSE release binary tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
     ok 'release-binary-isa builds in the persistent release target and records the audited archive'
 else
     bad "release-binary-isa did not record a reusable archive: $verdict"
+fi
+: >"$tmp/operator-launch.log"
+output="$(GATE_FIXTURE_OPERATOR_LAUNCH_LOG="$tmp/operator-launch.log" \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only operator-launch-smoke 2>&1 || true)"
+if grep -qF 'PASS operator-launch-smoke' <<<"$output" \
+    && [[ "$(cat "$tmp/operator-launch.log")" == "$(sha256sum <"$repo/.cas/release-binary/target/x86_64-unknown-linux-gnu/release/cas")" ]]; then
+    ok 'operator-launch-smoke smokes the exact release binary the ISA row recorded'
+else
+    bad "operator-launch-smoke did not receive the recorded release binary: $output"
 fi
 for control in GATE_FIXTURE_ISA_BUILD_FAIL GATE_FIXTURE_ISA_MISSING; do
     output="$(run_gate "$repo" "$control" "$repo/scripts/release-gate.sh" 9.99.7 --only release-binary-isa 2>&1 || true)"
@@ -1095,6 +1146,7 @@ fi
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths
+run_scenario operator-launch-run GATE_FIXTURE_OPERATOR_LAUNCH_FAIL operator-launch-smoke
 run_scenario visual-qa-run GATE_FIXTURE_HUB_WEB_VISUAL_QA_FAIL hub-web-visual-qa
 
 # The normal visual-QA scenarios above inject a runner stub so the self-test

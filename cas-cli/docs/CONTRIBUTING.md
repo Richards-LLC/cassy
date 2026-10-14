@@ -770,6 +770,11 @@ cargo-zigbuild and objdump for the ISA audit; Zig is keyed by its bytes). A full
 runs `assembly-proof.py check-row` before the row cache: a hit records the row
 `REUSED` with its source SHA, and a miss prints the differing key and runs the
 row as before. `--only` and a no-reuse full gate never consume a row proof.
+A `release-binary-isa` hit, from either source, counts only while
+`scripts/release-binary-artifact.py verify` finds this tree's audited archive
+(cas-c096). release.sh reuses that archive instead of rebuilding the tree, so
+without it the row rebuilds in its persistent release target
+(`<main checkout>/.cas/release-binary/target`).
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.

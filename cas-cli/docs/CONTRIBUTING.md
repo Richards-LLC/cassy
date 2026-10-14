@@ -1057,10 +1057,16 @@ Standing operator policy: factory/* pushes and epic-targeted PRs run
 import/dependency-selected tests in Scoped Validation. Protected-default PRs run
 only the required Fast Validation and macOS Check admission lanes. The release
 merge queue runs the complete workspace suite on its synthetic tree once; when its
-successful tree is pushed unchanged to main, the main-push Fast Validation and
-macOS lanes reuse that receipt and name the validating run. Direct pushes,
-bypass merges, receipt lookup failures, and changed trees still run those
-lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
+successful tree is pushed unchanged to main, the main-push Fast Validation lane
+reuses that receipt and names the validating run. The main-push macOS Check
+still runs, after the merge, because only main's Darwin cargo and sccache entries
+are readable by later queue entries. Without them every queue entry compiled
+cold, taking 12–14 minutes and making macOS the queue's slowest required check.
+The trade-off is one post-merge macOS compile per Rust-touching main push.
+Only main saves the macOS cargo cache, so queue and tag refs don't evict it
+(see [branch protection](../../docs/branch-protection/README.md#macos-check-latency-a-warm-cache-from-main)).
+Direct pushes, bypass merges, receipt lookup failures, and changed trees still
+run every lane. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by

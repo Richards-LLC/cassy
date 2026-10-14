@@ -1748,13 +1748,21 @@ if [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
 fi
 # Push only the branch you are on, to the same name: a per-task branch never
 # advances the frozen factory/<name>, and factory/<name> never another ref.
+refs=\"\"
 while read local_ref local_sha remote_ref remote_sha; do
   if [ \"$remote_ref\" != \"refs/heads/$branch\" ]; then
     record_push_rejection \"$remote_ref\"
     echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch.\" >&2
     exit 1
   fi
+  refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha
+\"
 done
+# cas-043b: the repository's own gate refuses a tip without a fast-rows PASS.
+fast_rows=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/fast-rows-pre-push.sh\"
+if [ -x \"$fast_rows\" ]; then
+  printf '%s' \"$refs\" | \"$fast_rows\" \"$@\" || exit 1
+fi
 exit 0
 ";
 
@@ -2025,15 +2033,22 @@ exit 0
         }
 
         let push_hook_path = private_hooks_dir.join("pre-push");
-        if push_hook_path.exists()
-            && std::fs::read_to_string(&push_hook_path)
-                .unwrap_or_default()
-                .contains("Cassy factory worker push guard")
-        {
+        let installed_push_guard = std::fs::read_to_string(&push_hook_path).unwrap_or_default();
+        if installed_push_guard.contains("fast-rows-pre-push.sh") {
             tracing::debug!(
                 "Cassy pre-push guard already installed at {:?}",
                 push_hook_path
             );
+        } else if installed_push_guard.contains("Cassy factory worker push guard") {
+            // cas-043b: refresh an older guard in place, keeping its chain.
+            let chained = private_hooks_dir.join("pre-push-project-hook");
+            if chained.exists() {
+                let existing = std::fs::read_to_string(&chained)?;
+                Self::write_push_guard_alongside(&private_hooks_dir, &push_hook_path, &existing)?;
+            } else {
+                std::fs::write(&push_hook_path, Self::WORKER_PRE_PUSH_HOOK)?;
+            }
+            tracing::info!("Refreshed Cassy worker pre-push guard at {:?}", push_hook_path);
         } else {
             let preexisting_project_hook = effective_hooks_dir.join("pre-push");
             if preexisting_project_hook.exists() {
@@ -4344,6 +4359,60 @@ mod tests {
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)
             .output();
+    }
+
+    /// cas-043b: a worker push runs the repository's fast-rows gate with git's
+    /// ref lines, and its refusal stops the push. An older installed guard is
+    /// refreshed to the gating version on the next install.
+    #[test]
+    fn worker_push_runs_the_repository_fast_rows_gate_cas_043b() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+        let hook_cas_root = tempfile::tempdir().unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
+        };
+        let gate = repo.join("scripts/fast-rows-pre-push.sh");
+        std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
+        std::fs::write(&gate, "#!/bin/sh\ncat > \"$(git rev-parse --git-common-dir)/gate-stdin\"\n\
+            echo 'FIX version-literals: fixture refusal' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(git(repo, &["add", "scripts"]).status.success());
+        assert!(git(repo, &["commit", "-qm", "ship the push gate"]).status.success());
+        let remote = repo.join("remote.git");
+        assert!(git(repo, &["init", "-q", "--bare", &remote.to_string_lossy()]).status.success());
+        git(repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
+        let wt = repo.parent().unwrap().join(format!(
+            "{}-fast-rows-wt",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(git(repo, &["worktree", "add", "-q", "-b", "factory/w", &wt.to_string_lossy(), "main"]).status.success());
+
+        // A guard from before cas-043b is refreshed in place.
+        TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
+        let hooks = git(&wt, &["rev-parse", "--path-format=absolute", "--git-path", "hooks"]);
+        let pre_push = std::path::PathBuf::from(String::from_utf8_lossy(&hooks.stdout).trim()).join("pre-push");
+        std::fs::write(&pre_push, "#!/bin/sh\n# Cassy factory worker push guard (old)\nexit 0\n").unwrap();
+        TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
+        assert_eq!(std::fs::read_to_string(&pre_push).unwrap(), TeamsManager::WORKER_PRE_PUSH_HOOK);
+
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "factory/w"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(!push.status.success());
+        assert!(String::from_utf8_lossy(&push.stderr).contains("FIX version-literals: fixture refusal"));
+        let tip = String::from_utf8_lossy(&git(&wt, &["rev-parse", "HEAD"]).stdout).trim().to_string();
+        let stdin = std::fs::read_to_string(repo.join(".git/gate-stdin")).unwrap();
+        assert!(stdin.contains(&format!("refs/heads/factory/w {tip} refs/heads/factory/w ")), "{stdin}");
+        assert!(git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]).stdout.is_empty());
+        let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }
 
     /// GH #339: even an explicit refspec must not let a foreign checkout HEAD

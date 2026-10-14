@@ -22,7 +22,7 @@ readonly -a gate_check_ids=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src builtin-projections-src
+    fixture-paths-src builtin-projections-src call-shapes
 )
 
 usage() {
@@ -1819,6 +1819,16 @@ PY
     printf 'builtin-projections-src: %s matches %s\n' "$projection" "$body"
 }
 
+# cas-043b: suggested MCP calls in builtins and runtime templates name accepted
+# actions and fields (the lint's only implementation; a few seconds, no build).
+check_call_shapes() {
+    if ! lane_touches cas-cli/src crates scripts/check-call-shapes.py scripts/mcp-call-surface.json; then
+        printf 'call-shapes: no cas-cli/src, crate or call-surface change\n'
+        return 0
+    fi
+    python3 scripts/check-call-shapes.py .
+}
+
 check_ci_script_tests_changed() (
     if [[ "$fast_rows" != true ]]; then
         printf 'ci-script-tests-changed: the full gate runs every entry in ci-script-tests\n'
@@ -1987,6 +1997,8 @@ run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src,
     check_fixture_paths_src
 run_check builtin-projections-src 'task-verifier root projection equals its embedded body; no .md Codex agents (lane change only in fast mode)' \
     check_builtin_projections_src
+run_check call-shapes 'python3 scripts/check-call-shapes.py (builtin and runtime MCP calls match scripts/mcp-call-surface.json)' \
+    check_call_shapes
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree

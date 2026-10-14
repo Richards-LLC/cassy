@@ -99,8 +99,10 @@ class FastRows(unittest.TestCase):
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
-                       "check-migration-registry.py", "ci-script-tests-for-diff.py"):
+                       "check-migration-registry.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
+        (self.repo / "scripts/fast-rows-pre-push.sh").chmod(0o755)
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
         self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
         self.write("cas-cli/src/builtins/skills/example/SKILL.md", EXAMPLE_SKILL)
@@ -168,7 +170,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 19)
+        self.assertEqual(len(proof['rows']), 20)
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):
@@ -198,7 +200,8 @@ class FastRows(unittest.TestCase):
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
                     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
-                    "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src"):
+                    "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
+                    "call-shapes"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -599,6 +602,48 @@ sleep 2
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
         self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
+
+    def test_a_call_shape_error_in_a_builtin_skill_is_refused_with_its_line_cas_043b(self):
+        # cas-0f05's CI red: a spaced placeholder hid the reminder's message.
+        skill = EXAMPLE_SKILL + ("coordination action=remind remind_event=ci_completed \\\n"
+                                 "  remind_filter='{\"sha\":\"<full 40-char sha>\"}' \\\n"
+                                 '  remind_message="CI finished"\n')
+        start = time.monotonic()
+        self.refused_at_park("call-shapes", {"cas-cli/src/builtins/skills/example/SKILL.md": skill},
+                             "cas-cli/src/builtins/skills/example/SKILL.md:6: coordination action=remind: missing remind_message")
+        self.assertLess(time.monotonic() - start, LANE.fast_rows_budget())
+
+    def push(self, **env):
+        return command(self.repo, "git", "push", "origin", "HEAD:refs/heads/factory/lane",
+                       env=dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"), **env))
+
+    def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        self.write(".git/hooks/pre-push", '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/scripts/fast-rows-pre-push.sh" "$@"\n')
+        (self.repo / ".git/hooks/pre-push").chmod(0o755)
+        self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
+        self.commit()
+        refused = self.push()
+        self.assertNotEqual(refused.returncode, 0, refused.stderr)
+        self.assertIn("FIX version-literals: ", refused.stderr)
+        self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
+        self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
+
+        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue")
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        log = (self.repo / ".git/cas/fast-rows/overrides.log").read_text()
+        self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)
+
+        # A same-tip PASS receipt makes the next push free: no rows run.
+        self.write("cas-cli/tests/sample.rs", "#[test]\nfn sample() {}\n")
+        self.commit()
+        self.assertEqual(self.fast().returncode, 0)
+        repeat = self.push()
+        self.assertEqual(repeat.returncode, 0, repeat.stderr)
+        self.assertNotIn("running fast rows", repeat.stderr)
 
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
         body = "Verify the task.\n"

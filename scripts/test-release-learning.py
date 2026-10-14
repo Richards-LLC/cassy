@@ -126,6 +126,85 @@ cut_run_stage receipts
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.log.read_bytes(), before)
 
+    # cas-9734: a lesson learned twice is not sticking. A third learn= mapping
+    # or failure-log entry needs an open P0/P1 task that removes the cause.
+    def recurring_log(self):
+        self.log.write_text(
+            '- 2026-10-01 — **assemble-stale-base** — Symptom: first Root cause: fixture\n'
+            '- 2026-10-05 — **assemble-stale-base** — Symptom: second Root cause: fixture\n')
+
+    def cause_tasks(self):
+        database = self.repo / 'tasks.db'
+        with sqlite3.connect(database) as connection:
+            connection.execute('CREATE TABLE tasks(id TEXT, status TEXT, priority INTEGER)')
+            connection.executemany('INSERT INTO tasks VALUES (?,?,?)', [
+                ('cas-p1', 'open', 1), ('cas-p0', 'in_progress', 0), ('cas-p3', 'open', 3),
+                ('cas-done', 'closed', 1)])
+        self.env['CAS_RELEASE_LEARNING_TASK_DB'] = str(database)
+
+    def test_recurring_lesson_mapping_needs_an_open_p1_cause_task(self):
+        self.recurring_log()
+        self.cause_tasks()
+        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('assemble-stale-base has been learned 2 times', result.stdout)
+        self.assertIn('--task "${RELEASE_CAUSE_TASK:?', result.stdout)
+        for task, expected in [('cas-p3', 1), ('cas-done', 1), ('cas-none', 1), ('cas-p1', 0), ('cas-p0', 0)]:
+            (self.run_dir / 'blockers.log').write_text(f'assemble learn=assemble-stale-base task={task}\n')
+            self.assertEqual(self.check().returncode, expected, (task, self.check().stdout))
+        # The row's own --learn entry is not a prior learning; a forged marker gains one, not a pass.
+        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base recurrence=2\n')
+        self.assertEqual(self.check().returncode, 0)
+        self.log.write_text(self.log.read_text() + '- 2026-10-09 — **assemble-stale-base** — Symptom: third Root cause: fixture\n')
+        self.assertNotEqual(self.check().returncode, 0)
+        # A first-time lesson still maps by itself.
+        self.log.write_text('- 2026-10-01 — **assemble-stale-base** — Symptom: once Root cause: fixture\n')
+        (self.run_dir / 'blockers.log').write_text('assemble learn=assemble-stale-base\n')
+        self.assertEqual(self.check().returncode, 0)
+
+    def test_learn_refuses_a_third_entry_without_cause_task(self):
+        shutil.copy(HELPER, self.repo / 'scripts/release-learning.py')
+        self.recurring_log()
+        self.cause_tasks()
+        (self.run_dir / 'blockers.log').write_text('assemble\n')
+        before = self.log.read_bytes()
+        for extra in ([], ['--task', 'cas-p3']):
+            result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'stale base again',
+                                  'rebase skipped', 'assemble-stale-base', *extra,
+                                  '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('has been learned 2 times', result.stdout)
+            self.assertEqual(self.log.read_bytes(), before)
+            self.assertEqual((self.run_dir / 'blockers.log').read_text(), 'assemble\n')
+        result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'stale base again',
+                              'rebase skipped', 'assemble-stale-base', '--task', 'cas-p1',
+                              '--run-dir', str(self.run_dir), '--evidence', 'blockers.log:1')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        entry = self.log.read_text().splitlines()[-1]
+        self.assertIn('Symptom: stale base again Root cause: rebase skipped Recurrence: 3. Rung: gate. '
+                      'Task: cas-p1. Release: operator-reported.', entry)
+        self.assertEqual((self.run_dir / 'blockers.log').read_text(),
+                         'assemble learn=assemble-stale-base recurrence=3 task=cas-p1\n')
+        self.assertEqual(self.check().returncode, 0)
+
+    def test_learn_records_recurrence_and_rung(self):
+        shutil.copy(HELPER, self.repo / 'scripts/release-learning.py')
+        result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'literal version',
+                              'no env macro', 'version-literals', '--rung', 'preflight')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Recurrence: 1. Rung: preflight. Release:', self.log.read_text())
+        result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'slack route',
+                              'assumed', 'manual:slack-route')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('**manual:slack-route** — Symptom: slack route Root cause: assumed '
+                      'Recurrence: 1. Rung: prose.', self.log.read_text())
+        before = self.log.read_bytes()
+        for args in (['manual:slack-route', '--rung', 'gate'], ['version-literals', '--rung', 'memo']):
+            result = self.command('bash', 'scripts/release-gate.sh', '--learn', 'x', 'y', *args)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.log.read_bytes(), before)
+
     def warn(self):
         return self.command('python3', str(HELPER), '--warn-tooling', str(self.repo))
 

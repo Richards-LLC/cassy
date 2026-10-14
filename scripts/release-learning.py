@@ -12,6 +12,11 @@ import sys
 FILES = ('blockers.log', 'supervisor-interventions.md')
 STAGES = set('preflight assemble prep ledger gate pr-body pipeline publish post-publication announce report receipts host-update'.split())
 LOG = 'cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
+# cas-9734: a lesson learned this many times is not sticking. Another learn=
+# mapping is bookkeeping; the rescue needs an open P0/P1 task whose
+# acceptance removes the cause.
+RECURRENCE_LIMIT = 2
+CAUSE_TASK_PRIORITY = 1
 
 
 def git(root, *args):
@@ -26,6 +31,20 @@ def executable_lessons(root):
         return registered & learned
     except (OSError, TypeError):
         return set()
+
+
+def failure_counts(root):
+    """Failure-log entries per check id or manual: class (the recurrence count)."""
+    counts = {}
+    try:
+        text = (root / LOG).read_text()
+    except OSError:
+        return counts
+    for line in text.splitlines():
+        match = re.match(r'-\s.*?\*\*((?:manual:)?[a-z0-9-]+)\*\*', line)
+        if match:
+            counts[match[1]] = counts.get(match[1], 0) + 1
+    return counts
 
 
 def task_database(root):
@@ -45,6 +64,24 @@ def task_open(root, identifier):
         return False
 
 
+def cause_task(root, identifier):
+    """An open P0/P1 task: the only answer a recurring lesson accepts."""
+    try:
+        with sqlite3.connect(task_database(root), uri=True) as connection:
+            row = connection.execute('SELECT status, priority FROM tasks WHERE id = ?',
+                                     (identifier,)).fetchone()
+        return bool(row and row[0] in ('open', 'in_progress', 'blocked', 'awaiting_merge')
+                    and row[1] is not None and int(row[1]) <= CAUSE_TASK_PRIORITY)
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return False
+
+
+def recurrence_refusal(check_id, count):
+    return (f'{check_id} has been learned {count} times (limit {RECURRENCE_LIMIT}); another learn= '
+            f'mapping is bookkeeping. Open a P0/P1 task whose acceptance removes the cause '
+            f'(a default or auto-fix first, then a seconds-long preflight) and pass task=<id>')
+
+
 def evidence_rows(run_dir):
     for filename in FILES:
         path = run_dir / filename
@@ -59,22 +96,34 @@ def evidence_rows(run_dir):
 
 def check(root, run_dir):
     lessons = executable_lessons(root)
+    counts = failure_counts(root)
     failures = 0
     for filename, number, line in evidence_rows(run_dir):
         learned = re.findall(r'(?:^|\s)learn=([a-z0-9:-]+)(?=\s|$)', line)
         tasks = re.findall(r'(?:^|\s)task=(cas-[a-z0-9]+)(?=\s|$)', line)
         stages = (line.split()[0].split(',') if filename == 'blockers.log' else [])
         valid_stage = not stages or all(stage in STAGES for stage in stages)
-        if valid_stage and (any(row in lessons for row in learned) or any(task_open(root, task) for task in tasks)):
+        # --learn marks a row whose rescue appended its own failure-log entry
+        # (recurrence=N); that entry is not a prior learning of the lesson.
+        own = 1 if re.search(r'(?:^|\s)recurrence=[0-9]+(?=\s|$)', line) else 0
+        recurring = [row for row in learned if counts.get(row, 0) - own >= RECURRENCE_LIMIT]
+        if recurring:
+            if valid_stage and any(cause_task(root, task) for task in tasks):
+                continue
+        elif valid_stage and (any(row in lessons for row in learned) or any(task_open(root, task) for task in tasks)):
             continue
         failures += 1
         print(f'ERROR receipts release-learning: unlearned {filename}:{number}: {line}', file=sys.stderr)
+        for row in recurring:
+            print(f'  recurring lesson: {recurrence_refusal(row, counts[row] - own)}', file=sys.stderr)
         # The cause and row must be supplied deliberately. Shell parameter
         # checks prevent this printed command from learning placeholder prose.
-        symptom = re.sub(r'\s+(?:learn|task)=\S+', '', line).strip()
+        symptom = re.sub(r'\s+(?:learn|task|recurrence)=\S+', '', line).strip()
         command = ('scripts/release-gate.sh --learn ' + shlex.quote(symptom)
                    + ' "${RELEASE_FAILURE_CAUSE:?set diagnosed root cause}"'
                    + ' "${RELEASE_FAILURE_CHECK:?set executable gate row id}"'
+                   + (' --task "${RELEASE_CAUSE_TASK:?set open P0/P1 task that removes the cause}"'
+                      if recurring else '')
                    + ' --run-dir ' + shlex.quote(str(run_dir))
                    + ' --evidence ' + shlex.quote(f'{filename}:{number}'))
         print(f'  → {command}', file=sys.stderr)
@@ -84,9 +133,23 @@ def check(root, run_dir):
     return 0
 
 
-def map_rows(root, run_dir, check_id, references, validate_only=False):
+def require_cause_task(root, check_id, task, previous=None):
+    """Refuse a recurring lesson without an open P0/P1 cause-removing task.
+
+    `previous` is the count before this --learn appended its own entry.
+    """
+    count = failure_counts(root).get(check_id, 0) if previous is None else previous
+    if count >= RECURRENCE_LIMIT and not (task and cause_task(root, task)):
+        detail = f' ({task} is not an open P0/P1 task)' if task else ''
+        raise ValueError(recurrence_refusal(check_id, count) + detail)
+    if task and not task_open(root, task):
+        raise ValueError(f'{task} is not an open task')
+
+
+def map_rows(root, run_dir, check_id, references, validate_only=False, task=None, previous=None):
     if not validate_only and check_id not in executable_lessons(root):
         raise ValueError(f'{check_id} has no failure-log entry with an executable gate row')
+    require_cause_task(root, check_id, task, previous)
     changes = {}
     for reference in references:
         filename, number = reference.rsplit(':', 1)
@@ -97,7 +160,10 @@ def map_rows(root, run_dir, check_id, references, validate_only=False):
         index = int(number) - 1
         if index >= len(rows) or not rows[index].strip() or rows[index].lstrip().startswith('#'):
             raise ValueError(f'missing evidence row: {reference}')
-        rows[index] = re.sub(r'\s+learn=\S+', '', rows[index]) + f' learn={check_id}'
+        stripped = r'\s+(?:learn|task|recurrence)=\S+' if task else r'\s+(?:learn|recurrence)=\S+'
+        rows[index] = (re.sub(stripped, '', rows[index]) + f' learn={check_id}'
+                       + (f' recurrence={previous + 1}' if previous is not None else '')
+                       + (f' task={task}' if task else ''))
     if validate_only:
         return
     # Validate all requested rows before writing any annotation.
@@ -220,7 +286,24 @@ def main():
         if mode == '--check':
             return check(root, Path(args[0]))
         if mode in ('--map', '--validate-map'):
-            map_rows(root, Path(args[0]), args[1], args[2:], mode == '--validate-map')
+            options = {}
+            references = []
+            rest = list(args[2:])
+            while rest:
+                item = rest.pop(0)
+                if item in ('--task', '--previous') and rest:
+                    options[item[2:]] = rest.pop(0)
+                else:
+                    references.append(item)
+            previous = int(options['previous']) if 'previous' in options else None
+            map_rows(root, Path(args[0]), args[1], references, mode == '--validate-map',
+                     options.get('task') or None, previous)
+            return 0
+        if mode == '--recurrence':
+            print(failure_counts(root).get(args[0], 0))
+            return 0
+        if mode == '--require-cause-task':
+            require_cause_task(root, args[0], args[1] if len(args) > 1 and args[1] else None)
             return 0
         if mode == '--warn-tooling':
             warn_tooling(root)

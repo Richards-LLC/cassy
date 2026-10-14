@@ -53,6 +53,8 @@ class AdmissionTests(unittest.TestCase):
         self.events = []
         self.env = dict(os.environ)
         self.env.pop(host.LEASE_ENV, None)
+        # Local-worker behaviour unless a test opts into the CI case (cas-f632).
+        self.env.pop('GITHUB_ACTIONS', None)
         # Never start or contact the host's real compiler-cache server.
         for key in ('RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER'):
             self.env.pop(key, None)
@@ -722,6 +724,29 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
              self.assertRaisesRegex(ValueError, 'memory headroom'):
             worker.run([sys.executable, '-c', 'import time;time.sleep(30)'], env=self.env, directory=self.pool)
         with self.admit('worker'): pass  # aborted command did not strand the lease
+
+    # cas-f632: merge-group runs 38639494500 and 38642065261 were stopped at
+    # this headroom mid-journeys on the self-hosted runner and ejected PR #1198.
+    def test_cas_f632_ci_job_under_low_headroom_runs_to_completion(self):
+        snapshots = iter([HIGH] + [dict(HIGH, available_bytes=17*GIB, budget_bytes=GIB)] * 1000)
+        ci = dict(self.env, GITHUB_ACTIONS='true')
+        with mock.patch.object(worker.proof, 'memory_budget', side_effect=lambda _: next(snapshots)), \
+             mock.patch.object(worker.proof, 'positive_knob', return_value=None):
+            started = time.monotonic()
+            code = worker.run([sys.executable, '-c', 'import time;time.sleep(2.5)'], env=ci, directory=self.pool)
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(time.monotonic() - started, 2.5, 'the guard polled while the job ran')
+        with self.admit('worker'): pass
+
+    def test_cas_f632_only_github_actions_true_is_a_ci_job(self):
+        for value in ('false', '1', ''):
+            with self.subTest(GITHUB_ACTIONS=value):
+                snapshots = iter([HIGH, dict(HIGH, budget_bytes=GIB)])
+                with mock.patch.object(worker.proof, 'memory_budget', side_effect=lambda _: next(snapshots)), \
+                     mock.patch.object(worker.proof, 'positive_knob', return_value=None), \
+                     self.assertRaisesRegex(ValueError, 'assembly memory headroom'):
+                    worker.run([sys.executable, '-c', 'import time;time.sleep(30)'],
+                               env=dict(self.env, GITHUB_ACTIONS=value), directory=self.pool)
 
     # cas-833e: a background assembly proof held intent for its whole run, and
     # QA browser runs timed out at 600 s. One bounded "taste lane" run is

@@ -118,6 +118,11 @@ comes from the token-owned agent list, independently of caller session lookup.
 Operator CLI identity uses the same session/ancestor-PID lookup as status.
 Peer discovery also excludes every agent registered in this project's local
 agent store, so a plain terminal never counts this clone's supervisors as peers.
+The view fits 72 columns, in this order: caller presence, peers and their work,
+recorded epic splits, then mailbox health. JSON exposes `epic_splits` separately
+from the health-only `mailbox_status`. Each split retains its stored `state` and
+an effective `display_state` (`expired` for a lapsed pending proposal), its task
+shares, peer, reason, expiry and decision time.
 
 ## Adding Features
 

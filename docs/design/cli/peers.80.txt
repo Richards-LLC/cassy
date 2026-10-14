@@ -28,4 +28,15 @@ sup-prowl [live]
     prowl-worker-3 [active]
       Branch factory/prowl-worker-3
       Tasks none
-Peer mailbox: not receiving: no factory daemon session.
+Epic splits:
+  split-accepted [accepted, outgoing] epic cas-shared
+    with sup-prowl@prowl
+    mine cas-mine
+    theirs cas-theirs
+    decided 10-14 00:07 UTC | Agreed ownership
+  split-expired [expired, outgoing] epic cas-shared
+    with sup-prowl@prowl
+    mine cas-mine
+    theirs cas-theirs
+    Agreed ownership
+Peer mailbox: not receiving: daemon has not reported a mailbox poll.

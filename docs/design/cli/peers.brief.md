@@ -16,10 +16,10 @@ terminal-qa: PASS peers-long · 12 runs · 0 fail · 0 warn · 0 allowed · /hom
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
-| Hierarchy | 4 | Presence is first as required by the supervisor; peer/live count follows, then scope and details, with mailbox last. |
+| Hierarchy | 4 | Presence is first as required by the supervisor; peer/live count follows, then scope and details, recorded splits, with mailbox last. |
 | Fit | 4 | Supervisor groups separate identity, claims and live workers; the summary omits expanded work. |
-| Craft | 4 | Claim ages align right with one seconds heading; presence and mailbox use the shared status messages; long values truncate with a JSON escape. |
+| Craft | 4 | Claim ages align right with one seconds heading; presence, splits and mailbox use shared renderers; all lines fit 72 columns and long values name the JSON escape. |
 | Theme safety | 5 | Both gates pass dark, light and Solarized, NO_COLOR and C locale without colors or controls. |
-| Machine contract | 5 | One typed document preserves raw lock keys and owner IDs; human text uses plain task IDs/names; failure JSON is valid and exits nonzero. |
+| Machine contract | 5 | One typed document preserves raw lock keys and owner IDs; split raw/effective states and shares are structured, mailbox health separate; failure JSON is valid and exits nonzero. |
 
-Scored by golden-gazelle-73 on 2026-10-13 at d167482b1. Captures use the actual built CLI with an isolated fake cloud; production proof is cas-c7c7.
+Scored by golden-gazelle-73 on 2026-10-13 at f0b866541. Captures use the actual built CLI with an isolated fake cloud and local supervisor/split records; independent final production re-check belongs to subtle-cobra-75.

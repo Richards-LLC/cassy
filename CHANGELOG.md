@@ -15,6 +15,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `scripts/test-hub-web-gate.py` pins the step's wiring instead, and the
   release train still runs the full journeys before publication.
 
+### Fixed — the memory guard no longer stops CI jobs mid-run (cas-f632)
+
+- `scripts/worker-memory.py` stops a local worker suite when free memory
+  falls into the reserve kept for the supervisor's assembly proof. On the
+  self-hosted runner, that rule stopped the merge queue's Commander journeys
+  twice with no test failing, and ejected PR #1198 both times. A CI job
+  (`GITHUB_ACTIONS=true`) is still admitted and still waits for memory, but it
+  is never stopped mid-run. Local worker behaviour is unchanged.
+
 ### Added — a merge-queue ejection of an epic PR wakes the supervisor and is retried once (cas-e369)
 
 - The CI watcher now tracks open epics' PRs, not only parked worker

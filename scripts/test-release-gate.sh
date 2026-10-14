@@ -165,6 +165,9 @@ jobs:
         run: echo "$NOTES"
 EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
+    # release-integrate.py registers the cas-changelog driver from its sibling;
+    # without it the nested cas-7aa5 [Unreleased] replay conflicts.
+    cp "$script_dir/cas-merge-drivers.py" "$repo/scripts/cas-merge-drivers.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
     cp "$script_dir/release-learning.py" "$repo/scripts/release-learning.py"
     cat >"$repo/scripts/check-release-publish-toolchain.py" <<'PY_ZIG_FIXTURE'

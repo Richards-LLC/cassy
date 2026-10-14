@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Receipt learning gate, durable mappings and unreleased tooling warnings."""
 from pathlib import Path
+import json
 import os
 import shutil
 import sqlite3
@@ -214,10 +215,12 @@ cut_run_stage receipts
         (self.run_dir / 'blockers.log').write_text(
             'preflight learn=scratch-base\ngate learn=version-literals\nreceipts task=cas-1543\n'
             'assemble learn=assemble-stale-base recurrence=1\n')
-        self.command('python3', str(HELPER), '--measure', str(self.repo), str(self.run_dir))
-        self.assertEqual((self.run_dir / 'lesson-recurrence.receipt').read_text(),
-                         'LESSON_RESCUES=4\nLESSON_RECURRED=2\n'
-                         'LESSON_RECURRED_CLASSES=scratch-base,version-literals\n')
+        run_dir = self.repo / 'v9.98.0-release-9.98.0'
+        self.run_dir.rename(run_dir)
+        self.command('python3', str(HELPER), '--measure', str(self.repo), str(run_dir))
+        self.assertEqual(json.loads((run_dir / 'lesson-recurrence.json').read_text()), {
+            'version': '9.98.0', 'rescues': 4, 'recurrences': 2, 'rate': 0.5,
+            'classes': ['scratch-base', 'version-literals']})
 
     def warn(self):
         return self.command('python3', str(HELPER), '--warn-tooling', str(self.repo))

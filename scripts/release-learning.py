@@ -95,19 +95,20 @@ def evidence_rows(run_dir):
 
 
 def measure(root, run_dir):
-    """Write lesson-recurrence.receipt: rescues whose learn= class was already
+    """Write lesson-recurrence.json: rescues whose learn= class was already
     in the failure log (a row's own --learn entry, recurrence=N, excluded)."""
     counts = failure_counts(root)
-    rescues, recurred = 0, []
+    rescues, classes = 0, []
     for _, _, line in evidence_rows(run_dir):
         rescues += 1
         own = 1 if re.search(r'(?:^|\s)recurrence=[0-9]+(?=\s|$)', line) else 0
         learned = re.findall(r'(?:^|\s)learn=([a-z0-9:-]+)(?=\s|$)', line)
         if learned and counts.get(learned[0], 0) - own >= 1:
-            recurred.append(learned[0])
-    (run_dir / 'lesson-recurrence.receipt').write_text(
-        f'LESSON_RESCUES={rescues}\nLESSON_RECURRED={len(recurred)}\n'
-        f'LESSON_RECURRED_CLASSES={",".join(recurred)}\n')
+            classes.append(learned[0])
+    version = re.match(r'v?([0-9]+\.[0-9]+\.[0-9]+)', run_dir.resolve().name)
+    (run_dir / 'lesson-recurrence.json').write_text(json.dumps({
+        'version': version[1] if version else '', 'rescues': rescues, 'recurrences': len(classes),
+        'rate': round(len(classes) / rescues, 4) if rescues else 0.0, 'classes': classes}) + '\n')
 
 
 def check(root, run_dir):

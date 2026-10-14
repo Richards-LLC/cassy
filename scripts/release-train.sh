@@ -1123,7 +1123,7 @@ run_report() {
         fi
         printf 'report start %s version=%s worktree=%s\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$version" "$worktree"
-        # cas-9734: the report's Lesson recurrence row reads this receipt.
+        # cas-9734: the report's Lesson recurrence row reads lesson-recurrence.json.
         python3 "$script_dir/release-learning.py" --measure "$worktree" "$run_dir" || true
         set +e
         (cd "$worktree" && "$report_cmd" release report "$version" --pdf) \

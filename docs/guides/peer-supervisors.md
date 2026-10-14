@@ -1,154 +1,255 @@
 # Collaborating with supervisors on the same repository
 
-Cassy lets supervisors of one repository discover and message each other across
-factory sessions, clones and machines. Each supervisor keeps its own workers.
-Peer awareness shows who is working nearby; task claims and an agreed epic split
-help keep the two fleets from doing the same work.
+Supervisors of one GitHub repository can find each other, message each other
+and stay off each other's work, whether they run on one machine or several.
+Each supervisor keeps its own workers. A peer is a colleague: you can see it,
+message it and agree on who does what, but you cannot spawn, assign or direct
+its workers, and it cannot direct yours.
 
-This guide is being completed against the 3.51 epic. A `TODO(task)` marks a
-command, message or live receipt that awaits that task's merge. It is not a
-sample of command output.
+## What you get
+
+| Capability | How |
+| --- | --- |
+| Discovery | `coordination action=peers` lists the other supervisors of this repository with machine, session, epic focus and heartbeat age. The same section appears in `factory action=worker_status` and `cas status --verbose`. |
+| Presence | The first line of that section is your own cloud registration: `Cloud presence: registered …` or `Cloud presence: failing: <cause>`. |
+| Messaging | `coordination action=message target=<name>` (or `<name>@<machine>`) reaches a peer's inbox through the Cassy Cloud mailbox. Replies use `in_reply_to`; `coordination action=message_status id=<peer message id>` reads delivery. |
+| Awareness | `coordination action=peers detail=true` (or `peer=<name>`) shows a peer's focus, task claims, live workers and branches. |
+| Claim and spawn refusal | `task start`, `task action=claim` and `spawn_workers task_id=` refuse a task another session of this repository holds, naming the holder and when its claim runs out. Nothing is queued. |
+| Epic split | `factory action=epic_split` records which children of an epic each side owns. Each side's start and spawn on the other's children is refused. |
 
 ## Prerequisites
 
-On each machine, use a Cassy build with peer collaboration, log in to Cassy
-Cloud, and open a clone of the same repository. Cassy derives the project
-identity from the Git origin; a configured canonical identity or registered
-alias must resolve to that same project. Sync the project so both supervisors
-can refer to the same task IDs.
+On every machine:
 
-```bash
-cas login
-cas cloud sync
-cas factory
-```
+1. A Cassy build with peer collaboration (3.51).
+2. `cas login` to Cassy Cloud. Without it, peers reads
+   ``Peers: not logged in to Cassy Cloud, so supervisors on other machines are unknown (`cas login`).``
+3. A clone of the same repository. Peers are matched by the repository's
+   canonical id, taken from `[project] canonical_id` in `.cas/config.toml` or
+   the git origin; `git@github.com:o/r.git` and `github.com/o/r` match.
+4. A running factory (`cas factory`). The factory daemon is what receives peer
+   messages. A supervisor without one is listed, but a send to it fails with
+   `<name>@<machine> is not running a factory daemon, so it cannot receive peer messages`.
 
-Keep the factory daemon running on both machines. A supervisor registered by
-an MCP session alone does not establish a receiving mailbox. Check the signed-in
-account on each machine with `cas whoami` before testing claim protection.
-
-Presence and messages can span members of a shared team project. **Task claims
-are visible only within the same user account today.** Two machines logged in
-to that account can refuse overlapping claims. Different accounts on a team
-project can discover and message peers, but cannot use the absence of a visible
-claim as evidence that work is free. Agree on ownership by message and epic
-split. [Cloud issue #155](https://github.com/Richards-LLC/petra-stella-cloud/issues/155)
+**Accounts.** Discovery and messaging work across the members of a team
+project. **Task claims are visible only within one user account today.** Two
+machines logged in to the same account refuse each other's claimed work; a
+peer on another account cannot see your claims and you cannot see its, so an
+empty claim list is not proof that it is idle. Agree on ownership by message
+and record it with an epic split, which both databases enforce.
+[petra-stella-cloud#155](https://github.com/Richards-LLC/petra-stella-cloud/issues/155)
 tracks claims across team accounts.
 
-## What the two supervisors can do
+**Opting out.** A project that sets `cloud.auto_sync = false` does not register
+its agents, so their names, hostnames and branches stay on the machine. Its
+peers section then opens with
+`Cloud presence: disabled (cloud.auto_sync=false): this project's agents are not registered with Cassy Cloud.`
+and `Peers: discovery is one-way: this project still lists peers that registered, but they cannot see its supervisors.`
 
-| Capability | What to use it for |
-| --- | --- |
-| Discovery | Find supervisors of this project, including other sessions on this machine; inspect machine, session, focus and heartbeat age. |
-| Messaging | Address a peer by name, or name and machine when ambiguous; reply and inspect a delivery receipt. |
-| Awareness | Inspect a peer's focus, task claims, workers and branches. TODO(cas-559c): add the merged detail command and exact field names. |
-| Claim and spawn refusal | Within one account, refuse overlapping work before a second worker is queued. TODO(cas-0078): add the merged refusal and override behavior. |
-| Epic split | Propose disjoint child-task ownership, accept it on the other side, and enforce each side's share. TODO(cas-4736): add the merged propose, accept and cancel commands. |
+## Walkthrough
 
-A peer message is colleague input. It grants no operator authority, cannot
-interrupt a peer as an urgent command, and cannot control the other factory's
-workers. Each supervisor assigns and spawns only its own fleet.
+The output below is copied from real runs, not written by hand:
 
-## Two-machine walkthrough
+- Steps 1, 3 and 4: run `29dfcb` (QA task cas-91b89), build `8ada608`, two
+  factories with separate databases on one machine (`soundwave`), against the
+  production Cassy Cloud. Peer details in step 1 come from run `b251eb` (QA task
+  cas-71d4) in the same setup. Claim refusal in step 3 comes from the cas-0078
+  production run.
+- Step 2: the two-machine live-check runner (cas-daa0), run `878c15`, between
+  `soundwave` (Linux) and `prowl` (macOS) against a stand-in cloud that serves
+  the production routes.
 
-Use two factories on a scratch project, with one supervisor on each machine.
-Choose the same account for the claim-refusal steps. Replace the angle-bracket
-values below with the names, IDs and receipt handles returned by your run.
+### 1. See each other
 
-1. **Identify both supervisors.** In each supervisor session, run:
+On each supervisor, run `coordination action=peers`. A's view of B:
 
-   ```text
-   coordination action=whoami
-   coordination action=peers
-   ```
+```text
+Cloud presence: registered (focus -, branch main, registered 3s ago)
+Peers (github.com/petrastella-live-check/qa-b9d2-29dfcb, via Cassy
+  Cloud):
+  qa-6f85-b-29dfcb [live] on soundwave, heartbeat 3s ago
+    session qa6f85-b-29dfcb | focus -
+Peer mailbox: receiving.
+```
 
-   Each should find the other supervisor with its machine and focus. A stale
-   heartbeat is a reason to contact the peer, not proof that its work is free.
-   `cas status --verbose` also shows the peers view.
+Neither supervisor registered by hand: each factory registers its supervisor
+with the cloud on start, retries if that fails, and refreshes its focus and
+branch on every heartbeat. `Peer mailbox: receiving.` means this factory's
+daemon is claiming peer messages.
 
-   TODO(cas-f707, cas-daa0): insert the real discovery and healthy-presence
-   output, with the reviewed build SHA and run receipt. TODO(cas-559c): include
-   the peer detail output for claims, workers and branches.
+For a peer's claims, workers and branches, add `detail=true`, or `peer=<name>`
+for one peer:
 
-2. **Send and reply.** From A, address B using the discovered machine label:
+```text
+[OK] 1 peer supervisor | 1 live
+Repo github.com/petrastella-live-check/qa-7e32-b251eb
+qa7e32-b-b251eb [live]
+  Machine soundwave
+  Session q7e32b-b251eb
+  Focus   cas-3775
+  Heartbeat 13s ago
+  Branch  main
+  Claims  3 | age since renewal (s)
+       13 cas-3775 [claimed; title not synced]
+          Owner qa7e32-b-b251eb
+       13 cas-49ec [claimed; title not synced]
+          Owner qa7e32-bw2-b251eb
+       13 cas-aaf7 [claimed; title not synced]
+          Owner qa7e32-bw1-b251eb
+  Workers 2 live (read-only)
+    qa7e32-bw1-b251eb [active]
+      Branch factory/qa7e32-bw1-b251eb
+      Tasks cas-aaf7
+    qa7e32-bw2-b251eb [active]
+      Branch factory/qa7e32-bw2-b251eb
+      Tasks cas-49ec
+Peer mailbox: receiving.
+```
 
-   ```text
-   coordination action=message target=<B-name>@<B-machine> summary="Plan the split" message="I will take the parser children. Can you take the CLI children?"
-   ```
+`cas peers --detail` (or `--peer <name>`, and `--json`) prints the same view
+from a shell.
 
-   On B, poll the inbox and reply using the notification ID of A's message:
+### 2. Message and reply
 
-   ```text
-   coordination action=inbox_poll
-   coordination action=message target=<A-name>@<A-machine> in_reply_to=<notification-id> summary="Split agreed" message="I will take the CLI children."
-   ```
+From `soundwave`, address the peer by the name and machine peers showed:
 
-   Copy the delivery-status command from each send receipt. A queued receipt
-   means the cloud or local outbox accepted the send; inspect status to learn
-   whether it was delivered. If a send supplies a local retry handle, keep
-   that handle so you can inspect the same logical send without duplicating it.
+```text
+coordination action=message target=sup-prowl-878c15@prowl summary="ping" message="..."
+```
 
-   TODO(cas-a19b, cas-13c7, cas-daa0): insert real send, inbox, reply and delivered
-   status output, including the automatic-retry handle when exercised.
+```text
+Message sent to peer supervisor sup-prowl-878c15@prowl via Cassy Cloud (peer message pm_1, queued): delivered to sup-prowl-878c15@prowl mailbox. Check delivery with coordination action=message_status id=pm_1.
+```
 
-3. **Prove claim protection.** Have A start a shared scratch task. Have B try
-   to start that same task, without forcing it. B should be refused with the
-   holder identified. Release the task on A; then B can start it. Try a spawn
-   for a task still claimed by A and verify that B has no queued worker for it.
+On `prowl`, `coordination action=inbox_poll` shows the message labelled as
+coming from a peer supervisor:
 
-   TODO(cas-0078, cas-daa0): insert the real start/refusal, release/reacquire and
-   pre-queue spawn-refusal commands and output. Include the same-account
-   precondition in that receipt.
+```text
+**[3] From: peer:sup-soundwave-878c15@soundwave**
+Summary: peer sup-soundwave-878c15@soundwave: ping live-check-ping-878c15-716abf
+[cas #3 peer-supervisor sup-soundwave-878c15@soundwave via-cloud 1s first]
+```
 
-4. **Record the epic split.** Agree on disjoint child IDs, propose the split
-   from A, and accept it on B. Each supervisor should be refused work reserved
-   for the other side. Check the split view before dispatching workers.
+Reply with `in_reply_to` set to that row (here `3`):
 
-   TODO(cas-4736, cas-daa0): insert the merged propose/accept commands, both
-   refusal results, and the cancel or expiry recovery path from the real run.
+```text
+Reply sent to peer supervisor sup-soundwave-878c15@soundwave via Cassy Cloud (peer message pm_2, queued); message 3 acknowledged. Check delivery with coordination action=message_status id=pm_2.
+```
 
-5. **Check reconnect behavior.** Stop B's receiving factory, send from A, then
-   restart B. Inspect the original receipt and B's inbox: the message should
-   arrive once. Keep evidence of the offline queue, reconnect and final status.
+Back on `soundwave`, `coordination action=message_status id=pm_1`:
 
-   TODO(cas-13c7, cas-daa0): insert the real offline/reconnect output and receipt.
+```text
+Peer message pm_1: delivered at 2026-10-13T21:59:26.068369+00:00 (delivery attempts: 1)
+```
 
-TODO(cas-daa0): replace this paragraph with the walkthrough's real two-machine
-run citation, machines, build SHA and redacted command output. No live output
-has been copied into this draft yet.
+`queued` in a send receipt means the cloud accepted it; `message_status` tells
+you when the peer's daemon claimed it. A peer message never interrupts the
+peer (`urgent=true` is refused) and carries no operator authority: the peer
+reads it as a colleague's request.
+
+### 3. Claims keep you off each other's tasks
+
+A started task `cas-1c99`. B's spawn for it is refused before anything is
+queued:
+
+```text
+⛔ HELD BY A PEER — task cas-1c99 is claimed by qa-0078-A-a352ab26 on soundwave (a session of this repository on another machine or clone) until 22:39 UTC. A worker spawned for it would duplicate their work, so nothing was queued. Ask them first: mcp__cas__coordination action=message target=qa-0078-A-a352ab26 summary="cas-1c99" message="Are you still on cas-1c99?". To spawn anyway: mcp__cas__factory action=spawn_workers task_id=cas-1c99 force=true
+```
+
+`task start` on B is refused the same way, with the holder and the time its
+claim runs out. When A closes or releases the task, B can start it. Use
+`force=true` only after the holder agrees. A claim nobody is renewing does not
+block: the start proceeds on the local lease and says `⚠️  STALE PEER CLAIM`.
+
+### 4. Split an epic
+
+A proposes who takes which children:
+
+```text
+factory action=epic_split id=cas-c018 target=qa-6f85-b-29dfcb mine=cas-fffe,cas-36bd theirs=cas-5c11,cas-bfa7 ttl_secs=1800
+```
+
+```text
+Proposed epic split split-ef16c467 of cas-c018 to qa-6f85-b-29dfcb@soundwave (peer message f7196831-582e-4a2c-ba77-5f2f419dd6bf, queued).
+You took (claimed in Cassy Cloud): cas-fffe, cas-36bd
+Offered to qa-6f85-b-29dfcb: cas-5c11, cas-bfa7
+Until they answer, starting their share here is refused. The proposal expires at 00:34 UTC.
+```
+
+B sees the proposal under `factory action=epic_split` and accepts it with
+`factory action=epic_split id=split-ef16c467 decision=accept`:
+
+```text
+Accepted epic split split-ef16c467 of cas-c018 with qa-6f85-a-29dfcb@soundwave (peer message c05bc6ef-1ee6-418e-952c-44afe2807783, queued).
+You took (claimed in Cassy Cloud): cas-5c11, cas-bfa7
+qa-6f85-a-29dfcb keeps: cas-fffe, cas-36bd — starting those here is refused.
+```
+
+From then on, A's start or spawn on B's share is refused:
+
+```text
+⛔ SPLIT TO A PEER — cas-5c11 belongs to peer supervisor qa-6f85-b-29dfcb@soundwave under epic split split-ef16c467 of cas-c018 (accepted).
+Starting it here would duplicate their work. Ask them first: mcp__cas__coordination action=message target=qa-6f85-b-29dfcb@soundwave summary="cas-5c11" message="..."
+To end the split: mcp__cas__factory action=epic_split id=split-ef16c467 decision=cancel. To take this child anyway: mcp__cas__task action=start id=cas-5c11 force=true
+```
+
+Both peers views list the split between the peers and the mailbox line:
+
+```text
+Epic splits:
+  split-ef16c467 [accepted, outgoing] epic cas-c018
+    with qa-6f85-b-29dfcb@soundwave
+    mine cas-fffe, cas-36bd
+    theirs cas-5c11, cas-bfa7
+    decided 10-14 00:05 UTC
+```
+
+Either side ends it with `decision=cancel`, which releases only the
+canceller's own claims and tells the peer:
+
+```text
+Cancelled epic split split-ef16c467 of cas-c018; released 2 of your own claim(s); told qa-6f85-b-29dfcb@soundwave (peer message 9ae35596-5046-42a8-b38f-118403c9a667, queued).
+```
+
+`decision=reject reason="..."` declines a proposal; an unanswered proposal
+expires after `ttl_secs` (default 1800).
 
 ## Troubleshooting
 
-The rows marked TODO await merged client strings. The cloud error code below
-comes from the production mailbox contract; the client will add context.
-
-| Message or condition | Meaning | Action |
+| You see | Meaning | Do this |
 | --- | --- | --- |
-| ``Peers: not logged in to Cassy Cloud, so supervisors on other machines are unknown (`cas login`).`` | This machine cannot discover cloud peers. | Log in here with `cas login`; then refresh peers. |
-| TODO(cas-f707): exact presence failing message and cause | The local supervisor has not established healthy cloud presence. | Read the cause, check login and connectivity, and inspect the next retry. Recheck presence after recovery. |
-| TODO(cas-13c7): exact mailbox not receiving message and cause | Presence and receive health are separate; discovery alone does not prove inbox delivery. | Keep the factory daemon running, resolve the reported login/project/network cause, then inspect receive health and the send receipt. |
-| `recipient_not_found` | Production cannot address that recipient in the selected project; unknown, wrong-project and inaccessible recipients share this code. | Refresh peers and copy the peer's current name and machine. Confirm both factories use the same project. |
-| TODO(cas-a19b): exact not-running-a-factory-daemon refusal | A discovered supervisor has no receiving factory mailbox. | Start the recipient's factory daemon and refresh discovery before sending again. |
-| TODO(cas-559c): exact different-account claim-visibility message | The peer's claims cannot be read with your account. | Agree on ownership by message and split; an empty local view does not establish no peer work. |
-| TODO(cas-13c7, cas-a19b): exact automatic retry message with `peer-outbox:<id>` | The logical send is durably queued for bounded automatic retry. | Inspect the supplied status handle. If it ends in abandonment, resolve its named cause before an explicit retry. |
-| TODO(cas-0078): exact peer-held task/spawn refusal | Another supervisor owns the visible claim. | Message that holder and wait for release, or arrange an explicit takeover. Do not use force to settle an ownership disagreement. |
-| TODO(cas-4736): exact other-share split refusal | The child is reserved for the other side of a split. | Ask that supervisor to change or cancel the agreement before dispatching it locally. |
-| TODO(cas-a19b): exact unknown-target and cloud-resolution errors | The send was refused immediately, rather than becoming an undeliverable local queue row. | Correct the recipient or resolve the named cloud cause; inspect any receipt before resending. |
+| ``Peers: not logged in to Cassy Cloud, so supervisors on other machines are unknown (`cas login`).`` | This project has no Cassy Cloud login. | Run `cas login`, then check peers again. |
+| `Peers: this project has no canonical id to match peers by (set [project] canonical_id or a git origin).` | Cassy cannot tell which repository this is. | Add a git origin, or set `[project] canonical_id` in `.cas/config.toml`. |
+| `Peers: Cassy Cloud lookup failed: <error>` | The agent list could not be read. | Check the error (network, `401` for a bad login); the next call retries. |
+| `Cloud presence: failing: <cause>` followed by `<n> failed attempts, next retry in <time>.` and `Peers cannot see this agent until it registers.` | This supervisor is not registered, so peers cannot see or message it. | Fix the cause (login, network). The heartbeat retries on its own, backing off to every 5 minutes; check peers again afterwards. |
+| `Cloud presence: not registered yet (no registration attempt recorded for this agent)` | No factory daemon has registered this agent yet. | Start the factory, or wait one heartbeat (30 s). |
+| `Cloud presence: disabled (cloud.auto_sync=false): …` | The project opted out of cloud sync. | Remove `cloud.auto_sync = false` if this supervisor should be visible to peers. |
+| ``Peer mailbox: not receiving: not logged in to Cassy Cloud (`cas login`)`` with `Retry: automatic with backoff, at most 30s.` | The daemon cannot claim peer messages. | Run `cas login`; receiving resumes within 30 s without a restart. |
+| `Peer mailbox: not receiving: no factory daemon session.` | This supervisor is not running inside a factory. | Start it with `cas factory`. |
+| `Peer mailbox: not receiving: daemon mailbox status is stale.` or `daemon has not reported a mailbox poll.` | The factory daemon stopped polling. | Check that the factory is running; restart it if not. |
+| `<name>@<machine> is not running a factory daemon, so it cannot receive peer messages` | The peer is listed but has no receiving mailbox. | Ask its operator to start `cas factory`, then send again. |
+| `no supervisor or worker named <target> in this project or its peers. Nothing was enqueued.` | No local agent or peer supervisor has that name. Peer workers are never addressable. | Copy the name from `coordination action=peers`. |
+| `'<target>' names <n> peer supervisors; address one as <a>@<machine> or <b>@<machine>` | Two peers share the name. | Add `@<machine>`. |
+| ``Could not resolve message target '<target>' through Cassy Cloud: no token (not logged in; `cas login`). Nothing was enqueued.`` | Not logged in, so peers cannot be resolved. | Run `cas login`. |
+| `Could not deliver to <name>@<machine> mailbox: peer message refused (404): {"error":"recipient_not_found"…}` | The cloud cannot address that recipient in this project (unknown, wrong project or not visible to you; the cloud does not say which). Not retried. | Check peers again and confirm both clones resolve to the same project. |
+| `Could not deliver to <name>@<machine> mailbox: <cause>; queued for automatic retry as peer-outbox:<id>` | A temporary failure (network, 5xx, 408, 429). The send is kept and retried for up to 15 minutes. | `coordination action=message_status id=peer-outbox:<id>` shows its state. Do not resend: the retry keeps the same identity, so the peer gets it once. |
+| Inbox notice `Message peer-outbox:<id> to <recipient> was abandoned as undeliverable: <reason>` | Retrying ran out (`retry TTL expired`) or hit a permanent refusal. | Fix the named cause, then send again. |
+| `Claims not visible (different account)` in peer details | That peer is on another Cassy Cloud account, whose claims you cannot read. | It is not idle by default. Agree on ownership by message and an epic split. |
+| `⛔ HELD BY A PEER — task <id> is claimed by <who> … until <time>.` | Another session of this repository holds the claim. | Message the holder. `force=true` only after it agrees or its claim is stale. |
+| `⛔ SPLIT TO A PEER — <id> belongs to peer supervisor <name>@<machine> under epic split <split> …` | The child is the other side's share. | Ask the peer, or end the split with `decision=cancel`. |
+| `⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable (<reason>), so claims on <id> from other machines could not be checked. Started on the local lease only.` | The start went ahead without the cross-machine check. | Check peers before dispatching more work on that epic. |
+| `⚠️  PEER CLAIM LOST — claim on <id> lost to <peer>@<machine>; stop work or coordinate.` | Your claim ran out and a peer took the task. | Stop the work or message that peer. |
 
-## Cloud behavior relevant to operators
+## How the cloud behaves
 
-Discovery is scoped by project; it is not a list of every agent in your account.
-A heartbeat older than five minutes reads as stale. A factory sends its current
-project binding, focus, branch and factory session with presence updates so a
-reconnect can repair discovery and refresh awareness.
-
-A live claim belongs to its holder until renewed, released or expired. Repeating
-a claim for the same holder does not extend it: renewal does. If renewal reports
-that no active lock exists, the client must reacquire or report the new holder.
-When cloud claim checking fails, read the local warning before dispatching work;
-local lease success alone does not prove cross-machine exclusivity.
-
-Cloud mailbox messages expire after seven days. Client automatic send retry has
-its own bounded lifetime; TODO(cas-13c7): confirm that lifetime and the exact
-terminal notice in the merged implementation. A delivered receipt records the
-mailbox delivery path, not a promise that the peer has acted on the request.
+- Discovery asks for this project only (`?project=<canonical id>`). A peer whose
+  last heartbeat is older than 5 minutes is shown `[stale]`; peers not seen for
+  24 hours are not listed.
+- Every heartbeat (30 s) re-sends the agent's project, focus, branch, factory
+  session and hostname, so a reconnect repairs discovery on its own. A heartbeat
+  the cloud answers with 404 or 401 registers the agent again.
+- A claim lasts the configured lease (at most an hour) and is renewed every two
+  minutes while its task's lease is held. An expired claim is free. Claiming a
+  task you already hold does not extend it; renewal does.
+- Peer messages live in the cloud for 7 days. A message is delivered once even
+  if the send is retried; two separate sends of the same text both arrive.

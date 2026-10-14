@@ -12,7 +12,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `release-gate.sh --fast-rows` now also refuses:
   - the next patch, minor or major version in a lane's changed files;
   - `env!("CARGO_BIN_EXE_<name>")` in any crate's integration tests;
-  - an edit to a released CHANGELOG section;
   - a root task-verifier projection that drifted from its embedded body.
 - Each of the five failures of 2026-10-14 that cost a CI or merge-queue round
   has a fixture: the two_machine binary path, a next-version comment, two

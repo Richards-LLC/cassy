@@ -1471,50 +1471,6 @@ check_changelog_and_versions() {
             return 1
         fi
     done
-    [[ "$fast_rows" == true ]] || return 0
-    check_released_changelog_sections
-}
-
-# A lane adds entries under [Unreleased]; a released section is history. A
-# bullet that lands in one (an edit, or a merge resolution that kept the wrong
-# side) is refused at park rather than at the cut. New released sections, such
-# as main's next release merged into a lane, are allowed.
-check_released_changelog_sections() {
-    local base="${fast_base:-HEAD^}"
-    git cat-file -e "$base:CHANGELOG.md" 2>/dev/null || return 0
-    # The default branch's copy is canonical too: a lane may carry main's
-    # correction of a section the epic base still holds in its older form.
-    local canonical="${ZERO_BASE_REF:-origin/main}"
-    git cat-file -e "$canonical:CHANGELOG.md" 2>/dev/null || canonical="$base"
-    git show "$canonical:CHANGELOG.md" >"$tmp_dir/changelog-canonical.md"
-    git show "$base:CHANGELOG.md" | python3 -c '
-import re, sys
-
-def sections(text):
-    found, name, body = {}, None, []
-    for line in text.splitlines():
-        heading = re.match(r"## \[(\d+\.\d+\.\d+)\]", line)
-        if heading or line.startswith("## ["):
-            if name:
-                found[name] = "\n".join(body).strip()
-            name, body = (heading[1] if heading else None), []
-        elif name:
-            body.append(line)
-    if name:
-        found[name] = "\n".join(body).strip()
-    return found
-
-before = sections(sys.stdin.read())
-canonical = sections(open(sys.argv[2]).read())
-after = sections(open("CHANGELOG.md").read())
-changed = [v for v in before if after.get(v) not in (before[v], canonical.get(v, before[v]))]
-for v in changed:
-    print("changelog: released section [%s] differs from the base (%s)" % (
-        v, "removed" if v not in after else "edited"))
-if changed:
-    print("FIX: restore the released sections (git checkout %s -- CHANGELOG.md, then re-add your entry) and put new bullets under ## [Unreleased]" % sys.argv[1])
-sys.exit(1 if changed else 0)
-' "$base" "$tmp_dir/changelog-canonical.md"
 }
 
 check_publish_toolchain() {

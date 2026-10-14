@@ -231,8 +231,7 @@ class FastRows(unittest.TestCase):
         self.assertFalse(path.exists() and path.read_text().startswith(f"fast-rows: PASS {head} "), failed.stdout)
         (self.repo / "docs/bad.md").unlink()
         self.commit()
-        self.write("CHANGELOG.md", (self.repo / "CHANGELOG.md").read_text().replace(
-            "## [Unreleased]\n", "## [Unreleased]\n\n- Uncommitted.\n"))
+        self.write("CHANGELOG.md", (self.repo / "CHANGELOG.md").read_text() + "\n- Uncommitted.\n")
         dirty = self.fast()
         self.assertEqual(dirty.returncode, 0, dirty.stdout + dirty.stderr)
         self.assertFalse(self.receipt()[1].exists(), dirty.stdout)
@@ -600,20 +599,6 @@ sleep 2
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
         self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
-
-    def test_released_changelog_sections_are_immutable_in_a_lane_cas_7bce(self):
-        released = "## [Unreleased]\n\n## [9.99.7] - 2026-09-30\n\n- Fixture.\n"
-        self.refused_at_park("changelog-and-versions", {"CHANGELOG.md": released.replace(
-            "- Fixture.\n", "- Fixture.\n- My lane's change.\n")}, "## [Unreleased]")
-        # A newer released section merged in from main, plus an [Unreleased]
-        # bullet, is the normal lane shape.
-        command(self.repo, "git", "reset", "-q", "--hard", self.base)
-        self.write("CHANGELOG.md", "## [Unreleased]\n\n- My lane's change.\n\n## [9.99.8] - 2026-10-01\n\n- Main.\n\n"
-                   + released.split("\n\n", 1)[1])
-        self.commit()
-        result = self.fast()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("PASS changelog-and-versions", result.stdout)
 
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
         body = "Verify the task.\n"

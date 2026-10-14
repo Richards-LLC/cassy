@@ -652,8 +652,6 @@ fixture per failure:
   are printed as a NOTE.
 - `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
 - `test-env` and `fixture-paths-src`: the environment failures.
-- `changelog-and-versions`: fast mode also refuses an edit to a released
-  CHANGELOG section that matches neither the base nor the default branch.
 - `builtin-projections-src`: the no-build half of `builtin-projections`. It
   checks that the root task-verifier projection matches its embedded body.
 

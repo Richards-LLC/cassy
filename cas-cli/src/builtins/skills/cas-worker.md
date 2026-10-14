@@ -33,7 +33,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    mistakes that otherwise cost a CI or merge-queue round: version literals
    (current and next release, comments included), changed-Markdown lint,
    test shape (no `env!("CARGO_BIN_EXE_*")` in integration tests), test
-   environment, runtime checkout reads, released CHANGELOG sections and builtin
+   environment, runtime checkout reads, CHANGELOG versions and builtin
    projections. Each failure prints `FIX <row>: …`, and a park refusal quotes it;
    apply that fix, commit, rerun. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)

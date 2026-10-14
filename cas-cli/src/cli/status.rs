@@ -124,8 +124,7 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
         let mut fmt = Formatter::stdout(&mut out, theme);
 
         fmt.subheading("cas status")?;
-        fmt.write_muted(&"─".repeat(40))?;
-        fmt.newline()?;
+        section_rule(&mut fmt)?;
         fmt.field(
             "  Entries",
             &format!("{total_entries} ({total_archived} archived)"),
@@ -168,8 +167,7 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
         }
         fmt.newline()?;
         fmt.subheading("Configuration")?;
-        fmt.write_muted(&"─".repeat(40))?;
-        fmt.newline()?;
+        section_rule(&mut fmt)?;
         fmt.field("  Sync enabled", &config.sync.enabled.to_string())?;
         fmt.field("  Sync target", &config.sync.target)?;
         fmt.field("  Min helpful", &config.sync.min_helpful.to_string())?;
@@ -179,12 +177,23 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
             fmt.warning("Sync disabled via environment")?;
         }
 
+        // cas-e477: supervisors of this repo on any machine, via Cassy Cloud.
+        // Verbose only: the one-line summary and --json stay offline.
+        fmt.newline()?;
+        fmt.subheading("Peers")?;
+        section_rule(&mut fmt)?;
+        // cas-f707: never list the session running this command as its own peer.
+        let self_id = crate::cloud::peers::cli_self_id(cas_root);
+        for line in crate::cloud::peers::peers_section(cas_root, self_id.as_deref()).lines() {
+            fmt.write_raw(&format!("  {line}"))?;
+            fmt.newline()?;
+        }
+
         // Show recent entries
         if !entries.is_empty() {
             fmt.newline()?;
             fmt.subheading("Recent entries")?;
-            fmt.write_muted(&"─".repeat(40))?;
-            fmt.newline()?;
+            section_rule(&mut fmt)?;
             for entry in entries.iter().take(5) {
                 let score = entry.feedback_score();
                 let score_str = if score > 0 {
@@ -218,4 +227,39 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
     }
 
     Ok(())
+}
+
+/// The rule under a `cas status --verbose` section heading: box drawing on a
+/// UTF-8 locale, ASCII hyphens otherwise (`LC_ALL=C`), so a C-locale
+/// terminal never receives bytes it cannot show (cas-867a).
+fn section_rule(fmt: &mut Formatter<'_>) -> std::io::Result<()> {
+    let mark = if fmt.unicode() { "\u{2500}" } else { "-" };
+    fmt.write_muted(&mark.repeat(40))?;
+    fmt.newline()
+}
+
+#[cfg(test)]
+mod cas_867a_tests {
+    use super::*;
+    use crate::test_support::TestEnvGuard;
+
+    fn rule_under(locale: &str) -> String {
+        let _env = TestEnvGuard::with_vars(&[("LC_ALL", locale)]);
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::plain(&mut buf);
+            section_rule(&mut fmt).unwrap();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn cas_867a_section_rules_fall_back_to_ascii_under_a_c_locale() {
+        let c = rule_under("C");
+        assert!(c.is_ascii(), "{c:?}");
+        assert_eq!(c.trim_end(), "-".repeat(40));
+
+        let utf8 = rule_under("en_US.UTF-8");
+        assert_eq!(utf8.trim_end(), "\u{2500}".repeat(40));
+    }
 }

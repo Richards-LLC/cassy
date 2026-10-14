@@ -87,6 +87,43 @@ silently reintroduce fixed bugs.
 - If you previously installed via `cargo install cas` or a distro package,
   remove those copies so only `~/.local/bin/cas` remains.
 
+## Peer work awareness
+
+`coordination action=peers detail=true` shows each peer supervisor's machine,
+factory session, epic focus, active task claims, live workers and registered
+branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
+implies detail. `json=true` returns the full report without truncation.
+The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
+`--json` accepting the same filters and output contract. Presence appears first,
+then peers or details, then the mailbox footer. JSON carries the typed
+`cloud_presence` record, `cloud_presence_message`, and `mailbox_status` too.
+Agent pagination echoes the returned `next_sort_cursor` with the other cursors.
+
+Claims are scoped to the repository's canonical identity. Their titles and task
+status come from this checkout's synced task store when available; an unsynced
+task remains visible by its plain task ID, with `title not synced` explaining
+the missing title. Human rows use agent names; JSON also keeps `lock_key` and
+`agent_id` for exact cloud receipts. Claim age is time since the last renewal.
+Only active, unexpired claims count. Live workers have an active/idle heartbeat
+within five minutes and must match both the peer's factory session and machine.
+A missing branch is shown as unknown. Worker details are read-only: these rows
+do not register remote workers locally or make them message or spawn targets.
+Cloud failures are reported as unavailable, never as an empty claim list.
+Cloud locks are private to one user account: a team peer on another account shows
+`Claims not visible (different account)` and worker tasks as `not visible`.
+If the caller's account identity is unknown, the report says so. JSON includes
+`claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
+is authoritative only when visibility is `same_account`. The viewer account
+comes from the token-owned agent list, independently of caller session lookup.
+Operator CLI identity uses the same session/ancestor-PID lookup as status.
+Peer discovery also excludes every agent registered in this project's local
+agent store, so a plain terminal never counts this clone's supervisors as peers.
+The view fits 72 columns, in this order: caller presence, peers and their work,
+recorded epic splits, then mailbox health. JSON exposes `epic_splits` separately
+from the health-only `mailbox_status`. Each split retains its stored `state` and
+an effective `display_state` (`expired` for a lapsed pending proposal), its task
+shares, peer, reason, expiry and decision time.
+
 ## Adding Features
 
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.
@@ -1373,34 +1410,44 @@ The close gate checks the task-attributed Git diff, even after merge, and names
 the exact `task action=notes` command when approval is missing. Approval for a
 different file or a line absent from that diff does not satisfy the gate.
 
-## Operator write roots (GH #1169)
+## Operator write roots (GH #1169, GH #1182)
 
 The factory workspace contract normally lets agents write only to their
 worktree, `factory.artifacts_root/<project-key>/<task-id>/`, the configured
 scratch root and the harness scratchpad. An operator can add directories
 outside these:
 
-- **Project write roots.** Run `cas config set factory.write_roots "~/soundwave-config/docs/requests,~/.config/autostart:create+edit+delete"`.
-  Each entry is `path[:modes]`. The default mode is `create+edit`; `delete` is
-  off unless named. An empty value clears the roots. `cas config get
-  factory.write_roots` shows them.
+- **Project write roots.** Run `cas config set factory.write_roots
+  "~/Downloads,/mnt/shockwave/ai/pooled_assets/llm"`. This writes
+  `[factory] write_roots = [...]` to the project's `.cas/config.toml`, so
+  `cas config list` and `cas config get factory.write_roots` show it. Each
+  root lets the project's supervisor and workers create, edit, rename and
+  delete files beneath it. An empty value clears it. Roots are per project:
+  a worker reads them from its owning project's `.cas/config.toml`, also in
+  an isolated worktree, and another project's agents never get them.
 - **One-off task grants.** Run `cas config grant-write --task <id> --path <dir>
   --mode create+edit --reason "<why>"`. The grant applies to the worker
   holding the task and to the supervisor until the task closes. It is
   recorded as a DECISION note on the task. `cas config revoke-write --task
-  <id> [--path <dir>]` removes it.
+  <id> [--path <dir>]` removes it. Grants are stored in
+  `.cas/operator/write-policy.toml`.
 
-Both are stored in `.cas/operator/write-policy.toml`, never in `config.toml`.
-Paths are resolved to canonical absolute directories when set, so `..` and
-symlinks are resolved rather than trusted. `/`, `$HOME` itself, and anything
-that contains or lies inside `.cas/operator/` are refused.
+Root paths are resolved to canonical absolute directories when set: `~`
+expands to `$HOME`, symlinks resolve to their target, and an entry with a `..`
+component is refused. `/`, `$HOME` and its ancestors, the project root, and
+anything that contains or lies inside the project's `.cas/` are refused, so
+`.cas/config.toml` is never under a root. The hook re-checks each entry and
+skips one that no longer resolves or is unsafe. Roots that 3.50.0 stored in
+`.cas/operator/write-policy.toml` are still honoured, and the next `cas config
+set factory.write_roots` moves them into `config.toml` (an empty value clears
+them too).
 
-Each root admits only its modes:
+Each grant admits only its modes; a project root admits all three:
 
 - **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or
   `touch` destination;
-- **edit**: an existing file, or, once a policy file exists, `sed -i` /
-  `perl -i` operands and `mv` sources (without a policy file these keep their
+- **edit**: an existing file, or, once roots or a policy file exist, `sed -i` /
+  `perl -i` operands and `mv` sources (without them these keep their
   previous, unjudged behaviour);
 - **delete**: `rm` or an `apply_patch` delete.
 
@@ -1410,22 +1457,34 @@ refusal lists the roots in effect.
 
 **Operator-only, guardrail-grade (not security-grade).** The operator and the
 agents share a Unix user. The PreToolUse hook is the actual gate against
-agents; the CLI checks are defence in depth. With no policy file, the default
-contract is unchanged. The layers are:
+agents; the CLI checks are defence in depth. With no roots and no policy
+file, the default contract is unchanged. The layers are:
 
-- the commands refuse to run when they detect any agent environment variable
-  (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_*`, `CAS_CLONE_PATH`,
-  `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`, `CODEX_THREAD_ID`);
-- they refuse when an agent or Cassy server (claude, codex, `cas serve`,
-  `cas factory`) is among the process's ancestors, or when the process runs
-  inside a factory worker or server cgroup;
-- they refuse without an interactive terminal, and need a typed confirmation;
-- `Config::set` refuses the key, so the config TUI, import and every agent path
-  that reaches it cannot set roots;
+- `cas config set factory.write_roots` refuses only inside a factory worker or
+  server cgroup. The operator usually runs it as `! cas …` inside an agent
+  pane, which carries agent environment and has no terminal, so it does not
+  check either;
+- the grant commands also refuse when they detect any agent environment
+  variable (`CAS_AGENT_*`, `CAS_SESSION_ID`, `CAS_FACTORY_*`,
+  `CAS_CLONE_PATH`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CODEX_SANDBOX*`,
+  `CODEX_THREAD_ID`), an agent or Cassy server among the process's
+  ancestors, or no interactive terminal, and need a typed confirmation;
+- `Config::set` refuses the key, so MCP, the config TUI and `cas config reset`
+  cannot set roots, and `cas config import` keeps the current value;
 - PreToolUse refuses any agent Bash call of these commands, even when wrapped
-  by `env`, `sudo`, `setsid`, `sh -c` or `script -c`, and any agent write,
-  edit, delete or rename under `.cas/operator/`. This applies to workers and
-  the supervisor alike.
+  by `timeout`, `env`, `nice`, `nohup`, `xargs`, `stdbuf`, `flock`, `sudo`,
+  `setsid`, `$(which cas)`, `eval`, `sh -c` or `script -c`. It also refuses
+  any command that names `factory.write_roots` with `set` (or `grant-write` /
+  `revoke-write`) unless every statement only reads (`grep`, `cat`, `git
+  log`, `cas config get`, …), which covers `python -c`, `perl -e` and
+  heredocs. A command hidden in a script file the agent runs is out of
+  reach of a tool-call hook. It also refuses any agent write,
+  edit, delete or rename of the project's `.cas/config.toml`,
+  `.cas/config.yaml` or anything under `.cas/operator/` (file tools,
+  redirections, `tee`, `cp`, `mv`, `sed -i`, `perl -i`, `rm`). Agents change
+  other keys with `cas config set`, which stays allowed. No root ever admits
+  any project's `.cas/config.*` or `.cas/operator/`. This applies to workers
+  and the supervisor alike.
 
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.

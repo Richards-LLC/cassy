@@ -34,6 +34,7 @@ pub(crate) fn execute_edit_line_based(
     use std::io::{self, BufRead, Write};
 
     let mut config = Config::load(cas_root)?;
+    let original = config.clone();
     let reg = registry();
 
     // Get all current values
@@ -178,6 +179,12 @@ pub(crate) fn execute_edit_line_based(
 
     // Save if changes were made
     if changes_made > 0 {
+        // cas-0d4f0: piped edits may not relax a security-relevant key.
+        crate::cli::config::operator_ops::guard_operator_config(
+            &original,
+            &config,
+            crate::config::operator_policy::InvocationContext::from_process,
+        )?;
         config.save(cas_root)?;
         fmt.success(&format!("Saved {changes_made} change(s)"))?;
     } else {

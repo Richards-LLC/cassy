@@ -1,4 +1,5 @@
 import { openInstallationInventory } from "./installation-inventory";
+import { explorerOrigin, explorerUrl } from "./app-switcher";
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
@@ -59,7 +60,8 @@ import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
 import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
-import { WriteGrantState, sendWriteGrant } from "./write-grant";
+import { WriteGrantState, focusAfterResult, sendWriteGrant } from "./write-grant";
+import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
@@ -87,6 +89,10 @@ applyScheme();
 
 const pendingPairingStore = pendingPairingStoreFor(window);
 const relayOrigin = pairingRelayOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-pairing-relay-origin"]')?.content ?? null);
+// cas-eaa3: Explorer lives on the same Cassy Cloud origin as the operator
+// inbox, so the switcher reuses that reviewed origin: the embedded page names
+// no new external origin (hub h4_csp_03) and the link is a plain navigation.
+const explorerBase = explorerOrigin(document.querySelector<HTMLMetaElement>('meta[name="cas-operator-inbox-origin"]')?.content);
 // cas-9b7d: the account's durable operator inbox. It loads on its own, with
 // no machine connection, so retained supervisor messages read on a new
 // device while every hub is off.
@@ -3797,7 +3803,7 @@ function render(captureDraft = true): void {
   // Only what the conversation shell shows is built (cas-0546): the thread's
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
-  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability() }, regions));
+  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
   if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
@@ -4249,12 +4255,16 @@ function syncConversationAttention(count: number): void {
   applyAttentionSheet();
 }
 /** The phone Tasks sheet names whose tasks it holds, while it covers the header that does (cas-d043 G01). */
+/** The open conversation and its machine, in words ("cas-src on Atlas"). */
+function conversationWhere(): string {
+  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
+  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
+  return contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label });
+}
 function syncProgressSheetWhere(): void {
   const heading = document.querySelector<HTMLElement>("#context-progress-heading");
   let line = document.querySelector<HTMLElement>(".conversation-context .context-sheet-where");
-  const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
-  const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find((item) => item.name === selectedSession) : undefined;
-  const where = progressSheetOpen() ? contextSheetWhere({ projectDir: session?.project_dir, supervisor: session?.supervisor, host: machine?.label }) : "";
+  const where = progressSheetOpen() ? conversationWhere() : "";
   if (!where || !heading) { line?.remove(); return; }
   if (!line) { line = document.createElement("p"); line.className = "context-sheet-where"; line.id = "context-sheet-where"; heading.after(line); }
   if (line.textContent !== where) line.textContent = where;
@@ -4475,9 +4485,9 @@ function fleetAnnouncer(): HTMLElement {
   return region;
 }
 
-function fleetAnnounce(text: string): void {
-  const region = fleetAnnouncer();
-  if (region.textContent !== text) region.textContent = text;
+function fleetAnnounce(text: string, options: AnnounceOptions = {}): void {
+  // cas-1380: `repeat` speaks an identical result again (Review grant twice).
+  announceTo(fleetAnnouncer(), text, options);
 }
 
 function syncFleetSelection(): void {
@@ -4564,12 +4574,15 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     writeAccess: {
       state: writeGrant,
       tasks,
+      // cas-4cf2: the phone sheet covers the header that names the conversation.
+      where: phoneLayout() ? conversationWhere() || undefined : undefined,
       on: {
         // Typing keeps the field and its caret; only stage changes redraw.
         changed: () => {},
-        review: () => { writeGrant.review(); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : "header:grant-result"); },
-        revoke: () => { writeGrant.askRevoke(); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : "header:grant-result"); },
-        cancel: () => { writeGrant.cancel(); rerender("header:grant-review"); },
+        // cas-5020: a refusal focuses the control that fixes it and is announced.
+        review: () => { writeGrant.review(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true }); rerender(writeGrant.stage === "confirm-grant" ? "header:grant-go" : focusAfterResult(writeGrant)); },
+        revoke: () => { writeGrant.askRevoke(); if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true }); rerender(writeGrant.stage === "confirm-revoke" ? "header:grant-go" : focusAfterResult(writeGrant)); },
+        cancel: () => { const opener = writeGrant.stage === "confirm-revoke" ? "header:grant-revoke" : "header:grant-review"; writeGrant.cancel(); rerender(opener); },
         confirm: () => { void runWriteGrant(); },
       },
     },
@@ -4587,9 +4600,9 @@ async function runWriteGrant(): Promise<void> {
   fleetFocusNext = "header:grant-go";
   renderStatus(statuses.get(sessionKey(machineId, session)));
   await sending;
-  if (writeGrant.result) fleetAnnounce(writeGrant.result.text);
+  if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true });
   if (selectedMachineId !== machineId || selectedSession !== session) return;
-  fleetFocusNext = "header:grant-result";
+  fleetFocusNext = focusAfterResult(writeGrant, kind);
   renderStatus(statuses.get(sessionKey(machineId, session)));
   void loadStatus(machineId, session);
 }
@@ -4637,7 +4650,17 @@ function renderStatus(status?: Record<string, unknown>): void {
   syncFleetSelection();
   container.onkeydown = (event) => {
     if (event.key !== "Escape" || !container.querySelector(".fleet-ops-menu, .fleet-ops-confirm, .fleet-ops-preview, .fleet-ops-panel")) return;
-    event.preventDefault(); event.stopPropagation(); dismissFleetPanel();
+    event.preventDefault(); event.stopPropagation();
+    // cas-42c0: Escape on a Write access confirmation backs out to the form,
+    // like Cancel, and puts focus back on the action that opened it.
+    if (fleetHeaderPanel === "grant" && (writeGrant.stage === "confirm-grant" || writeGrant.stage === "confirm-revoke")) {
+      const opener = writeGrant.stage === "confirm-revoke" ? "header:grant-revoke" : "header:grant-review";
+      writeGrant.cancel();
+      fleetFocusNext = opener;
+      renderStatus(selectedMachineId && selectedSession ? statuses.get(sessionKey(selectedMachineId, selectedSession)) : undefined);
+      return;
+    }
+    dismissFleetPanel();
   };
   const undoFocused = document.activeElement instanceof HTMLElement && document.activeElement.dataset.fleetFocus === "undo";
   const hadFocus = document.activeElement instanceof HTMLElement && (container.contains(document.activeElement) || document.activeElement.closest("#fleet-phone-undo")) ? document.activeElement.dataset.fleetFocus : undefined;
@@ -4655,7 +4678,16 @@ function renderStatus(status?: Record<string, unknown>): void {
     const target = want.endsWith(":first-item")
       ? container.querySelector<HTMLElement>(`[data-fleet-focus^="${CSS.escape(want.replace(/:first-item$/, ""))}:item:"]`)
       : [...(phoneLayout() ? document : container).querySelectorAll<HTMLElement>(`[data-fleet-focus="${CSS.escape(want)}"]`)].find((node) => node.getClientRects().length > 0);
-    if (target) { target.focus({ preventScroll: false }); return; }
+    if (target) {
+      target.focus({ preventScroll: false });
+      // cas-68d0 F02: focus alone may leave the receipt under the rail's
+      // bottom fade; scrolling honours its scroll margin. cas-5020: focus is
+      // on a control now, so bring the receipt into view and then keep the
+      // focused control in sight.
+      const receipt = want.startsWith("header:grant") ? container.querySelector<HTMLElement>(".write-grant-result") : null;
+      if (receipt) { receipt.scrollIntoView({ block: "nearest" }); target.scrollIntoView({ block: "nearest" }); }
+      return;
+    }
     if (want === "undo") {
       const fallback = progressSheetOpen() || !phoneLayout() ? container.querySelector<HTMLElement>('[data-fleet-focus="header:add"]') : document.querySelector<HTMLElement>("#conversation-fleet");
       fallback?.focus(); return;

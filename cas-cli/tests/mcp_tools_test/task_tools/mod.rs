@@ -9,6 +9,7 @@ mod gate;
 mod independent_qa;
 mod aliases;
 mod operations;
+mod peer_claims;
 mod qa_evidence_gate;
 mod reopen_atomicity;
 mod verification_flow;

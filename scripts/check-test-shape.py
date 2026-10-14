@@ -4,7 +4,10 @@
 Scan test bodies and test-only helpers for constant/literal equality pins and
 Rust source reads. A // pin: reason immediately above the statement or function
 acknowledges an intentional structural/compatibility contract. Vendor code is
-excluded. --changed-since uses merge-base(ref, HEAD), including working changes.
+excluded. Integration tests under cas-cli/tests must use the runtime binary
+resolver rather than env!("CARGO_BIN_EXE_cas"); this archive-portability rule
+cannot be exempted with a pin. --changed-since uses merge-base(ref, HEAD),
+including working changes.
 """
 import argparse
 from pathlib import Path
@@ -57,6 +60,17 @@ def lint(source, path):
         scopes.extend((-1, a, b) for a, b in ps.items() if ts[a].value == '{'
                       and 'cfg(test)' in ''.join(x.value for x in ts[max(0, a-15):a]))
     hits = []
+    # Check the whole integration source, including constants and helpers.
+    # Comments and string examples are already excluded by the Rust tokenizer.
+    # A pin cannot repair a producer path on another archive runner.
+    if path.startswith('cas-cli/tests/'):
+        for i, t in enumerate(ts):
+            if (not t.string and t.value == 'env' and i + 3 < len(ts)
+                    and ts[i + 1].value == '!'
+                    and ts[i + 2].value in ('(', '[', '{')
+                    and ts[i + 3].string
+                    and ts[i + 3].value in ('"CARGO_BIN_EXE_cas"', 'CARGO_BIN_EXE_cas')):
+                hits.append((source.count('\n', 0, t.start) + 1, 'archive-unsafe Cargo binary path'))
     seen = set()
     for fn, begin, end in scopes:
         function_pin = fn >= 0 and pinned(source, ts[fn - 1].start if fn > 0 and ts[fn - 1].value == "async" else ts[fn].start)
@@ -136,7 +150,10 @@ def main():
             if not path or path.startswith('vendor/') or not Path(path).is_file():
                 continue
             for line, kind in lint(Path(path).read_text(), path):
-                hits.append(f'{path}:{line}: {kind}; add // pin: <reason> or replace with a behavior test')
+                remedy = ('use cas::test_paths::cas_binary() for archive runners'
+                          if kind == 'archive-unsafe Cargo binary path'
+                          else 'add // pin: <reason> or replace with a behavior test')
+                hits.append(f'{path}:{line}: {kind}; {remedy}')
         print('\n'.join(hits) if hits else 'test-shape: PASS (no unpinned hits)')
         return bool(hits)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:

@@ -19,7 +19,12 @@ export interface WriteAccessContext {
   readonly state: WriteGrantState;
   readonly tasks: readonly FleetTask[];
   readonly on: WriteAccessHandlers;
+  /** On a phone, the conversation and machine the sheet acts on ("cas-src on Atlas"). */
+  readonly where?: string;
 }
+
+export const WRITE_ACCESS_TITLE = "Write access outside the worktree";
+const WRITE_ACCESS_TITLE_ID = "write-grant-title";
 
 function labelled(document: Document, text: string, control: HTMLElement): HTMLLabelElement {
   const label = document.createElement("label");
@@ -45,7 +50,26 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   const panel = document.createElement("div");
   panel.className = "fleet-ops-panel write-grant";
   panel.setAttribute("role", "group");
-  panel.setAttribute("aria-label", "Write access outside the worktree");
+  // cas-4cf2: the visible title is the accessible name; a phone sheet names
+  // its close button for the panel. cas-68d0 F01: an h3 under the rail's h2,
+  // naming the group by reference so the name is spoken once.
+  panel.setAttribute("aria-labelledby", WRITE_ACCESS_TITLE_ID);
+  panel.dataset.closeLabel = "Close write access";
+  const title = document.createElement("h3");
+  title.id = WRITE_ACCESS_TITLE_ID;
+  title.className = "write-grant-title";
+  title.textContent = WRITE_ACCESS_TITLE;
+  const lead = document.createElement("p");
+  lead.className = "write-grant-lead";
+  lead.textContent = "Lets the agents on one task write to a folder outside their worktree until the task closes.";
+  panel.append(title);
+  if (context.where) {
+    const where = document.createElement("p");
+    where.className = "write-grant-where";
+    where.textContent = context.where;
+    panel.append(where);
+  }
+  panel.append(lead);
 
   if (state.stage === "confirm-grant" || state.stage === "confirm-revoke" || state.stage === "sending") {
     const confirm = document.createElement("div");
@@ -91,6 +115,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
       box.className = "write-grant-mode";
       box.value = mode;
       box.checked = state.draft.modes.has(mode);
+      box.dataset.fleetFocus = `header:grant-mode:${mode}`;
       box.onchange = () => {
         if (box.checked) state.draft.modes.add(mode);
         else state.draft.modes.delete(mode);
@@ -121,10 +146,17 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   if (state.result) {
     const line = document.createElement("p");
     line.className = `write-grant-result fleet-ops-note fleet-ops-note--${state.result.tone === "ok" ? "ok" : "error"}`;
+    // cas-5020: a status line, never a focus target; focus goes to a control.
     line.setAttribute("role", "status");
-    line.tabIndex = -1;
-    line.dataset.fleetFocus = "header:grant-result";
-    line.textContent = state.result.text;
+    // cas-06e8: the task id never breaks at its hyphen.
+    const at = state.result.task ? state.result.text.indexOf(state.result.task) : -1;
+    if (at < 0) line.textContent = state.result.text;
+    else {
+      const id = document.createElement("span");
+      id.className = "write-grant-id";
+      id.textContent = state.result.task!;
+      line.append(state.result.text.slice(0, at), id, state.result.text.slice(at + state.result.task!.length));
+    }
     panel.append(line);
   }
   return panel;

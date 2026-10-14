@@ -193,6 +193,97 @@ impl CasCore {
             _ => {} // Assigned to this agent - allow claim
         }
 
+        // cas-5f28: mirror the claim into Cassy Cloud first; a peer on another
+        // machine that holds this task refuses the claim before anything here
+        // changes. Epics are shared: their overlap is only reported.
+        // cas-4736: a child the peer took under a binding epic split.
+        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(hold.refusal(
+                    &req.task_id,
+                    &crate::mcp::tools::core::guidance::caller_prefix(),
+                )),
+                data: None,
+            });
+        }
+        // cas-0078: a claim another agent of this database holds is left with
+        // it until the local lease below decides, and every round trip runs
+        // off the async runtime within one budget.
+        let peer_claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root);
+        let peer_budget = crate::cloud::peer_claims::PeerBudget::default();
+        let cloud_duration = req.duration_secs.clamp(1, 3600) as u32;
+        let claim_kind = if task.task_type == crate::types::TaskType::Epic {
+            crate::cloud::peer_claims::ClaimKind::Epic
+        } else {
+            crate::cloud::peer_claims::ClaimKind::Task
+        };
+        let mut cloud_claimed = false;
+        let mut cloud_local_holder: Option<String> = None;
+        let peer_note = match peer_claims.clone() {
+            Some(claims) => {
+                use crate::cloud::peer_claims::{Acquire, ClaimKind};
+                let kind = claim_kind;
+                let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
+                let prefix = crate::mcp::tools::core::guidance::caller_prefix();
+                let answer = {
+                    let (id, agent, name) =
+                        (req.task_id.clone(), agent_id.clone(), agent_name.clone());
+                    peer_budget
+                        .run(move || {
+                            claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                                local.contains(holder)
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(Acquire::Unavailable)
+                };
+                match answer {
+                    Acquire::Claimed => {
+                        cloud_claimed = true;
+                        String::new()
+                    }
+                    Acquire::LocalHolder(holder) => {
+                        cloud_local_holder = Some(holder);
+                        String::new()
+                    }
+                    Acquire::PeerHolds(hold) if kind == ClaimKind::Task => {
+                        return Err(McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(format!(
+                                "⛔ HELD BY A PEER — task {} is claimed by {} until {}. Ask them first: {prefix}coordination action=message target={} summary=\"{}\" message=\"...\". To take it over anyway: {prefix}task action=start id={} force=true",
+                                req.task_id,
+                                hold.describe(),
+                                hold.until(),
+                                hold.name(),
+                                req.task_id,
+                                req.task_id,
+                            )),
+                            data: None,
+                        });
+                    }
+                    Acquire::PeerHolds(hold) => hold.shared_epic_note(&req.task_id, &prefix),
+                    Acquire::StalePeer(hold) => format!(
+                        "\n⚠️  STALE PEER CLAIM — {}'s claim on {} {}; claimed here on the local lease.",
+                        hold.describe(),
+                        req.task_id,
+                        hold.stale_reason(chrono::Utc::now()),
+                    ),
+                    Acquire::Unavailable(reason) => format!(
+                        "\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}); other machines' claims on {} could not be checked.",
+                        crate::mcp::tools::truncate_str(&reason, 200),
+                        req.task_id,
+                    ),
+                }
+            }
+            None => String::new(),
+        };
+        let prefer_start_hint = match prefer_start_hint {
+            Some(hint) => Some(format!("{hint}{peer_note}")),
+            None if peer_note.is_empty() => None,
+            None => Some(peer_note),
+        };
+
         let result = agent_store
             .try_claim(
                 &req.task_id,
@@ -205,6 +296,32 @@ impl CasCore {
                 message: Cow::from(format!("Failed to claim task: {e}")),
                 data: None,
             })?;
+
+        // cas-0078: the cloud claim follows the local lease. The winner takes
+        // a claim another local agent held; a refused claimant leaves behind
+        // no claim of its own, and never touches anyone else's.
+        if let Some(claims) = peer_claims {
+            let won = match &result {
+                ClaimResult::Success(_) => true,
+                ClaimResult::AlreadyClaimed { held_by, .. } => held_by == &agent_id,
+                _ => false,
+            };
+            let (id, agent, name) = (req.task_id.clone(), agent_id.clone(), agent_name.clone());
+            let kind = claim_kind;
+            match (won, cloud_local_holder) {
+                (true, Some(holder)) => {
+                    let _ = peer_budget
+                        .run(move || {
+                            claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration)
+                        })
+                        .await;
+                }
+                (false, _) if cloud_claimed => {
+                    let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+                }
+                _ => {}
+            }
+        }
 
         match result {
             ClaimResult::Success(lease) => {
@@ -387,6 +504,8 @@ impl CasCore {
 
         match release_result {
             Ok(()) => {
+                // cas-5f28: release the Cassy Cloud claim beside the lease.
+                crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
@@ -623,6 +742,8 @@ impl CasCore {
         let lease_released = agent_store
             .release_lease_for_task(&req.task_id, "Task reset")
             .unwrap_or(false);
+        // cas-5f28: and its Cassy Cloud claim, so peers may start it.
+        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
 
         let prior_status = task.status;
         let prior_assignee = task.assignee.clone();
@@ -1043,6 +1164,8 @@ impl CasCore {
                     data: None,
                 })?;
         }
+        // cas-5f28: the receiver's start takes the cloud claim afresh.
+        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
 
         // Try to claim for target agent (best effort - they may need to claim themselves)
         let claim_result = agent_store.try_claim(

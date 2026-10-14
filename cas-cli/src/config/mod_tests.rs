@@ -968,7 +968,15 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.ai_enrichment.effort", "low", "low"),
     ];
     let registry = meta::registry();
-    for key in registry.all_keys().into_iter().filter(|key| key.starts_with("factory.")) {
+    // GH #1182: `factory.write_roots` is registered, readable and listed, but
+    // operator-only: the generic setter refuses it and only the operator CLI
+    // path writes it (see `factory_write_roots_are_operator_only_gh_1182`).
+    const OPERATOR_ONLY: &[&str] = &["factory.write_roots"];
+    for key in registry
+        .all_keys()
+        .into_iter()
+        .filter(|key| key.starts_with("factory.") && !OPERATOR_ONLY.contains(key))
+    {
         assert!(
             table.iter().any(|(settable, _, _)| *settable == key),
             "registered key {key} is missing from this round-trip table"
@@ -1027,6 +1035,45 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         Some(FACTORY_ARTIFACTS_ROOT_DEFAULT),
         "an unset artifacts_root reads as its default"
     );
+}
+
+/// GH #1182: `[factory] write_roots` lives in config.toml, is shown by `get`
+/// and `list`, survives a save and load, and is preserved by any later
+/// load-modify-save of another key; the generic setter (MCP, config editor,
+/// reset, import) refuses it.
+#[test]
+fn factory_write_roots_are_operator_only_gh_1182() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    assert_eq!(config.get("factory.write_roots").as_deref(), Some(""));
+    assert_eq!(
+        meta::registry().get("factory.write_roots").unwrap().examples(),
+        vec!["~/Downloads,/mnt/models"],
+        "QA F04: describe shows a real example, not item1,item2,item3"
+    );
+    let error = config.set("factory.write_roots", "/tmp").unwrap_err().to_string();
+    assert!(error.contains("operator"), "{error}");
+    assert!(config.factory().write_roots.is_empty());
+
+    config.set_factory_write_roots(vec!["/mnt/a".into(), "/mnt/b".into()]);
+    assert_eq!(config.get("factory.write_roots").as_deref(), Some("/mnt/a,/mnt/b"));
+    let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
+    assert_eq!(listed.get("factory.write_roots").map(String::as_str), Some("/mnt/a,/mnt/b"));
+    config.save(temp.path()).unwrap();
+    let text = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(text.contains("write_roots = ["), "{text}");
+
+    let mut loaded = Config::load(temp.path()).unwrap();
+    loaded.set("factory.note_max_chars", "1800").unwrap();
+    loaded.save(temp.path()).unwrap();
+    let reloaded = Config::load(temp.path()).unwrap();
+    assert_eq!(reloaded.factory().write_roots, vec!["/mnt/a".to_string(), "/mnt/b".to_string()]);
+
+    let mut cleared = reloaded;
+    cleared.set_factory_write_roots(Vec::new());
+    cleared.save(temp.path()).unwrap();
+    let text = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(!text.contains("write_roots"), "an empty list is not serialized: {text}");
 }
 
 #[test]

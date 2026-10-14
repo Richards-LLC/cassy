@@ -461,7 +461,17 @@ impl CasService {
 
         spec.status = SpecStatus::Approved;
         spec.approved_at = Some(Utc::now());
-        spec.approved_by = self.inner.get_agent_id().ok();
+        // cas-3c26: an MCP approval is an agent's; stamp it as one, with the
+        // registry's role, so it never reads as the operator's sign-off.
+        let approver = self.inner.get_agent_id().ok();
+        let role = approver.as_deref().and_then(|id| {
+            crate::store::open_agent_store(&self.inner.cas_root)
+                .ok()?
+                .get(id)
+                .ok()
+                .map(|agent| agent.role.to_string())
+        });
+        spec.approved_by = spec_approval_stamp(approver.as_deref(), role.as_deref());
         spec.updated_at = Utc::now();
 
         store.update(&spec).map_err(|e| {
@@ -517,5 +527,40 @@ impl CasService {
             "Rejected spec: {} - {}",
             id, spec.title
         )))
+    }
+}
+
+/// cas-3c26: who approved a spec, as recorded. An MCP approval is always an
+/// agent's, so it is stamped as one (`agent:<id> (<registry role>)`) and can
+/// never read as the operator's sign-off.
+pub(crate) fn spec_approval_stamp(agent_id: Option<&str>, role: Option<&str>) -> Option<String> {
+    Some(format!(
+        "agent:{} ({})",
+        agent_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or("unknown"),
+        role.filter(|role| !role.trim().is_empty())
+            .unwrap_or("unregistered role")
+    ))
+}
+
+#[cfg(test)]
+mod spec_approval_tests {
+    use super::spec_approval_stamp;
+
+    #[test]
+    fn cas_3c26_spec_approval_is_stamped_as_an_agents_never_the_operators() {
+        assert_eq!(
+            spec_approval_stamp(Some("sup-1"), Some("supervisor")).as_deref(),
+            Some("agent:sup-1 (supervisor)")
+        );
+        assert_eq!(
+            spec_approval_stamp(Some("w-2"), None).as_deref(),
+            Some("agent:w-2 (unregistered role)")
+        );
+        assert_eq!(
+            spec_approval_stamp(None, None).as_deref(),
+            Some("agent:unknown (unregistered role)")
+        );
     }
 }

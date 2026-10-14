@@ -380,34 +380,18 @@ fn test_factory_agent_active_tasks_count() {
 // Cloud Integration Tests (Require CAS_CLOUD_TOKEN)
 // =============================================================================
 
-/// Get cloud configuration from environment for testing
-/// Returns None if cloud credentials are not available
-fn get_test_cloud_config() -> Option<cas::cloud::CloudConfig> {
-    let token = std::env::var("CAS_CLOUD_TOKEN").ok()?;
-    if token.is_empty() {
-        return None;
-    }
-
-    let endpoint =
-        std::env::var("CAS_CLOUD_ENDPOINT").unwrap_or_else(|_| "https://cas.cloud".to_string());
-
-    Some(cas::cloud::CloudConfig {
-        token: Some(token),
-        endpoint,
-        ..Default::default()
-    })
+/// The cloud these tests run against: the in-process fake by default, or the
+/// real Cassy Cloud through the namespacing proxy when
+/// `CAS_TEST_CLOUD_TOKEN_FILE` is set (cas-c7c7). The cloud is
+/// returned so it lives as long as the test, and its teardown runs at drop.
+fn cloud_for_test() -> (cas::cloud::CloudConfig, super::test_cloud::TestCloud) {
+    let cloud = super::test_cloud::TestCloud::start();
+    (cloud.config(), cloud)
 }
 
 #[test]
-#[ignore = "Requires CAS_CLOUD_TOKEN environment variable"]
 fn test_cloud_factory_registration() {
-    let config = match get_test_cloud_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping cloud test: CAS_CLOUD_TOKEN not set");
-            return;
-        }
-    };
+    let (config, _fake) = cloud_for_test();
 
     // Create a cloud coordinator
     let mut coordinator =
@@ -437,15 +421,8 @@ fn test_cloud_factory_registration() {
 }
 
 #[test]
-#[ignore = "Requires CAS_CLOUD_TOKEN environment variable"]
 fn test_cloud_agent_sync_across_machines() {
-    let config = match get_test_cloud_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping cloud test: CAS_CLOUD_TOKEN not set");
-            return;
-        }
-    };
+    let (config, _fake) = cloud_for_test();
 
     // Create two coordinators (simulating two machines)
     let mut coordinator_a =
@@ -481,15 +458,8 @@ fn test_cloud_agent_sync_across_machines() {
 }
 
 #[test]
-#[ignore = "Requires CAS_CLOUD_TOKEN environment variable"]
 fn test_cloud_task_claiming_distributed() {
-    let config = match get_test_cloud_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping cloud test: CAS_CLOUD_TOKEN not set");
-            return;
-        }
-    };
+    let (config, _cloud) = cloud_for_test();
 
     // Create two coordinators (simulating two machines)
     let mut coordinator_a =
@@ -515,6 +485,12 @@ fn test_cloud_task_claiming_distributed() {
 
     // Agent A claims the task
     let claim_a = coordinator_a.claim(&task_id, 300, Some("Testing"));
+
+    // Both the fake and the real cloud serve claims, so it succeeds outright.
+    assert!(
+        matches!(claim_a, Ok(cas::types::ClaimResult::Success(_))),
+        "{claim_a:?}"
+    );
 
     // Handle case where task doesn't exist in cloud yet
     if let Ok(result) = &claim_a {
@@ -544,15 +520,8 @@ fn test_cloud_task_claiming_distributed() {
 }
 
 #[test]
-#[ignore = "Requires CAS_CLOUD_TOKEN environment variable"]
 fn test_cloud_prompt_queue_delivery() {
-    let config = match get_test_cloud_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping cloud test: CAS_CLOUD_TOKEN not set");
-            return;
-        }
-    };
+    let (config, _fake) = cloud_for_test();
 
     // Create a coordinator
     let mut coordinator =
@@ -580,15 +549,8 @@ fn test_cloud_prompt_queue_delivery() {
 }
 
 #[test]
-#[ignore = "Requires CAS_CLOUD_TOKEN environment variable"]
 fn test_cloud_event_streaming() {
-    let config = match get_test_cloud_config() {
-        Some(c) => c,
-        None => {
-            eprintln!("Skipping cloud test: CAS_CLOUD_TOKEN not set");
-            return;
-        }
-    };
+    let (config, _fake) = cloud_for_test();
 
     // Create coordinators
     let mut coordinator_a =

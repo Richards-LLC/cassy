@@ -525,6 +525,16 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
+    /// Directories outside the worktree where this project's factory agents
+    /// (supervisor and workers) may create, edit and delete files (GH #1182).
+    /// Operator-only: set with `cas config set factory.write_roots`, which
+    /// stores canonical absolute paths. `Config::set` refuses the key, so MCP,
+    /// the config editor and imports cannot widen it, and the PreToolUse hook
+    /// refuses agent writes to `.cas/config.toml`. Empty keeps the default
+    /// workspace contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_roots: Vec<String>,
+
     /// Maximum number of characters accepted in an ordinary agent message.
     #[serde(default = "default_message_max_chars")]
     pub message_max_chars: usize,
@@ -951,6 +961,7 @@ impl Default for FactoryConfig {
         Self {
             worker_policy: Default::default(),
             artifacts_root: None,
+            write_roots: Vec::new(),
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),
             note_max_chars: default_note_max_chars(),
@@ -1403,6 +1414,11 @@ pub struct CloudSyncConfig {
     /// Warn when the oldest retryable local change is this old (seconds).
     #[serde(default = "default_cloud_queue_oldest_warning_secs")]
     pub queue_oldest_warning_secs: u64,
+
+    /// The label people see and type for this machine (`name@machine`,
+    /// claim refusals, peer listings). Unset means the hostname (cas-c7c7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_label: Option<String>,
 }
 
 fn default_cloud_sync_interval() -> u64 {
@@ -1431,6 +1447,7 @@ impl Default for CloudSyncConfig {
             max_retries: default_max_retries(),
             queue_pending_warning: default_cloud_queue_pending_warning(),
             queue_oldest_warning_secs: default_cloud_queue_oldest_warning_secs(),
+            machine_label: None,
         }
     }
 }

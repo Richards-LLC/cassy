@@ -1870,7 +1870,7 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         assert!(conn.prepare("SELECT race_col FROM t LIMIT 0").is_ok());
 
-        // cas-e0cb: SQLite 3.51.0-3.51.1 deadlock when two WAL connections in
+        // cas-e0cb: SQLite 3.51.x before 3.51.2 deadlocks when two WAL connections in
         // one process close at once (unixLock -> unixIsSharingShmNode takes
         // unixBigLock under pLockMutex; unixClose takes them the other way),
         // which hung this test for 600 s. 3.51.2 fixed it; 3.51.3 also fixes

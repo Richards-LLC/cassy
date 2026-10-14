@@ -449,6 +449,7 @@ mod tests {
             last_activity_at: None,
             last_activity: None,
             started_at: None,
+            cloud_project_id: None,
             daemon_identity: None,
         }];
         let projects = projects_from_rows(rows, &sessions, false);

@@ -11,6 +11,8 @@ mod injection_events;
 mod lifecycle;
 #[cfg(test)]
 mod loop_latency_tests;
+#[cfg(test)]
+mod peer_mailbox_wake_tests;
 pub(crate) mod loop_watchdog;
 pub(super) mod merge_sweep;
 mod output;

@@ -190,10 +190,21 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.id DESC";
 
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
+///
+/// cas-b5ad: a row the daemon claimed for its transport after the turn began,
+/// but whose handoff it never completed, is eligible too. A busy worker's
+/// pane is never silent, so the daemon declines the wake after the claim and
+/// leaves the row gated (any Agent-Teams copy is held by Claude Code until
+/// the turn ends); without this the claim hid the row from every tool
+/// boundary of a long turn. A completed handoff (`transport_delivered_at`)
+/// keeps its claim (cas-27ad). Both placeholders bind the turn start.
 const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
-    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
-     AND (q.transport_delivered_at IS NULL
-          OR julianday(q.transport_delivered_at) > julianday(?))";
+    "AND (((seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
+           AND (q.transport_delivered_at IS NULL
+                OR julianday(q.transport_delivered_at) > julianday(?)))
+          OR (seen.source = 'transport_claimed'
+              AND q.transport_delivered_at IS NULL
+              AND julianday(seen.seen_at) > julianday(?)))";
 
 /// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
 /// The daemon's claim (`transport_claimed`) hides a handed-off row from every
@@ -2360,6 +2371,18 @@ pub trait PromptQueueStore: Send + Sync {
     /// Unknown-target abandon: processed without transport success.
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
 
+    /// Notify a registered sender that its separate durable peer outbox row
+    /// expired. Idempotent; the daemon notice cannot generate a bounce loop.
+    fn notify_peer_send_abandoned(
+        &self,
+        sender_agent_id: &str,
+        sender_name: &str,
+        sender_session: Option<&str>,
+        outbox_id: i64,
+        recipient: &str,
+        reason: &str,
+    ) -> Result<()>;
+
     /// Terminate a supervisor lifecycle WAKE relay that was never transported
     /// (cas-7787, GH #160): processed, stage `Abandoned`, reason
     /// [`PendingReason::UndeliveredLifecycleRelay`].
@@ -3025,8 +3048,227 @@ impl SqlitePromptQueueStore {
                 params![now, prompt_id],
             )?;
         }
+        if next == DeliveryStage::Abandoned {
+            Self::notify_abandoned_sender_in_tx(tx, prompt_id)?;
+        }
         Ok(())
     }
+
+    /// Commit the abandonment and its sender notice together. The immutable
+    /// origin identifies the sender even when source="supervisor" and the
+    /// failed message belongs to a different recipient factory session.
+    fn notify_abandoned_sender_in_tx(tx: &Connection, prompt_id: i64) -> Result<()> {
+        let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, prompt_id)? else {
+            return Ok(());
+        };
+        Self::insert_abandonment_notice_in_tx(
+            tx,
+            &notice.sender,
+            notice.session.as_deref(),
+            &prompt_id.to_string(),
+            &notice.target,
+            &notice.reason,
+        )
+    }
+
+    fn abandoned_sender_notice_in_tx(
+        tx: &Connection,
+        prompt_id: i64,
+    ) -> Result<Option<AbandonedSenderNotice>> {
+        let original = tx
+            .query_row(
+                "SELECT source, target, factory_session, origin_agent_id, origin_kind,
+                    COALESCE(last_pending_detail, last_pending_reason, 'undeliverable')
+             FROM prompt_queue WHERE id = ? AND highest_stage = 'abandoned'
+               AND source <> 'delivery-watchdog'",
+                params![prompt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((mut sender, target, mut session, origin_id, origin_kind, reason)) = original
+        else {
+            return Ok(None);
+        };
+        if origin_kind.as_deref() == Some("registered_agent") {
+            (sender, session) = Self::abandonment_recipient_in_tx(
+                tx,
+                origin_id.as_deref(),
+                &sender,
+                session.as_deref(),
+            )?;
+        }
+        Ok(Some(AbandonedSenderNotice {
+            sender,
+            session,
+            prompt_id,
+            target,
+            reason,
+        }))
+    }
+
+    /// A maintenance sweep may expire an entire backlog. Resolve authenticated
+    /// sender identities first, then leave at most one notice in each inbox.
+    fn notify_bulk_abandoned_senders_in_tx(tx: &Connection, prompt_ids: &[i64]) -> Result<()> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut groups: BTreeMap<(String, Option<String>), Vec<AbandonedSenderNotice>> =
+            BTreeMap::new();
+        for id in prompt_ids {
+            if let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, *id)? {
+                groups
+                    .entry((notice.sender.clone(), notice.session.clone()))
+                    .or_default()
+                    .push(notice);
+            }
+        }
+        for ((sender, session), mut notices) in groups {
+            notices.sort_by_key(|notice| notice.prompt_id);
+            // Keep the established single-message wording when a sender has
+            // only one expired message in this sweep.
+            if notices.len() == 1 {
+                let notice = &notices[0];
+                Self::insert_abandonment_notice_in_tx(
+                    tx,
+                    &sender,
+                    session.as_deref(),
+                    &notice.prompt_id.to_string(),
+                    &notice.target,
+                    &notice.reason,
+                )?;
+                continue;
+            }
+            let targets = notices
+                .iter()
+                .map(|notice| notice.target.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let reasons = notices
+                .iter()
+                .map(|notice| notice.reason.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("; ");
+            let ids = notices
+                .iter()
+                .map(|notice| notice.prompt_id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Self::insert_abandonment_body_in_tx(
+                tx,
+                &sender,
+                session.as_deref(),
+                &format!(
+                    "{} messages to {targets} were abandoned ({reasons}); ids {ids}",
+                    notices.len()
+                ),
+                &format!("{} messages to {targets} abandoned", notices.len()),
+                &format!("delivery-abandoned:batch:{ids}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn abandonment_recipient_in_tx(
+        tx: &Connection,
+        sender_id: Option<&str>,
+        stored_name: &str,
+        stored_session: Option<&str>,
+    ) -> Result<(String, Option<String>)> {
+        let has_agents = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if has_agents {
+            if let Some(sender) = tx
+                .query_row(
+                    "SELECT name, factory_session FROM agents
+                 WHERE id = ? AND status IN ('active', 'idle')",
+                    params![sender_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
+            {
+                return Ok(sender);
+            }
+            // Prefer an explicitly re-registered sender with the same name
+            // and session, then the project's current supervisor.
+            if let Some(supervisor) = tx
+                .query_row(
+                    "SELECT name, factory_session FROM agents
+                 WHERE status IN ('active', 'idle')
+                   AND ((name = ?1 AND factory_session IS ?2) OR role = 'supervisor')
+                 ORDER BY (name = ?1 AND factory_session IS ?2) DESC, last_heartbeat DESC, id
+                 LIMIT 1",
+                    params![stored_name, stored_session],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?
+            {
+                return Ok(supervisor);
+            }
+        }
+        // Sessionless logical addressing survives the period with no live
+        // supervisor and is visible to the next supervisor's inbox poll.
+        Ok(("supervisor".to_string(), None))
+    }
+
+    fn insert_abandonment_notice_in_tx(
+        tx: &Connection,
+        sender: &str,
+        session: Option<&str>,
+        message_id: &str,
+        recipient: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let notice =
+            format!("Message {message_id} to {recipient} was abandoned as undeliverable: {reason}");
+        Self::insert_abandonment_body_in_tx(
+            tx,
+            sender,
+            session,
+            &notice,
+            &format!("Message {message_id} to {recipient} abandoned"),
+            &format!("delivery-abandoned:{message_id}"),
+        )
+    }
+
+    fn insert_abandonment_body_in_tx(
+        tx: &Connection,
+        sender: &str,
+        session: Option<&str>,
+        notice: &str,
+        summary: &str,
+        dedupe_key: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT OR IGNORE INTO prompt_queue
+                (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
+             VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?)",
+            params![sender, notice, Utc::now().to_rfc3339(), session, summary, dedupe_key],
+        )?;
+        Ok(())
+    }
+}
+
+struct AbandonedSenderNotice {
+    sender: String,
+    session: Option<String>,
+    prompt_id: i64,
+    target: String,
+    reason: String,
 }
 
 /// Options for [`SqlitePromptQueueStore::atomic_stage_stamp`].
@@ -3814,9 +4056,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND q.delivery_stalled_notified_at IS NULL
                AND q.acked_at IS NULL
                AND COALESCE(q.highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+               -- cas-b5ad: the daemon's transport claim is a reservation,
+               -- not a read; a claimed row whose wake keeps being declined is
+               -- still unread, and its sender must hear that it stalled.
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                       AND seen.source <> 'transport_claimed'
                )
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
                     OR (q.urgent = 0 AND q.priority > 1 AND q.created_at <= ?))
@@ -3876,6 +4122,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                        AND NOT EXISTS (
                            SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                              AND seen.source <> 'transport_claimed'
                        )",
                     params![prompt_id, factory_session, stale_cutoff],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
@@ -5970,6 +6217,40 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn notify_peer_send_abandoned(
+        &self,
+        sender_agent_id: &str,
+        sender_name: &str,
+        sender_session: Option<&str>,
+        outbox_id: i64,
+        recipient: &str,
+        reason: &str,
+    ) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let (sender, session) = Self::abandonment_recipient_in_tx(
+                &tx,
+                Some(sender_agent_id),
+                sender_name,
+                sender_session,
+            )?;
+            let reason = format!(
+                "{reason}\nOriginal sender: {sender_name} (session {})",
+                sender_session.unwrap_or("none")
+            );
+            Self::insert_abandonment_notice_in_tx(
+                &tx,
+                &sender,
+                session.as_deref(),
+                &format!("peer-outbox:{outbox_id}"),
+                recipient,
+                &reason,
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
     fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -6220,25 +6501,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn abandon_pending_older_than(&self, older_than_secs: i64) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let now = Utc::now().to_rfc3339();
             let detail = format!(
                 "expired by explicit queue remediation (older_than_secs={older_than_secs})"
             );
-            let rows = conn.execute(
-                "UPDATE prompt_queue
+            let ids = tx
+                .prepare_cached(
+                    "UPDATE prompt_queue
                  SET processed_at = COALESCE(processed_at, ?),
                      highest_stage = 'abandoned',
                      last_pending_reason = 'abandoned_unknown_target',
                      last_pending_detail = ?,
                      next_attempt_at = NULL
-                 WHERE processed_at IS NULL AND created_at < ?",
-                params![now, detail, cutoff],
-            )?;
-            Ok(rows)
+                 WHERE processed_at IS NULL AND created_at < ? RETURNING id",
+                )?
+                .query_map(params![now, detail, cutoff], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Self::notify_bulk_abandoned_senders_in_tx(&tx, &ids)?;
+            tx.commit()?;
+            Ok(ids.len())
         })
     }
-
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -6272,13 +6557,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE processed_at IS NULL AND created_at < ?",
                     params![now, detail, cutoff],
                 )?;
+                let ids: Vec<_> = stale.iter().map(|row| row.id).collect();
+                Self::notify_bulk_abandoned_senders_in_tx(&tx, &ids)?;
             }
 
             tx.commit()?;
             Ok(stale)
         })
     }
-
     fn abandon_ineligible_session_targets(
         &self,
         targets: &[&str],
@@ -6290,6 +6576,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let now = Utc::now().to_rfc3339();
             let placeholders = std::iter::repeat_n("?", targets.len())
@@ -6305,7 +6592,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  WHERE processed_at IS NULL
                    AND factory_session = ?
                    AND created_at < ?
-                   AND target NOT IN ({placeholders})"
+                   AND target NOT IN ({placeholders}) RETURNING id"
             );
             let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
                 Box::new(now),
@@ -6317,14 +6604,18 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     .iter()
                     .map(|target| Box::new((*target).to_string()) as Box<dyn rusqlite::ToSql>),
             );
-            let rows = conn.execute(
-                &sql,
-                rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
-            )?;
-            Ok(rows)
+            let ids = tx
+                .prepare_cached(&sql)?
+                .query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
+                    |row| row.get::<_, i64>(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Self::notify_bulk_abandoned_senders_in_tx(&tx, &ids)?;
+            tx.commit()?;
+            Ok(ids.len())
         })
     }
-
     fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
         if older_than_secs <= 0 {
             return Err(StoreError::Other(
@@ -6587,9 +6878,11 @@ impl SqlitePromptQueueStore {
                 if let Some(session) = factory_session {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
+                    // cas-b5ad: the receipt clause binds the turn start twice.
                     params.extend(
                         turn_start_param
-                            .clone()
+                            .iter()
+                            .flat_map(|at| [at.clone(), at.clone()])
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -6631,9 +6924,11 @@ impl SqlitePromptQueueStore {
                 } else {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
+                    // cas-b5ad: the receipt clause binds the turn start twice.
                     params.extend(
                         turn_start_param
-                            .clone()
+                            .iter()
+                            .flat_map(|at| [at.clone(), at.clone()])
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -6694,7 +6989,13 @@ impl SqlitePromptQueueStore {
                      WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
                         OR (?5 AND prompt_queue_recipient_seen.source = 'transport_claimed')",
                 )?;
-                let takes_claim = matches!(transport, TransportEligibility::WakeNamed);
+                // cas-b5ad: a tool-boundary drain returns a claimed row only
+                // when the claim came after the turn began; it takes that
+                // claim over as the pointer wake's turn does.
+                let takes_claim = matches!(
+                    transport,
+                    TransportEligibility::WakeNamed | TransportEligibility::After(_)
+                );
                 for prompt in &prompts {
                     stmt.execute(params![prompt.id, recipient, seen_at, source.as_str(), takes_claim])?;
                 }
@@ -7011,6 +7312,68 @@ mod tests {
         assert!(
             store.message_delivery_report(transported).is_err(),
             "ordinary suppressed rows with delivery evidence stay invalid"
+        );
+    }
+
+    /// cas-b5ad: a busy worker's pane is never silent, so the daemon claims a
+    /// supervisor message for its transport and then declines every wake.
+    /// The claim (`transport_claimed`) hid the row from the tool-boundary
+    /// drain, and Claude Code holds the transported copy until the turn ends,
+    /// so the worker took many tool calls without seeing it (13+ minutes,
+    /// message 4184454). A row claimed after the current turn began is
+    /// surfaced at the next tool boundary and its claim becomes the hook's
+    /// receipt; one claimed before the turn began (possibly the turn's own
+    /// prompt) is not.
+    #[test]
+    fn tool_boundary_surfaces_rows_claimed_for_transport_after_the_turn_began_cas_b5ad() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-b5ad";
+        let before = store
+            .enqueue_with_session("supervisor", "worker-1", "the turn's own prompt", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let decision = store
+            .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(decision, "worker-1").unwrap());
+
+        let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()),
+            vec![decision],
+            "the mid-turn claim reaches the worker at its next tool call"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a surfaced row is receipted and never replayed"
+        );
+        let report = store.message_delivery_report(decision).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Confirmed, "{report:?}");
+        assert!(
+            !store.claim_recipient_transport(decision, "worker-1").unwrap(),
+            "the daemon cannot reclaim a row the hook surfaced"
+        );
+
+        // A claim whose handoff completed stays with its transport (cas-27ad).
+        let handed_off = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into the pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(handed_off, "worker-1").unwrap());
+        store.mark_transport_delivered(handed_off).unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a completed handoff is not surfaced a second time"
         );
     }
 
@@ -10287,6 +10650,186 @@ mod tests {
     }
 
     #[test]
+    fn cas_a19b_bulk_sweeps_aggregate_notices_per_sender() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentRole};
+
+        for sweep in ["remediation", "stale", "session"] {
+            let (temp, store) = create_test_store();
+            let agents = SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut a = Agent::new("sender-a".into(), "sup-a".into());
+            a.role = AgentRole::Supervisor;
+            a.factory_session = Some("sender-session-a".into());
+            let mut b = Agent::new("sender-b".into(), "sup-b".into());
+            b.role = AgentRole::Supervisor;
+            b.factory_session = Some("sender-session-b".into());
+            agents.register(&a).unwrap();
+            agents.register(&b).unwrap();
+            let enqueue_old = |sender: &Agent, target: &str| {
+                let id = store
+                    .enqueue_urgent_with_outcome(
+                        "supervisor",
+                        target,
+                        "old work",
+                        Some("recipient-session"),
+                        None,
+                        None,
+                        false,
+                        Some(&QueueOrigin::RegisteredAgent {
+                            agent_id: sender.id.clone(),
+                        }),
+                    )
+                    .unwrap()
+                    .id();
+                backdate(&store, id, 30 * 24 * 60 * 60);
+                id
+            };
+            let ids_a: Vec<_> = (0..23)
+                .map(|n| enqueue_old(&a, &format!("worker-{}", n % 2)))
+                .collect();
+            let ids_b: Vec<_> = (0..2).map(|_| enqueue_old(&b, "other-worker")).collect();
+            let fresh = store
+                .enqueue_with_session(
+                    "supervisor",
+                    "live-worker",
+                    "fresh work",
+                    "recipient-session",
+                )
+                .unwrap();
+            let run_sweep = || match sweep {
+                "remediation" => store.abandon_pending_older_than(900).unwrap(),
+                "stale" => store.expire_stale_pending(900).unwrap().len(),
+                "session" => store
+                    .abandon_ineligible_session_targets(&["live-worker"], "recipient-session", 900)
+                    .unwrap(),
+                _ => unreachable!(),
+            };
+
+            assert_eq!(run_sweep(), 25, "{sweep}");
+            for (sender, ids, targets) in [
+                (&a, &ids_a, "worker-0, worker-1"),
+                (&b, &ids_b, "other-worker"),
+            ] {
+                let notices = store
+                    .poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100)
+                    .unwrap();
+                assert_eq!(
+                    notices.len(),
+                    1,
+                    "{sweep}: one notice per authenticated sender"
+                );
+                let notice = &notices[0];
+                assert_eq!(notice.origin, Some(QueueOrigin::Daemon));
+                assert_eq!(notice.factory_session, sender.factory_session);
+                assert!(
+                    notice.prompt.starts_with(&format!(
+                        "{} messages to {targets} were abandoned (",
+                        ids.len()
+                    )),
+                    "{}",
+                    notice.prompt
+                );
+                let listed: Vec<i64> = notice
+                    .prompt
+                    .split("; ids ")
+                    .nth(1)
+                    .unwrap()
+                    .split(", ")
+                    .map(|id| id.parse().unwrap())
+                    .collect();
+                assert_eq!(&listed, ids, "every abandoned ID appears exactly once");
+                let reason = match sweep {
+                    "remediation" => "explicit queue remediation",
+                    "stale" => "stale queue item",
+                    "session" => "target no longer belongs to factory session",
+                    _ => unreachable!(),
+                };
+                assert!(notice.prompt.contains(reason), "{}", notice.prompt);
+                for id in ids {
+                    assert_eq!(
+                        store.message_delivery_report(*id).unwrap().unwrap().stage,
+                        DeliveryStage::Abandoned
+                    );
+                }
+            }
+            assert_eq!(run_sweep(), 0, "repeat sweep cannot duplicate notices");
+            assert_eq!(
+                store
+                    .peek_for_targets(&["live-worker"], Some("recipient-session"), 10)
+                    .unwrap()[0]
+                    .id,
+                fresh
+            );
+
+            // A later sweep has a new aggregate, not a sender-wide dedupe
+            // key that would hide future abandonment.
+            let later = [enqueue_old(&a, "new-worker"), enqueue_old(&a, "new-worker")];
+            assert_eq!(run_sweep(), 2);
+            let notices = store
+                .poll_unseen_for_recipient(&a.name, a.factory_session.as_deref(), 10)
+                .unwrap();
+            assert_eq!(notices.len(), 1);
+            assert!(
+                notices[0]
+                    .prompt
+                    .contains(&format!("; ids {}, {}", later[0], later[1]))
+            );
+            // An ended sender still falls back to the current supervisor,
+            // with one aggregate in that supervisor's own session.
+            agents.unregister(&a.id).unwrap();
+            let orphaned = [enqueue_old(&a, "orphan-worker"), enqueue_old(&a, "orphan-worker")];
+            assert_eq!(run_sweep(), 2);
+            let fallback = store.poll_unseen_for_recipient(&b.name, b.factory_session.as_deref(), 10).unwrap();
+            assert_eq!(fallback.len(), 1);
+            assert_eq!(fallback[0].factory_session, b.factory_session);
+            assert!(fallback[0].prompt.contains(&format!("; ids {}, {}", orphaned[0], orphaned[1])));
+        }
+    }
+
+    #[test]
+    fn cas_a19b_single_abandonments_keep_individual_notices() {
+        let (_temp, store) = create_test_store();
+        let manual = store.enqueue("sender", "worker-a", "first").unwrap();
+        let deadline = store.enqueue("sender", "worker-b", "second").unwrap();
+        store
+            .mark_abandoned(manual, Some("target disappeared"))
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET first_attempt_at = ? WHERE id = ?",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(901)).to_rfc3339(),
+                    deadline
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .record_retry(
+                    deadline,
+                    PendingReason::TargetUnavailable,
+                    Some("worker unavailable")
+                )
+                .unwrap(),
+            PromptRetryDisposition::Abandoned { .. }
+        ));
+        let notices = store.poll_unseen_for_recipient("sender", None, 10).unwrap();
+        assert_eq!(notices.len(), 2);
+        assert!(
+            notices[0]
+                .prompt
+                .starts_with(&format!("Message {manual} to worker-a was abandoned"))
+        );
+        assert!(
+            notices[1]
+                .prompt
+                .starts_with(&format!("Message {deadline} to worker-b was abandoned"))
+        );
+    }    #[test]
     fn explicit_age_remediation_abandons_only_old_pending_rows() {
         let (_temp, store) = create_test_store();
         let old = store.enqueue("supervisor", "dead-worker", "old").unwrap();
@@ -10627,6 +11170,59 @@ mod tests {
                 .is_none()
         );
         assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
+    }
+
+    /// cas-b5ad: the daemon's transport claim is a reservation, not a read.
+    /// A claimed row whose wake keeps being declined (message 4184454) is
+    /// still unread, so its sender must hear that it stalled; a row the
+    /// recipient's hook surfaced is read and is not bounced.
+    #[test]
+    fn a_claimed_but_unrendered_row_still_bounces_to_its_sender_cas_b5ad() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "session");
+        let claimed = store
+            .enqueue_full(
+                "supervisor",
+                "busy-worker",
+                "scope decision",
+                Some("session"),
+                Some("scope decision"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        let surfaced = store
+            .enqueue_full(
+                "supervisor",
+                "busy-worker",
+                "read already",
+                Some("session"),
+                Some("read already"),
+                Some(NotificationPriority::Normal),
+            )
+            .unwrap();
+        assert!(store.claim_recipient_transport(claimed, "busy-worker").unwrap());
+        store
+            .record_recipient_surfaced(surfaced, "busy-worker", SurfacingSource::HookSurfaced)
+            .unwrap();
+        let old = (Utc::now() - chrono::Duration::seconds(13 * 60)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id IN (?, ?)",
+                params![old, claimed, surfaced],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .delivery_stalled_candidates("session", 10 * 60, 12 * 60, 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![claimed]
+        );
     }
 
     #[test]

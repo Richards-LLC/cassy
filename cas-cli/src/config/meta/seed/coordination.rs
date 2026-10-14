@@ -18,6 +18,22 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         });
     }
     registry.register(ConfigMeta {
+        key: "factory.write_roots",
+        section: "factory",
+        name: "Project Write Roots",
+        description: "Operator-only. Directories outside the worktree where this project's supervisor and workers may create, edit and delete files. Set with `cas config set factory.write_roots \"~/Downloads,/mnt/models\"` (empty clears). Paths are canonicalized at set time; /, $HOME, its ancestors and anything containing or inside this project's .cas are refused. Agents cannot change it.",
+        value_type: ConfigType::StringList,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "write", "roots", "workspace", "outside", "directories", "operator"],
+        use_cases: &[
+            "Let agents save downloads into ~/Downloads or a model store",
+            "Let agents write systemd user units or request files in another repository",
+        ],
+    });
+    registry.register(ConfigMeta {
         key: "factory.artifacts_root",
         section: "factory",
         name: "Durable Task Artifacts Root",

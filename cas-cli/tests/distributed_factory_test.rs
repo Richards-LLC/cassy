@@ -14,8 +14,9 @@
 //! # Run all distributed factory tests
 //! cargo test --test integration_factory distributed_factory_test::
 //!
-//! # Run with cloud (requires CAS_CLOUD_TOKEN env var)
-//! CAS_CLOUD_TOKEN=xxx cargo test --test integration_factory distributed_factory_test::
+//! # Run against the real cloud (cas-c7c7): a 0600 cloud.json or token file
+//! CAS_TEST_CLOUD_TOKEN_FILE=<path> CAS_TEST_CLOUD_TRANSCRIPT_DIR=<dir> cargo nextest run \
+//!     -p cas --test integration_factory -E 'test(two_machine) | test(test_cloud_)'
 //! ```
 
 use std::path::PathBuf;
@@ -82,3 +83,27 @@ impl TestMachine {
 
 #[path = "distributed_factory_test_cases/tests.rs"]
 mod tests;
+
+#[path = "distributed_factory_test_cases/peers.rs"]
+mod peers;
+
+#[path = "distributed_factory_test_cases/peer_messages.rs"]
+mod peer_messages;
+
+#[path = "distributed_factory_test_cases/fake_cloud.rs"]
+mod fake_cloud;
+
+#[path = "distributed_factory_test_cases/test_cloud.rs"]
+mod test_cloud;
+
+#[path = "distributed_factory_test_cases/two_machine.rs"]
+mod two_machine;
+
+#[path = "distributed_factory_test_cases/epic_split.rs"]
+mod epic_split;
+
+#[path = "support/cloud_contract_replay.rs"]
+mod cloud_contract_replay;
+
+#[path = "distributed_factory_test_cases/contract_parity.rs"]
+mod contract_parity;

@@ -101,6 +101,8 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "remind_list",
     "remind_cancel",
     "my_context",
+    // cas-e477: live supervisors of this repo on any machine.
+    "peers",
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
@@ -122,6 +124,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "gc_cleanup",
     "epic_status",
     "focus_epic",
+    "epic_split",
     "restart_spawn_queue",
     "agent_list",
     "agent_cleanup",

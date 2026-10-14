@@ -23,7 +23,7 @@ version and worktree, never a version-keyed path.
    already learned twice is refused unless `--task` names an open P0/P1 task
    whose acceptance removes the cause; receipts refuse its `learn=` mapping the
    same way. Store the lesson with `memory action=remember entry_type=learning
-   tags=release,op:release-cut`; starting the next cut surfaces it.
+   tags=release,operation:release-cut`; starting the next cut surfaces it.
 2. Before merging a release-bound lane, run `scripts/release-train.sh <version>
    <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,

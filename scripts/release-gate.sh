@@ -62,9 +62,8 @@ learn() {
     [[ -z "$cause_task" ]] || task_args=(--task "$cause_task")
     # A lesson learned twice already is not sticking: refuse another prose
     # entry or learn= mapping without an open P0/P1 cause-removing task.
-    previous="$(python3 "$repo_root/scripts/release-learning.py" --recurrence "$repo_root" "$check_id")" || return 1
-    python3 "$repo_root/scripts/release-learning.py" --require-cause-task "$repo_root" \
-        "$check_id" "$cause_task" || return 2
+    previous="$(python3 "$repo_root/scripts/release-learning.py" --require-cause-task "$repo_root" \
+        "$check_id" "$cause_task")" || return 2
     if [[ -n "$mapping_dir" || ${#mapping_rows[@]} -gt 0 ]]; then
         [[ -n "$mapping_dir" && ${#mapping_rows[@]} -gt 0 ]] || {
             printf 'error: --run-dir and --evidence are required together\n' >&2; return 2;
@@ -110,7 +109,7 @@ learn() {
         "$repo_root/scripts/gen-builtin-reference-history.sh"
         printf 'Regenerated builtin reference history after --learn; commit the ledger before starting a gate.\n'
     fi
-    printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release,op:release-cut before retrying (op: tags surface it when the next cut starts).\n' "$check_id"
+    printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release,operation:release-cut before retrying (the next cut surfaces it).\n' "$check_id"
 }
 
 if [[ "${1:-}" == '--learn' ]]; then

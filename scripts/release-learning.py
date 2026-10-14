@@ -299,11 +299,10 @@ def main():
             map_rows(root, Path(args[0]), args[1], references, mode == '--validate-map',
                      options.get('task') or None, previous)
             return 0
-        if mode == '--recurrence':
-            print(failure_counts(root).get(args[0], 0))
-            return 0
         if mode == '--require-cause-task':
+            # Prints the prior recurrence count for --learn's new entry.
             require_cause_task(root, args[0], args[1] if len(args) > 1 and args[1] else None)
+            print(failure_counts(root).get(args[0], 0))
             return 0
         if mode == '--warn-tooling':
             warn_tooling(root)

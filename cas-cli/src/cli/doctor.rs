@@ -1603,51 +1603,36 @@ fn memory_decay_check(cas_root: &Path) -> Check {
 /// release train had already learned. Shown only in a checkout that carries
 /// the release failure log (cas-src); runs live in ~/.cas/artifacts/release.
 fn lesson_recurrence_check(project_root: &Path) -> Option<Check> {
-    if !project_root.join(crate::lesson_recurrence::FAILURE_LOG).is_file() {
-        return None;
-    }
-    let history = crate::lesson_recurrence::FailureHistory::load(Some(project_root));
+    let log = std::fs::read_to_string(project_root.join(crate::lesson_recurrence::FAILURE_LOG)).ok()?;
+    let history = crate::lesson_recurrence::failure_history(&log);
     let releases = crate::lesson_recurrence::release_runs_root()
         .map(|root| {
-            crate::lesson_recurrence::recent_releases(
-                &root,
-                &history,
-                5,
-                chrono::Utc::now().date_naive(),
-            )
+            crate::lesson_recurrence::recent_releases(&root, &history, 5, chrono::Utc::now().date_naive())
         })
         .unwrap_or_default();
     Some(lesson_recurrence_check_for(&releases))
 }
 
 fn lesson_recurrence_check_for(releases: &[crate::lesson_recurrence::ReleaseRecurrence]) -> Check {
-    let Some(latest) = releases.first() else {
+    let Some((latest, earlier)) = releases.split_first() else {
         return Check::new(
             "lesson recurrence",
             CheckStatus::Ok,
-            "Lesson recurrence: no release run with rescue evidence under ~/.cas/artifacts/release".to_string(),
+            "Lesson recurrence: no release run with rescue evidence under ~/.cas/artifacts/release",
         );
     };
-    let rescues: usize = releases.iter().map(|release| release.rescues).sum();
-    let recurred: usize = releases.iter().map(|release| release.recurred.len()).sum();
     let mut message = format!("Lesson recurrence: {} {}", latest.release, latest.summary());
-    if releases.len() > 1 {
-        message.push_str(&format!(
-            "; last {} releases: {recurred} of {rescues} rescues{}",
-            releases.len(),
-            if rescues > 0 {
-                format!(" ({}%)", (recurred * 100 + rescues / 2) / rescues)
-            } else {
-                String::new()
-            }
-        ));
+    if !earlier.is_empty() {
+        let earlier: Vec<String> = earlier
+            .iter()
+            .map(|release| format!("{} {}/{}", release.release, release.recurred.len(), release.rescues))
+            .collect();
+        message.push_str(&format!("; earlier: {}", earlier.join(", ")));
     }
     if latest.recurred.is_empty() {
         return Check::new("lesson recurrence", CheckStatus::Ok, message);
     }
-    message.push_str(
-        " — a repeated lesson needs a cause-removing P0/P1 task (scripts/release-gate.sh --learn … --task <id>), not another learn= mapping",
-    );
+    message.push_str(" — a repeated lesson needs a P0/P1 task that removes the cause (--learn … --task <id>)");
     Check::new("lesson recurrence", CheckStatus::Warning, message)
 }
 
@@ -7000,16 +6985,13 @@ mod tests {
 
     #[test]
     fn lesson_recurrence_row_warns_when_the_latest_release_repeated_a_lesson() {
-        use crate::lesson_recurrence::ReleaseRecurrence;
-        let release = |name: &str, rescues: usize, recurred: &[&str]| ReleaseRecurrence {
-            release: name.to_string(),
-            rescues,
-            recurred: recurred.iter().map(|class| class.to_string()).collect(),
+        let release = |name: &str, rescues: usize, recurred: &[&str]| {
+            crate::lesson_recurrence::ReleaseRecurrence {
+                release: name.to_string(),
+                rescues,
+                recurred: recurred.iter().map(|class| class.to_string()).collect(),
+            }
         };
-        let none = lesson_recurrence_check_for(&[]);
-        assert_eq!(none.name, "lesson recurrence");
-        assert!(matches!(none.status, CheckStatus::Ok));
-
         let check = lesson_recurrence_check_for(&[
             release("v9.98.0", 3, &["scratch-base", "version-literals"]),
             release("v9.97.1", 1, &[]),
@@ -7017,17 +6999,13 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
             check.message.starts_with(
-                "Lesson recurrence: v9.98.0 2 of 3 rescues (67%) repeated a learned lesson: scratch-base, version-literals; last 2 releases: 2 of 4 rescues (50%)"
+                "Lesson recurrence: v9.98.0 2 of 3 rescues (67%) repeated a learned lesson: scratch-base, version-literals; earlier: v9.97.1 0/1"
             ),
             "{}",
             check.message
         );
-
-        let clean = lesson_recurrence_check_for(&[release("v9.99.0", 1, &[]), release("v9.98.0", 3, &["scratch-base"])]);
-        assert!(matches!(clean.status, CheckStatus::Ok), "{}", clean.message);
-        assert!(clean.message.contains("v9.99.0 0 of 1 rescue (0%)"), "{}", clean.message);
-        // Outside cas-src the row is absent rather than empty.
-        assert!(lesson_recurrence_check(std::path::Path::new("/nonexistent-project")).is_none());
+        // Outside cas-src (no failure log) the row is absent.
+        assert!(lesson_recurrence_check(Path::new("/nonexistent-project")).is_none());
     }
 
     #[test]

@@ -756,18 +756,12 @@ fn acquire_sources(
 
     let mut release_evidence = find_release_evidence(tag, &release);
     release_evidence.lesson_recurrence = crate::lesson_recurrence::release_runs_root().and_then(|root| {
-        let fallback_cut = release_evidence
-            .tag_published_at
-            .as_deref()
-            .and_then(|published| DateTime::parse_from_rfc3339(published).ok())
-            .map(|published| published.with_timezone(&Utc).date_naive())
-            .unwrap_or_else(|| Utc::now().date_naive());
-        crate::lesson_recurrence::for_release(
-            &root,
-            version,
-            &crate::lesson_recurrence::FailureHistory::load(Some(project_root)),
-            fallback_cut,
-        )
+        let history = crate::lesson_recurrence::failure_history(
+            &fs::read_to_string(project_root.join(crate::lesson_recurrence::FAILURE_LOG)).ok()?,
+        );
+        crate::lesson_recurrence::recent_releases(&root, &history, usize::MAX, Utc::now().date_naive())
+            .into_iter()
+            .find(|release| release.release == tag)
     });
     if release_evidence.green_to_published_seconds.is_none() {
         warnings.push(

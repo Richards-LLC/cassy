@@ -324,6 +324,32 @@ def cmd_setup(args):
     print(json.dumps({"ok": True, "run_dir": str(run_dir), "binary_version": version}))
 
 
+def cmd_cloud_token(args):
+    """Rewrite the scratch project's cloud.json token (0600), keeping the
+    endpoint. The token arrives on stdin; `--invalid` writes a random bad
+    token instead (to take this machine's mailbox and presence offline)."""
+    import secrets as _secrets
+    cloud = Path(args.run_dir) / "repo" / ".cas" / "cloud.json"
+    config = json.loads(cloud.read_text())
+    config["token"] = ("invalid-" + _secrets.token_hex(16)) if args.invalid else sys.stdin.read().strip()
+    if not config["token"]:
+        raise SystemExit("cloud-token: no token on stdin")
+    fd = os.open(cloud, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(config, handle)
+    print(json.dumps({"ok": True, "valid": not args.invalid}))
+
+
+def cmd_agent_ids(args):
+    try:
+        db = _db(args.run_dir)
+        rows = db.execute("SELECT id, name, role, status FROM agents").fetchall()
+    except Exception as error:
+        print(json.dumps({"ok": False, "error": str(error), "agents": []}))
+        return
+    print(json.dumps({"ok": True, "agents": [dict(zip(("id", "name", "role", "status"), r)) for r in rows]}))
+
+
 def cmd_launch(args):
     """Start `cas factory daemon` detached in its own session; print its pid."""
     run_dir = Path(args.run_dir)
@@ -586,6 +612,13 @@ def machine_main(argv):
         if name == "sweep":
             command.add_argument("--kill", action="store_true")
         command.set_defaults(func=func)
+    token = sub.add_parser("cloud-token")
+    token.add_argument("--run-dir", required=True)
+    token.add_argument("--invalid", action="store_true")
+    token.set_defaults(func=cmd_cloud_token)
+    ids = sub.add_parser("agent-ids")
+    ids.add_argument("--run-dir", required=True)
+    ids.set_defaults(func=cmd_agent_ids)
     probe = sub.add_parser("probe")
     probe.add_argument("--binary", required=True)
     probe.set_defaults(func=cmd_probe)
@@ -608,7 +641,7 @@ def machine_main(argv):
 
 MACHINE_COMMANDS = {
     "setup", "launch", "sweep", "remove", "spawn-count", "task-export", "task-import", "installed-cas",
-    "queue-find", "probe",
+    "queue-find", "probe", "cloud-token", "agent-ids",
 }
 
 

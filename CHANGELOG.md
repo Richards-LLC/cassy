@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — a release can no longer ship that the operator cannot launch (cas-e719)
+
+- 3.51.0 refused `cas factory` and `cas claude <account>` for every operator
+  on the default `factory.nice_cargo=true`, and no gate launched the real
+  binary. The new `operator-launch-smoke` gate row runs
+  `scripts/check-operator-launch.sh` on the tree's audited release binary,
+  as does the post-publication install-path proof (macOS and Linux) on the
+  installed binary.
+- The smoke uses a throwaway HOME and a `cas init` project with default config.
+  It runs in a clean shell that keeps only the Claude Code preferences
+  operators export (`CLAUDE_CODE_NATIVE_CURSOR`, `CLAUDE_CODE_NO_FLICKER`). It
+  runs in a login shell on a pseudo-terminal and, on Linux, in a transient
+  systemd user unit, outside the caller's agent ancestry and cgroup.
+  `cas factory`, `cas claude <account>`, `cas hub pair` and
+  `cas hub authorize` must pass their operator-only gate, and the same
+  commands must be refused with `CAS_AGENT_ROLE` set. Each stops at the
+  launch boundary through a new hidden `--check-launch` flag. The real binary
+  runs it in 3.2 s.
+
 ### Changed — the publisher reuses the gate's release binary (cas-c096)
 
 - The gate's `release-binary-isa` row builds in a persistent release target

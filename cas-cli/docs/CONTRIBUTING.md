@@ -1384,9 +1384,14 @@ The full release gate's `hub-web-tests` row runs `npm ci`, `npm run typecheck`,
 and `npm test` before build and Rust suite rows. A failure prevents pipeline
 admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
 including the repo-level `scripts/visual-qa.mjs` that web tests import and read.
-Both scoped CI lanes use the same conservative paths for `web-check-needed`;
-Markdown fixtures beneath those paths still require web tests. The no-build
-fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
+CI's `web-check-needed` (both scoped lanes and the merge-queue Commander step:
+build, visual QA, dist drift and journeys) is narrower: `scripts/classify-web-inputs.py`
+lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
+worker-memory wrapper with its imports, and `.github/workflows/ci.yml`. Any
+other `scripts/` or `.github/` change skips them; a classifier failure runs them.
+`scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
+the list omits. Markdown fixtures beneath hub-web still require web tests. The
+no-build fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
 
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires one task decision note per

@@ -410,6 +410,7 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
             .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
                 id: TASK.into(),
                 brief: Some(true),
+                force: None,
             }))
             .await
             .unwrap(),

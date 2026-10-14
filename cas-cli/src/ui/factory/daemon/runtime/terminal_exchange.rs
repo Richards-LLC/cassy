@@ -198,6 +198,7 @@ mod tests {
                 sink,
                 stream,
                 pane_sizes: HashMap::new(),
+                relay_trusted: false,
             },
             client,
         )

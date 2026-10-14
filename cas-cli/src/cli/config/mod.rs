@@ -22,6 +22,12 @@ pub enum ConfigCommands {
     Get(ConfigGetArgs),
 
     /// Set a config value (write roots: `cas config set --help`)
+    ///
+    /// Keys that relax a Cassy guard (slack.transport, verification.enabled,
+    /// verification.force_bypass_allowed, factory.supervisor_only_mcp and
+    /// _env, factory.worker_credential_env, qa.evidence_gate,
+    /// qa.independent_pass, release.claude_account_allowlist) are
+    /// operator-only: they need an interactive terminal outside any agent.
     Set(ConfigSetArgs),
 
     /// List all config options

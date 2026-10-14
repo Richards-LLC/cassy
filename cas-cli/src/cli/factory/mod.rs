@@ -1377,6 +1377,16 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         }
         bail!(msg);
     }
+    // cas-3c26: a PTY wrapper (`script -qc`) satisfies the terminal check above,
+    // so an agent could still stand up its own factory. Launching one is the
+    // operator's.
+    if let Some(refusal) = crate::config::operator_policy::operator_action_refusal(
+        "Launching a factory",
+        "run `cas factory` yourself from your own terminal",
+        &crate::config::operator_policy::InvocationContext::from_process(),
+    ) {
+        bail!(refusal);
+    }
 
     // Apply [llm] config harness defaults when CLI args are at their defaults.
     // CLI args explicitly set by the user take precedence over config values.

@@ -173,7 +173,7 @@ pub fn prepare_task_lifecycle_outbox(
     occurrence_id: &str,
 ) -> Option<cas_store::TaskReopenLifecycleOutbox> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
-    let supervisor = resolve_owning_supervisor(agent_store, factory_session.as_deref())?;
+    let supervisor = resolve_worker_supervisor(agent_store, factory_session.as_deref())?;
     let transition_key = transition_key(
         task_id,
         old_status,
@@ -502,11 +502,17 @@ pub fn resolve_owning_supervisor(
     factory_session: Option<&str>,
 ) -> Option<OwningSupervisor> {
     let agents = agent_store.list(None).ok()?;
-    let mut candidates: Vec<_> = agents
-        .into_iter()
-        .filter(|a| a.role == AgentRole::Supervisor)
-        .filter(|a| a.visible_to_factory_session(factory_session))
-        .collect();
+    best_supervisor(
+        agents
+            .into_iter()
+            .filter(|a| a.role == AgentRole::Supervisor)
+            .filter(|a| a.visible_to_factory_session(factory_session))
+            .collect(),
+    )
+}
+
+/// The supervisor row a relay should address among `candidates`.
+fn best_supervisor(mut candidates: Vec<cas_types::Agent>) -> Option<OwningSupervisor> {
     if candidates.is_empty() {
         return None;
     }
@@ -547,6 +553,80 @@ pub fn resolve_owning_supervisor(
             sup.name.clone()
         },
     })
+}
+
+/// The supervisor a worker of `factory_session` reports to (GH #1171).
+///
+/// [`resolve_owning_supervisor`] needs a supervisor row stamped with the same
+/// factory session. A live supervisor's row can lack that stamp: it registered
+/// from a process without `CAS_FACTORY_SESSION`, or its session id moved on a
+/// restart while a worker row kept the old one. A worker's `target=supervisor`
+/// then failed, and its verification dispatch fell back to the worker itself,
+/// while the supervisor was live and messaging it from the same clone.
+///
+/// The fallbacks keep resolution scoped to the worker's session, in order:
+/// 1. the session's own metadata (`~/.cas/sessions/<session>.json`) names its
+///    supervisor;
+/// 2. the only live supervisor on the clone that carries no factory session.
+///
+/// A supervisor stamped with another session is never chosen.
+pub fn resolve_worker_supervisor(
+    agent_store: &dyn AgentStore,
+    factory_session: Option<&str>,
+) -> Option<OwningSupervisor> {
+    if let Some(owner) = resolve_owning_supervisor(agent_store, factory_session) {
+        return Some(owner);
+    }
+    let session = factory_session.map(str::trim).filter(|s| !s.is_empty())?;
+    let supervisors: Vec<cas_types::Agent> = agent_store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|a| a.role == AgentRole::Supervisor)
+        .collect();
+    if let Some(name) = session_metadata_supervisor_name(session)
+        && let Some(owner) = best_supervisor(
+            supervisors
+                .iter()
+                .filter(|a| a.name == name)
+                .cloned()
+                .collect(),
+        )
+    {
+        return Some(owner);
+    }
+    let sessionless_live: Vec<cas_types::Agent> = supervisors
+        .into_iter()
+        .filter(|a| a.factory_session.as_deref().is_none_or(|s| s.trim().is_empty()))
+        .filter(|a| {
+            matches!(
+                a.status,
+                cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+            )
+        })
+        .collect();
+    if sessionless_live.len() == 1 {
+        return best_supervisor(sessionless_live);
+    }
+    None
+}
+
+/// The supervisor name a factory session's metadata file records, if any.
+fn session_metadata_supervisor_name(session: &str) -> Option<String> {
+    // The session id comes from the agent registry; never let it name a path
+    // outside the sessions directory.
+    if session.contains('/') || session.contains('\\') || session.contains("..") {
+        return None;
+    }
+    let text = std::fs::read_to_string(crate::ui::factory::metadata_path(session)).ok()?;
+    let metadata: serde_json::Value = serde_json::from_str(&text).ok()?;
+    metadata
+        .get("supervisor")?
+        .get("name")?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 /// Resolve the factory session represented by a lifecycle actor.
@@ -706,7 +786,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
     branch_tip: Option<&str>,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
-    let Some(supervisor) = resolve_owning_supervisor(agent_store, factory_session.as_deref())
+    let Some(supervisor) = resolve_worker_supervisor(agent_store, factory_session.as_deref())
     else {
         return Ok(LifecyclePushResult::NoSupervisor);
     };

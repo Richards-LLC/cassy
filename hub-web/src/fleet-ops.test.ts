@@ -18,6 +18,8 @@ import {
 } from "./fleet-ops";
 import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
 import type { Scope } from "./types";
+import type { WriteAccessContext } from "./write-grant-view";
+import { WriteGrantState } from "./write-grant";
 
 const ORIGIN = "https://commander.example";
 const CONTROL: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -230,6 +232,38 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     // cas-97d58 F06: by what it allows, never the scope id.
     expect(readOnly.querySelector(".fleet-ops-reason")?.textContent).toContain("Needs the Manage workers and tasks permission.");
     expect(readOnly.querySelector(".fleet-ops-reason")?.textContent).not.toMatch(/factory:/);
+  });
+
+  // cas-a217: each missing permission gets its own line naming its controls,
+  // and every control's description resolves to a rendered line.
+  it("names the permission each disabled header control needs, one line per permission", () => {
+    const writeAccess: WriteAccessContext = { state: new WriteGrantState(), tasks: [], on: { changed: vi.fn(), review: vi.fn(), revoke: vi.fn(), confirm: vi.fn(), cancel: vi.fn() } };
+    const described = (header: HTMLElement, selector: string) => {
+      const id = header.querySelector(selector)?.getAttribute("aria-describedby");
+      return id ? header.querySelector(`#${id}`)?.textContent : undefined;
+    };
+    const plain = headerControls(document, { ...context(CONTROL), writeAccess }, undefined);
+    expect([...plain.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
+      "Add worker and Focus epic: Not allowed on this pairing. Needs the Manage workers and tasks permission. Allow managing workers in Paired machines.",
+      "Write access: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.",
+    ]);
+    expect(described(plain, ".fleet-ops-add")).toMatch(/^Add worker and Focus epic: /);
+    expect(described(plain, ".fleet-ops-focus")).toMatch(/^Add worker and Focus epic: /);
+    expect(described(plain, ".fleet-ops-grant")).toMatch(/^Write access: .*Needs the Stop and restart workers and sessions permission/);
+    const operate = headerControls(document, { ...context([...CONTROL, "factory-operate"]), writeAccess }, undefined);
+    expect([...operate.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
+      "Write access: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.",
+    ]);
+    expect(operate.querySelector(".fleet-ops-add")?.hasAttribute("aria-describedby")).toBe(false);
+    expect(described(operate, ".fleet-ops-grant")).toMatch(/^Write access: /);
+    const manage = headerControls(document, { ...context([...CONTROL, "factory-manage"]), writeAccess }, undefined);
+    expect([...manage.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
+      "Add worker and Focus epic: Not allowed on this pairing. Needs the Manage workers and tasks permission. Allow managing workers in Paired machines.",
+    ]);
+    expect(manage.querySelector(".fleet-ops-grant")?.hasAttribute("aria-disabled")).toBe(false);
+    // Without Write access in the rail, a single line still names its controls.
+    const noGrant = headerControls(document, context(CONTROL), undefined);
+    expect([...noGrant.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent?.split(":")[0])).toEqual(["Add worker and Focus epic"]);
   });
 
   it("draws the Undo offer while it lasts", () => {

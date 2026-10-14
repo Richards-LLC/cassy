@@ -62,6 +62,7 @@ pub mod markdown;
 mod prompt_queue_store;
 mod prompt_store;
 mod qa_pass_store;
+mod epic_split_store;
 mod recording_store;
 mod recording_text_store;
 mod reminder_store;
@@ -125,6 +126,10 @@ pub use delegation_receipt_store::{
     DELEGATION_RECEIPT_SCHEMA, DelegationBudget, DelegationReceipt, DelegationReceiptState,
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
+};
+pub use epic_split_store::{
+    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection, SplitState, decide_epic_split,
+    get_epic_split, insert_epic_split, list_epic_splits, open_epic_splits,
 };
 pub use qa_pass_store::{
     NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, claim_qa_pass,

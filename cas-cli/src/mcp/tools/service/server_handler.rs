@@ -608,10 +608,10 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
                 | "worktree_status"
                 | "db_branch_show"
         ),
-        "rule" | "skill" | "spec" | "verification" | "coordination" | "system" | "team"
-        | "pattern" | "knowledge" | "artifact" => {
-            !matches!(action, "show" | "list" | "status" | "members")
-        }
+        // cas-e477: `peers` only reads the cloud agent registry.
+        "coordination" => !matches!(action, "show" | "list" | "status" | "members" | "peers"),
+        "rule" | "skill" | "spec" | "verification" | "system" | "team" | "pattern"
+        | "knowledge" | "artifact" => !matches!(action, "show" | "list" | "status" | "members"),
         // Unknown tool/action schemas must be treated as write-capable: an
         // optimistic "not committed" answer would invite a duplicate write.
         _ => true,
@@ -760,6 +760,15 @@ mod tests {
         let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
         std::fs::create_dir_all(&core.cas_root).unwrap();
         core.register_agent("timeout-sender".into(), "timeout-supervisor".into(), None)
+            .unwrap();
+        // Unknown targets are refused before enqueue (cas-a19b). This
+        // post-commit timeout fixture needs a routable local recipient.
+        crate::store::open_agent_store(&core.cas_root)
+            .unwrap()
+            .register(&crate::types::Agent::new(
+                "timeout-recipient-id".into(),
+                "timeout-recipient".into(),
+            ))
             .unwrap();
         let service = CasService::new(
             core,

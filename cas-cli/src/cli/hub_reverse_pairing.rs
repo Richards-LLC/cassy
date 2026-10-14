@@ -281,6 +281,15 @@ fn ensure_private_attempt_file(path: &Path) -> Result<()> {
 }
 
 pub(super) fn authorize(args: &HubAuthorizeArgs, cli: &Cli) -> Result<()> {
+    // cas-3c26: authorizing a pairing is the operator's. `--yes` may skip the
+    // prompt for an unattended operator, never for an agent.
+    if let Some(refusal) = crate::config::operator_policy::agent_context_refusal(
+        "Authorizing a Commander pairing",
+        "run `cas hub authorize <code>` yourself from your own terminal",
+        &crate::config::operator_policy::InvocationContext::from_process(),
+    ) {
+        anyhow::bail!(refusal);
+    }
     let user_cloud = CloudConfig::load_user().unwrap_or_default();
     let cloud = if user_cloud.is_logged_in() {
         user_cloud
@@ -484,7 +493,7 @@ fn display_scopes_by_kind(
     }
 }
 
-fn is_control_scope(scope: Scope) -> bool {
+pub(super) fn is_control_scope(scope: Scope) -> bool {
     matches!(
         scope,
         Scope::PaneInput

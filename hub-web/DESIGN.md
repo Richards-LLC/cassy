@@ -159,6 +159,13 @@ inset; `#toast` already offsets by it), the full-screen Attention and launch
 sheets, and the desktop Raw output drawer. In a browser tab the insets are 0
 and nothing moves. `e2e/installed-safe-area.spec.ts` emulates a 47px status
 bar and a 44px landscape notch and fails if any control sits under either.
+A phone on its side gets both side insets in a Safari tab too
+(`viewport-fit=cover`), so the phone body adds them to its own edge spacing:
+the conversation rows, Write to a supervisor, the footer, the thread, the
+Waiting-on-you strip, the composer (glass margin and base padding) and the
+Raw output bottom sheet (cas-5072); the wider side drawer pads only its right
+edge. HUB-J9's sideways parts in `phone.journey.ts` check every control at
+844×390 and 932×430 with 44px side insets.
 
 Rules:
 
@@ -214,6 +221,95 @@ attach keeps the pane's text for Raw output and its activity for the working
 line.
 The generated dark-well selector excludes `.conversation-active` so reading
 inherits the chosen page scheme; code scrolls locally without clipping prose.
+
+## App switcher
+
+Cassy Cloud is one system with two apps: **Commander** (this client, the
+conversations with your supervisors) and **Explorer** (the cloud's tasks,
+issues and project health). Both carry the same switcher so either one is a
+tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
+
+- **Position.** The lockup at the top of the conversation list is the switch:
+  `button#app-switcher-toggle` holds the mark, the "Cassy Cloud" wordmark and
+  a small `--ink-mid` chevron, is named "Cassy Cloud apps", and gets the
+  `--bg-hover` wash on hover and while open. That puts it in the same place on
+  desktop, phone and landscape at no cost in height or width: the phone list
+  still shows six conversations (HUB-J16), a desktop shows a project's
+  sessions whole (HUB-J14), and the header row fits down to 320px: below
+  380px the switch shows the mark and chevron only (the wordmark stays in its
+  name). The
+  dialogs' lockups stay plain. Explorer makes its own header lockup the same
+  switch. An open conversation whose project has a cloud identity also offers
+  **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone
+  reaches the project's tasks without leaving the thread.
+- **Shape.** The lockup opens `nav#app-switcher` (`aria-label="Cassy Cloud
+  apps"`), a native `popover` anchored under it (CSS anchor positioning,
+  with a fixed top-right fallback). It is an opaque `--bg-panel` card,
+  `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide. It lists
+  two items in this order in both apps: **Commander** ("Conversations with
+  your supervisors") and **Explorer** ("Tasks, issues and project health").
+  Names are 15px semibold and hints 13px `--ink-mid`; each item is at least
+  44px tall. Escape and an outside tap close it, and focus returns to the
+  button.
+- **Current app.** A `span` with `aria-current="page"`: `--bg-active` with a
+  2px `--color-action` outline drawn inside it, like the open conversation's
+  edge. It is never the Send gradient, because it marks a place, not an action.
+  Under forced colours the outline is `CanvasText`.
+- **Other app.** An `a` that opens the other app in a named tab
+  (`target="cassy-explorer"` here and `target="cassy-commander"` in Explorer),
+  so repeated switches reuse one tab and neither app's live state is lost.
+  It shows a quiet `↗`, its accessible name adds "(opens in a new tab)", and
+  it carries `rel="noopener noreferrer"` with `referrerpolicy="no-referrer"`.
+  When the deployment names no cloud origin, the segment is a disabled `span`
+  that says why.
+- **Where Explorer opens.** `<cloud origin>/explorer/tasks?project_id=<id>`,
+  the open conversation's project, where `<id>` is the session's
+  `cloud_project_id`. That is the same canonical identity sync pushes under
+  (config pin, git remote, then folder name), and the hub reports it on
+  `/v1/sessions`. With no conversation open, or no identity,
+  `<cloud origin>/explorer`. The cloud origin is the operator inbox's
+  reviewed `meta[name="cas-operator-inbox-origin"]`: Explorer is served from
+  the same Cassy Cloud, so the embedded page names no new external origin
+  (the hub's `h4_csp_03` allows only the pairing relay and the inbox) and the
+  link is a plain top-level navigation, with no fetch and no `connect-src`
+  change. Explorer links back to Commander's origin
+  (`https://hub.petrastella.io/commander/`).
+- **No credentials in URLs.** The link holds only the origin, the path and
+  `project_id`: never a device key, pairing code or fragment, session or
+  machine name, or token. The two apps keep separate sign-ins. Commander is
+  paired per machine, and Explorer uses the cloud session; switching
+  authenticates neither. `app-switcher.test.ts` pins the URL shape and
+  rejects a malformed project id.
+
+## Shared tokens
+
+`docs/design/design-tokens.json` is the single source for both apps.
+`scripts/generate-tokens.mjs` turns it into `src/tokens.css` (house roles),
+`src/glass.css` re-colours those roles for Glass, and
+`scripts/build-cassy-tokens.mjs` (run by `npm run tokens` and the build)
+writes **`public/cassy-tokens.css`**. That file keeps only the
+custom-property blocks of both: scheme selectors and their media queries,
+with no component rules, machine accents or dark wells. The hub serves it at
+`/commander/cassy-tokens.css`, so the published copy is
+`https://hub.petrastella.io/commander/cassy-tokens.css`.
+
+- **Versioning.** The header's `cassy-tokens-sha256:` is the SHA-256 of the
+  body. A copy proves it is unedited, and two copies are the same version
+  exactly when the hashes match.
+- **Schemes.** Light by default and dark under
+  `prefers-color-scheme: dark`. `html[data-scheme="light"|"dark"]` forces
+  one, as Commander's Appearance setting does. More contrast and reduced
+  transparency are included.
+- **Sync for Explorer.** `node hub-web/scripts/sync-cassy-tokens.mjs --to
+  app/cassy-tokens.css` vendors the published copy (Node 18+, no
+  dependencies; `--from <path or https URL>` picks another source). CI runs
+  the same command with `--check`. It exits 1 when the copy was edited by
+  hand or is behind the source, and 2 when the source's own hash is broken.
+- **Checks here.** `npm test` runs `build-cassy-tokens.mjs --check`, and
+  `cassy-tokens.test.ts` pins that the file is current, holds only token
+  blocks under an intact hash, and that the sync flags an edit or drift.
+  Change a token in `design-tokens.json` or `glass.css`, then run
+  `npm run tokens`, never edit the artifact.
 
 ## Colors
 

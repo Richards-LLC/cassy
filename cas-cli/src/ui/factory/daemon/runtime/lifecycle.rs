@@ -1952,6 +1952,7 @@ impl FactoryDaemon {
             ws_clients: HashMap::new(),
             terminal_exchange: Default::default(),
             next_ws_client_id: 0,
+            relay_token: None,
             web_pane_sizes: HashMap::new(),
             teams,
             notify_rx,
@@ -1996,6 +1997,18 @@ impl FactoryDaemon {
         // Backstop for every entry path: a gone client must not kill the
         // daemon (cas-5918). The process entry points set it earlier.
         crate::server_signals::ignore_sigpipe_for_server();
+        // cas-ca22: mint this run's Commander relay token into the hub's
+        // private directory; only the hub relay presenting it may carry
+        // operator_verified. Without it every client is stored unverified.
+        match crate::hub::HubRuntimePaths::default_for_user().and_then(|paths| {
+            crate::ui::factory::relay_token::mint(paths.root(), &self.session_name)
+        }) {
+            Ok(token) => self.relay_token = Some(token),
+            Err(error) => tracing::warn!(
+                %error,
+                "cas-ca22: no Commander relay token; operator messages will be stored unverified"
+            ),
+        }
         // Bind WebSocket listener if not already bound (fork-first and legacy paths
         // set ws_listener=None because they run before the Tokio runtime exists).
         if self.ws_listener.is_none() {
@@ -2112,6 +2125,13 @@ impl FactoryDaemon {
         > = None;
         let mut violet_sweep_task: Option<JoinHandle<()>> = None;
         let mut violet_error_reported = false;
+        // cas-f9c7: messages from peer supervisors of this repo on other
+        // machines, claimed from the Cassy Cloud peer mailbox every 15 s on
+        // the blocking pool.
+        let mut peer_mailbox = crate::cloud::peer_mailbox::PeerMailboxPoller::new(
+            self.app.cas_dir(),
+            &self.session_name,
+        );
         let refresh_interval = Duration::from_secs(2);
         let poll_interval = Duration::from_millis(100);
 
@@ -2400,6 +2420,17 @@ impl FactoryDaemon {
                             }
                         }
                     }
+                }
+
+                if let Some(report) = peer_mailbox.poll(std::time::Instant::now()).await
+                    && report.delivered > 0
+                {
+                    super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                    tracing::info!(
+                        delivered = report.delivered,
+                        rejected = report.rejected,
+                        "queued peer supervisor messages from Cassy Cloud"
+                    );
                 }
 
                 // A successful PTY spawn is not a verified worker. Confirm the
@@ -2733,6 +2764,13 @@ impl FactoryDaemon {
         // This group never contains the supervisor or live worker harnesses.
         self.cancel_provisioning();
         self.merge_sweep.shutdown().await;
+
+        // cas-ca22: retire this run's Commander relay token.
+        if self.relay_token.take().is_some()
+            && let Ok(paths) = crate::hub::HubRuntimePaths::default_for_user()
+        {
+            crate::ui::factory::relay_token::remove(paths.root(), &self.session_name);
+        }
 
         // Clean up notification socket
         if let Some(ref notify) = self.notify_rx {

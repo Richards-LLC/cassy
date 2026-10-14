@@ -513,11 +513,18 @@ fn factory_req(action: &str) -> FactoryRequest {
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 
 fn coord_req(action: &str) -> CoordinationRequest {
     CoordinationRequest {
+        detail: None,
+        peer: None,
+        json: None,
         action: action.to_string(),
         id: None,
         task_id: None,
@@ -581,6 +588,10 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 
@@ -3725,6 +3736,63 @@ async fn test_worker_status_scopes_agents_to_factory_session() {
     );
 }
 
+/// cas-f707: a failing cloud registration makes the supervisor invisible
+/// to its peers, so the fast `worker_status` poll says so (and stays quiet
+/// while registered).
+#[tokio::test]
+async fn cas_f707_worker_status_summary_flags_a_failing_cloud_presence() {
+    use cas::cloud::presence::{self, PresenceRecord, PresenceState};
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    async fn summary(env: &FactoryTestEnv) -> String {
+        let mut request = factory_req("worker_status");
+        request.summary = Some(true);
+        get_text(
+            &env.service
+                .factory_request(Parameters(request))
+                .await
+                .expect("worker_status summary should succeed"),
+        )
+    }
+
+    let quiet = summary(&env).await;
+    assert!(!quiet.contains("Cloud presence"), "{quiet}");
+
+    let now = chrono::Utc::now();
+    let failing = PresenceRecord {
+        agent_id: "test-supervisor-id".to_string(),
+        state: PresenceState::Failing,
+        cause: Some("Failed to register agent (503): registry unavailable".to_string()),
+        failures: 2,
+        last_attempt_at: now,
+        registered_at: None,
+        next_retry_at: Some(now + chrono::Duration::seconds(30)),
+        focus: None,
+        branch: None,
+    };
+    presence::save(&env.cas_root, &failing);
+    let flagged = summary(&env).await;
+    assert!(
+        flagged.contains("Cloud presence: failing: Failed to register agent (503): registry"),
+        "{flagged}"
+    );
+    assert!(flagged.contains("  2 failed attempts, next retry in"), "{flagged}");
+
+    presence::save(
+        &env.cas_root,
+        &PresenceRecord {
+            state: PresenceState::Registered,
+            cause: None,
+            failures: 0,
+            registered_at: Some(now),
+            next_retry_at: None,
+            ..failing
+        },
+    );
+    let registered = summary(&env).await;
+    assert!(!registered.contains("Cloud presence"), "{registered}");
+}
+
 #[tokio::test]
 async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
@@ -6034,13 +6102,54 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
         text.contains("Prompt queue entries pruned: 0"),
         "age-targeted remediation must preserve history: {text}"
     );
-    assert_eq!(pq.pending_count().unwrap(), 0);
+    // Remediation expires the original row, then leaves a fresh notice for
+    // its sender; that notice must survive this same cleanup transaction.
+    assert_eq!(pq.pending_count().unwrap(), 1);
+    let pending = pq.peek_all(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    let notice = &pending[0];
+    assert_ne!(notice.id, id);
+    assert_eq!(notice.source, "delivery-watchdog");
+    assert_eq!(notice.target, "src");
+    assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+    assert!(notice.prompt.contains(&format!("Message {id} to dead-worker")));
+    assert!(notice.prompt.contains("explicit queue remediation"));
     let report = pq
         .message_delivery_report(id)
         .unwrap()
         .expect("expired row remains queryable");
     assert_eq!(report.stage, cas_store::DeliveryStage::Abandoned);
     assert!(report.delivered_at.is_none());
+}
+
+#[tokio::test]
+async fn test_c384_gc_cleanup_aggregates_notices_per_sender() {
+    let env = FactoryTestEnv::new();
+    let pq = env.prompt_queue();
+    let mut originals = Vec::new();
+    for (sender, count) in [("sender-a", 5), ("sender-b", 2)] {
+        for _ in 0..count {
+            originals.push(pq.enqueue(sender, "dead-worker", "old work").unwrap());
+        }
+    }
+    let mut req = factory_req("gc_cleanup");
+    req.force = Some(true);
+    req.older_than_secs = Some(0);
+    let result = env.service.factory_request(Parameters(req)).await.unwrap();
+    let text = get_text(&result);
+    assert!(text.contains("Prompt queue entries expired: 7"), "{text}");
+    assert!(text.contains("Prompt queue entries pruned: 0"), "{text}");
+    let pending = pq.peek_all(10).unwrap();
+    assert_eq!(pending.len(), 2, "two senders receive two notices, not seven");
+    for (sender, count) in [("sender-a", 5), ("sender-b", 2)] {
+        let notice = pending.iter().find(|row| row.target == sender).unwrap();
+        assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(notice.prompt.starts_with(&format!("{count} messages to dead-worker were abandoned (")), "{}", notice.prompt);
+        assert!(notice.prompt.contains("explicit queue remediation"));
+    }
+    for id in originals {
+        assert_eq!(pq.message_delivery_report(id).unwrap().unwrap().stage, cas_store::DeliveryStage::Abandoned);
+    }
 }
 
 #[tokio::test]
@@ -6557,6 +6666,9 @@ fn coord_msg(
     urgent: Option<bool>,
 ) -> CoordinationRequest {
     CoordinationRequest {
+        detail: None,
+        peer: None,
+        json: None,
         action: action.to_string(),
         id: None,
         task_id: None,
@@ -6620,6 +6732,10 @@ fn coord_msg(
         cwd: None,
         port: None,
         shared: None,
+        mine: None,
+        theirs: None,
+        decision: None,
+        ttl_secs: None,
     }
 }
 
@@ -7881,6 +7997,9 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     // addressed to a worker name the supervisor already knows (e.g. from an
     // explicit spawn_workers worker_names= request) before the daemon has
     // finished spawning it.
+    env.spawn_queue()
+        .enqueue_spawn(1, &["not-born-yet".to_string()], true, None, None, None)
+        .expect("pending local spawn");
 
     let req = coord_msg("message", "not-born-yet", "start with task cas-abc1", None);
     let result = env.service.coordination(Parameters(req)).await;
@@ -11536,4 +11655,51 @@ async fn cas_3e3a_public_refusals_offer_a_supported_remedy_and_preserve_work() {
         serde_json::to_value(env.agent_store().get(&worker).unwrap()).unwrap(),
         worker_before
     );
+}
+
+/// cas-e477: `coordination action=peers` is wired, read-only, and explains
+/// a project that is not logged in to Cassy Cloud instead of listing nothing.
+#[tokio::test]
+async fn coordination_peers_reports_a_logged_out_project_cas_e477() {
+    let env = FactoryTestEnv::new();
+    let result = env
+        .service
+        .coordination(Parameters(coord_req("peers")))
+        .await
+        .expect("coordination action=peers must dispatch");
+    let text = get_text(&result);
+    assert!(text.starts_with("Peers: not logged in"), "{text}");
+}
+
+/// cas-e477: worker_status carries the Peers section on both its no-agent and
+/// its full path; the summary fast path stays local and omits it.
+#[tokio::test]
+async fn worker_status_shows_peers_but_the_summary_does_not_cas_e477() {
+    let env = FactoryTestEnv::new();
+    let empty = get_text(
+        &env.service
+            .factory_request(Parameters(factory_req("worker_status")))
+            .await
+            .unwrap(),
+    );
+    assert!(empty.contains("Peers: not logged in"), "{empty}");
+
+    env.register_worker_with_id("peer-status-worker", "peer-status-worker", None);
+    let full = get_text(
+        &env.service
+            .factory_request(Parameters(factory_req("worker_status")))
+            .await
+            .unwrap(),
+    );
+    assert!(full.contains("Peers: not logged in"), "{full}");
+
+    let mut summary = factory_req("worker_status");
+    summary.summary = Some(true);
+    let summary = get_text(
+        &env.service
+            .factory_request(Parameters(summary))
+            .await
+            .unwrap(),
+    );
+    assert!(!summary.contains("Peers"), "{summary}");
 }

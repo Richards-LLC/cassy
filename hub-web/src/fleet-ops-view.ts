@@ -346,6 +346,9 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
   return wrap;
 }
 
+/** The header's reason line for a missing permission: one per scope. */
+const headerReasonId = (gate: FleetControlGate): string => `fleet-reason-header-${gate.scope}`;
+
 /** The section header's Add worker… and Focus epic…, with their small panels. */
 export function headerControls(document: Document, context: FleetOpsViewContext, panel: FleetHeaderPanel | undefined): HTMLElement {
   const wrap = document.createElement("div");
@@ -353,22 +356,33 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   const add = button(document, "Add worker…", "fleet-ops-add", "header:add", () => context.on.toggleHeader("add"));
   add.setAttribute("aria-expanded", String(panel === "add"));
   const addGate = fleetControlGate(context.scopes, "add-workers", context.origin);
-  gateDisabled(add, addGate, "fleet-reason-header-add");
+  gateDisabled(add, addGate, headerReasonId(addGate));
   const focus = button(document, "Focus epic…", "fleet-ops-focus", "header:focus", () => context.on.toggleHeader("focus"));
   focus.setAttribute("aria-expanded", String(panel === "focus"));
   const focusGate = fleetControlGate(context.scopes, "focus-epic", context.origin);
-  gateDisabled(focus, focusGate, "fleet-reason-header-focus");
+  gateDisabled(focus, focusGate, headerReasonId(focusGate));
   // cas-ab04 (GH #1169): grant or revoke a task's write access outside its
   // worktree; the hub records it from this paired device.
   const grant = button(document, "Write access…", "fleet-ops-grant", "header:grant", () => context.on.toggleHeader("grant"));
   grant.setAttribute("aria-expanded", String(panel === "grant"));
   const grantGate = fleetControlGate(context.scopes, "write-access", context.origin);
-  gateDisabled(grant, grantGate, "fleet-reason-header-grant");
+  gateDisabled(grant, grantGate, headerReasonId(grantGate));
   wrap.append(add, focus);
   if (context.writeAccess) wrap.append(grant);
-  for (const [gate, id] of [[addGate, "fleet-reason-header-add"], [focusGate, "fleet-reason-header-focus"], ...(context.writeAccess ? [[grantGate, "fleet-reason-header-grant"]] as const : [])] as const) {
-    const reason = reasonLine(document, gate, id);
-    if (reason) { wrap.append(reason); break; }
+  // cas-a217: one line per missing permission, naming the controls it gates,
+  // so Write access (factory:manage) never borrows Add worker's remedy.
+  const gated: [FleetControlGate, string][] = [[addGate, "Add worker"], [focusGate, "Focus epic"]];
+  if (context.writeAccess) gated.push([grantGate, "Write access"]);
+  const byScope = new Map<string, { gate: FleetControlGate; names: string[] }>();
+  for (const [gate, name] of gated) {
+    if (gate.allowed) continue;
+    const group = byScope.get(gate.scope) ?? { gate, names: [] };
+    group.names.push(name);
+    byScope.set(gate.scope, group);
+  }
+  for (const { gate, names } of byScope.values()) {
+    const reason = reasonLine(document, gate, headerReasonId(gate), names.join(" and "));
+    if (reason) wrap.append(reason);
   }
   if (panel === "add" && addGate.allowed) {
     const form = document.createElement("div");

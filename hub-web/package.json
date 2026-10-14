@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "python3 ../scripts/worker-memory.py -- sh -c 'npm run tokens && vite build'",
-    "test": "node scripts/generate-tokens.mjs --check && npm run tokens && node scripts/run-verified-tests.mjs vitest",
+    "test": "node scripts/generate-tokens.mjs --check && node scripts/build-cassy-tokens.mjs --check && npm run tokens && node scripts/run-verified-tests.mjs vitest",
     "typecheck": "python3 ../scripts/worker-memory.py -- sh -c 'tsc --noEmit && tsc --noEmit -p e2e'",
-    "tokens": "node scripts/generate-tokens.mjs",
+    "tokens": "node scripts/generate-tokens.mjs && node scripts/build-cassy-tokens.mjs",
     "visual-qa": "python3 ../scripts/worker-memory.py -- npm exec --yes --package=playwright -- node scripts/visual-qa.mjs",
     "check:journey-clock": "node --test scripts/check-journey-clock.test.mjs && node scripts/check-journey-clock.mjs",
     "check:journey-receipts": "node --test e2e/journeys/receipt-directory.test.mjs",

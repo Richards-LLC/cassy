@@ -87,6 +87,43 @@ silently reintroduce fixed bugs.
 - If you previously installed via `cargo install cas` or a distro package,
   remove those copies so only `~/.local/bin/cas` remains.
 
+## Peer work awareness
+
+`coordination action=peers detail=true` shows each peer supervisor's machine,
+factory session, epic focus, active task claims, live workers and registered
+branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
+implies detail. `json=true` returns the full report without truncation.
+The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
+`--json` accepting the same filters and output contract. Presence appears first,
+then peers or details, then the mailbox footer. JSON carries the typed
+`cloud_presence` record, `cloud_presence_message`, and `mailbox_status` too.
+Agent pagination echoes the returned `next_sort_cursor` with the other cursors.
+
+Claims are scoped to the repository's canonical identity. Their titles and task
+status come from this checkout's synced task store when available; an unsynced
+task remains visible by its plain task ID, with `title not synced` explaining
+the missing title. Human rows use agent names; JSON also keeps `lock_key` and
+`agent_id` for exact cloud receipts. Claim age is time since the last renewal.
+Only active, unexpired claims count. Live workers have an active/idle heartbeat
+within five minutes and must match both the peer's factory session and machine.
+A missing branch is shown as unknown. Worker details are read-only: these rows
+do not register remote workers locally or make them message or spawn targets.
+Cloud failures are reported as unavailable, never as an empty claim list.
+Cloud locks are private to one user account: a team peer on another account shows
+`Claims not visible (different account)` and worker tasks as `not visible`.
+If the caller's account identity is unknown, the report says so. JSON includes
+`claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
+is authoritative only when visibility is `same_account`. The viewer account
+comes from the token-owned agent list, independently of caller session lookup.
+Operator CLI identity uses the same session/ancestor-PID lookup as status.
+Peer discovery also excludes every agent registered in this project's local
+agent store, so a plain terminal never counts this clone's supervisors as peers.
+The view fits 72 columns, in this order: caller presence, peers and their work,
+recorded epic splits, then mailbox health. JSON exposes `epic_splits` separately
+from the health-only `mailbox_status`. Each split retains its stored `state` and
+an effective `display_state` (`expired` for a lapsed pending proposal), its task
+shares, peer, reason, expiry and decision time.
+
 ## Adding Features
 
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.

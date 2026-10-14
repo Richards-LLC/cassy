@@ -1887,6 +1887,8 @@ fn restart_deadline_keeps_old_lock_owner_and_launches_no_replacement() {
 #[cfg(unix)]
 #[test]
 fn restart_force_terminates_a_recordless_lock_holder_and_starts_replacement() {
+    use cas::hub::HubRuntimePaths;
+
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
@@ -1900,6 +1902,34 @@ fn restart_force_terminates_a_recordless_lock_holder_and_starts_replacement() {
         .expect("start force-recovery fixture");
     assert!(initial.status.success());
     let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+
+    // --force may terminate the running holder before its SIGTERM handler
+    // removes the record. Establish the recordless stopping state this test
+    // exercises before asking the restart command to recover it.
+    let old_pid = initial["pid"].as_u64().unwrap() as u32;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(old_pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("signal the old hub into its stopping barrier");
+    let marker = barrier.join("record-removed-lock-held");
+    let marker_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    while !marker.exists() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "old hub did not reach its stopping barrier");
+    assert!(
+        !home.path().join(".cas/hub/process.json").exists(),
+        "force recovery must start from the recordless state"
+    );
+    let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+    assert!(
+        paths.acquire_instance_lock().is_err(),
+        "old hub must still hold its machine lock"
+    );
+    let owner = paths.read_lock_owner().unwrap();
+    assert_eq!(owner.pid, old_pid);
+    assert_eq!(owner.phase, "stopping");
 
     let restart = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "restart", "--force", "--port", "0"])

@@ -250,13 +250,24 @@ async fn run_upstream(
     events: &MachineEventBus,
     mut controls: mpsc::Receiver<ClientMessage>,
 ) -> Result<()> {
-    let url = format!("ws://127.0.0.1:{port}");
+    // cas-ca22: present the daemon's relay token, so this connection alone
+    // may carry the operator_verified attribution the hub sets.
+    let token = crate::hub::HubRuntimePaths::default_for_user()
+        .ok()
+        .and_then(|paths| crate::ui::factory::relay_token::read(paths.root(), session));
+    if token.is_none() {
+        tracing::warn!(
+            session,
+            "cas-ca22: no relay token for this daemon; its Commander messages will be stored unverified"
+        );
+    }
+    let request = crate::ui::factory::relay_token::upstream_request(port, token.as_deref())?;
     let config = WebSocketConfig {
         max_message_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
         max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
         ..WebSocketConfig::default()
     };
-    let (mut socket, _) = connect_async_with_config(&url, Some(config), false)
+    let (mut socket, _) = connect_async_with_config(request, Some(config), false)
         .await
         .with_context(|| format!("connect to daemon for session '{session}'"))?;
     let mut supervisor_pane_id: Option<String> = None;

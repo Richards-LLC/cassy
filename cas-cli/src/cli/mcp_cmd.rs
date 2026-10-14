@@ -201,6 +201,65 @@ fn public_name_after_mutation(raw_name: &str, cas_root: &Path) -> Result<String>
 /// Everything after `--` is passed literally to the subprocess.
 #[cfg(feature = "mcp-proxy")]
 fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> {
+    let ParsedAdd {
+        name,
+        scope,
+        server_config,
+    } = parse_add_args(raw)?;
+
+    let transport_name = match &server_config {
+        ServerConfig::Http { .. } => "http",
+        ServerConfig::Sse { .. } => "sse",
+        ServerConfig::Stdio { .. } => "stdio",
+    };
+
+    let (mut config, path) = load_config_for_scope(&scope, cas_root)?;
+    let resolved = resolve_scoped_mutation_name(&name, &config, cas_root)?;
+    let (raw_name, is_update) = match resolved {
+        Some((raw_name, _)) => (raw_name, true),
+        None if cas_types::is_generated_public_upstream_id(&name) => {
+            anyhow::bail!("server identifier was not found; run `cas mcp list` again")
+        }
+        None => (name, false),
+    };
+    guard_supervisor_only(&raw_name, Some(&server_config), &config, cas_root)?;
+    config.add_server(raw_name.clone(), server_config);
+    config.save_to(&path)?;
+    let public_name = public_name_after_mutation(&raw_name, cas_root)?;
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "action": if is_update { "updated" } else { "added" },
+                "name": public_name,
+                "transport": transport_name,
+            })
+        );
+    } else {
+        let theme = ActiveTheme::default();
+        let mut stdout = io::stdout();
+        let mut fmt = Formatter::stdout(&mut stdout, theme);
+        let verb = if is_update { "Updated" } else { "Added" };
+        StatusLine::success(format!("{verb} server \"{public_name}\"")).render(&mut fmt)?;
+        fmt.field("Config", &path.display().to_string())?;
+    }
+
+    Ok(())
+}
+
+/// `cas mcp add` arguments, parsed as `claude mcp add` parses them.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) struct ParsedAdd {
+    pub name: String,
+    pub scope: String,
+    pub server_config: ServerConfig,
+}
+
+/// Parse `cas mcp add` arguments (cas-1b94: shared with the PreToolUse hook,
+/// so it judges exactly the server the command would write).
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn parse_add_args(raw: &[String]) -> Result<ParsedAdd> {
     let mut transport: Option<String> = None;
     let mut auth: Option<String> = None;
     let mut headers: Vec<String> = Vec::new();
@@ -331,44 +390,50 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
         other => anyhow::bail!("unknown transport \"{other}\". Use: http, stdio, or sse"),
     };
 
-    let transport_name = match &server_config {
-        ServerConfig::Http { .. } => "http",
-        ServerConfig::Sse { .. } => "sse",
-        ServerConfig::Stdio { .. } => "stdio",
-    };
+    Ok(ParsedAdd {
+        name,
+        scope,
+        server_config,
+    })
+}
 
-    let (mut config, path) = load_config_for_scope(&scope, cas_root)?;
-    let resolved = resolve_scoped_mutation_name(&name, &config, cas_root)?;
-    let (raw_name, is_update) = match resolved {
-        Some((raw_name, _)) => (raw_name, true),
-        None if cas_types::is_generated_public_upstream_id(&name) => {
-            anyhow::bail!("server identifier was not found; run `cas mcp list` again")
-        }
-        None => (name, false),
-    };
-    config.add_server(raw_name.clone(), server_config);
-    config.save_to(&path)?;
-    let public_name = public_name_after_mutation(&raw_name, cas_root)?;
+/// cas-1b94: refuse, from an agent context, a `cas mcp` change that would
+/// remove, replace or alias a `factory.supervisor_only_mcp` server. The
+/// operator at their own terminal is unaffected, as are ordinary servers.
+#[cfg(feature = "mcp-proxy")]
+fn guard_supervisor_only(
+    name: &str,
+    added: Option<&ServerConfig>,
+    config: &Config,
+    cas_root: &Path,
+) -> Result<()> {
+    guard_supervisor_only_in(
+        name,
+        added,
+        config,
+        &crate::config::operator_policy::supervisor_only_mcp_names(cas_root),
+        &crate::config::operator_policy::InvocationContext::from_process(),
+    )
+}
 
-    if cli.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "action": if is_update { "updated" } else { "added" },
-                "name": public_name,
-                "transport": transport_name,
-            })
-        );
-    } else {
-        let theme = ActiveTheme::default();
-        let mut stdout = io::stdout();
-        let mut fmt = Formatter::stdout(&mut stdout, theme);
-        let verb = if is_update { "Updated" } else { "Added" };
-        StatusLine::success(format!("{verb} server \"{public_name}\"")).render(&mut fmt)?;
-        fmt.field("Config", &path.display().to_string())?;
+#[cfg(feature = "mcp-proxy")]
+fn guard_supervisor_only_in(
+    name: &str,
+    added: Option<&ServerConfig>,
+    config: &Config,
+    supervisor_only: &[String],
+    context: &crate::config::operator_policy::InvocationContext,
+) -> Result<()> {
+    use crate::config::operator_policy::{
+        supervisor_only_mcp_cli_refusal, supervisor_only_mcp_refusal,
+    };
+    match supervisor_only_mcp_cli_refusal(
+        supervisor_only_mcp_refusal(name, added, config, supervisor_only),
+        context,
+    ) {
+        Some(refusal) => anyhow::bail!(refusal),
+        None => Ok(()),
     }
-
-    Ok(())
 }
 
 /// Parse "Key: Value" or "Key=Value" header strings.
@@ -418,6 +483,7 @@ fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) ->
         return Ok(());
     };
 
+    guard_supervisor_only(&raw_name, None, &config, cas_root)?;
     debug_assert!(config.remove_server(&raw_name));
 
     config.save_to(&path)?;
@@ -676,6 +742,9 @@ fn execute_import(
             }
             skipped += 1;
         } else if exists && force {
+            if !dry_run {
+                guard_supervisor_only(&server.name, Some(&server.config), &config, cas_root)?;
+            }
             if dry_run {
                 fmt.bullet(&format!(
                     "update {:<19} {:<12} {}",
@@ -686,6 +755,9 @@ fn execute_import(
             }
             updated += 1;
         } else {
+            if !dry_run {
+                guard_supervisor_only(&server.name, Some(&server.config), &config, cas_root)?;
+            }
             if dry_run {
                 fmt.bullet(&format!(
                     "add   {:<20} {:<12} {}",
@@ -1096,6 +1168,115 @@ mod tests {
     use super::*;
     use cmcp_core::config::ServerConfig;
     use std::collections::HashMap;
+
+    fn agent_context() -> crate::config::operator_policy::InvocationContext {
+        crate::config::operator_policy::InvocationContext {
+            env_names: ["CLAUDE_CODE_ENTRYPOINT".to_string()].into(),
+            ..Default::default()
+        }
+    }
+
+    fn operator_context() -> crate::config::operator_policy::InvocationContext {
+        crate::config::operator_policy::InvocationContext {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            ..Default::default()
+        }
+    }
+
+    /// cas-1b94: from an agent context, `cas mcp add|remove` cannot remove,
+    /// replace or alias a supervisor-only server; ordinary servers stay
+    /// manageable, and the operator at their terminal may change any.
+    #[test]
+    fn cli_refuses_agent_changes_to_supervisor_only_servers_cas_1b94() {
+        let only = vec!["vercel".to_string()];
+        let mut config = Config::default();
+        let vercel = parse_add_args(&["vercel".into(), "https://mcp.vercel.com".into()])
+            .unwrap()
+            .server_config;
+        config.add_server("vercel".into(), vercel);
+        let alias = parse_add_args(&[
+            "-s".into(),
+            "user".into(),
+            "deploys".into(),
+            "https://mcp.vercel.com".into(),
+        ])
+        .unwrap();
+        assert_eq!(alias.name, "deploys");
+        assert_eq!(alias.scope, "user");
+
+        let agent = agent_context();
+        let removal = guard_supervisor_only_in("vercel", None, &config, &only, &agent)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            removal.contains("supervisor-only") && removal.contains("CLAUDE_CODE_ENTRYPOINT"),
+            "{removal}"
+        );
+        let aliased = guard_supervisor_only_in(
+            "deploys",
+            Some(&alias.server_config),
+            &config,
+            &only,
+            &agent,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            aliased.contains("'deploys' would reach supervisor-only server 'vercel'"),
+            "{aliased}"
+        );
+
+        let other = parse_add_args(&["docs".into(), "https://docs.example/mcp".into()]).unwrap();
+        guard_supervisor_only_in("docs", Some(&other.server_config), &config, &only, &agent)
+            .expect("ordinary servers stay manageable");
+        guard_supervisor_only_in("docs", None, &config, &only, &agent).expect("ordinary removal");
+
+        let operator = operator_context();
+        guard_supervisor_only_in("vercel", None, &config, &only, &operator)
+            .expect("the operator at a terminal may remove it");
+        guard_supervisor_only_in(
+            "deploys",
+            Some(&alias.server_config),
+            &config,
+            &only,
+            &operator,
+        )
+        .expect("and may alias it");
+    }
+
+    /// cas-1b94: the shared parser reads stdio commands after `--` and the
+    /// transport flags as `cas mcp add` always has.
+    #[test]
+    fn add_parser_reads_stdio_and_http_forms_cas_1b94() {
+        let stdio = parse_add_args(&[
+            "-e".into(),
+            "K=V".into(),
+            "local-tool".into(),
+            "--".into(),
+            "npx".into(),
+            "tool-mcp".into(),
+        ])
+        .unwrap();
+        assert_eq!(stdio.scope, "local");
+        match stdio.server_config {
+            ServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, ["tool-mcp"]);
+                assert_eq!(env.get("K").map(String::as_str), Some("V"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let sse = parse_add_args(&[
+            "-t".into(),
+            "sse".into(),
+            "s".into(),
+            "https://e/sse".into(),
+        ])
+        .unwrap();
+        assert!(matches!(sse.server_config, ServerConfig::Sse { .. }));
+        assert!(parse_add_args(&[]).is_err());
+    }
 
     /// cas-9f07: stdio `env` values are redacted by default; keys + command stay.
     #[test]

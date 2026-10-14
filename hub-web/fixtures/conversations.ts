@@ -4,6 +4,7 @@ import type { Scope } from '../src/types';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
+import { DEFAULT_EXPLORER_ORIGIN, explorerUrl } from '../src/app-switcher';
 import { applyActionAvailability, applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, ensureConversationStage, fitConversationHost, keyboardViewportHeight, rawOutputDrawerMarkup } from '../src/conversation-shell';
 import { CONVERSATION_OPENING, fatalConnectionRecovery, lostConnectionBanner, pairingControlsReason, renderConnectionSurfaceInto } from '../src/connection-state-view';
 import { TranscriptView, type TranscriptSource } from '../src/transcript-view';
@@ -117,7 +118,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       : state === 'conversation-sessions' || state === 'conversation-earlier'
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired, explorerHref: explorerUrl(DEFAULT_EXPLORER_ORIGIN, selected ? "github.com/richards-llc/cassy" : null) });
   // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
   const needsPairing = state === 'conversation-needs-pairing';
   const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' || state === 'conversations-session-end-error' ? fixtureManySessionRows()

@@ -196,6 +196,9 @@ describe('fleet permissions on a paired machine (cas-d382)', () => {
     expect(block.getAttribute('aria-label')).toBe('Fleet permissions on Atlas');
     const manage = block.querySelector<HTMLElement>('[data-permission="manage"]')!;
     expect(manage.querySelector('.fleet-permission-name')?.textContent).toBe('Stop and restart workers and sessions');
+    // cas-a217: the list says which permission allows write grants.
+    expect(manage.querySelector('.fleet-permission-also')?.textContent).toBe('Also needed to grant a task write access outside its worktree.');
+    expect(block.querySelector('[data-permission="operate"] .fleet-permission-also')).toBeNull();
     expect(manage.querySelector('.fleet-permission-state')?.textContent).toBe('Not allowed on this pairing');
     const stop = manage.querySelector<HTMLButtonElement>('.fleet-permission-control')!;
     expect(stop.getAttribute('aria-disabled')).toBe('true');

@@ -509,6 +509,23 @@ impl ConfigTuiApp {
     }
 
     fn save_config(&mut self) -> anyhow::Result<()> {
+        self.save_config_with(crate::config::operator_policy::InvocationContext::from_process)
+    }
+
+    /// cas-0d4f0: a change to a security-relevant key needs the operator;
+    /// from an agent context the save is refused and the edits stay unsaved.
+    fn save_config_with(
+        &mut self,
+        context: impl FnOnce() -> crate::config::operator_policy::InvocationContext,
+    ) -> anyhow::Result<()> {
+        if let Err(refusal) = crate::cli::config::operator_ops::guard_operator_config(
+            &self.original_config,
+            &self.config,
+            context,
+        ) {
+            self.status_message = Some((refusal.to_string(), true));
+            return Ok(());
+        }
         self.config.save(&self.cas_root)?;
         self.original_config = self.config.clone();
         self.has_unsaved = false;
@@ -593,4 +610,39 @@ pub fn run_tui(section: Option<String>, cas_root: &std::path::Path) -> anyhow::R
     }
 
     app.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::operator_policy::InvocationContext;
+
+    /// cas-0d4f0: the TUI refuses to save a security-relevant key from an
+    /// agent context and keeps the edit unsaved; ordinary keys save.
+    #[test]
+    fn cas_0d4f0_config_tui_refuses_operator_keys_from_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let agent = || InvocationContext {
+            env_names: ["CAS_AGENT_ROLE".to_string()].into_iter().collect(),
+            ..InvocationContext::default()
+        };
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config.set("qa.evidence_gate", "false").unwrap();
+        app.config.set("qa.independent_pass", "false").unwrap();
+        app.config.set("verification.enabled", "false").unwrap();
+        app.has_unsaved = true;
+        app.save_config_with(agent).unwrap();
+        assert!(app.has_unsaved);
+        let (message, is_error) = app.status_message.clone().unwrap();
+        assert!(is_error && message.contains("operator"), "{message}");
+        let saved = Config::load(&root).unwrap();
+        assert_eq!(saved.get("qa.evidence_gate"), app.original_config.get("qa.evidence_gate"));
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config.set("sync.min_helpful", "5").unwrap();
+        app.save_config_with(agent).unwrap();
+        assert!(!app.has_unsaved);
+        assert_eq!(Config::load(&root).unwrap().get("sync.min_helpful").as_deref(), Some("5"));
+    }
 }

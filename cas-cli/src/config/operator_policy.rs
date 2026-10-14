@@ -35,6 +35,42 @@
 //! script file the agent runs, or assembled at run time, is out of its reach,
 //! as is any same-user write made outside tool calls. A hard boundary needs
 //! agents under a separate Unix user.
+//!
+//! # Operator-only actions and role signals (cas-3c26)
+//!
+//! The same gate guards the other operator-only actions:
+//! - `cas hub pair` also needs the operator to confirm the origin and scopes.
+//! - `cas hub authorize` refuses agents even with `--yes`.
+//! - Launching `cas factory` refuses agents too.
+//!
+//! [`operator_action_refusal`] checks four signals in turn:
+//! 1. agent environment markers;
+//! 2. agent or Cassy-server ancestors, which a PTY wrapper such as
+//!    `script -qc` does not hide;
+//! 3. a factory worker cgroup;
+//! 4. an interactive terminal.
+//!
+//! The PreToolUse hook refuses the same commands from an agent's shell,
+//! however they are wrapped. It also refuses any agent command that sets,
+//! unsets or clears `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, so the role gates
+//! that read them see the role the factory gave the agent. That hook refusal
+//! is the control for those role gates, which include `cas update`'s worker
+//! restriction, `restart_spawn_queue` and `supervisor_override`.
+//!
+//! The gates themselves still read the environment. Overriding it from the
+//! process's cgroup was rejected, because a worker's own test harnesses run
+//! in its cgroup and legitimately drop the role (cas-937a). That is
+//! indistinguishable from a spoof at the process level.
+//!
+//! Residual limit (the same as above): every signal is same-user process
+//! state.
+//! - An agent can write a script file that changes its role environment
+//!   and run it, and the hook sees only the script's name.
+//! - It can strip its ancestry with a double-forked daemon, or leave its
+//!   cgroup through the user's delegated cgroup tree.
+//!
+//! These are deliberate evasions, not mistakes. Only a separate Unix user
+//! for agents closes them.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -470,37 +506,223 @@ pub struct InvocationContext {
     pub cgroup: String,
 }
 
+/// Security-relevant config keys that relax a guard (cas-0d4f0). Like the
+/// write roots, only the operator may change them: `cas config set`, reset,
+/// import, the line editor and the TUI refuse an agent context, and the
+/// PreToolUse hook refuses agent shell commands that set them and every
+/// agent write to a Cassy `config.toml`.
+pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
+    "verification.enabled",
+    "verification.force_bypass_allowed",
+    "slack.transport",
+    "factory.supervisor_only_mcp",
+    "factory.supervisor_only_env",
+    "factory.worker_credential_env",
+    "qa.evidence_gate",
+    "qa.independent_pass",
+    "release.claude_account_allowlist",
+];
+
+/// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.
+pub fn is_operator_only_config_key(key: &str) -> bool {
+    let key = key.trim();
+    key == "factory.write_roots" || OPERATOR_ONLY_CONFIG_KEYS.contains(&key)
+}
+
+/// The operator-only keys whose value differs between two configs.
+pub fn changed_operator_config_keys(
+    before: &crate::config::Config,
+    after: &crate::config::Config,
+) -> Vec<&'static str> {
+    OPERATOR_ONLY_CONFIG_KEYS
+        .iter()
+        .copied()
+        .filter(|key| before.get(key) != after.get(key))
+        .collect()
+}
+
+/// Why this process may not change the operator-only `changed` keys, or
+/// `None` when nothing operator-only changes or an operator runs it.
+pub fn operator_config_refusal(changed: &[&str], context: &InvocationContext) -> Option<String> {
+    if changed.is_empty() {
+        return None;
+    }
+    let keys = changed.join(", ");
+    context_refusal(
+        context,
+        &format!(
+            "{keys} {} operator-only because {} a Cassy guard",
+            if changed.len() == 1 { "is" } else { "are" },
+            if changed.len() == 1 { "it relaxes" } else { "they relax" }
+        ),
+        &format!("run `cas config set {} <value>` yourself from your own terminal", changed[0]),
+    )
+}
+
 /// Why this process may not change the operator policy, or `None` when it
 /// looks like an operator at a terminal: no agent environment, no agent
 /// process among its ancestors, and an interactive terminal.
 pub fn operator_context_refusal(context: &InvocationContext) -> Option<String> {
+    context_refusal(
+        context,
+        "Write roots and grants are operator-only",
+        "run the command yourself from your own terminal",
+    )
+}
+
+/// cas-3c26: why this process may not run the operator-only `action`, or
+/// `None` when it looks like an operator at an interactive terminal.
+pub fn operator_action_refusal(
+    action: &str,
+    remedy: &str,
+    context: &InvocationContext,
+) -> Option<String> {
+    context_refusal(context, &format!("{action} is operator-only"), remedy)
+}
+
+/// cas-3c26: [`operator_action_refusal`] without the interactive-terminal
+/// requirement, for operator paths that legitimately run unattended (an
+/// explicit `--yes`). An agent context is still refused.
+pub fn agent_context_refusal(
+    action: &str,
+    remedy: &str,
+    context: &InvocationContext,
+) -> Option<String> {
+    let unattended = InvocationContext {
+        stdin_is_terminal: true,
+        stdout_is_terminal: true,
+        ..context.clone()
+    };
+    context_refusal(&unattended, &format!("{action} is operator-only"), remedy)
+}
+
+/// cas-3c26: whether a `/proc/self/cgroup` path places the process in a
+/// Cassy factory worker's scope (or a server nested under one).
+pub fn in_factory_worker_cgroup(cgroup: &str) -> bool {
+    cgroup
+        .lines()
+        .any(|line| line.split('/').any(|part| part.starts_with("cas-worker-")))
+}
+
+/// cas-3c26: the operator-only action a `cas` invocation performs, judged
+/// by the real CLI parser (`args` are the words after `cas`).
+pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
+    use crate::cli::Commands;
+    use crate::cli::hub::HubCommands;
+    use clap::Parser;
+    let argv = std::iter::once("cas".to_string()).chain(args.iter().cloned());
+    let cli = crate::cli::Cli::try_parse_from(argv).ok()?;
+    match cli.command? {
+        Commands::Hub(hub) => match hub.command? {
+            HubCommands::Pair(_) => Some("Pairing a Commander device (`cas hub pair`)"),
+            HubCommands::Authorize(_) => {
+                Some("Authorizing a Commander pairing (`cas hub authorize`)")
+            }
+            _ => None,
+        },
+        Commands::Factory(factory) if factory.command.is_none() => {
+            Some("Launching a factory (`cas factory`)")
+        }
+        _ => None,
+    }
+}
+
+/// `subject` states what is operator-only; `remedy` what the operator runs.
+fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> Option<String> {
     if let Some(marker) = context.env_names.iter().find(|name| {
         AGENT_ENV_MARKERS.contains(&name.as_str())
             || AGENT_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
     }) {
         return Some(format!(
-            "refused: {marker} is set, so this runs inside an agent session. Write roots and grants are operator-only; run the command yourself from your own terminal."
+            "refused: {marker} is set, so this runs inside an agent session. {subject}; {remedy}."
         ));
     }
     if let Some(ancestor) = context.ancestors.iter().find(|line| agent_ancestor(line)) {
         let program = ancestor.split_whitespace().next().unwrap_or(ancestor);
         return Some(format!(
-            "refused: this process descends from an agent or Cassy server ({program}). Write roots and grants are operator-only; run the command yourself from your own terminal."
+            "refused: this process descends from an agent or Cassy server ({program}). {subject}; {remedy}."
         ));
     }
     if worker_cgroup_refusal(&context.cgroup).is_some() {
-        return Some(
-            "refused: this process runs inside a Cassy factory worker cgroup. Write roots and grants are operator-only; run the command yourself from your own terminal."
-                .to_string(),
-        );
+        return Some(format!(
+            "refused: this process runs inside a Cassy factory worker cgroup. {subject}; {remedy}."
+        ));
     }
     if !(context.stdin_is_terminal && context.stdout_is_terminal) {
-        return Some(
-            "refused: write roots and grants need an interactive terminal so the operator can confirm them."
-                .to_string(),
-        );
+        return Some(format!(
+            "refused: {subject}, and a change needs an interactive terminal so the operator can confirm it; {remedy}."
+        ));
     }
     None
+}
+
+/// cas-0d4f0: refusal for an MCP proxy change that would weaken
+/// `factory.supervisor_only_mcp`: removing or replacing a supervisor-only
+/// server, or adding the same endpoint under another name, which workers
+/// could then call. The operator manages those with `cas mcp` at a terminal.
+///
+/// cas-1b94: shared by the MCP `proxy_add`/`proxy_remove` tools, the `cas mcp`
+/// CLI and the PreToolUse hook, so the three apply one rule.
+#[cfg(feature = "mcp-proxy")]
+pub fn supervisor_only_mcp_refusal(
+    name: &str,
+    added: Option<&cmcp_core::config::ServerConfig>,
+    existing: &cmcp_core::config::Config,
+    supervisor_only: &[String],
+) -> Option<String> {
+    use cmcp_core::config::ServerConfig;
+    fn endpoint(server: &ServerConfig) -> String {
+        match server {
+            ServerConfig::Stdio { command, args, .. } => format!("{command} {}", args.join(" ")),
+            ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } => url.clone(),
+        }
+    }
+    let refusal = |what: String| {
+        format!(
+            "🚫 OPERATOR-ONLY (cas-0d4f0): {what}. factory.supervisor_only_mcp keeps it from workers, so only the operator changes it, with `cas mcp add|remove` from their own terminal. Ask the supervisor to request the operator's approval."
+        )
+    };
+    if supervisor_only
+        .iter()
+        .any(|only| only == name || cas_types::public_upstream_id(only) == name)
+    {
+        return Some(refusal(format!("'{name}' is a supervisor-only MCP server")));
+    }
+    let added = endpoint(added?);
+    existing
+        .servers
+        .iter()
+        .find(|(existing_name, server)| {
+            supervisor_only.contains(existing_name) && endpoint(server) == added
+        })
+        .map(|(existing_name, _)| {
+            refusal(format!(
+                "'{name}' would reach supervisor-only server '{existing_name}' under another name"
+            ))
+        })
+}
+
+/// The `factory.supervisor_only_mcp` server names configured at `cas_root`.
+pub fn supervisor_only_mcp_names(cas_root: &Path) -> Vec<String> {
+    crate::config::Config::load(cas_root)
+        .map(|config| config.factory().worker_policy.supervisor_only_mcp)
+        .unwrap_or_default()
+}
+
+/// cas-1b94: whether `cas mcp add|remove|import` may make a change that
+/// `proxy_refusal` (from [`supervisor_only_mcp_refusal`]) objects to. The
+/// operator at their own terminal may; an agent context may not.
+pub fn supervisor_only_mcp_cli_refusal(
+    proxy_refusal: Option<String>,
+    context: &InvocationContext,
+) -> Option<String> {
+    let refusal = proxy_refusal?;
+    context_refusal(
+        context,
+        "Servers on factory.supervisor_only_mcp are operator-only",
+        "the operator runs `cas mcp add|remove` from their own terminal",
+    )
+    .map(|why| format!("{refusal}\n{why}"))
 }
 
 impl InvocationContext {
@@ -595,6 +817,169 @@ mod tests {
         }
     }
 
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// cas-3c26: an agent that unsets every agent variable (`env -u …`) or
+    /// gives itself a terminal (`script -qc …`) still descends from its
+    /// harness, and a worker still runs in its cgroup; each is refused. An
+    /// operator's terminal passes.
+    #[test]
+    fn cas_3c26_operator_actions_refuse_env_spoof_pty_wrappers_and_worker_cgroups() {
+        let action = "Pairing a Commander device";
+        let remedy = "run `cas hub pair` yourself";
+        // `env -u CAS_AGENT_ROLE -u CLAUDECODE … cas hub pair` from Claude Code.
+        let env_spoof = context(
+            &[],
+            &[
+                "bash -c cas hub pair",
+                "claude --dangerously-skip-permissions",
+            ],
+            true,
+        );
+        let refused =
+            operator_action_refusal(action, remedy, &env_spoof).expect("env spoof refused");
+        assert!(refused.contains("descends from an agent"), "{refused}");
+        assert!(refused.contains(action), "{refused}");
+
+        // `script -qc 'cas hub pair'` from Codex: a terminal, but an agent ancestor.
+        let pty = context(
+            &[],
+            &[
+                "script -qc cas hub pair",
+                "/usr/bin/bash",
+                "/opt/codex/bin/codex exec",
+            ],
+            true,
+        );
+        assert!(operator_action_refusal(action, remedy, &pty).is_some());
+
+        // A role variable alone is an agent marker.
+        let spoofed_role = context(&["CAS_AGENT_ROLE"], &[], true);
+        assert!(operator_action_refusal(action, remedy, &spoofed_role).is_some());
+
+        // A worker scope, even with a clean environment and a terminal.
+        let mut worker = context(&[], &[], true);
+        worker.cgroup =
+            "0::/user.slice/cas-worker-cas-src-mighty-crane-74/cas-private-server-1".into();
+        let refused =
+            operator_action_refusal(action, remedy, &worker).expect("worker cgroup refused");
+        assert!(refused.contains("worker cgroup"), "{refused}");
+
+        // The operator at a terminal passes; without a terminal it is refused.
+        assert_eq!(
+            operator_action_refusal(action, remedy, &context(&[], &["-bash"], true)),
+            None
+        );
+        assert!(
+            operator_action_refusal(action, remedy, &context(&[], &["-bash"], false)).is_some()
+        );
+    }
+
+    /// cas-3c26: every operator-only CLI path shares one gate, so the
+    /// write-policy (cas-3147), guarded-config (cas-0d4f0) and supervisor-only
+    /// MCP (cas-1b94) checks refuse the same spoofed contexts.
+    #[test]
+    fn cas_3c26_every_operator_only_path_refuses_the_same_spoofed_contexts() {
+        let mut worker = context(&[], &[], true);
+        worker.cgroup = "0::/user.slice/cas-worker-cas-src-a-b".into();
+        let spoofed = [
+            context(&[], &["bash -c cas config set x", "claude"], true),
+            context(
+                &[],
+                &[
+                    "script -qc cas mcp remove github",
+                    "/opt/codex/bin/codex exec",
+                ],
+                true,
+            ),
+            context(&["CAS_AGENT_ROLE"], &[], true),
+            worker,
+        ];
+        for spoof in &spoofed {
+            assert!(operator_context_refusal(spoof).is_some(), "{spoof:?}");
+            assert!(
+                operator_config_refusal(&["verification.enabled"], spoof).is_some(),
+                "{spoof:?}"
+            );
+            assert!(
+                supervisor_only_mcp_cli_refusal(Some("supervisor-only".into()), spoof).is_some(),
+                "{spoof:?}"
+            );
+            assert!(
+                operator_action_refusal("Pairing", "run it", spoof).is_some(),
+                "{spoof:?}"
+            );
+        }
+        let operator = context(&[], &["-bash"], true);
+        assert_eq!(operator_context_refusal(&operator), None);
+        assert_eq!(
+            operator_config_refusal(&["verification.enabled"], &operator),
+            None
+        );
+        assert_eq!(
+            supervisor_only_mcp_cli_refusal(Some("x".into()), &operator),
+            None
+        );
+    }
+
+    /// cas-3c26: `--yes` paths drop only the terminal requirement.
+    #[test]
+    fn cas_3c26_unattended_operator_paths_still_refuse_agents() {
+        let (action, remedy) = ("Authorizing a Commander pairing", "run it yourself");
+        assert_eq!(
+            agent_context_refusal(action, remedy, &context(&[], &["cron"], false)),
+            None
+        );
+        assert!(agent_context_refusal(action, remedy, &context(&[], &["claude"], false)).is_some());
+        assert!(
+            agent_context_refusal(action, remedy, &context(&["CLAUDECODE"], &[], true)).is_some()
+        );
+    }
+
+    #[test]
+    fn cas_3c26_worker_cgroups_are_recognized_and_server_scopes_are_not() {
+        assert!(in_factory_worker_cgroup(
+            "0::/user.slice/x.scope/cas-worker-cas-src-a-b"
+        ));
+        assert!(in_factory_worker_cgroup(
+            "0::/user.slice/cas-worker-a/cas-private-server-9"
+        ));
+        assert!(!in_factory_worker_cgroup("0::/user.slice/cas-server-hub"));
+        assert!(!in_factory_worker_cgroup(
+            "0::/user.slice/user@1000.service/app.slice"
+        ));
+        assert!(!in_factory_worker_cgroup(""));
+    }
+
+    /// cas-3c26: operator-only `cas` invocations, by the real CLI parser.
+    #[test]
+    fn cas_3c26_operator_only_cas_invocations_are_classified_by_the_cli_parser() {
+        for line in [
+            "hub pair --origin https://commander.example",
+            "hub pair --origin https://x --scopes machine:read,pane:input,message:send",
+            "hub authorize K7MW-4H2Q --yes",
+            "factory",
+            "factory --workers 3",
+            "--verbose factory -w 2",
+        ] {
+            assert!(
+                operator_only_cas_invocation(&words(line)).is_some(),
+                "{line}"
+            );
+        }
+        for line in [
+            "hub status",
+            "factory status",
+            "task list",
+            "hub",
+            "config get factory.write_roots",
+        ] {
+            assert_eq!(operator_only_cas_invocation(&words(line)), None, "{line}");
+        }
+    }
+
     /// cas-3147: the operator-only commands refuse any process that carries
     /// an agent's environment, descends from an agent harness or Cassy
     /// server, or has no interactive terminal; an operator's terminal passes.
@@ -637,6 +1022,45 @@ mod tests {
         let refusal = operator_context_refusal(&context(&["HOME"], &["-bash"], false))
             .expect("no terminal");
         assert!(refusal.contains("terminal"), "{refusal}");
+    }
+
+    /// cas-0d4f0: a change to a security-relevant key is refused from any
+    /// agent context and allowed for the operator at a terminal; ordinary
+    /// keys never need the operator.
+    #[test]
+    fn cas_0d4f0_operator_only_keys_refuse_agent_contexts() {
+        let before = crate::config::Config::default();
+        let mut after = before.clone();
+        after.set("sync.min_helpful", "5").unwrap();
+        assert!(changed_operator_config_keys(&before, &after).is_empty());
+        let agent = context(&["HOME", "CLAUDECODE"], &["-bash"], false);
+        assert_eq!(operator_config_refusal(&[], &agent), None);
+
+        for (key, value) in [
+            ("verification.enabled", "false"),
+            ("verification.force_bypass_allowed", "true"),
+            ("slack.transport", "any"),
+            ("factory.supervisor_only_mcp", ""),
+            ("factory.worker_credential_env", "GH_TOKEN"),
+            ("qa.evidence_gate", "false"),
+            ("release.claude_account_allowlist", "agent@example.com"),
+        ] {
+            assert!(is_operator_only_config_key(key), "{key}");
+            let mut changed = before.clone();
+            changed.set(key, value).unwrap();
+            if changed.get(key) == before.get(key) {
+                // The default already equals this value; flip it instead.
+                changed.set(key, "true").unwrap();
+            }
+            let keys = changed_operator_config_keys(&before, &changed);
+            assert_eq!(keys, [key], "{key}");
+            let refusal = operator_config_refusal(&keys, &agent).expect("agent is refused");
+            assert!(refusal.contains(key) && refusal.contains("operator"), "{refusal}");
+            let operator = context(&["HOME", "PATH"], &["-bash"], true);
+            assert_eq!(operator_config_refusal(&keys, &operator), None);
+        }
+        assert!(is_operator_only_config_key("factory.write_roots"));
+        assert!(!is_operator_only_config_key("issues.repo"));
     }
 
     #[test]

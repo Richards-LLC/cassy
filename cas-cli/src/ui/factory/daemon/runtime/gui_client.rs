@@ -19,7 +19,8 @@ fn queue_frame(client: &mut GuiConnection, frame: &[u8]) {
 pub(super) fn commander_control_from_gui_message(
     message: &ClientMessage,
 ) -> Option<super::delivery::CommanderControl> {
-    super::delivery::commander_control_from_message(message)
+    // cas-ca22: the GUI socket carries no relay authentication.
+    super::delivery::commander_control_from_message(message, false)
 }
 
 impl FactoryDaemon {

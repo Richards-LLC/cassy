@@ -10,7 +10,9 @@ use crate::config::{Config, registry};
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
+use crate::cli::config::operator_ops::guard_operator_config;
 use crate::cli::config::util::{format_constraint, truncate_description};
+use crate::config::operator_policy::InvocationContext;
 
 pub(crate) fn execute_get(args: &ConfigGetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = Config::load(cas_root)?;
@@ -57,6 +59,23 @@ pub(crate) fn execute_set(args: &ConfigSetArgs, cli: &Cli, cas_root: &Path) -> a
     execute_set_internal(&mut config, &args.key, &args.value, cas_root, cli)
 }
 
+/// Set and save one key; a security-relevant key needs the operator
+/// (cas-0d4f0). Returns the previous value.
+pub(crate) fn set_config_value(
+    config: &mut Config,
+    key: &str,
+    value: &str,
+    cas_root: &Path,
+    context: impl FnOnce() -> InvocationContext,
+) -> anyhow::Result<String> {
+    let before = config.clone();
+    let old_value = config.get(key).unwrap_or_default();
+    config.set(key, value)?;
+    guard_operator_config(&before, config, context)?;
+    config.save(cas_root)?;
+    Ok(old_value)
+}
+
 fn execute_set_internal(
     config: &mut Config,
     key: &str,
@@ -64,10 +83,7 @@ fn execute_set_internal(
     cas_root: &std::path::Path,
     cli: &Cli,
 ) -> anyhow::Result<()> {
-    let old_value = config.get(key).unwrap_or_default();
-
-    config.set(key, value)?;
-    config.save(cas_root)?;
+    let old_value = set_config_value(config, key, value, cas_root, InvocationContext::from_process)?;
 
     if cli.json {
         let json = serde_json::json!({
@@ -427,7 +443,9 @@ pub(crate) fn execute_reset(
         }
 
         // Reset to default config
-        config = Config::default();
+        let reset = Config::default();
+        guard_operator_config(&config, &reset, InvocationContext::from_process)?;
+        config = reset;
         config.save(cas_root)?;
 
         if cli.json {
@@ -436,9 +454,13 @@ pub(crate) fn execute_reset(
             println!("Reset all {} options to defaults", reg.count());
         }
     } else if let Some(meta) = reg.get(&args.key) {
-        let old_value = config.get(&args.key).unwrap_or_default();
-        config.set(&args.key, meta.default)?;
-        config.save(cas_root)?;
+        let old_value = set_config_value(
+            &mut config,
+            &args.key,
+            meta.default,
+            cas_root,
+            InvocationContext::from_process,
+        )?;
 
         if cli.json {
             let json = serde_json::json!({

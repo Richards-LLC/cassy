@@ -1,9 +1,9 @@
-name: Measure macOS release-fast LTO (cas-542e follow-up, never merged)
+name: Measure macOS release-fast LTO (cas-f627, never merged)
 
 on:
   push:
     branches:
-      - "measure/brave-fox-8-macos-lto"
+      - "factory/brave-fox-8-cas-f627"
 
 permissions:
   contents: read

@@ -99,24 +99,39 @@ pub fn apply_resource_contention_env(cas_root: Option<&std::path::Path>) {
     let Ok(cfg) = Config::load(cas_root) else {
         return;
     };
-    let fc = cfg.factory();
-    let trimmed = fc.cargo_build_jobs.trim();
+    let pairs = resource_contention_env(&cfg.factory(), |name| std::env::var(name).is_ok());
     // SAFETY: caller (cli::run) invokes this before the telemetry thread is
     // spawned, so the process is still single-threaded. That is the whole
     // reason this function exists as a separate entry point rather than
     // living inline in `factory::execute`. The guards above enforce the
     // invariant at runtime — see cas-c614.
     unsafe {
-        if std::env::var("CAS_FACTORY_CARGO_BUILD_JOBS").is_err()
-            && !trimmed.is_empty()
-            && !trimmed.eq_ignore_ascii_case("auto")
-        {
-            std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", trimmed);
-        }
-        if std::env::var("CAS_FACTORY_NICE_WORKER").is_err() && fc.nice_cargo {
-            std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
+        for (name, value) in pairs {
+            std::env::set_var(name, value);
         }
     }
+}
+
+/// The build-knob variables [`apply_resource_contention_env`] exports for
+/// `factory`, skipping any `is_set` reports present. cas-31ec: these are
+/// operator build knobs, not agent identity; the operator-only launch gate
+/// must not read them as an agent marker.
+pub(crate) fn resource_contention_env(
+    factory: &crate::config::FactoryConfig,
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, String)> {
+    let mut pairs = Vec::new();
+    let trimmed = factory.cargo_build_jobs.trim();
+    if !is_set("CAS_FACTORY_CARGO_BUILD_JOBS")
+        && !trimmed.is_empty()
+        && !trimmed.eq_ignore_ascii_case("auto")
+    {
+        pairs.push(("CAS_FACTORY_CARGO_BUILD_JOBS", trimmed.to_string()));
+    }
+    if !is_set("CAS_FACTORY_NICE_WORKER") && factory.nice_cargo {
+        pairs.push(("CAS_FACTORY_NICE_WORKER", "1".to_string()));
+    }
+    pairs
 }
 
 /// cas-c614: detection result for the `apply_resource_contention_env`
@@ -2418,6 +2433,45 @@ mod tests {
     use super::*;
     use crate::store::AgentStore;
     use crate::ui::factory::FactoryConfig;
+
+    /// cas-31ec: `cas` exports its build knobs before the factory launch
+    /// check runs. With `nice_cargo` and a pinned job count, an operator
+    /// terminal carrying exactly what `apply_resource_contention_env` sets
+    /// must still pass the operator-only launch gate.
+    #[test]
+    fn cas_31ec_self_set_build_knobs_do_not_refuse_the_factory_launch() {
+        use crate::config::operator_policy::{InvocationContext, operator_action_refusal};
+        let factory = crate::config::FactoryConfig {
+            nice_cargo: true,
+            cargo_build_jobs: "4".to_string(),
+            ..Default::default()
+        };
+        let exported = resource_contention_env(&factory, |_| false);
+        let names: Vec<_> = exported.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["CAS_FACTORY_CARGO_BUILD_JOBS", "CAS_FACTORY_NICE_WORKER"]);
+        // Shell overrides win and are not re-exported.
+        assert!(resource_contention_env(&factory, |_| true).is_empty());
+
+        let operator = InvocationContext {
+            env_names: ["HOME", "PATH", "TERM"]
+                .into_iter()
+                .chain(names.iter().copied())
+                .map(str::to_string)
+                .collect(),
+            ancestors: vec!["-bash".into(), "/usr/bin/konsole".into()],
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            cgroup: "0::/user.slice/app.slice/app-org.kde.konsole-1.scope/tab(2).scope".into(),
+        };
+        assert_eq!(
+            operator_action_refusal(
+                "Launching a factory",
+                "run `cas factory` yourself from your own terminal",
+                &operator,
+            ),
+            None
+        );
+    }
 
     fn recovery_supervisor() -> cas_types::Agent {
         let mut caller = cas_types::Agent::new("registered-supervisor".into(), "lead".into());

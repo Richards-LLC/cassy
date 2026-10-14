@@ -118,6 +118,10 @@ where
     result
 }
 
+/// Shown when a config file still has the `[jev]` section, which was removed with Jev (cas-4971).
+const RETIRED_JEV_SECTION_NOTE: &str =
+    "Note: the [jev] config section is retired and ignored; remove it from config.toml.";
+
 impl Config {
     /// Load configuration from .cas directory
     ///
@@ -143,6 +147,7 @@ impl Config {
                     "Failed to parse config.toml at line {line}: {e}. Restore a known-good config.toml backup, then rerun `cas doctor`."
                 ))
             })?;
+            config.note_retired_sections();
 
             // If YAML also exists, merge any settings that are missing from TOML.
             // This handles the case where something wrote to config.yaml after
@@ -169,6 +174,7 @@ impl Config {
         if yaml_path.exists() {
             let content = std::fs::read_to_string(&yaml_path)?;
             let config: Self = serde_yaml::from_str(&content)?;
+            config.note_retired_sections();
 
             // Auto-migrate to TOML
             if let Err(e) = config.save_toml(cas_dir) {
@@ -185,6 +191,16 @@ impl Config {
         }
 
         Ok(Self::default())
+    }
+
+    /// Print a one-line note, once per process, when the loaded file still
+    /// carries a retired section. The section itself is ignored on load and
+    /// dropped on the next save.
+    fn note_retired_sections(&self) {
+        static NOTED: std::sync::Once = std::sync::Once::new();
+        if self.retired_jev.is_some() {
+            NOTED.call_once(|| eprintln!("{RETIRED_JEV_SECTION_NOTE}"));
+        }
     }
 
     /// Load project config with host-level `~/.cas/config.toml` staging defaults.

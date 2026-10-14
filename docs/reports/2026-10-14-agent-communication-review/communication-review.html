@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cassy agent-to-agent communication review — 2026-10-14</title>
+<meta name="description" content="Investigation of Cassy agent-to-agent messaging: transport is fast, delivery records are false, and operator replies never arrive.">
+<style>
+/* Generated from design-tokens.json by scripts/gen-design-tokens-css.py. Do not edit.
+   Paste into the artifact's <style>; DESIGN.md tokens replace these when a project has one. */
+:root {
+  color-scheme: light dark;
+  --bg: #F7F4EE;
+  --surface: #FFFFFF;
+  --surface-hero: #F1E7DD;
+  --line: #DAD3C7;
+  --line-strong: #8F8371;
+  --ink: #1B1D24;
+  --ink-muted: #5A5F6E;
+  --verdict: #2E3A9F;
+  --verdict-soft: #DDE1F7;
+  --evidence: #5A5F6E;
+  --action: #2E3A9F;
+  --good: #226845;
+  --warning: #7F5504;
+  --danger: #B3261E;
+  --good-tint: rgba(34,104,69,0.10);
+  --warning-tint: rgba(127,85,4,0.10);
+  --danger-tint: rgba(179,38,30,0.10);
+  --focus: #2E3A9F;
+  --series-1: #4C5CA8;
+  --series-2: #9D433B;
+  --series-3: #0095A0;
+  --series-4: #693F88;
+  --series-5: #5C6C00;
+  --magnitude-1: #E5E8F8;
+  --magnitude-2: #B7BEEB;
+  --magnitude-3: #8590DA;
+  --magnitude-4: #5563C2;
+  --magnitude-5: #2E3A9F;
+  --polarity-1: #B3261E;
+  --polarity-2: #DAD3C7;
+  --polarity-3: #226845;
+  --series-neutral: #6B7280;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif;
+  --font-body: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --type-eyebrow: 600 12px/16px var(--font-mono);
+  --type-caption: 400 14px/20px var(--font-body);
+  --type-body: 400 17px/26px var(--font-body);
+  --type-lede: 400 21px/30px var(--font-body);
+  --type-heading: 600 27px/32px var(--font-body);
+  --type-title: 400 34px/38px var(--font-display);
+  --type-verdict: 400 clamp(32px, 4.6vw, 52px)/1.08 var(--font-display);
+  --type-hero-number: 500 clamp(56px, 8vw, 96px)/1 var(--font-mono);
+  --type-ledger: 400 15px/22px var(--font-mono);
+  --measure: 68ch;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+  --container: 1120px;
+  --gutter: 24px;
+  --margin-column: 240px;
+  --radius-chip: 4px;
+  --radius-panel: 8px;
+  --radius-ledger: 0px;
+}
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12141A;
+    --surface: #191C24;
+    --surface-hero: #241E1E;
+    --line: #2B3040;
+    --line-strong: #6B7390;
+    --ink: #E9E6E0;
+    --ink-muted: #A3A7B4;
+    --verdict: #A9B3FF;
+    --verdict-soft: rgba(169,179,255,0.16);
+    --evidence: #A3A7B4;
+    --action: #A9B3FF;
+    --good: #5FC492;
+    --warning: #E2B14D;
+    --danger: #EF7B72;
+    --good-tint: rgba(95,196,146,0.14);
+    --warning-tint: rgba(226,177,77,0.14);
+    --danger-tint: rgba(239,123,114,0.14);
+    --focus: #A9B3FF;
+    --series-1: #7083D1;
+    --series-2: #C86A60;
+    --series-3: #00A5B4;
+    --series-4: #8C52B6;
+    --series-5: #819334;
+    --magnitude-1: #2A3050;
+    --magnitude-2: #3F4A8C;
+    --magnitude-3: #5B69C4;
+    --magnitude-4: #8592EA;
+    --magnitude-5: #A9B3FF;
+    --polarity-1: #EF7B72;
+    --polarity-2: #2B3040;
+    --polarity-3: #5FC492;
+    --series-neutral: #9AA1AF;
+  }
+}
+
+/* Report layout. Every colour is a token from tokens.css above; no rule carries its own hex. */
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:var(--type-body)}
+a{color:var(--action);text-decoration-thickness:1px;text-underline-offset:3px}
+a:focus-visible,summary:focus-visible,.scroll:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:var(--space-4);top:var(--space-4);background:var(--surface);color:var(--action);padding:var(--space-2) var(--space-3);z-index:2}
+.wrap{max-width:var(--container);margin:0 auto;padding:0 var(--gutter)}
+.eyebrow{font:var(--type-eyebrow);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);margin:0}
+p{max-width:var(--measure);margin:0 0 var(--space-4)}
+h2{font:var(--type-heading);letter-spacing:-.01em;margin:0 0 var(--space-4)}
+h3{font:600 21px/28px var(--font-body);margin:var(--space-12) 0 var(--space-3)}
+h2 + h3,h2 + p + h3{margin-top:var(--space-6)}
+.secnum{font:500 15px/1 var(--font-mono);color:var(--ink-muted);margin-right:var(--space-2);vertical-align:2px}
+code{font:.86em/1.4 var(--font-mono);overflow-wrap:anywhere}
+.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.caption{font:var(--type-caption);color:var(--ink-muted)}
+.src{font:400 12px/18px var(--font-mono);color:var(--ink-muted);margin-top:var(--space-3)}
+ul,ol{max-width:var(--measure);padding-left:1.4em;margin:0 0 var(--space-4)}
+li{margin:0 0 var(--space-1)}
+li > ul,li > ol{margin:var(--space-1) 0 var(--space-2)}
+.kicker{font:600 17px/26px var(--font-body);margin:var(--space-6) 0 var(--space-2)}
+s.struck{font-family:var(--font-mono);text-decoration:line-through;text-decoration-thickness:2px;text-decoration-color:var(--danger)}
+
+/* ---------- Verdict hero ---------- */
+.hero{background:var(--surface-hero);color:var(--ink);padding:var(--space-6) 0 var(--space-4)}
+.hero .grid{display:grid;grid-template-columns:minmax(0,1fr);grid-template-areas:"lead" "fig" "after";gap:var(--space-4) var(--space-12)}
+.hero .lead{grid-area:lead;min-width:0}
+.hero .gap{grid-area:fig;min-width:0}
+.hero .after{grid-area:after;min-width:0}
+.verdict{font:var(--type-verdict);letter-spacing:-.015em;max-width:22ch;margin:var(--space-3) 0 0;font-weight:400}
+.verdict em{font-style:italic;color:var(--verdict)}
+.vrule{height:3px;background:var(--verdict);border:0;margin:0 0 var(--space-2);width:120px}
+.prov{font:400 12px/18px var(--font-mono);color:var(--ink-muted);margin:0;max-width:none}
+.prov code{font-size:1em}
+@media (min-width:1080px){
+  .hero{padding:var(--space-12) 0 var(--space-8)}
+  .hero .grid{grid-template-columns:minmax(0,5fr) minmax(0,6fr);grid-template-areas:"lead fig" "after fig";align-items:start}
+  .hero .after{align-self:end}
+}
+.gap{margin:0}
+.fig-eyebrow{margin-bottom:var(--space-3)}
+.gap-row{margin:0 0 var(--space-4)}
+.gap-label{margin:0 0 var(--space-1);font:600 14px/20px var(--font-body);color:var(--ink)}
+.bar{display:flex;gap:3px;height:30px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.seg{display:block;height:100%;min-width:0}
+.seg-claim{background:var(--line-strong)}
+.seg-read{background:var(--verdict)}
+.seg-swept,.seg-read2,.seg-other,.sw{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.seg-swept{border:1.5px solid var(--danger);background:repeating-linear-gradient(135deg,var(--danger) 0 2px,transparent 2px 6px)}
+.gap-claim{margin:var(--space-1) 0 0;font:500 17px/24px var(--font-mono)}
+.gap-claim .num{margin-left:var(--space-2)}
+.gap-keys{display:flex;gap:3px;margin-top:var(--space-2)}
+.key{margin:0;min-width:0;font:var(--type-caption);color:var(--ink)}
+.key .what{display:block;color:var(--ink-muted)}
+.key-swept{border-left:1.5px solid var(--danger);padding-left:var(--space-2)}
+.key-read{border-left:3px solid var(--verdict);padding-left:var(--space-2);padding-right:var(--space-2)}
+.num.big{display:block;font:500 clamp(28px,4vw,40px)/1.1 var(--font-mono);letter-spacing:-.02em}
+.key-read .num.big{color:var(--verdict)}
+.gap figcaption{margin:var(--space-2) 0 0;max-width:none}
+@media (min-width:1080px){
+  .hero .gap{padding-top:var(--space-2)}
+  .bar{height:52px}
+  .gap-row{margin-bottom:var(--space-8)}
+  .gap-label{font-size:15px;margin-bottom:var(--space-2)}
+  .gap-claim{font-size:21px;line-height:30px;margin-top:var(--space-2)}
+  .num.big{font-size:52px}
+  .key{font-size:15px;line-height:22px}
+  .gap figcaption{font-size:15px;line-height:22px}
+}
+
+/* ---------- Sections with a right margin rail ---------- */
+main{padding:var(--space-4) var(--gutter) var(--space-16)}
+section{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-4) var(--gutter);padding:var(--space-12) 0 var(--space-8);border-top:1px solid var(--line)}
+main > section:first-child{border-top:0}
+.body,.rail{grid-column:1;min-width:0}
+.note{font:var(--type-caption);color:var(--evidence);border-left:1px solid var(--line-strong);padding:0 0 0 var(--space-3);margin:0 0 var(--space-4);max-width:60ch}
+.note .eyebrow{margin-bottom:var(--space-1);color:var(--verdict)}
+.note p{margin:0 0 var(--space-2);max-width:none}
+.note ul{padding-left:1.1em;margin:0}
+.note li{margin-bottom:var(--space-2)}
+.note.works{border-left-color:var(--good)}
+.note.works .eyebrow{color:var(--good)}
+.see{font:600 15px/22px var(--font-body)}
+@media (min-width:1080px){
+  section{grid-template-columns:minmax(0,1fr) var(--margin-column)}
+  .rail{grid-column:2;grid-row:1;align-self:start;position:sticky;top:var(--space-6)}
+}
+
+/* ---------- Figures ---------- */
+.fig{margin:var(--space-6) 0 var(--space-8);background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius-panel);padding:var(--space-6)}
+.fig-title{font:400 24px/30px var(--font-display);margin:0 0 var(--space-1);max-width:40ch}
+.fig-sub{font:var(--type-caption);color:var(--ink-muted);margin:0 0 var(--space-4)}
+.fig .src{margin-bottom:0}
+@media (max-width:480px){.fig{padding:var(--space-4) var(--space-3)}.fig-title{font-size:21px;line-height:27px}}
+
+/* sorted bars */
+.hbars,.stacks{display:flex;flex-direction:column;gap:var(--space-2)}
+.hbars .row,.stacks .srow{display:grid;grid-template-columns:minmax(0,13rem) minmax(0,1fr);gap:var(--space-1) var(--space-3);align-items:center}
+.hbars .lab,.stacks .lab{font:400 13px/18px var(--font-mono);color:var(--ink);overflow-wrap:anywhere}
+.track{display:flex;align-items:center;gap:var(--space-2);min-width:0}
+.lane{flex:1 1 auto;min-width:0;display:flex;gap:2px;height:18px;align-items:stretch}
+.hbars .lane{padding-right:4.5rem;align-items:center;gap:var(--space-2)}
+.hbars .fill{height:18px;flex:none}
+.hbars .val{flex:none}
+.stacks .lane{padding-right:4.5rem;align-items:center}
+.stacks .seg{height:18px;flex:none}
+.stacks .val{flex:none;margin-left:var(--space-2)}
+.fill{display:block;background:var(--evidence);-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.val{flex:0 0 4.5rem;font:500 14px/18px var(--font-mono);color:var(--ink)}
+.hbars .row.decisive .fill{background:var(--verdict)}
+.hbars .row.decisive .lab,.hbars .row.decisive .val{color:var(--verdict);font-weight:600}
+.bar-note{margin:-2px 0 var(--space-2) calc(13rem + var(--space-3));font:var(--type-caption);color:var(--evidence);border-left:1px solid var(--line-strong);padding-left:var(--space-3);max-width:46ch}
+.hbars.est .row{grid-template-columns:minmax(0,17rem) minmax(0,1fr)}
+.hbars.est .fill{background:transparent;border:1.5px dashed var(--evidence)}
+.hbars.est .row.decisive .fill{background:var(--verdict-soft);border-color:var(--verdict)}
+@media (max-width:640px){
+  .hbars .row,.stacks .srow,.hbars.est .row{grid-template-columns:minmax(0,1fr)}
+  .bar-note{margin-left:0}
+}
+/* stacked bars per session */
+.stacks .srow{grid-template-areas:"lab track" ". parts"}
+.stacks .lab{grid-area:lab}
+.stacks .track{grid-area:track}
+.stacks .parts{grid-area:parts;font:400 12px/16px var(--font-mono);color:var(--ink-muted);margin-top:-2px}
+.stacks .srow.current .lab{color:var(--verdict);font-weight:600}
+.stacks .srow.current .lab em{font-style:normal;font-weight:400;color:var(--ink-muted)}
+.seg-read2{display:block;background:var(--series-1)}
+.seg-other{display:block;background:var(--series-neutral)}
+@media (max-width:640px){.stacks .srow{grid-template-areas:"lab" "track" "parts"}}
+.legend{display:flex;flex-wrap:wrap;gap:var(--space-2) var(--space-6);font:var(--type-caption);color:var(--ink-muted);margin:var(--space-4) 0 0;max-width:none;justify-content:center}
+.sw{display:inline-block;width:12px;height:12px;vertical-align:-1px;margin-right:6px}
+.sw-read2{background:var(--series-1)}
+.sw-swept{border:1.5px solid var(--danger);background:repeating-linear-gradient(135deg,var(--danger) 0 2px,transparent 2px 4px)}
+.sw-other{background:var(--series-neutral)}
+
+/* one message, three bodies */
+.three{list-style:none;padding:0;margin:0 0 var(--space-2);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-2);max-width:none}
+.three li{margin:0;padding:var(--space-3);border:1px solid var(--line-strong);border-radius:var(--radius-chip);font:var(--type-caption);color:var(--ink);background:var(--surface)}
+.three li .eyebrow{display:block;margin-bottom:var(--space-1);color:var(--verdict)}
+.three-n{font:var(--type-caption);color:var(--ink-muted);margin:0 0 var(--space-6)}
+@media (max-width:640px){.three{grid-template-columns:minmax(0,1fr)}}
+
+/* waffle */
+.waffle-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-4);align-items:start}
+.waffle svg{display:block;width:100%;max-width:420px;height:auto}
+.w-burst{fill:var(--verdict)}
+.w-newt{fill:var(--magnitude-2);stroke:var(--magnitude-4);stroke-width:1}
+.w-rest{fill:none;stroke:var(--line-strong);stroke-width:1.5}
+.wkeys{list-style:none;padding:0;margin:0;font:var(--type-caption)}
+.wkeys li{margin:0 0 var(--space-3);display:grid;grid-template-columns:20px minmax(0,1fr);gap:0 var(--space-2)}
+.wkeys .sw{margin:4px 0 0}
+.sw-burst{background:var(--verdict)}
+.sw-newt{background:var(--magnitude-2);border:1px solid var(--magnitude-4)}
+.sw-rest{border:1.5px solid var(--line-strong)}
+.num.big2{font:500 21px/24px var(--font-mono);margin-right:var(--space-1)}
+.wkeys li:first-child .num{color:var(--verdict)}
+@media (min-width:820px){.waffle-grid{grid-template-columns:minmax(0,420px) minmax(0,1fr)}}
+@media print{.sw,.w-burst,.w-newt{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+
+/* ---------- Ledgers ---------- */
+.scroll{overflow-x:auto;margin:var(--space-4) 0 var(--space-6);max-width:100%}
+table.ledger{border-collapse:collapse;width:100%;background:var(--surface);color:var(--ink)}
+table.ledger caption{text-align:left;caption-side:top;font:var(--type-caption);color:var(--ink-muted);padding:0 0 var(--space-2)}
+table.ledger th[scope=col]{font:var(--type-eyebrow);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);text-align:left;vertical-align:bottom;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--line-strong)}
+table.ledger td,table.ledger th[scope=row]{padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--line);vertical-align:top;font:400 15px/22px var(--font-body);text-align:left}
+table.ledger th[scope=row]{font-weight:600;min-width:9rem}
+table.ledger .n{text-align:right;font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+table.ledger tr.decisive td,table.ledger tr.decisive th{background:var(--verdict-soft);color:var(--ink)}
+table.ledger tr.decisive th[scope=row]{box-shadow:inset 3px 0 0 var(--verdict)}
+table.ledger td code,table.ledger th code{font-size:13px}
+.rowsub{display:block;font:400 13px/18px var(--font-body);color:var(--ink-muted)}
+table.overview th[scope=row]{width:9rem;font:var(--type-eyebrow);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);padding-top:var(--space-3)}
+table.overview tr.decisive th[scope=row]{color:var(--ink)}
+table.overview td{max-width:68ch}
+table.channels{min-width:720px}
+table.channels th[scope=col]{padding:var(--space-2) var(--space-2);letter-spacing:.04em}
+table.channels td{padding:var(--space-2) var(--space-2)}
+table.channels th[scope=row]{min-width:12rem}
+.gshare{min-width:7rem;white-space:nowrap}
+.gbar{display:inline-block;width:4rem;height:10px;background:transparent;border:1px solid var(--line-strong);vertical-align:middle;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.gbar span{display:block;height:100%;background:var(--evidence)}
+.gpct{margin-left:var(--space-2);font-size:13px;font-weight:600}
+details.data,details.sql{margin:var(--space-3) 0 var(--space-4)}
+details.data > summary,details.sql > summary{font:600 14px/20px var(--font-body);color:var(--action);cursor:pointer}
+details.sql pre{margin:var(--space-2) 0 0;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius-panel);padding:var(--space-3) var(--space-4);overflow-x:auto;font:400 13px/20px var(--font-mono);max-width:100%}
+details.sql pre code{font:inherit;overflow-wrap:normal;white-space:pre}
+
+/* ---------- Impact x effort matrix ---------- */
+table.matrix{border-collapse:collapse;width:100%;min-width:760px;table-layout:fixed;color:var(--ink)}
+table.matrix caption{text-align:left;caption-side:top;font:var(--type-caption);color:var(--ink-muted);padding:0 0 var(--space-3)}
+table.matrix th[scope=col]{font:var(--type-eyebrow);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);text-align:left;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--line-strong);vertical-align:bottom}
+table.matrix .corner{width:7.5rem;border-bottom:1px solid var(--line-strong)}
+table.matrix th[scope=row]{font:600 14px/20px var(--font-body);text-align:left;vertical-align:top;padding:var(--space-3);border-right:1px solid var(--line-strong)}
+table.matrix td{vertical-align:top;padding:var(--space-3);border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+table.matrix td.first{background:var(--surface-hero);color:var(--ink);border:1px solid var(--line-strong)}
+.cell-tag{font:var(--type-eyebrow);letter-spacing:.08em;text-transform:uppercase;color:var(--ink);margin:0 0 var(--space-2)}
+.chip{display:grid;grid-template-columns:1.8rem minmax(0,1fr);gap:var(--space-2);margin:0 0 var(--space-3);font:400 14px/20px var(--font-body)}
+.chip .rank{font:600 15px/20px var(--font-mono);color:var(--ink);text-align:right}
+.chip .exact{display:block;font:400 12px/16px var(--font-mono);color:var(--ink-muted)}
+.chip .tids{display:block;font:400 12px/18px var(--font-mono)}
+.chip .tids a{margin-right:var(--space-2)}
+.empty{color:var(--ink-muted);margin:0}
+@media (max-width:640px){
+  table.matrix{min-width:0;display:block}
+  table.matrix caption,table.matrix tbody,table.matrix tr,table.matrix th[scope=row],table.matrix td{display:block}
+  table.matrix thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  table.matrix th[scope=row]{border-right:0;border-bottom:1px solid var(--line-strong);padding:var(--space-4) 0 var(--space-2)}
+  table.matrix td{margin:var(--space-2) 0}
+  table.matrix td.none{display:none}
+  table.matrix td::before{content:attr(data-effort);display:block;font:var(--type-eyebrow);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);margin-bottom:var(--space-2)}
+}
+a.tid{font-family:var(--font-mono);font-size:.92em;white-space:nowrap}
+.tanchor{font-family:var(--font-mono);font-weight:600;scroll-margin-top:var(--space-8)}
+.tanchor:target{background:var(--verdict-soft);color:var(--ink);outline:2px solid var(--verdict)}
+
+/* ---------- Footer ---------- */
+footer.prov-foot{border-top:1px solid var(--line-strong);background:var(--bg);color:var(--ink-muted);padding:var(--space-8) 0 var(--space-16);font:var(--type-caption)}
+footer.prov-foot h2{color:var(--ink)}
+footer.prov-foot h3{color:var(--ink);font-size:17px;margin-top:var(--space-6)}
+footer.prov-foot p,footer.prov-foot li{max-width:90ch}
+footer.prov-foot ul{max-width:90ch}
+
+@media (prefers-reduced-motion:no-preference){a,summary{transition:color 120ms cubic-bezier(.2,0,0,1)}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* ---------- Print: always light, everything expanded ---------- */
+@media print{
+  body{font-size:11pt;line-height:1.45;background:var(--surface);color:var(--ink)}
+  .hero{background:none;padding:12pt 0}
+  .hero .grid{grid-template-columns:1fr;grid-template-areas:"lead" "fig" "after"}
+  main{padding:0}
+  section{grid-template-columns:1fr;padding:16pt 0 8pt}
+  .rail{position:static;grid-column:1;grid-row:auto}
+  details > summary{display:none}
+  details{display:block}
+  .scroll{overflow:visible}
+  table.channels,table.matrix{min-width:0}
+  table.matrix{table-layout:auto}
+  .fig,table,tr,.chip,.note,pre{break-inside:avoid}
+  h2,h3{break-after:avoid}
+  thead{display:table-header-group}
+  a[href^="http"]::after{content:" (" attr(href) ")";font-size:9pt}
+  .skip{display:none}
+  .fig{border-color:var(--line-strong)}
+}
+
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the findings</a>
+<header class="hero">
+  <div class="wrap grid">
+    <div class="lead">
+      <p class="eyebrow">Investigation · Cassy agent-to-agent communication · 2026-10-14 · for the operator</p>
+      <h1 class="verdict">Cassy moves messages in 0.1–0.2&nbsp;s, then records the wrong outcome — and the operator’s replies <em>never arrive</em>.</h1>
+    </div>
+    
+<figure class="gap" aria-labelledby="gap-title" aria-describedby="gap-desc">
+  <p class="eyebrow fig-eyebrow" id="gap-title">228 queue rows this session · one label, two different truths</p>
+  <div class="gap-row" role="img" aria-label="What the queue recorded: 228 rows, all labelled abandoned.">
+    <p class="gap-label"><span class="who">The queue recorded</span></p>
+    <div class="bar"><span class="seg seg-claim" style="flex:1 1 0"></span></div>
+    <p class="gap-claim"><s class="struck">abandoned</s> <span class="num">228</span></p>
+  </div>
+  <div class="gap-row" role="img" aria-label="What happened: 128 rows had been read by the worker; 100 were supervisor replies to the operator that the sweep discarded unseen.">
+    <p class="gap-label"><span class="who">What happened</span></p>
+    <div class="bar">
+      <span class="seg seg-read" style="flex:128 1 0"></span><span class="seg seg-swept" style="flex:100 1 0"></span>
+    </div>
+    <div class="gap-keys">
+      <p class="key key-read" style="flex:128 1 0"><span class="num big">128</span> <span class="what">read by the worker, then marked abandoned</span></p>
+      <p class="key key-swept" style="flex:100 1 0"><span class="num big">100</span> <span class="what">operator replies swept unseen after ~930&nbsp;s</span></p>
+    </div>
+  </div>
+  <figcaption id="gap-desc" class="caption">Not one bad night: since 2026-09-15, <span class="num">1,376</span> of <span class="num">1,990</span> rows marked
+  <s class="struck">abandoned</s> had a seen receipt. Transport itself took 0.1–0.2&nbsp;s on every live channel.</figcaption>
+</figure>
+    <div class="after">
+      <hr class="vrule">
+      <p class="prov">Task cas-447d · 2026-10-14 · crisp-sparrow-96 · Cassy 3.51.0 (1c201ff) on soundwave · snapshot <code>cas.db</code> 2026-10-14 11:51Z · session <code>cassy-swift-gazelle-77</code></p>
+    </div>
+  </div>
+</header>
+<main id="main" class="wrap">
+
+<section id="overview" aria-labelledby="overview-h">
+  <div class="body">
+    <h2 id="overview-h">Overview</h2>
+    
+<div class="scroll" tabindex="0" role="region" aria-label="Overview"><table class="ledger overview"><caption>The investigation at a glance</caption>
+<tbody>
+<tr><th scope="row">Question</th><td>Do Cassy’s agent-to-agent channels deliver, and does the record say what happened?</td></tr>
+<tr class="decisive"><th scope="row">Verdict</th><td>Transport works (0.1–0.2 s). The record does not: read messages are labelled abandoned, the operator lane is swept, readers see one message up to three times, alarms cry wolf, and supervisors cannot coordinate with each other.</td></tr>
+<tr><th scope="row">Confidence</th><td>High for database counts, which are exact. Transcript counts come from regex classifiers and are close estimates. Cross-machine peer messaging is unmeasured (§8).</td></tr>
+<tr><th scope="row">Scope</th><td>Session <code>cassy-swift-gazelle-77</code>, 2026-10-13 20:48Z to 2026-10-14 11:49Z: 870 prompt_queue rows, 167 supervisor_queue rows, 18 workers; five earlier sessions for comparison; code at <code>1c201ff06</code>.</td></tr>
+<tr><th scope="row">Date · author</th><td>2026-10-14 · crisp-sparrow-96 (cas-447d)</td></tr>
+<tr><th scope="row">Source</th><td><a href="communication-review.md">communication-review.md</a> is the source of truth; this page is rendered from it.</td></tr>
+</tbody></table></div>
+  </div>
+  
+</section>
+
+<section id="summary" aria-labelledby="summary-h">
+  <div class="body">
+    <h2 id="summary-h">What is broken</h2>
+    <ol><li><strong>The operator never gets the supervisor's replies, and the queue says they were abandoned.</strong><ul><li>100 of 105 supervisor→operator rows this session were swept as <code>abandoned_unknown_target</code> about 930 s after creation, because "operator" is missing from the sweep's list of valid targets.</li><li>All 202 operator outbox events ever recorded have no relay receipt, and the cloud outbox has never held a row.</li><li>This is the root of <a class="tid" href="#t-cas-5c89">cas-5c89</a>. Filed as <strong><a class="tid" href="#t-cas-d88c">cas-d88c</a></strong>.</li></ul></li><li><strong>Delivery bookkeeping is wrong.</strong><ul><li>Gated rows get a "seen" receipt about 0.1 s after enqueue, before anyone has read them.</li><li>Messages that were read are later labelled "abandoned": 128 this session, and 1,376 of the 1,990 "abandoned" rows in the last month.</li><li>Every metric, banner and abandonment notice built on these fields is unreliable. Filed as <strong><a class="tid" href="#t-cas-f7b0">cas-f7b0</a></strong>.</li></ul></li><li><strong>Readers see the same thing several times.</strong><ul><li>A Claude Teams supervisor reads each pointer-woken message three times. 37 ids came wake + hook + teammate block, about 21K tokens.</li><li>Every merge park sends two relays, and the second one reads as a rejection: 14/14 this session, 311/312 since October.</li><li>New workers inherit the whole broadcast backlog, 13 h old and contradictory, and cannot start their task until they read it.</li><li>The supervisor receives its own broadcasts back.</li></ul></li><li><strong>Alarms cry wolf.</strong><ul><li>Six workers got 105 "you have gone quiet" nudges (~19K tokens), more than all the supervisor's direct messages to them. One worker got 67, 23 of them in a single prompt, while it was sleeping on CI.</li><li>6 of 8 checkable <code>worker_stalled</code> escalations fired while a tool call was running.</li><li>A shutdown the supervisor itself requested sent 13 Critical alarms, about 2.9K chars each, mostly spinner glyphs.</li></ul></li><li><strong>Supervisors can't coordinate with each other.</strong><ul><li>Nothing hands off epics when a session ends.</li><li>Integration notices go to dead owners.</li><li>Two supervisors' conflicting integrations triggered no notice to either.</li><li>The 3.51 cloud peer mailbox has never carried a live send from this machine: <code>peer_message_outbox</code> has 0 rows.</li></ul></li></ol><h3 id="fixes-order">Highest-leverage fixes, in order</h3><ol><li><a class="tid" href="#t-cas-d88c">cas-d88c</a>: operator lane sweep</li><li><a class="tid" href="#t-cas-f7b0">cas-f7b0</a>: honest receipts</li><li><a class="tid" href="#t-cas-1f0c">cas-1f0c</a>: one body per message</li><li><a class="tid" href="#t-cas-7156">cas-7156</a>: stop the nudge storms</li><li><a class="tid" href="#t-cas-6853">cas-6853</a>: broadcast backlog and echo</li><li><a class="tid" href="#t-cas-5c2c">cas-5c2c</a>: supervisor-to-supervisor handoff and conflict notices</li></ol>
+<p>The first three are small and local. Together they change what every agent and every dashboard believes about delivery.</p>
+<p>Filed tasks: 19 new tasks, plus evidence notes on 4 existing ones (<a class="tid" href="#t-cas-5c89">cas-5c89</a>, <a class="tid" href="#t-cas-00d5">cas-00d5</a>, <a class="tid" href="#t-cas-8063">cas-8063</a>, <a class="tid" href="#t-cas-6eec">cas-6eec</a>). The full list is in §7.</p><p class="see"><a href="#s6">See every fix on the impact × effort matrix ↓</a></p>
+  </div>
+  <aside class="rail"><div class="note works"><p class="eyebrow">What works</p><ul><li>The routing core is fast and well guarded. Worker-to-supervisor and supervisor-to-worker transport completes in 0.1–0.2 s on average.</li><li>Every row carries a stage and a pending reason.</li><li>Unknown targets fail at once with a named error instead of queueing silently.</li><li>Lifecycle relays are durable and deduped by key.</li><li>Typed envelopes for blockers, merge requests and verification decide what may wake an idle supervisor.</li><li>External reminders fired on time; #2904 fired 26 minutes after it was set, when the PR landed.</li><li>The worker return contract, when followed, produces messages that can be checked in one read. 71% of worker delivery messages followed it.</li></ul></div></aside>
+</section>
+
+<section id="s2" aria-labelledby="s2-h">
+  <div class="body">
+    <h2 id="s2-h"><span class="secnum">2</span> Measurements</h2>
+    <p>Every query ran against the snapshot. The SQL files are in <code>queries/</code>. Abbreviations: <code>S = sqlite3 snap.db</code>, <code>W = factory_session='cassy-swift-gazelle-77'</code>.</p><h3 id="s2-1"><span class="secnum">2.1</span> Volume, latency and receipts by channel</h3><p>This is <code>queries/lat.sql</code>. It classifies rows by source and target and computes transport and seen latency.</p><div class="scroll" tabindex="0" role="region" aria-label="Volume, latency and receipts by channel"><table class="ledger channels"><caption>Volume, latency and receipts by channel, session <code>cassy-swift-gazelle-77</code>. The banded row is the operator lane: 105 replies, 0 seen.</caption><thead><tr><th scope="col">from → to</th><th scope="col" class="n">n</th><th scope="col" class="n">seen</th><th scope="col" class="n">transported</th><th scope="col" class="n">acked</th><th scope="col" class="n">gate-declined</th><th scope="col" class="gshare">share gated</th><th scope="col" class="n">avg transport s</th><th scope="col" class="n">avg seen s</th></tr></thead><tbody><tr><th scope="row">worker/self-reminder → named agent<span class="rowsub">230 to zen-viper-42 incl. 31 peer copies; 62 self-reminders; ~18 worker→worker</span></th><td class=n>310</td><td class=n>309</td><td class=n>274</td><td class=n>9</td><td class=n>16</td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:5.161%"></span></span></td><td class=n>0.1</td><td class=n>0.2</td></tr><tr><th scope="row">supervisor → worker</th><td class=n>183</td><td class=n>183</td><td class=n>80</td><td class=n>1</td><td class=n><strong>102</strong></td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:55.738%"></span></span><span class="gpct num">56%</span></td><td class=n>0.1</td><td class=n>0.5</td></tr><tr><th scope="row">worker → &quot;supervisor&quot; literal</th><td class=n>181</td><td class=n>180</td><td class=n>110</td><td class=n>50</td><td class=n>0</td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:0.000%"></span></span></td><td class=n>0.2</td><td class=n>0.3</td></tr><tr class="decisive"><th scope="row">supervisor → operator</th><td class=n>105</td><td class=n><strong>0</strong></td><td class=n>3</td><td class=n>0</td><td class=n>0</td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:0.000%"></span></span></td><td class=n>0.3</td><td class=n>–</td></tr><tr><th scope="row">director → worker</th><td class=n>35</td><td class=n>35</td><td class=n>26</td><td class=n>3</td><td class=n>10</td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:28.571%"></span></span></td><td class=n>1.0</td><td class=n>0.7</td></tr><tr><th scope="row">task-assignment → worker</th><td class=n>15</td><td class=n>15</td><td class=n>9</td><td class=n>0</td><td class=n>6</td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:40.000%"></span></span></td><td class=n>0.1</td><td class=n>0.9</td></tr><tr><th scope="row">supervisor → all_workers</th><td class=n>12</td><td class=n>12</td><td class=n>11</td><td class=n>0</td><td class=n>0</td><td class="gshare"><span class="gbar" aria-hidden="true"><span style="width:0.000%"></span></span></td><td class=n>0.1</td><td class=n>0.0</td></tr></tbody></table></div><p>Reading the table:</p>
+<ul><li>Transport is fast.</li><li>56% of supervisor→worker messages were deferred by "pane has not been silent long enough".</li><li>The "seen" latency is an artifact. For gated rows the receipt source is <code>transport_claimed</code>, written about 0.1 s after enqueue (<code>queries/gate.sql</code>). For example, 4185905 was "seen" at +0.05 s, but the worker answered 9 min later (4185932).</li><li>Explicit acks are rare (66 of 870 rows). That is by design: task start counts as acceptance.</li></ul><h3 id="s2-2"><span class="secnum">2.2</span> Final stage distribution in this session</h3>
+<figure class="fig" aria-labelledby="stage-t">
+  <p class="fig-title" id="stage-t">The second-largest final stage is a label that is mostly wrong</p>
+  <p class="fig-sub">Final <code>highest_stage</code> of all 870 <code>prompt_queue</code> rows in session <code>cassy-swift-gazelle-77</code> · rows</p>
+  <div class="hbars" role="img" aria-label="Final stage of the 870 prompt_queue rows this session, sorted: assumed_seen 265, abandoned 228, delivered 197, gated 84, confirmed 66, none 26, selected 2, partially_delivered 1, suppressed 1. Of the 228 abandoned, 128 had been read and 100 were operator rows."><div class="row"><span class="lab">assumed_seen</span><span class="track"><span class="lane"><span class="fill" style="width:100.000%"></span><span class="val num">265</span></span></span></div><div class="row decisive"><span class="lab"><s class="struck">abandoned</s></span><span class="track"><span class="lane"><span class="fill" style="width:86.038%"></span><span class="val num">228</span></span></span></div><p class="bar-note"><span class="num">128</span> of these were read by the worker · <span class="num">100</span> were operator replies the sweep discarded</p><div class="row"><span class="lab">delivered</span><span class="track"><span class="lane"><span class="fill" style="width:74.340%"></span><span class="val num">197</span></span></span></div><div class="row"><span class="lab">gated</span><span class="track"><span class="lane"><span class="fill" style="width:31.698%"></span><span class="val num">84</span></span></span></div><div class="row"><span class="lab">confirmed</span><span class="track"><span class="lane"><span class="fill" style="width:24.906%"></span><span class="val num">66</span></span></span></div><div class="row"><span class="lab">none (empty)</span><span class="track"><span class="lane"><span class="fill" style="width:9.811%"></span><span class="val num">26</span></span></span></div><div class="row"><span class="lab">selected</span><span class="track"><span class="lane"><span class="fill" style="width:0.755%"></span><span class="val num">2</span></span></span></div><div class="row"><span class="lab">partially_delivered</span><span class="track"><span class="lane"><span class="fill" style="width:0.377%"></span><span class="val num">1</span></span></span></div><div class="row"><span class="lab">suppressed</span><span class="track"><span class="lane"><span class="fill" style="width:0.377%"></span><span class="val num">1</span></span></span></div></div>
+  <figcaption class="src">Source: snapshot <code>snap.db</code> 2026-10-14 11:51Z · query in §2.2 below</figcaption>
+</figure><details class="sql" open><summary>Query (sql)</summary><pre><code>select highest_stage, count(*) from prompt_queue where W group by 1;
+select last_pending_reason, count(*) from prompt_queue where W group by 1;</code></pre></details>
+<div class="scroll" tabindex="0" role="region" aria-label="Final stage, this session (figure twin)"><table class="ledger"><caption>Final stage, this session (figure twin)</caption><thead><tr><th scope="col">Stage</th><th scope="col" class=n>Count</th></tr></thead><tbody><tr><th scope="row">assumed_seen</th><td class=n>265</td></tr><tr class="decisive"><th scope="row"><strong>abandoned</strong></th><td class=n><strong>228</strong></td></tr><tr><th scope="row">delivered</th><td class=n>197</td></tr><tr><th scope="row">gated</th><td class=n>84</td></tr><tr><th scope="row">confirmed</th><td class=n>66</td></tr><tr><th scope="row">none (empty)</th><td class=n>26</td></tr><tr><th scope="row">selected</th><td class=n>2</td></tr><tr><th scope="row">partially_delivered</th><td class=n>1</td></tr><tr><th scope="row">suppressed</th><td class=n>1</td></tr></tbody></table></div>
+<p>The reasons behind the 228 abandoned rows:</p>
+<ul><li><code>operator</code> target, never seen: 100. These are caused by the sweep and filed as <a class="tid" href="#t-cas-d88c">cas-d88c</a>.</li><li>Worker targets, <em>seen</em>, never transported: 128. The average age at sweep was 40,455 s. These are false and filed as <a class="tid" href="#t-cas-f7b0">cas-f7b0</a>.</li></ul>
+<details class="sql" open><summary>Query (sql)</summary><pre><code>select target='operator', transport_delivered_at is not null, acked_at is not null,
+  exists(select 1 from prompt_queue_recipient_seen s where s.prompt_id=p.id), count(*),
+  avg((julianday(processed_at)-julianday(created_at))*86400)
+from prompt_queue p where W and last_pending_reason='abandoned_unknown_target' group by 1,2,3,4;</code></pre></details>
+<p>Cross-check against the daemon's own log: every one of the 128 rows plus 101 rows still "gated" has an <code>events.supervisor_injected … (ok)</code> entry.</p>
+<details class="sql" open><summary>Query (sql)</summary><pre><code>with inj as (select json_extract(metadata,'$.prompt_id') pid, json_extract(metadata,'$.status') st
+  from events where event_type='supervisor_injected' and created_at&gt;='2026-10-13T20:48' group by 1,2)
+select inj.st, p.highest_stage, p.last_pending_reason, count(*)
+from inj join prompt_queue p on p.id=inj.pid group by 1,2,3;</code></pre></details><h3 id="s2-3"><span class="secnum">2.3</span> The same pattern across sessions</h3>
+<figure class="fig" aria-labelledby="xs-t">
+  <p class="fig-title" id="xs-t">Every session since September shows the same two failures, in different mixes</p>
+  <p class="fig-sub"><code>abandoned_unknown_target</code> rows per factory session, split by what happened · rows · one shared scale</p>
+  <div class="stacks" role="img" aria-label="Abandoned rows per session split into rows that had been read and operator rows: swift-gazelle-77: 228 abandoned, 128 seen, 100 operator; agile-raven-93: 37 abandoned, 17 seen, 20 operator; fierce-octopus-14: 743 abandoned, 741 seen, 2 operator; rapid-parrot-36: 219 abandoned, 219 seen, 0 operator; zealous-panther-88: 269 abandoned, 204 seen, 65 operator; keen-tiger-11: 97 abandoned, 0 seen, 92 operator."><div class="srow current"><span class="lab">swift-gazelle-77 <em>(this session)</em></span><span class="track"><span class="lane"><span class="seg seg-read2" style="width:17.227%"></span><span class="seg seg-swept" style="width:13.459%"></span><span class="val num">228</span></span></span><span class="parts"><span class="k-read">read 128</span> · <span class="k-swept">operator 100</span></span></div><div class="srow"><span class="lab">agile-raven-93</span><span class="track"><span class="lane"><span class="seg seg-read2" style="width:2.288%"></span><span class="seg seg-swept" style="width:2.692%"></span><span class="val num">37</span></span></span><span class="parts"><span class="k-read">read 17</span> · <span class="k-swept">operator 20</span></span></div><div class="srow"><span class="lab">fierce-octopus-14</span><span class="track"><span class="lane"><span class="seg seg-read2" style="width:99.731%"></span><span class="seg seg-swept" style="width:0.269%"></span><span class="val num">743</span></span></span><span class="parts"><span class="k-read">read 741</span> · <span class="k-swept">operator 2</span></span></div><div class="srow"><span class="lab">rapid-parrot-36</span><span class="track"><span class="lane"><span class="seg seg-read2" style="width:29.475%"></span><span class="val num">219</span></span></span><span class="parts"><span class="k-read">read 219</span></span></div><div class="srow"><span class="lab">zealous-panther-88</span><span class="track"><span class="lane"><span class="seg seg-read2" style="width:27.456%"></span><span class="seg seg-swept" style="width:8.748%"></span><span class="val num">269</span></span></span><span class="parts"><span class="k-read">read 204</span> · <span class="k-swept">operator 65</span></span></div><div class="srow"><span class="lab">keen-tiger-11</span><span class="track"><span class="lane"><span class="seg seg-swept" style="width:12.382%"></span><span class="seg seg-other" style="width:0.673%"></span><span class="val num">97</span></span></span><span class="parts"><span class="k-swept">operator 92</span></span></div></div>
+  <p class="legend"><span><span class="sw sw-read2"></span>had a seen receipt (false abandon)</span> <span><span class="sw sw-swept"></span>operator reply, never seen (sweep)</span> <span><span class="sw sw-other"></span>other</span></p>
+  <figcaption class="src">Source: <code>queries/xs.sql</code> on the 11:51Z snapshot. Segments use the table's “…of which seen” and “Operator abandoned” columns; the unlabelled remainder (keen-tiger-11) is neither.</figcaption>
+</figure><p>This is <code>queries/xs.sql</code>.</p>
+<div class="scroll" tabindex="0" role="region" aria-label="Per-session counts (figure twin, queries/xs.sql)"><table class="ledger"><caption>Per-session counts (figure twin, queries/xs.sql)</caption><thead><tr><th scope="col">Session</th><th scope="col" class=n>Rows</th><th scope="col" class=n>Gated</th><th scope="col" class=n>Abandoned</th><th scope="col" class=n>…of which seen</th><th scope="col" class=n>→ operator</th><th scope="col" class=n>Operator abandoned</th><th scope="col" class=n>Lifecycle</th><th scope="col" class=n>Peer copies</th><th scope="col" class=n>Broadcasts</th></tr></thead><tbody><tr class="decisive"><th scope="row">swift-gazelle-77</th><td class=n>870</td><td class=n>134</td><td class=n>228</td><td class=n>128</td><td class=n>105</td><td class=n>100</td><td class=n>149</td><td class=n>31</td><td class=n>12</td></tr><tr><th scope="row">agile-raven-93</th><td class=n>102</td><td class=n>17</td><td class=n>37</td><td class=n>17</td><td class=n>23</td><td class=n>20</td><td class=n>22</td><td class=n>0</td><td class=n>0</td></tr><tr><th scope="row">fierce-octopus-14</th><td class=n>1566</td><td class=n>462</td><td class=n>743</td><td class=n>741</td><td class=n>2</td><td class=n>2</td><td class=n>414</td><td class=n>12</td><td class=n>4</td></tr><tr><th scope="row">rapid-parrot-36</th><td class=n>496</td><td class=n>108</td><td class=n>219</td><td class=n>219</td><td class=n>0</td><td class=n>0</td><td class=n>145</td><td class=n>4</td><td class=n>4</td></tr><tr><th scope="row">zealous-panther-88</th><td class=n>305</td><td class=n>72</td><td class=n>269</td><td class=n>204</td><td class=n>66</td><td class=n>65</td><td class=n>57</td><td class=n>0</td><td class=n>0</td></tr><tr><th scope="row">keen-tiger-11</th><td class=n>275</td><td class=n>9</td><td class=n>97</td><td class=n>0</td><td class=n>97</td><td class=n>92</td><td class=n>15</td><td class=n>0</td><td class=n>0</td></tr></tbody></table></div>
+<p>Month-wide, from 2026-09-15:</p>
+<ul><li>1,990 rows were <code>abandoned_unknown_target</code>, and 1,376 of them had a seen receipt. Of those 1,376, 1,122 were "stale 86400s+ quarantined" and 254 were "target no longer belongs to factory session".</li><li>7 abandoned with "No such file or directory (os error 2) … 16 failed attempts / ~900s".</li></ul><h3 id="s2-4"><span class="secnum">2.4</span> Operator channel</h3><details class="sql" open><summary>Query (sql)</summary><pre><code>select factory_session, count(*), sum(relay_receipt is not null), sum(attempts) from operator_delivery_outbox group by 1;
+select count(*) from operator_cloud_outbox;</code></pre></details>
+<ul><li><code>operator_delivery_outbox</code>: 202 rows across 5 sessions. 0 relay receipts and 0 attempts.</li><li><code>operator_cloud_outbox</code>: <strong>0 rows ever</strong>.</li><li>Of the 105 operator rows this session, 86 are mirrored <code>status</code> and 19 are <code>answer</code> (origin daemon). Only 3 were delivered: the in_reply_to answers sent while the Commander was live.</li></ul><h3 id="s2-5"><span class="secnum">2.5</span> Lifecycle relays and the supervisor queue</h3><details class="sql" open><summary>Query (sql)</summary><pre><code>select json_extract(payload,'$.transition'), count(*), count(distinct json_extract(payload,'$.task_id'))
+from supervisor_queue where created_at&gt;='2026-10-13T20:48' and event_type='task_lifecycle' group by 1;</code></pre></details>
+<div class="scroll" tabindex="0" role="region" aria-label="task_lifecycle transitions this session"><table class="ledger"><caption>task_lifecycle transitions this session</caption><thead><tr><th scope="col">Transition</th><th scope="col" class=n>Count</th></tr></thead><tbody><tr><th scope="row">task_started</th><td class=n>41</td></tr><tr><th scope="row">task_closed</th><td class=n>37</td></tr><tr><th scope="row">task_close_rejected</th><td class=n>14</td></tr><tr><th scope="row">task_awaiting_merge</th><td class=n>14</td></tr><tr><th scope="row">task_blocked</th><td class=n>9</td></tr><tr><th scope="row">task_ready</th><td class=n>1</td></tr></tbody></table></div>
+<p>Other event types:</p>
+<ul><li>reminder_fired: 62 (none processed or prompted)</li><li>worker_died: 12</li><li>worker_idle: 11, exactly one per worker</li><li>worker_stalled: 10</li><li>supervisor_stalled: 4</li><li>workers_died_together: 1</li></ul>
+<p>Pairing: all 14 close_rejected rows share an <code>occurrence_id</code> with an awaiting_merge row for the same task, with reason <code>MERGE REQUIRED</code>. Since October: 311 close_rejected against 312 awaiting_merge.</p>
+<details class="sql" open><summary>Query (sql)</summary><pre><code>select count(*) from supervisor_queue a join supervisor_queue b
+ on json_extract(a.payload,'$.occurrence_id')=json_extract(b.payload,'$.occurrence_id')
+ and json_extract(a.payload,'$.task_id')=json_extract(b.payload,'$.task_id')
+where a.created_at&gt;='2026-10-13T20:48' and json_extract(a.payload,'$.transition')='task_close_rejected'
+  and json_extract(b.payload,'$.transition')='task_awaiting_merge';   -- 14</code></pre></details>
+<p>Dead letters:</p>
+<ul><li>All-time, 2,514 <code>reminder_fired</code> rows have <code>processed_at</code> and <code>prompt_delivered_at</code> both NULL.</li><li>All 116 task_lifecycle rows this session were never marked processed.</li></ul><h3 id="s2-6"><span class="secnum">2.6</span> What the supervisor receives</h3><p>This is <code>queries/inb.sql</code>: rows addressed to the supervisor, by category.</p>
+<div class="scroll" tabindex="0" role="region" aria-label="Rows addressed to the supervisor, by category (queries/inb.sql)"><table class="ledger"><caption>Rows addressed to the supervisor, by category (queries/inb.sql)</caption><thead><tr><th scope="col">Category</th><th scope="col" class=n>n</th><th scope="col" class=n>chars</th><th scope="col" class=n>avg chars</th></tr></thead><tbody><tr><th scope="row">Worker messages</th><td class=n>218</td><td class=n>187,028</td><td class=n>858</td></tr><tr><th scope="row">Lifecycle (may wake)</th><td class=n>52</td><td class=n>50,712</td><td class=n>975</td></tr><tr><th scope="row">Lifecycle (inbox only)</th><td class=n>71</td><td class=n>45,859</td><td class=n>646</td></tr><tr><th scope="row">Peer-worker copies</th><td class=n>31</td><td class=n>18,972</td><td class=n>612</td></tr><tr><th scope="row">Worker attention (wake)</th><td class=n>26</td><td class=n>8,548</td><td class=n>329</td></tr><tr><th scope="row">Reminders</th><td class=n>13</td><td class=n>4,876</td><td class=n>375</td></tr><tr><th scope="row">Director (spawn)</th><td class=n>19</td><td class=n>4,550</td><td class=n>239</td></tr><tr><th scope="row">Commander</th><td class=n>3</td><td class=n>110</td><td class=n>37</td></tr></tbody></table></div>
+<p>The queue holds 433 rows and 320K chars. The transcript shows about 534K chars (~133K tokens) of agent communication, because of repeats; §3 has the detail.</p><h3 id="s2-7"><span class="secnum">2.7</span> Broadcast backlog</h3><details class="sql" open><summary>Query (sql)</summary><pre><code>select recipient, count(*) from prompt_queue_recipient_seen s join prompt_queue p on p.id=s.prompt_id
+where p.target='all_workers' and p.factory_session='cassy-swift-gazelle-77' group by 1;</code></pre></details>
+<p>All 18 recipients have 12 of 12 receipts. That includes crisp-sparrow-96, registered 11:49Z, about 13 h after the first broadcast, and also <code>zen-viper-42</code> and <code>supervisor</code>, i.e. the sender itself.</p><h3 id="s2-8"><span class="secnum">2.8</span> Reminders</h3><details class="sql" open><summary>Query (sql)</summary><pre><code>select trigger_type, trigger_event, status, cross_session, count(*),
+  avg((julianday(fired_at)-julianday(created_at))*86400)
+from reminders where created_at&gt;='2026-10-13T20:48' group by 1,2,3,4;</code></pre></details>
+<ul><li>Time reminders: 62 fired (average delay 577 s) and 22 cancelled.</li><li>branch_contained_in: 1 fired (#2904, 1,562 s after creation, when the PR landed) and 3 cancelled.</li><li>All 13 reminder rows addressed to the supervisor record <code>wake_not_applicable: row carries no server-stamped sender</code>. They still worked for this Claude Teams supervisor, but only because the Teams inbox write starts a turn.</li></ul>
+  </div>
+  <aside class="rail"><div class="note"><p class="eyebrow">Reading the seen column</p><p>For gated rows the “seen” receipt is written by <code>transport_claimed</code> about 0.1 s after enqueue — before anyone reads it. 4185905 was “seen” at +0.05 s; the worker answered 9 min later.</p></div><div class="note"><p class="eyebrow">Why 128 is false</p><p>The daemon’s own log has an <code>events.supervisor_injected … (ok)</code> entry for every one of the 128 rows.</p></div></aside>
+</section>
+
+<section id="s3" aria-labelledby="s3-h">
+  <div class="body">
+    <h2 id="s3-h"><span class="secnum">3</span> Transcripts: clarity, noise and token cost</h2>
+    <p>Method: Python extractors over the model-visible text (<code>transcript-scripts/</code>); tokens are estimated as chars/4.</p>
+<figure class="fig" aria-labelledby="cost-t">
+  <p class="fig-title" id="cost-t">The supervisor reads each pointer-woken message three times: ~21K tokens of repeats, ~24K more of identical receipts</p>
+  <p class="fig-sub">Estimated tokens (chars ÷ 4) · dashed bars are estimates, not counts · supervisor communication ≈ 534K chars (~133K tokens); with hooks ≈ 870K chars (~218K tokens)</p>
+  <ol class="three" aria-label="One message, three bodies">
+    <li><span class="eyebrow">1 · wake line</span> “CAS wake: message N is in your inbox … (body not repeated here)”</li>
+    <li><span class="eyebrow">2 · hook body</span> <code>[incoming messages]</code> at the next tool boundary</li>
+    <li><span class="eyebrow">3 · teammate block</span> the same body again as a teammate turn</li>
+  </ol>
+  <p class="three-n"><span class="num">37</span> ids arrived all three ways; <span class="num">47</span> ids arrived more than once.</p>
+  <div class="hbars est" role="img" aria-label="Estimated token cost, chars divided by 4: ambient-recall hook about 68K, send receipts about 24K, repeated bodies about 21K, gone-quiet nudges about 19K, supervisor-reminder hook about 13K, off-task broadcasts about 8K."><div class="row"><span class="lab">Ambient-recall hook · supervisor</span><span class="track"><span class="lane"><span class="fill" style="width:100.000%"></span><span class="val num">~68K</span></span></span></div><div class="row"><span class="lab">Send receipts, 179 identical · supervisor</span><span class="track"><span class="lane"><span class="fill" style="width:35.294%"></span><span class="val num">~24K</span></span></span></div><div class="row decisive"><span class="lab">Repeated bodies: wake + hook + teammate · supervisor</span><span class="track"><span class="lane"><span class="fill" style="width:30.882%"></span><span class="val num">~21K</span></span></span></div><div class="row"><span class="lab">“Gone quiet” nudges · 6 workers</span><span class="track"><span class="lane"><span class="fill" style="width:27.941%"></span><span class="val num">~19K</span></span></span></div><div class="row"><span class="lab">Supervisor-reminder hook · supervisor</span><span class="track"><span class="lane"><span class="fill" style="width:19.118%"></span><span class="val num">~13K</span></span></span></div><div class="row"><span class="lab">Off-task broadcasts · workers</span><span class="track"><span class="lane"><span class="fill" style="width:11.765%"></span><span class="val num">~8K</span></span></span></div></div>
+  <figcaption class="src">Source: Python extractors over the model-visible transcript text (<code>transcript-scripts/</code>); tokens estimated as chars/4. Regex classifiers: treat counts as close estimates.</figcaption>
+</figure><p class="kicker">Supervisor (zen-viper-42)</p>
+<ul><li>About 534K chars (~133K tokens) of communication.</li><li>Including hook overhead (ambient recall ~68K tokens, supervisor-reminder hook ~13K tokens), about 870K chars (~218K tokens).</li><li><strong>Repeats</strong>:<ul><li>47 ids were delivered more than once: 37 three times (wake, hook body, teammate block), 7 as a queued wake plus hook plus teammate, and 3 other combinations. The repeats cost about 85K chars (~21K tokens).</li><li>All 45 wake lines claim "(body not repeated here)".</li></ul></li><li><strong>Semantic echoes</strong>:<ul><li>25 of 30 <code>task_closed</code> relays were followed within 15 minutes by the worker's own "closed" message.</li><li>All 14 awaiting_merge relays were followed by 1–3 worker merge-request messages.</li><li>Eight workers each sent a short re-send right after a 1,200-cap rejection.</li><li>young-newt-54 said why: "plain status messages don't wake an idle supervisor. I re-sent it as a formal merge request".</li></ul></li><li><strong>Send receipts</strong>: 185 sends returned about 540 chars each (~24K tokens). Of those, 179 were the same text: "enqueued… not yet confirmed delivered… check message_status". <code>message_status</code> was used once.</li><li><strong>Noise</strong>:<ul><li>worker_died bodies are about 2.9K chars of pane tail ("Hullaballooing…✻✶…").</li><li>supervisor_stalled once said "actionable-idle for <strong>0m</strong>", while the supervisor was correctly waiting for CI.</li><li>A liveness relay told a Claude supervisor to call <code>mcp__cs__task</code>, which is the Codex prefix.</li></ul></li></ul>
+<figure class="fig waffle" aria-labelledby="nudge-t">
+  <p class="fig-title" id="nudge-t">One worker got 67 of 105 “gone quiet” nudges — 23 in a single prompt while it slept on CI</p>
+  <p class="fig-sub">Director nudges to six Claude workers, one square per nudge · these never enter <code>prompt_queue</code>, so queue metrics cannot see them</p>
+  <div class="waffle-grid">
+    <svg viewBox="-2 -2 330 154" preserveAspectRatio="xMinYMin meet" role="img" aria-labelledby="nudge-svg-t">
+      <title id="nudge-svg-t">105 nudges: 67 to young-newt-54, of which 23 arrived in one prompt at 00:02:19; the rest went to the other five workers.</title>
+      <rect class="w-burst" x="0" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="22" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="44" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="66" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="88" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="110" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="132" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="154" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="176" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="198" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="220" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="242" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="264" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="286" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="308" y="0" width="18" height="18" rx="2"/><rect class="w-burst" x="0" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="22" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="44" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="66" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="88" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="110" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="132" y="22" width="18" height="18" rx="2"/><rect class="w-burst" x="154" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="176" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="198" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="220" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="242" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="264" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="286" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="308" y="22" width="18" height="18" rx="2"/><rect class="w-newt" x="0" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="22" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="44" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="66" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="88" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="110" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="132" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="154" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="176" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="198" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="220" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="242" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="264" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="286" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="308" y="44" width="18" height="18" rx="2"/><rect class="w-newt" x="0" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="22" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="44" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="66" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="88" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="110" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="132" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="154" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="176" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="198" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="220" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="242" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="264" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="286" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="308" y="66" width="18" height="18" rx="2"/><rect class="w-newt" x="0" y="88" width="18" height="18" rx="2"/><rect class="w-newt" x="22" y="88" width="18" height="18" rx="2"/><rect class="w-newt" x="44" y="88" width="18" height="18" rx="2"/><rect class="w-newt" x="66" y="88" width="18" height="18" rx="2"/><rect class="w-newt" x="88" y="88" width="18" height="18" rx="2"/><rect class="w-newt" x="110" y="88" width="18" height="18" rx="2"/><rect class="w-newt" x="132" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="154" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="176" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="198" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="220" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="242" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="264" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="286" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="308" y="88" width="18" height="18" rx="2"/><rect class="w-rest" x="0" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="22" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="44" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="66" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="88" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="110" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="132" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="154" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="176" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="198" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="220" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="242" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="264" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="286" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="308" y="110" width="18" height="18" rx="2"/><rect class="w-rest" x="0" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="22" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="44" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="66" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="88" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="110" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="132" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="154" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="176" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="198" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="220" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="242" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="264" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="286" y="132" width="18" height="18" rx="2"/><rect class="w-rest" x="308" y="132" width="18" height="18" rx="2"/>
+    </svg>
+    <ul class="wkeys">
+      <li><span class="sw sw-burst"></span><span><span class="num big2">23</span> to young-newt-54 in one prompt, 00:02:19, during <code>sleep 290</code></span></li>
+      <li><span class="sw sw-newt"></span><span><span class="num big2">67</span> to young-newt-54 in all (~19K tokens across all six workers)</span></li>
+      <li><span class="sw sw-rest"></span><span>the rest of the <span class="num">105</span> to five other workers</span></li>
+    </ul>
+  </div>
+  <figcaption class="src">Source: worker transcripts (<code>transcript-scripts/workers.py</code>). Per-worker counts for the other five are not in the source and are not drawn.</figcaption>
+</figure><p class="kicker">Workers (6 Claude transcripts)</p>
+<ul><li>Inbound communication is 2.7–8.3% of each worker's context.</li><li>About 47 off-task broadcasts reached them (~8K tokens), and 105 "gone quiet" nudges (~19K tokens).</li><li>young-newt-54 alone got 67 nudges, 23 in one prompt at 00:02:19, during <code>sleep 290</code>.</li><li>subtle-gopher-35 worked continuously from 11:19 to 11:42. Its brief, its status check and 5 nudges all arrived together at 11:42:20, after it had already finished.</li><li>Return-contract compliance: 52% of all worker→supervisor messages, 71% of delivery messages.</li><li>Weakest: fierce-cheetah-73, 8 of 22.</li></ul><p class="kicker">Clarity</p>
+<ul><li>Good:<ul><li>Supervisor briefs are specific and bounded (4185886).</li><li>Contract-form status messages can be checked in one read (4185226).</li></ul></li><li>Bad:<ul><li>The merge-request envelope always looks failed ("Evidence not supplied", "Door: not declared").</li><li>Broadcast policy flip-flopped (merge, then don't merge), and the stale versions were replayed to new workers.</li></ul></li></ul>
+  </div>
+  <aside class="rail"><div class="note"><p class="eyebrow">Estimates</p><p>Token figures here are chars ÷ 4 over model-visible text, drawn dashed. Database counts elsewhere are exact.</p></div></aside>
+</section>
+
+<section id="s4" aria-labelledby="s4-h">
+  <div class="body">
+    <h2 id="s4-h"><span class="secnum">4</span> Supervisor observations: verdicts</h2>
+    <div class="scroll" tabindex="0" role="region" aria-label="17 supervisor leads, each checked against data or code"><table class="ledger"><caption>17 supervisor leads, each checked against data or code</caption><thead><tr><th scope="col" class=n>#</th><th scope="col">Lead</th><th scope="col">Verdict</th><th scope="col">Evidence</th></tr></thead><tbody><tr><th scope="row">1</th><td>Wake gate defers to busy workers with no feedback, while <code>worker_stalled</code> fires</td><td><strong>Confirmed</strong></td><td>4185905: deferred to the inbox at +0.05 s (<code>wake_gate_declines=1</code>, "pane has not been silent long enough"). <code>worker_stalled</code> 16496 came at 11:34, while the worker was running tool calls continuously. 102 of 183 supervisor→worker messages were gated. Filed as <a class="tid" href="#t-cas-d5ab">cas-d5ab</a>.</td></tr><tr><th scope="row">2</th><td>Stalled, quiet and idle alarms are noisy</td><td><strong>Confirmed for stalled and quiet. Refuted for idle repeats; the real idle bug is missed alarms.</strong></td><td>6 of 8 stall escalations fired during in-flight calls, and there were 105 worker nudges (<a class="tid" href="#t-cas-7156">cas-7156</a>). <code>worker_idle</code> fired exactly once per worker (11 of 11), because its key never changes (<code>lifecycle.rs:121</code>; retention exempt at <code>supervisor_queue_store.rs:563-567</code>). Later idle episodes are never reported (<a class="tid" href="#t-cas-0028">cas-0028</a>).</td></tr><tr><th scope="row">3</th><td>Every relay arrives twice</td><td><strong>Confirmed, and worse: three times</strong></td><td>37 ids came wake + hook + teammate (<a class="tid" href="#t-cas-1f0c">cas-1f0c</a>). <code>factory_inbox.rs:180-214, 327-368</code>.</td></tr><tr><th scope="row">4</th><td>Workers repeat their reports</td><td><strong>Confirmed in substance; no byte-identical repeats</strong></td><td>0 exact duplicate groups in <code>prompt_queue</code>. Semantic echoes after close and merge relays, the 4185932/4185934 pair, and re-sends after cap rejections. Cause: plain status cannot wake the supervisor (<a class="tid" href="#t-cas-48e5">cas-48e5</a>).</td></tr><tr><th scope="row">5</th><td>Merge-request envelope says "Evidence not supplied" and "Door: not declared"</td><td><strong>Confirmed</strong></td><td><code>review_body.rs:58-83, 140-150</code>. The worker's body never fills these fields (<code>message.rs:1858-1888</code>). Filed as <a class="tid" href="#t-cas-8b0e">cas-8b0e</a>.</td></tr><tr><th scope="row">6</th><td>MERGE REQUIRED nudge prescribes a per-task PR and blocks chat</td><td><strong>Confirmed</strong></td><td><code>prompts.rs:1105-1110, 1276-1293, 1313</code>; <code>pty.rs:17, 35, 292</code>. Filed as <a class="tid" href="#t-cas-03ff">cas-03ff</a>.</td></tr><tr><th scope="row">7</th><td>in_reply_to works only for messages from the target</td><td><strong>Confirmed</strong></td><td><code>message.rs:1516-1565</code>. Error seen on 4185839. Filed as <a class="tid" href="#t-cas-009c">cas-009c</a>.</td></tr><tr><th scope="row">8</th><td>Body limits produce the error only after the message is written</td><td><strong>Confirmed</strong></td><td>Caps are in <code>settings.rs:894-904</code> and checked at <code>message.rs:719</code>, but the served schema doesn't state them. 9 worker rejections and 2 supervisor rejections. Filed as <a class="tid" href="#t-cas-3349">cas-3349</a>.</td></tr><tr><th scope="row">9</th><td>shutdown_workers accepts but does nothing</td><td><strong>Plausible; confirmed by code, not reproduced</strong></td><td>Returns success before the daemon acts (<code>factory_ops.rs:3362-3379</code>). Daemon failures go only to the TUI and log (<code>queue_and_events.rs:8742-8756</code>). Note added to <a class="tid" href="#t-cas-00d5">cas-00d5</a>.</td></tr><tr><th scope="row">10</th><td>12 worker_died plus 1 workers_died_together, each needing an ack</td><td><strong>Confirmed</strong></td><td>12 + 1 rows in <code>supervisor_queue</code>; ack burst at 11:12:57–11:13:02. Deliberate per GH #197 (<code>epic_workers.rs:1520-1530</code>). Filed as <a class="tid" href="#t-cas-b06f">cas-b06f</a>.</td></tr><tr><th scope="row">11</th><td>September UNDELIVERED relays shown forever</td><td><strong>Confirmed</strong></td><td><code>prompt_queue_store.rs:6373-6455</code>: no age-out, and retention deletes only processed rows. Filed as <a class="tid" href="#t-cas-5871">cas-5871</a>.</td></tr><tr><th scope="row">12</th><td>GH #1186 cross-machine abandonment</td><td><strong>Partly fixed; live behaviour unverified</strong></td><td>Unknown names now fail fast (<code>message.rs:1499-1506</code>). The cloud path has an honest outbox and abandon notice (<code>outbox.rs:5-219</code>). The 900 s local abandon remains (<code>prompt_queue_store.rs:43</code>). <strong><code>peer_message_outbox</code> has 0 rows</strong>, so no live cross-machine send is recorded on this machine. Filed as <a class="tid" href="#t-cas-5c2c">cas-5c2c</a>.</td></tr><tr><th scope="row">13</th><td>No cross-supervisor conflict notice or handoff</td><td><strong>Confirmed by code</strong></td><td>SessionEnd has no epic handoff (<code>handlers_session.rs:1371-1380</code>). The overlap module only reports. <code>notify_owner</code> ignores liveness and remote owners (<code>rolling_integration.rs:1326-1461</code>). Filed as <a class="tid" href="#t-cas-5c2c">cas-5c2c</a>.</td></tr><tr><th scope="row">14</th><td><a class="tid" href="#t-cas-8063">cas-8063</a>: peer mail during a restart targets the old id</td><td><strong>Confirmed by code</strong></td><td>Messages are addressed by agent id (<code>peer_mailbox.rs:511, 601</code>), and claims are made only for current ids (<code>:394-398</code>). Note added to <a class="tid" href="#t-cas-8063">cas-8063</a>.</td></tr><tr><th scope="row">15</th><td>Commander status needs target=operator plus kind; terminal text isn't mirrored</td><td><strong>Partly refuted</strong></td><td>The mirror exists and produced 86 status and 19 answer rows this session (<code>commander_mirror.rs</code>). But it runs only after verified operator activity and only for Active supervisors, and its rows are then swept as abandoned (<a class="tid" href="#t-cas-d88c">cas-d88c</a>).</td></tr><tr class="decisive"><th scope="row">16</th><td><a class="tid" href="#t-cas-5c89">cas-5c89</a>: the cloud shows operator turns but not supervisor replies</td><td><strong>Confirmed, with root cause</strong></td><td>0 cloud-outbox rows ever, 0 of 202 relay receipts. The cloud row needs an active feed binding (<code>operator_cloud.rs:225-251</code>). The drain has no production caller (<code>operator_delivery.rs:420</code>). Note added to <a class="tid" href="#t-cas-5c89">cas-5c89</a>, plus <a class="tid" href="#t-cas-d88c">cas-d88c</a>.</td></tr><tr><th scope="row">17</th><td>Event reminders need cross_session, and the filter fields aren't discoverable</td><td><strong>Confirmed</strong></td><td>Error text at <code>factory_remind.rs:37-41, 64-70</code>. The served schema omits both, and its TTL text is wrong for external reminders (<code>tool_schema.rs:105-113</code>). Filed as <a class="tid" href="#t-cas-3349">cas-3349</a>.</td></tr></tbody></table></div>
+<p>Also found in my own spawn (not one of the supervisor's leads):</p>
+<ul><li>This worker's spawn message 4185939 arrived twice: once in <code>[incoming messages]</code> and again as a teammate turn.</li><li>Task start was refused until 11 stale broadcasts had been read.</li><li>The supervisor's brief 4185941 arrived only after task start.</li></ul>
+  </div>
+  <aside class="rail"><div class="note"><p class="eyebrow">Ruled out</p><p>Lead 2’s repeated-idle claim is refuted (idle fires once per worker; the real bug is missed alarms). Lead 4 found 0 byte-identical repeats. Lead 15 is partly refuted: the mirror exists.</p></div></aside>
+</section>
+
+<section id="s5" aria-labelledby="s5-h">
+  <div class="body">
+    <h2 id="s5-h"><span class="secnum">5</span> Good / Bad / Needs improvement</h2>
+    <h3 id="s5-good">Good</h3><ul><li><strong>The staged delivery model is explicit.</strong> There are 10 stages and 16 pending reasons, each with legal transitions (<code>prompt_queue_store.rs:845-1077</code>). Rows record wake attempts with readable reasons, so every gated row says <em>why</em>.</li><li><strong>Transport is fast.</strong> 0.1–0.2 s from enqueue to transport on every live channel (§2.1).</li><li><strong>Unknown targets fail fast with a named error.</strong> This fixes the silent half of GH #1186 (<code>message.rs:1499-1506</code>). The cloud peer outbox has honest outcomes and abandon notices (<code>outbox.rs:124-211</code>).</li><li><strong>Typed envelopes decide what may wake an idle supervisor.</strong> Blocker, merge, verification and lifecycle classes, from server-stamped senders only (<code>queue_and_events.rs:4659-4774, 4880-4893</code>). This blocks spoofed wakes.</li><li><strong>Lifecycle relays are durable, keyed and replayable</strong> (<code>supervisor_queue_store.rs:100-103</code>). The supervisor's own transitions are not echoed back to it (<code>supervisor_push.rs:850-865</code>).</li><li><strong>Reminders work.</strong> Time reminders were reliable, and the external <code>branch_contained_in</code> reminder fired when the PR landed (#2904).</li><li><strong>Messages are size-bounded.</strong> Caps exist, supervisor overflow spills to artifacts (<code>message.rs:757-781</code>), and a burst limit applies to peer-worker traffic.</li><li><strong>The worker return contract</strong> produces messages that can be checked in one read, when it is followed.</li><li><strong>Peer-worker traffic is visible to the supervisor</strong> through the copy lane.</li></ul><h3 id="s5-bad">Bad (defects, each with a filed task)</h3><div class="scroll" tabindex="0" role="region" aria-label="Defects, each with a filed task"><table class="ledger"><caption>Defects, each with a filed task</caption><thead><tr><th scope="col">Problem</th><th scope="col">Evidence</th><th scope="col">Task</th></tr></thead><tbody><tr class="decisive"><th scope="row">Operator replies are swept as abandoned at about 930 s</th><td>100 of 105 this session. "operator" is missing from <code>prompt_poison_sweep_targets</code> (<code>queue_and_events.rs:271-286</code>).</td><td><a class="tid" href="#t-cas-d88c">cas-d88c</a></td></tr><tr><th scope="row">The operator outbox never relays; the cloud outbox is empty</th><td>0 of 202 relay receipts; 0 cloud-outbox rows</td><td><a class="tid" href="#t-cas-5c89">cas-5c89</a> (note)</td></tr><tr><th scope="row">False seen receipts and false abandonment</th><td>128 this session; 1,376 of 1,990 this month</td><td><a class="tid" href="#t-cas-f7b0">cas-f7b0</a></td></tr><tr><th scope="row">Triple reading of every pointer-woken message</th><td>37 ids, about 21K tokens</td><td><a class="tid" href="#t-cas-1f0c">cas-1f0c</a></td></tr><tr><th scope="row">Every merge park also sends a close_rejected relay</th><td>14/14; 311/312 since October</td><td><a class="tid" href="#t-cas-3a82">cas-3a82</a></td></tr><tr><th scope="row">New workers get the stale broadcast backlog, gating task start, and the sender gets its own broadcasts</th><td>12 broadcasts × 18 recipients, including the sender</td><td><a class="tid" href="#t-cas-6853">cas-6853</a></td></tr><tr><th scope="row">"Gone quiet" nudge storms and false stall escalations</th><td>105 nudges; 67 to one worker; 6 of 8 escalations false</td><td><a class="tid" href="#t-cas-7156">cas-7156</a> (+ <a class="tid" href="#t-cas-6eec">cas-6eec</a> note)</td></tr><tr><th scope="row">Idle and stalled alarms fire only once per worker per session</th><td>11 idle relays for 11 workers</td><td><a class="tid" href="#t-cas-0028">cas-0028</a></td></tr><tr><th scope="row">A requested shutdown sends a Critical relay storm</th><td>12 + 1 relays at ~2.9K each</td><td><a class="tid" href="#t-cas-b06f">cas-b06f</a></td></tr><tr><th scope="row">Worker SendMessage bypasses every coordination rule</th><td><code>pre_tool.rs:650-655, 7264-7400</code></td><td><a class="tid" href="#t-cas-dd09">cas-dd09</a></td></tr><tr><th scope="row">Reminders cannot PTY-wake a pane</th><td>13 of 13 marked <code>wake_not_applicable</code></td><td><a class="tid" href="#t-cas-835e">cas-835e</a></td></tr><tr><th scope="row">Dead-letter supervisor_queue rows and a banner that never clears</th><td>2,514 reminder_fired rows; September banner rows</td><td><a class="tid" href="#t-cas-5871">cas-5871</a></td></tr><tr><th scope="row">Two sessions on one clone kill each other's Violet watches</th><td><code>violet_activity.rs:384-399</code></td><td><a class="tid" href="#t-cas-639c">cas-639c</a></td></tr></tbody></table></div><h3 id="s5-need">Needs improvement (design gaps)</h3><div class="scroll" tabindex="0" role="region" aria-label="Design gaps"><table class="ledger"><caption>Design gaps</caption><thead><tr><th scope="col">Gap</th><th scope="col">Evidence</th><th scope="col">Task</th></tr></thead><tbody><tr><th scope="row">The sender gets no outcome when the wake gate defers, and the stall detector ignores the gate's evidence that the recipient is busy</th><td>4185905 / 16496</td><td><a class="tid" href="#t-cas-d5ab">cas-d5ab</a></td></tr><tr><th scope="row">The merge-request envelope reads as a failure</th><td>14 of 14 envelopes</td><td><a class="tid" href="#t-cas-8b0e">cas-8b0e</a></td></tr><tr><th scope="row">The MERGE REQUIRED nudge ignores integration-branch bundling and blocks chat</th><td><code>prompts.rs:1276-1293</code></td><td><a class="tid" href="#t-cas-03ff">cas-03ff</a></td></tr><tr><th scope="row">in_reply_to threading is one-directional</th><td>4185839</td><td><a class="tid" href="#t-cas-009c">cas-009c</a></td></tr><tr><th scope="row">The served schema hides the caps and external-reminder rules; the reminder validator and parser disagree</th><td><code>tool_schema.rs:105-113</code></td><td><a class="tid" href="#t-cas-3349">cas-3349</a></td></tr><tr><th scope="row">No supervisor-to-supervisor handoff or conflict notice; integration notices go to dead owners; over-cap peer bodies point at a local path</th><td><code>handlers_session.rs:1371</code>; <code>rolling_integration.rs:1326-1461</code></td><td><a class="tid" href="#t-cas-5c2c">cas-5c2c</a> (+ <a class="tid" href="#t-cas-8063">cas-8063</a> note)</td></tr><tr><th scope="row">Workers echo lifecycle relays, and plain status has no typed wake</th><td>25 of 30 close echoes</td><td><a class="tid" href="#t-cas-48e5">cas-48e5</a></td></tr><tr><th scope="row">Send receipts are long and identical: 179 × about 540 chars</th><td>§3</td><td>in <a class="tid" href="#t-cas-d5ab">cas-d5ab</a></td></tr></tbody></table></div>
+  </div>
+  
+</section>
+
+<section id="s8" aria-labelledby="s8-h">
+  <div class="body">
+    <h2 id="s8-h"><span class="secnum">8</span> What would overturn this — and what was not measured</h2>
+    
+<p>Each finding has a check that would have contradicted it. None did:</p>
+<ul>
+<li><strong>False abandonment</strong> would fail if the 128 worker rows had no delivery record. Every one of them, plus 101 rows still “gated”, has an <code>events.supervisor_injected … (ok)</code> entry (§2.2).</li>
+<li><strong>The operator lane</strong> would be working if any of the 202 <code>operator_delivery_outbox</code> rows had a relay receipt or <code>operator_cloud_outbox</code> held any row. It has 0 receipts and 0 rows (§2.4).</li>
+<li><strong>The close_rejected twin</strong> would be coincidence if the pairs did not share an <code>occurrence_id</code>. All 14 do (§2.5).</li>
+</ul>
+<h3 id="s8-limits">Limits of this review</h3><ul><li>Cross-machine peer messaging could not be measured live: the outbox has 0 rows on this machine. The far machine's database was not read.</li><li>shutdown_workers (lead 9) is confirmed from code only.</li><li>The SendMessage bypass is a code finding, not observed in data.</li><li>Codex and Grok worker transcripts were not analysed: there is no Claude transcript directory for steady-swan-22, warm-fox-56 or golden-gazelle-73.</li><li>Transcript classifiers are regex-based. Treat their counts as close estimates; the DB counts are exact.</li></ul>
+  </div>
+  
+</section>
+
+<section id="s6" aria-labelledby="s6-h">
+  <div class="body">
+    <h2 id="s6-h"><span class="secnum">6</span> Suggestions, ranked by impact and effort</h2>
+    <p>Impact: H, M or L, judged by how many agents or decisions it touches and its token cost. Effort: S (≤1 day, one module), M (a few modules), L (cross-crate or cloud).</p><div class="scroll" tabindex="0" role="region" aria-label="Impact by effort matrix"><table class="matrix"><caption>18 ranked fixes placed by impact (rows) and effort (columns). Chips link to the filed task. A compound rating is printed on its chip and placed by its first, cheapest part.</caption><thead><tr><td class="corner"></td><th scope="col">Small effort · ≤1 day, one module</th><th scope="col">Medium effort · a few modules</th><th scope="col">Large effort · cross-crate or cloud</th></tr></thead><tbody><tr><th scope="row">High impact</th><td class="first" data-effort="High impact · Small effort · ≤1 day, one module"><p class="cell-tag">Do first</p><p class="chip"><span class="rank num">1</span><span class="ct">Operator lane: sweep exemption, owner, cloud binding and drain<span class="exact">impact H · effort S (sweep) + M (binding)</span><span class="tids"><a class="tid" href="#t-cas-d88c">cas-d88c</a> <a class="tid" href="#t-cas-5c89">cas-5c89</a></span></span></p><p class="chip"><span class="rank num">3</span><span class="ct">One body per message on Teams<span class="exact">impact H · effort S–M</span><span class="tids"><a class="tid" href="#t-cas-1f0c">cas-1f0c</a></span></span></p><p class="chip"><span class="rank num">5</span><span class="ct">Broadcast cutoff, supersede keys, no echo, no start gate<span class="tids"><a class="tid" href="#t-cas-6853">cas-6853</a></span></span></p></td><td class="" data-effort="High impact · Medium effort · a few modules"><p class="chip"><span class="rank num">2</span><span class="ct">Honest receipts<span class="tids"><a class="tid" href="#t-cas-f7b0">cas-f7b0</a></span></span></p><p class="chip"><span class="rank num">4</span><span class="ct">Debounce and coalesce nudges; count tool calls as activity<span class="tids"><a class="tid" href="#t-cas-7156">cas-7156</a> <a class="tid" href="#t-cas-d5ab">cas-d5ab</a></span></span></p></td><td class="" data-effort="High impact · Large effort · cross-crate or cloud"><p class="chip"><span class="rank num">8</span><span class="ct">Supervisor ↔ supervisor handoff, routing, conflict notices<span class="tids"><a class="tid" href="#t-cas-5c2c">cas-5c2c</a> <a class="tid" href="#t-cas-8063">cas-8063</a></span></span></p></td></tr><tr><th scope="row">Medium impact</th><td class="" data-effort="Medium impact · Small effort · ≤1 day, one module"><p class="chip"><span class="rank num">6</span><span class="ct">Drop the close_rejected twin on park<span class="tids"><a class="tid" href="#t-cas-3a82">cas-3a82</a></span></span></p><p class="chip"><span class="rank num">7</span><span class="ct">Requested shutdown sends one receipt<span class="tids"><a class="tid" href="#t-cas-b06f">cas-b06f</a> <a class="tid" href="#t-cas-00d5">cas-00d5</a></span></span></p><p class="chip"><span class="rank num">9</span><span class="ct">Typed status/ready wake; one message per event<span class="exact">impact M · effort S (docs) + M (class)</span><span class="tids"><a class="tid" href="#t-cas-48e5">cas-48e5</a></span></span></p><p class="chip"><span class="rank num">10</span><span class="ct">Merge-request envelope from proof:/ci: lines<span class="tids"><a class="tid" href="#t-cas-8b0e">cas-8b0e</a></span></span></p><p class="chip"><span class="rank num">11</span><span class="ct">Integration-aware MERGE REQUIRED<span class="tids"><a class="tid" href="#t-cas-03ff">cas-03ff</a></span></span></p><p class="chip"><span class="rank num">12</span><span class="ct">Episode-keyed idle and stalled relays<span class="tids"><a class="tid" href="#t-cas-0028">cas-0028</a></span></span></p><p class="chip"><span class="rank num">13</span><span class="ct">Schema states caps and reminder filters<span class="tids"><a class="tid" href="#t-cas-3349">cas-3349</a></span></span></p><p class="chip"><span class="rank num">15</span><span class="ct">Route SendMessage through message_send<span class="exact">impact M (latent) · effort S</span><span class="tids"><a class="tid" href="#t-cas-dd09">cas-dd09</a></span></span></p></td><td class="none" data-effort="Medium impact · Medium effort · a few modules"><p class="empty">—</p></td><td class="none" data-effort="Medium impact · Large effort · cross-crate or cloud"><p class="empty">—</p></td></tr><tr><th scope="row">Low impact</th><td class="" data-effort="Low impact · Small effort · ≤1 day, one module"><p class="chip"><span class="rank num">14</span><span class="ct">Two-way in_reply_to threading<span class="exact">impact L–M · effort S</span><span class="tids"><a class="tid" href="#t-cas-009c">cas-009c</a></span></span></p><p class="chip"><span class="rank num">16</span><span class="ct">Daemon-stamp reminders so they wake PTY panes<span class="exact">impact L (Claude) / H (Codex supervisor) · effort S</span><span class="tids"><a class="tid" href="#t-cas-835e">cas-835e</a></span></span></p><p class="chip"><span class="rank num">17</span><span class="ct">Dead-letter cleanup and banner age-out<span class="tids"><a class="tid" href="#t-cas-5871">cas-5871</a></span></span></p><p class="chip"><span class="rank num">18</span><span class="ct">Per-session Violet watches<span class="tids"><a class="tid" href="#t-cas-639c">cas-639c</a></span></span></p></td><td class="none" data-effort="Low impact · Medium effort · a few modules"><p class="empty">—</p></td><td class="none" data-effort="Low impact · Large effort · cross-crate or cloud"><p class="empty">—</p></td></tr></tbody></table></div><details class="data" open><summary>Ranked list (matrix twin, verbatim)</summary><div class="scroll" tabindex="0" role="region" aria-label="Suggestions ranked by impact and effort"><table class="ledger"><caption>Suggestions ranked by impact and effort</caption><thead><tr><th scope="col" class=n>Rank</th><th scope="col">Suggestion</th><th scope="col">Impact</th><th scope="col">Effort</th><th scope="col">Task</th></tr></thead><tbody><tr><th scope="row">1</th><td>Give the operator lane its own sweep exemption and owner. Fix the cloud binding and drain so supervisor replies reach Commander and Cloud.</td><td>H</td><td>S (sweep) + M (binding)</td><td><a class="tid" href="#t-cas-d88c">cas-d88c</a>, <a class="tid" href="#t-cas-5c89">cas-5c89</a></td></tr><tr><th scope="row">2</th><td>Make receipts honest: no seen receipt at claim time, no abandonment of read rows, a separate <code>recipient_ended_unread</code> reason. Everything else is measured from these fields.</td><td>H</td><td>M</td><td><a class="tid" href="#t-cas-f7b0">cas-f7b0</a></td></tr><tr><th scope="row">3</th><td>One body per message on Teams recipients, with truthful wake text</td><td>H</td><td>S–M</td><td><a class="tid" href="#t-cas-1f0c">cas-1f0c</a></td></tr><tr><th scope="row">4</th><td>Debounce and coalesce director nudges; count in-flight tool calls and gate declines as activity</td><td>H</td><td>M</td><td><a class="tid" href="#t-cas-7156">cas-7156</a>, <a class="tid" href="#t-cas-d5ab">cas-d5ab</a></td></tr><tr><th scope="row">5</th><td>Broadcasts: recipient registration cutoff, supersede keys, never echo to the sender, never gate task start</td><td>H</td><td>S</td><td><a class="tid" href="#t-cas-6853">cas-6853</a></td></tr><tr><th scope="row">6</th><td>Drop the close_rejected twin on park</td><td>M</td><td>S</td><td><a class="tid" href="#t-cas-3a82">cas-3a82</a></td></tr><tr><th scope="row">7</th><td>Requested shutdown sends one receipt; trim pane tails; fold into workers_died_together</td><td>M</td><td>S</td><td><a class="tid" href="#t-cas-b06f">cas-b06f</a>, <a class="tid" href="#t-cas-00d5">cas-00d5</a></td></tr><tr><th scope="row">8</th><td>Supervisor ↔ supervisor: handoff at SessionEnd, live-owner routing, conflict notices, a live two-machine receipt in the release gate</td><td>H</td><td>L</td><td><a class="tid" href="#t-cas-5c2c">cas-5c2c</a>, <a class="tid" href="#t-cas-8063">cas-8063</a></td></tr><tr><th scope="row">9</th><td>A typed <code>status/ready</code> wake class plus a one-message-per-event worker rule, to stop the echo loop</td><td>M</td><td>S (docs) + M (class)</td><td><a class="tid" href="#t-cas-48e5">cas-48e5</a></td></tr><tr><th scope="row">10</th><td>Merge-request envelope fed from the contract's <code>proof:</code> and <code>ci:</code> lines</td><td>M</td><td>S</td><td><a class="tid" href="#t-cas-8b0e">cas-8b0e</a></td></tr><tr><th scope="row">11</th><td>Integration-aware MERGE REQUIRED; quiet supervisor_stalled while a matching reminder is pending</td><td>M</td><td>S</td><td><a class="tid" href="#t-cas-03ff">cas-03ff</a></td></tr><tr><th scope="row">12</th><td>Episode-keyed idle and stalled relays</td><td>M</td><td>S</td><td><a class="tid" href="#t-cas-0028">cas-0028</a></td></tr><tr><th scope="row">13</th><td>Schema states the caps and reminder filter shapes; validator matches parser</td><td>M</td><td>S</td><td><a class="tid" href="#t-cas-3349">cas-3349</a></td></tr><tr><th scope="row">14</th><td>Two-way in_reply_to threading</td><td>L–M</td><td>S</td><td><a class="tid" href="#t-cas-009c">cas-009c</a></td></tr><tr><th scope="row">15</th><td>Route SendMessage through <code>message_send</code></td><td>M (latent)</td><td>S</td><td><a class="tid" href="#t-cas-dd09">cas-dd09</a></td></tr><tr><th scope="row">16</th><td>Daemon-stamp reminders so they can wake PTY panes</td><td>L (Claude) / H (Codex supervisor)</td><td>S</td><td><a class="tid" href="#t-cas-835e">cas-835e</a></td></tr><tr><th scope="row">17</th><td>Dead-letter cleanup and banner age-out</td><td>L</td><td>S</td><td><a class="tid" href="#t-cas-5871">cas-5871</a></td></tr><tr><th scope="row">18</th><td>Per-session Violet watches and owner-routed claims</td><td>L</td><td>S</td><td><a class="tid" href="#t-cas-639c">cas-639c</a></td></tr></tbody></table></div></details><p><strong>How to make it great.</strong> Make three properties hold everywhere:</p>
+<ol><li><strong>One truth per message.</strong> Make a row's stage the single source of what happened. Each reader then sees one body, and dashboards, banners and notices all agree with what the agent actually read.</li><li><strong>Every alarm is an episode.</strong> Each alert is keyed to a real episode, debounced, aware of activity, and coalesced when the reader is busy. A supervisor-initiated action produces one receipt, not alarms.</li><li><strong>Every party has a live address.</strong> Operator, peer supervisor and dead owner each have a delivery lane, a liveness check and a named failure. Identity follows the name across restarts.</li></ol>
+<p>Measure the result with the queries in §2 as release SLOs:</p>
+<ul><li>false-abandon rate = 0;</li><li>operator relay receipts = 100%;</li><li>duplicate body reads = 0;</li><li>nudges per worker-hour ≤ 1.</li></ul>
+  </div>
+  
+</section>
+
+<section id="s7" aria-labelledby="s7-h">
+  <div class="body">
+    <h2 id="s7-h"><span class="secnum">7</span> Filed tasks</h2>
+    <p class="kicker">New tasks</p>
+<ul><li><strong>P1</strong><ul><li><span class="tanchor" id="t-cas-d88c">cas-d88c</span>: operator rows swept as abandoned</li><li><span class="tanchor" id="t-cas-f7b0">cas-f7b0</span>: receipt honesty</li><li><span class="tanchor" id="t-cas-6853">cas-6853</span>: broadcast backlog and echo</li><li><span class="tanchor" id="t-cas-1f0c">cas-1f0c</span>: triple read</li><li><span class="tanchor" id="t-cas-7156">cas-7156</span>: nudge storms and false stalls</li><li><span class="tanchor" id="t-cas-b06f">cas-b06f</span>: shutdown relay storm</li><li><span class="tanchor" id="t-cas-5c2c">cas-5c2c</span>: supervisor-to-supervisor handoff and conflicts</li></ul></li><li><strong>P2</strong><ul><li><span class="tanchor" id="t-cas-3a82">cas-3a82</span>: close_rejected twin</li><li><span class="tanchor" id="t-cas-0028">cas-0028</span>: once-per-session idle and stalled alarms</li><li><span class="tanchor" id="t-cas-8b0e">cas-8b0e</span>: merge-request envelope</li><li><span class="tanchor" id="t-cas-03ff">cas-03ff</span>: MERGE REQUIRED nudge</li><li><span class="tanchor" id="t-cas-009c">cas-009c</span>: in_reply_to threading</li><li><span class="tanchor" id="t-cas-3349">cas-3349</span>: schema limits and reminder rules</li><li><span class="tanchor" id="t-cas-d5ab">cas-d5ab</span>: gate feedback and stall evidence</li><li><span class="tanchor" id="t-cas-dd09">cas-dd09</span>: SendMessage bypass</li><li><span class="tanchor" id="t-cas-48e5">cas-48e5</span>: skills, one message per event, typed status</li></ul></li><li><strong>P3</strong><ul><li><span class="tanchor" id="t-cas-5871">cas-5871</span>: dead letters and banner</li><li><span class="tanchor" id="t-cas-639c">cas-639c</span>: Violet watches</li><li><span class="tanchor" id="t-cas-835e">cas-835e</span>: reminder wake stamp</li></ul></li></ul>
+<p><strong>Evidence notes on existing tasks</strong>: <span class="tanchor" id="t-cas-5c89">cas-5c89</span>, <span class="tanchor" id="t-cas-00d5">cas-00d5</span>, <span class="tanchor" id="t-cas-8063">cas-8063</span>, <span class="tanchor" id="t-cas-6eec">cas-6eec</span>.</p>
+  </div>
+  
+</section>
+
+<section id="s1" aria-labelledby="s1-h">
+  <div class="body">
+    <h2 id="s1-h"><span class="secnum">1</span> Appendix: architecture as built</h2>
+    <details class="data" open><summary>Channel map with key code locations</summary><div class="scroll" tabindex="0" role="region" aria-label="Channels, paths and key code"><table class="ledger"><caption>Channels, paths and key code</caption><thead><tr><th scope="col">Channel</th><th scope="col">Path</th><th scope="col">Key code</th></tr></thead><tbody><tr><th scope="row">supervisor ↔ worker</th><td><code>coordination action=message</code> → <code>message_send</code> validates summary, the 1200-char cap (2500 for escalations) and the target → <code>prompt_queue</code> row → daemon delivery loop → Claude Teams inbox file plus an optional <code>CAS wake</code> line, or full body typed into the PTY (Codex/Grok/OpenCode) → turn-start or tool-boundary hook surfaces it as <code>[incoming messages]</code></td><td><code>agent_search_system/message.rs:662-2552</code>; <code>traffic_limits.rs:53-71</code>; <code>daemon/runtime/delivery.rs:163-176, 439-449</code>; <code>hooks/.../factory_inbox.rs:180-401</code></td></tr><tr><th scope="row">worker ↔ worker</th><td>Same handler. The peer must be in the same session. Writes two rows: the peer's, plus a "Peer worker message copy" for the supervisor. Limited to 5 per 60 s. Native <code>SendMessage</code> bypasses all of this.</td><td><code>message.rs:923-981, 2208-2237</code>; <code>prompt_queue_store.rs:3710-3772</code>; <code>pre_tool.rs:650-655, 7264-7400</code></td></tr><tr><th scope="row">Director / lifecycle → supervisor</th><td><code>supervisor_queue</code> row (INSERT OR IGNORE on <code>transition_key</code>) → <code>prompt_queue</code> row with source <code>lifecycle:</code> (inbox only) or <code>lifecycle-wake:</code> (may wake). Only close_rejected, awaiting_merge, blocked, attention and verification classes wake the supervisor.</td><td><code>supervisor_push.rs:38-156, 822-865</code>; <code>supervisor_queue_store.rs:100-103, 304-330</code>; <code>queue_and_events.rs:4659-4774</code></td></tr><tr><th scope="row">Director → worker nudges</th><td>Direct director <code>Prompt</code>, <code>durable_retry=false</code>. Never enters <code>prompt_queue</code>, so queue metrics can't see it.</td><td><code>director/prompts.rs:1816-1836</code>; <code>director/events.rs:1925-1960</code></td></tr><tr><th scope="row">Supervisor ↔ supervisor, same machine</th><td>A name match against the local agent store stays local. The match ignores agent status.</td><td><code>peer_message.rs:115-128</code>; <code>message.rs:1456-1506</code></td></tr><tr><th scope="row">Supervisor ↔ supervisor, cross-machine (3.51)</th><td><code>peer_message_send</code> → <code>peer_message_outbox</code> (m268): one synchronous try, then 5/10/20/30 s backoff and a 15-min TTL, then an abandon notice to the sender. Inbound poller runs every 15 s. Messages are addressed by <strong>agent id</strong>.</td><td><code>cloud/peer_mailbox.rs:284-317, 377-460, 508-606</code>; <code>peer_mailbox/outbox.rs:5-219</code>; <code>peer_mailbox/runtime.rs:105</code></td></tr><tr><th scope="row">Reminders</th><td><code>factory_remind</code> → <code>reminders</code> → daemon tick every 2 s (external probes every 60 s) → <code>prompt_queue</code> row with no origin stamp, plus a <code>reminder_fired</code> row in <code>supervisor_queue</code> that nothing consumes</td><td><code>factory_remind.rs:28-446</code>; <code>queue_and_events.rs:8941-9559</code>; <code>ci_watch.rs:24-27, 314-418</code></td></tr><tr><th scope="row">Operator / Commander</th><td>Supervisor-only <code>target=operator|commander:&lt;label&gt;</code> with a <code>kind</code>. Writes <code>record_operator_turn</code> → <code>operator_delivery_outbox</code> (always <code>unenrolled</code>), plus <code>operator_cloud_outbox</code> only while a feed binding is active. The Commander mirror copies final assistant text every 5 s.</td><td><code>message.rs:1146-1438</code>; <code>prompt_queue_store/operator_delivery.rs:3-14, 184-288, 420</code>; <code>operator_cloud.rs:225-251</code>; <code>commander_mirror.rs:14, 90-362</code></td></tr><tr><th scope="row">Violet / Slack</th><td>The daemon claims Slack activity from Cloud every 15 s and sends a typed <code>SlackActivity</code> wake to the supervisor (at most one per channel per 60 s). Only Violet may post.</td><td><code>violet_activity.rs:46-57, 384-399, 551-704, 1239-1330, 1596-1611</code>; <code>slack_transport.rs:8-80</code></td></tr><tr><th scope="row">Transport guards</th><td>Wake gate: 45 s of silence for an active recipient, 2 s for an idle one; parked after 3 declines; lifecycle rows re-nudged every 60 s, at most 20 times. Delivery watchdog: 600/1800 s, capped at 720 s. The 900 s retry age is <code>PROMPT_RETRY_MAX_AGE_SECS</code>.</td><td><code>queue_and_events.rs:1125-1192, 1366-1428, 2386-2396</code>; <code>prompt_queue_store.rs:43, 2714</code>; <code>config/settings.rs:894-924</code></td></tr></tbody></table></div></details>
+  </div>
+  
+</section>
+</main>
+<footer class="prov-foot">
+  <div class="wrap">
+    <h2 id="provenance">Methodology and provenance</h2>
+    <p><strong>Sources</strong></p>
+    <ul><li>Data: a read-only <code>.backup</code> snapshot of <code>.cas/cas.db</code> taken 2026-10-14 11:51Z, at <code>/mnt/rewind/cas/scratch/cas447d/snap.db</code>.<ul><li><code>.cas/prompt_queue.db</code> is a 0-byte file. The live queue tables are in <code>cas.db</code>.</li></ul></li><li>Transcripts: the zen-viper-42 supervisor transcript, plus six Claude worker transcripts.</li><li>Code: mapped at the worktree tip <code>1c201ff06</code>.</li><li>Primary session: <code>cassy-swift-gazelle-77</code>, 2026-10-13 20:48Z to 2026-10-14 11:49Z. It has 870 prompt_queue rows, 167 supervisor_queue rows and 18 workers.</li><li>Five earlier sessions are used for comparison.</li></ul>
+    <p>Abbreviations used in the queries: <code>S = sqlite3 snap.db</code>, <code>W = factory_session='cassy-swift-gazelle-77'</code>.</p>
+    <h3 id="queries">Query files, verbatim</h3>
+    <details class="sql" open><summary><code>queries/gate.sql</code></summary><pre><code>with m as (select p.*, (select min(seen_at) from prompt_queue_recipient_seen s where s.prompt_id=p.id and s.recipient=p.target) seen_at,
+ (select source from prompt_queue_recipient_seen s where s.prompt_id=p.id and s.recipient=p.target) seen_src
+ from prompt_queue p where p.factory_session='cassy-swift-gazelle-77' and p.target not in ('operator','all_workers','supervisor','zen-viper-42','terminal-history'))
+select wake_gate_declines&gt;0 gated, seen_src, count(*) n,
+ round(avg((julianday(seen_at)-julianday(created_at))*86400),1) avg_seen_s,
+ max(round((julianday(seen_at)-julianday(created_at))*86400,1)) max_seen_s,
+ sum(transport_delivered_at is not null) transported
+from m group by 1,2;</code></pre></details><details class="sql" open><summary><code>queries/inb.sql</code></summary><pre><code>select case
+ when source like 'lifecycle-wake:worker-attention%' then 'worker-attention (wake)'
+ when source like 'lifecycle-wake:%' then 'lifecycle (wake)'
+ when source like 'lifecycle:%' then 'lifecycle (no wake)'
+ when source in ('director','task-assignment','cas','terminal') then source
+ when source='supervisor' then 'supervisor-self'
+ when prompt like 'Reminder #%' then 'reminder'
+ when prompt like 'Peer worker message copy%' then 'peer-worker CC'
+ when source like 'commander:%' then 'commander'
+ else 'worker message' end cat,
+ count(*) n, sum(length(prompt)) chars, round(avg(length(prompt))) avg_chars, sum(wake_gate_declines&gt;0) gated
+from prompt_queue where factory_session='cassy-swift-gazelle-77' and target in ('supervisor','zen-viper-42')
+group by 1 order by chars desc;</code></pre></details><details class="sql" open><summary><code>queries/lat.sql</code></summary><pre><code>with m as (
+ select p.id, p.source, p.target, p.created_at, p.transport_delivered_at, p.acked_at, p.highest_stage, p.wake_gate_declines, p.urgent,
+  (select min(seen_at) from prompt_queue_recipient_seen s where s.prompt_id=p.id) seen_at,
+  (select min(delivered_at) from prompt_queue_recipient_transport t where t.prompt_id=p.id) rt_at,
+  case when p.source in ('director','task-assignment','cas','terminal') then p.source when p.source='supervisor' then 'supervisor' when p.source like 'commander:%' then 'commander' else 'worker/other' end src,
+  case when p.target='supervisor' then 'supervisor' when p.target='operator' then 'operator' when p.target='all_workers' then 'all_workers' else 'agent' end tgt
+ from prompt_queue p where p.factory_session='cassy-swift-gazelle-77')
+select src, tgt, count(*) n,
+ sum(seen_at is not null) seen, sum(transport_delivered_at is not null) transported, sum(acked_at is not null) acked,
+ sum(urgent) urgent, sum(wake_gate_declines&gt;0) gated_any, sum(wake_gate_declines) gate_declines,
+ round(avg((julianday(coalesce(transport_delivered_at,rt_at))-julianday(created_at))*86400),1) avg_transport_s,
+ round(avg((julianday(seen_at)-julianday(created_at))*86400),1) avg_seen_s
+from m group by 1,2 order by n desc;</code></pre></details><details class="sql" open><summary><code>queries/xs.sql</code></summary><pre><code>select factory_session fs, count(*) n,
+ sum(wake_gate_declines&gt;0) gated,
+ sum(last_pending_reason='abandoned_unknown_target') abandoned,
+ sum(last_pending_reason='abandoned_unknown_target' and exists(select 1 from prompt_queue_recipient_seen s where s.prompt_id=p.id)) aband_but_seen,
+ sum(target='operator') to_op, sum(target='operator' and highest_stage='abandoned') op_aband,
+ sum(acked_at is not null) acked,
+ sum(source like 'lifecycle%') lifecycle,
+ sum(prompt like 'Peer worker message copy%') peer_cc,
+ sum(target='all_workers') bcast
+from prompt_queue p where factory_session in ('cassy-swift-gazelle-77','cassy-agile-raven-93','cassy-fierce-octopus-14','cassy-rapid-parrot-36','cas-src-zealous-panther-88','cas-src-keen-tiger-11')
+group by 1 order by min(created_at) desc;</code></pre></details>
+    <h3 id="render">This rendering</h3>
+    <ul>
+      <li>Markdown source: <a href="communication-review.md"><code>communication-review.md</code></a> (cas-447d, unchanged). Concept brief and critique: <code>communication-review.brief.md</code>.</li>
+      <li>Rendered by <code>build/render.py</code> in the cas-6abe artifact directory; every number on this page is checked against the markdown by <code>build/check_numbers.py</code>.</li>
+      <li>Design language: Petrastella <code>tokens.css</code> (no project <code>DESIGN.md</code>). Single file, no network, no JavaScript; light and dark follow the system setting.</li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

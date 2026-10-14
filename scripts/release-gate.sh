@@ -430,10 +430,19 @@ run_check() {
     local name="$1" command="$2" function_name="$3" log status=0
     local started ended wall user system key='' source_sha="$cache_head"
     local receipt_key='' receipt_sha='' receipt_epoch='' receipt_status='' now receipt_path='' receipt_origin=''
-    local env_fingerprint input_hash
+    local env_fingerprint input_hash artifact_miss='' artifact_verdict='' row_reuse="$reuse_rows"
     row_selected "$name" || return 0
     log="$row_log_dir/$name.log"
     started="$(date -u +%FT%TZ)"
+    # cas-c096: the publisher reuses this row's audited archive, so a PASS
+    # proved on another tree is reused only alongside this tree's archive.
+    if [[ "$name" == release-binary-isa && -z "$only_rows" && "$no_reuse" == false ]] \
+        && ! artifact_verdict="$(release_binary_artifact_ready 2>&1)"; then
+        artifact_miss=1
+        row_reuse=false
+        printf '  %s (release binary archive; the row rebuilds it for the publisher)\n' \
+            "$(head -n1 <<<"$artifact_verdict")"
+    fi
     # Assembly/recovery already proved the CI script tiers, the native suite
     # and the queue's archive runner in a plain clone of the same code input
     # (the proof refuses a PASS unless all three passed on its tree). Consume
@@ -455,7 +464,8 @@ run_check() {
             return 0
         fi
         printf '  %s\n' "$assembly_pass"
-    elif [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(release-binary-isa|macos-check)$ \
+    elif [[ -z "$only_rows" && "$no_reuse" == false && -z "$artifact_miss" \
+        && "$name" =~ ^(release-binary-isa|macos-check)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         # cas-398c: the factory daemon proves these rows in the background on
         # a green integration tip, keyed on code input, toolchain, target and
@@ -479,7 +489,7 @@ run_check() {
     key="$(row_cache_key "$name" || true)"
     env_fingerprint="$(cache_environment)"
     input_hash="$(cache_input_hash "$name" || true)"
-    if "$reuse_rows" && [[ -n "$key" ]]; then
+    if "$row_reuse" && [[ -n "$key" ]]; then
         receipt_path=''
         receipt_origin=''
         if [[ -n "$cache_dir" && -f "$cache_dir/$name.$key" ]]; then
@@ -937,24 +947,84 @@ release_binary_isa_toolchain() {
     printf '%s\n' "$zigbuild_version" "$zig_version" "$objdump_version" | sha256sum | cut -d' ' -f1
 }
 
+readonly release_binary_target=x86_64-unknown-linux-gnu
+
+# cas-c096: one local release build per release tree. This row's build is the
+# one release.sh reuses, so it lives in a persistent release target (warm
+# dependencies across releases) rather than the fresh epic worktree's own.
+# Precedence: CAS_RELEASE_BINARY_TARGET_DIR, a configured CARGO_TARGET_DIR,
+# then <main checkout>/.cas/release-binary/target.
+release_binary_target_dir() {
+    printf '%s\n' "${CAS_RELEASE_BINARY_TARGET_DIR:-${CARGO_TARGET_DIR:-$cache_repository_root/.cas/release-binary/target}}"
+}
+
+# A row PASS from another tree (row cache, daemon row proof) proves the ISA but
+# leaves the publisher nothing to reuse, so it is reused only while an audited
+# archive for this exact tree exists; otherwise the row rebuilds, warm.
+release_binary_artifact_ready() {
+    python3 "$repo_root/scripts/release-binary-artifact.py" verify "$repo_root" \
+        --target "$release_binary_target"
+}
+
 check_release_binary_isa() {
-    local target=x86_64-unknown-linux-gnu staging="$tmp_dir/release-binary-isa"
-    local target_dir="${CARGO_TARGET_DIR:-target}"
+    local target="$release_binary_target" target_dir lock_fd status=0
     # --only does not dispatch the separate Zig discovery row. Resolve it here
     # too; zigbuild discovers the selected compiler through PATH, like release.sh.
     check_epic_worktree_zig || return $?
+    target_dir="$(release_binary_target_dir)"
+    mkdir -p "$target_dir" || return $?
+    # Concurrent gates share the persistent target. Hold its lock from the
+    # stale-output clean through packaging, so one gate never audits or records
+    # another's build. The lock lives on this shell's descriptor only: every
+    # command below runs with it closed, so a daemon a build spawns (sccache)
+    # cannot keep holding it.
+    exec {lock_fd}>>"$target_dir/.cas-release-binary.lock" || return $?
+    printf 'release target %s: acquiring build lock\n' "$target_dir"
+    python3 -c 'import fcntl, sys; fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX)' "$lock_fd" \
+        || { exec {lock_fd}>&-; return 1; }
+    build_audit_record_release_binary "$target" "$target_dir" {lock_fd}>&- || status=$?
+    exec {lock_fd}>&-
+    return "$status"
+}
+
+build_audit_record_release_binary() {
+    local target="$1" target_dir="$2" staging="$tmp_dir/release-binary-isa" ghostty_archive
+    local release_build="$target_dir/$target/release/build"
+    local -a ghostty_archives=()
+    # Same duplicate-output contract as release.sh: an earlier release's build
+    # outputs for these packages must not be what the audits below find.
+    rm -rf "$release_build"/blake3-* "$target_dir/$target/release/.fingerprint"/blake3-* \
+        "$release_build"/ghostty_vt_sys-* "$target_dir/$target/release/.fingerprint"/ghostty_vt_sys-* \
+        || return $?
     # Use the same locked target/profile and C/C++ baseline as release.sh.
     # Keep the publisher's linker/rustflags: the native assembly compiler guard
     # installs its own linker and would change the cross-target artifact.
     release_test_child env PATH="$(dirname "$ZIG"):$PATH" \
+        CARGO_TARGET_DIR="$target_dir" \
         CFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         CXXFLAGS_x86_64_unknown_linux_gnu=-march=x86_64 \
         "$cargo_bin" zigbuild -p cas --release --target "$target" --locked || return $?
+    # release.sh's audits, so its reuse of this build skips none of them.
+    mapfile -t ghostty_archives < <(find "$release_build" -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print)
+    if [[ "${#ghostty_archives[@]}" -ne 1 ]]; then
+        printf 'release-binary-isa: expected one built Ghostty archive under %s; found %s\n' \
+            "$release_build" "${#ghostty_archives[@]}"
+        return 1
+    fi
+    ghostty_archive="${ghostty_archives[0]}"
+    release_test_child "$repo_root/scripts/check-portable-x86_64-isa.sh" "$ghostty_archive" || return $?
+    release_test_child "$repo_root/scripts/check-blake3-no-avx512-build.sh" "$release_build" || return $?
     mkdir -p "$staging" || return $?
     cp "$target_dir/$target/release/cas" "$staging/cas" || return $?
     # Audit the packaging copy rather than a dev/test executable. This also
     # retains the auditor's deterministic baseline and seeded-EVEX self-tests.
-    release_test_child "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas"
+    release_test_child "$repo_root/scripts/test-check-portable-x86_64-isa.sh" "$staging/cas" || return $?
+    # The archive is an accelerator, never a proof input: failing to record it
+    # costs the publisher a rebuild, not this row.
+    python3 "$repo_root/scripts/release-binary-artifact.py" record "$repo_root" \
+        --target "$target" --binary "$staging/cas" --license "$repo_root/LICENSE" \
+        --audit ghostty-archive-isa --audit blake3-no-avx512 --audit packaged-binary-isa \
+        || printf 'WARN release binary not recorded; the publisher will rebuild this tree\n'
 }
 
 check_macos() {
@@ -1682,7 +1752,7 @@ if row_selected hub-web-tests && [[ "${failures[*]}" == *hub-web-tests* ]]; then
     exit 1
 fi
 run_check release-binary-isa \
-    "$cargo_bin zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked (baseline C/C++ flags); scripts/test-check-portable-x86_64-isa.sh <packaged-cas>" \
+    "$cargo_bin zigbuild -p cas --release --target x86_64-unknown-linux-gnu --locked (baseline C/C++ flags, persistent release target); Ghostty/BLAKE3 build audits; scripts/test-check-portable-x86_64-isa.sh <packaged-cas>; record the archive release.sh reuses" \
     check_release_binary_isa
 if row_selected release-binary-isa && [[ "${failures[*]}" == *release-binary-isa* ]]; then
     printf 'RELEASE GATE FAILED: %s (release binary ISA audit refused before pr-body/pipeline)\n' "${failures[*]}"

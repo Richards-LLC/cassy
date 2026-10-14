@@ -29,7 +29,13 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    factory branch starts a CI run. Where the repo ships the fast release rows
    (`scripts/release-gate.sh --fast-rows`), run them on the committed tip first:
    `./scripts/release-gate.sh --fast-rows --base origin/<target>`. The park
-   refuses a tip without that PASS receipt. Add milestone `note_type=progress` notes.
+   refuses a tip without that PASS receipt. The rows take seconds and catch the
+   mistakes that otherwise cost a CI or merge-queue round: version literals
+   (current and next release, comments included), changed-Markdown lint,
+   test shape (no `env!("CARGO_BIN_EXE_*")` in integration tests), test
+   environment, runtime checkout reads, released CHANGELOG sections and builtin
+   projections. Each failure prints `FIX <row>: …`, and a park refusal quotes it;
+   apply that fix, commit, rerun. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
    and read [close-gate.md](references/close-gate.md). Close with
    `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain

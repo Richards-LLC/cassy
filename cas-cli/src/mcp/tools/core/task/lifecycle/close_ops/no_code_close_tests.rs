@@ -649,6 +649,29 @@ fn fast_rows_receipt_gate_requires_the_exact_tip_where_the_rows_ship_cas_12ab() 
     assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_some(), "another tip's receipt");
     std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: FAIL {tip}\n")).unwrap();
     assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_some(), "not a PASS");
+    // cas-7bce: a FAIL receipt for this tip makes the refusal name the fix.
+    std::fs::write(
+        receipts.join(format!("{tip}.pass")),
+        format!(
+            "fast-rows: FAIL {tip} rows=version-literals,test-shape base=x\n\
+             FIX version-literals: replace each next-version literal above with env!(\"CARGO_PKG_VERSION\")\n\
+             FIX test-shape: use cas::test_paths::cas_binary() for archive runners\n"
+        ),
+    )
+    .unwrap();
+    let failed = fast_rows_receipt_refusal(repo, &tip, "epic/x", "cas-fr01").expect("a FAIL receipt refuses");
+    assert!(failed.contains("FAST ROWS FAILED"), "{failed}");
+    assert!(failed.contains("rows: version-literals,test-shape"), "{failed}");
+    assert!(failed.contains("- FIX test-shape: use cas::test_paths::cas_binary()"), "{failed}");
+    assert!(failed.contains("--fast-rows --base origin/epic/x"), "{failed}");
+    std::fs::write(
+        receipts.join(format!("{plain}.pass")),
+        format!("fast-rows: FAIL {plain} rows=markdown-lint base=x\nFIX markdown-lint: other tip\n"),
+    )
+    .unwrap();
+    std::fs::remove_file(receipts.join(format!("{tip}.pass"))).unwrap();
+    let missing = fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").expect("another tip's FAIL");
+    assert!(missing.contains("FAST ROWS REQUIRED") && !missing.contains("other tip"), "{missing}");
     std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=x\n")).unwrap();
     assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_none());
 }

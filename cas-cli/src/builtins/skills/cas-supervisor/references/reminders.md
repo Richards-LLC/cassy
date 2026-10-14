@@ -10,7 +10,8 @@ authoritative task/worker state once before acting.
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
 | Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, tell worker to re-close, then cancel any phase reminder |
-| Long CI, release, publication, or detached external job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
+| GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
+| Long release, publication, or other detached job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
 | Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |
 | Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |
 | Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One event reminder with a TTL | Cancel it if the phase completes through another path |
@@ -29,7 +30,7 @@ task must leave no stale phase reminder.
 
 ### Time checkpoint: release or detached command
 
-```
+```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
   remind_message="Release <name>: inspect the authoritative job receipt and task state"
 ```
@@ -37,7 +38,7 @@ coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
 The reminder is self-targeted by default. If the release finishes early, clean
 it up rather than letting it fire:
 
-```
+```text
 coordination action=remind_cancel remind_id=<reminder-id>
 ```
 
@@ -46,7 +47,7 @@ later bounded time reminder — do not accumulate timers.
 
 ### Event checkpoint: only for a concrete lifecycle event
 
-```
+```text
 coordination action=remind remind_event=task_completed remind_ttl_secs=1800 \
   remind_filter='{"task_id":"<task-id>"}' \
   remind_message="After this task completes, inspect its close/merge state once"
@@ -62,7 +63,7 @@ External conditions survive daemon/session restart and do not expire when
 `remind_ttl_secs` is omitted (`0` means no expiry). They require
 `cross_session=true` and a JSON filter:
 
-```
+```text
 coordination action=remind remind_event=branch_contained_in \
   remind_filter='{"commit":"<delivered-sha>","target_branch":"main"}' \
   cross_session=true remind_message="Delivery landed; inspect task and close"
@@ -71,6 +72,19 @@ coordination action=remind remind_event=tag_exists \
   remind_filter='{"tag":"v<release>"}' \
   cross_session=true remind_message="Release tag exists; inspect the authoritative receipt"
 ```
+
+For CI, wait on the runs themselves instead of a delay reminder:
+
+```text
+coordination action=remind remind_event=ci_completed \
+  remind_filter='{"sha":"<full-40-char-sha>","workflow":"CI"}' \
+  cross_session=true remind_message="CI finished on <sha>; merge or route the red job"
+```
+
+It fires within a minute once every run for that SHA (or only the named
+workflow) has completed, carrying each run's conclusion and URL and an
+overall `outcome`. Without `workflow`, scheduled runs are ignored. For a
+merge-queue landing, use `branch_contained_in` with `"target_branch":"main"`.
 
 The daemon checks origin on a bounded one-minute cadence. A local-only tag
 cannot satisfy `tag_exists`; the tag must be published to origin. A failed

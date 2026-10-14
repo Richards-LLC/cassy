@@ -29,8 +29,15 @@ def main():
     elif shutil.which("npx"):
         command = ["npx", "--no-install", "markdownlint-cli2@0.18.1"]
     else:
-        raise ValueError("install markdownlint-cli2@0.18.1 before lane admission")
-    return subprocess.run(command + ["--config", ".markdownlint-cli2.jsonc", *paths]).returncode
+        raise ValueError("no Markdown linter on PATH; FIX: npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund (the version CI pins), then rerun")
+    sys.stdout.flush()
+    status = subprocess.run(command + ["--config", ".markdownlint-cli2.jsonc", *paths]).returncode
+    if status:
+        # The exact repair, so a park refusal never needs a CI round to explain.
+        print("FIX: run `npx --yes markdownlint-cli2@0.18.1 --fix --config .markdownlint-cli2.jsonc "
+              + " ".join(paths) + "`, then hand-fix what remains (MD034: wrap bare URLs in <>; "
+              "MD036: make bold-only lines headings) and commit", flush=True)
+    return status
 
 
 if __name__ == "__main__":

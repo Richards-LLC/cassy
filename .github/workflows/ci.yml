@@ -1460,11 +1460,17 @@ jobs:
   # Linux test suite on a more expensive runner. The full check runs on the
   # canonical merge-queue tree; main PRs emit only a hosted admission receipt
   # so their code is not compiled twice before it can enter that queue.
+  # cas-861c0: it also runs on every main push, after the merge and off the
+  # queue's critical path, so main saves the Darwin cargo cache. Queue refs can
+  # read only their own and main's caches; with main never saving, every queue
+  # entry compiled cold (0 hits / 698 misses, 12-14 min). Warm, the job took
+  # 404 s (PR #1187 retry, 90% sccache hits), under the ~8.5 min Linux path.
   macos-check:
     name: macOS Check
     if: >-
       always() && needs.ci-diff.outputs.class != 'docs-only'
       && (github.event_name == 'pull_request'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
       || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -1579,6 +1585,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          # Only main's cache is readable by later queue entries; a queue or
+          # tag ref saving its own 333 MiB copy just evicts main's under the
+          # repository's 10 GB cache cap.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check workspace
         if: >-

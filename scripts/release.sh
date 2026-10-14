@@ -245,8 +245,57 @@ clean_stale_release_package_outputs() {
         "target/$target/release/.fingerprint"/blake3-*
 }
 
+# One local release build per release tree (cas-c096). The gate's
+# release-binary-isa row already built this tree's x86_64 binary in a warm
+# target, passed the Ghostty, BLAKE3 and packaged-binary ISA audits below, and
+# recorded the archive with its tree, version, target, build identity and
+# digests. Reuse it when every one of those matches; any mismatch rebuilds.
+# --manual-publish ships these local bytes, so it always builds them here.
+reuse_gate_release_binary() {
+    local target="$1" verdict archive staging
+    [[ "$target" == x86_64-unknown-linux-gnu ]] || return 1
+    if "$MANUAL_PUBLISH"; then
+        echo "Release binary: building; --manual-publish ships these local bytes."
+        return 1
+    fi
+    if [[ ! -f scripts/release-binary-artifact.py ]]; then
+        echo "Release binary: building; this tree has no gate artifact helper."
+        return 1
+    fi
+    if ! verdict="$(python3 scripts/release-binary-artifact.py verify "$REPO_ROOT" \
+        --target "$target" --version "$VERSION" 2>&1)"; then
+        printf 'Release binary: building; gate artifact not reusable: %s\n' "$verdict"
+        return 1
+    fi
+    archive="$(sed -n 's/^archive=//p' <<<"$verdict")"
+    staging="$(mktemp -d)"
+    if ! tar -xzf "$archive" -C "$staging" cas LICENSE; then
+        rm -rf "$staging"
+        echo "Release binary: building; gate archive could not be extracted."
+        return 1
+    fi
+    printf '%s\n' "$verdict"
+    # Re-audit the exact executable being reused; this costs seconds. Called
+    # as an `if` condition, errexit is off here, so every failure is explicit.
+    # A refused ISA audit stops the publish exactly as it would after a build.
+    if ! ./scripts/test-check-portable-x86_64-isa.sh "$staging/cas"; then
+        rm -rf "$staging"
+        echo "error: the reused gate release binary failed the ISA audit" >&2
+        exit 1
+    fi
+    rm -rf "$staging"
+    if ! cp "$archive" "$DIST_DIR/cas-$target.tar.gz"; then
+        echo "error: could not copy the reused gate archive into $DIST_DIR" >&2
+        exit 1
+    fi
+}
+
 for target in "${TARGETS[@]}"; do
     echo ""
+    if reuse_gate_release_binary "$target"; then
+        echo "=== Reused gate release binary for $target (no local rebuild) ==="
+        continue
+    fi
     echo "=== Building $target ==="
     if [[ "$target" == *"linux"* ]]; then
         cargo clean --release --target "$target"
@@ -285,15 +334,16 @@ if ! "$PUBLISH_TAG"; then
 fi
 
 # Tell the operator, before the tag exists, which publication path the tag will
-# take (cas-3b7c0). The lookup waits for a matching in-flight prebuild for its
-# bounded production timeout, then reports a loud cold-build fallback. The
-# difference between a ~2 minute and a ~15 minute publication is worth knowing
-# before pushing, not after.
+# take (cas-3b7c0). Don't wait here (cas-28eb): the tag workflow's own lookup
+# already waits for an in-flight prebuild of this tree and adopts it, so
+# blocking the tag push only moved that wait in front of it (~11 min measured).
 prebuild_status="$(GITHUB_REPOSITORY="${RELEASE_REPO:-Richards-LLC/cassy}" \
-    GITHUB_SHA="$(git rev-parse HEAD)" \
+    GITHUB_SHA="$(git rev-parse HEAD)" RELEASE_PREBUILD_WAIT_SECONDS=0 \
     ./scripts/find-release-prebuild.sh 2>/dev/null || true)"
 if grep -q '^found=true' <<<"$prebuild_status"; then
     echo "Prebuilt release artifacts are ready; the tag will publish without compiling."
+elif grep -q '^reason=prebuild still queued or in progress' <<<"$prebuild_status"; then
+    echo "The Release Prebuild for this tree is still running; the tag workflow waits for it and adopts it."
 else
     echo "NOTE: no prebuilt artifacts for this commit yet — the tag will build them inline (historically 13-26 min)."
     echo "      Wait for the Release Prebuild workflow on this commit to finish if you want the fast path."

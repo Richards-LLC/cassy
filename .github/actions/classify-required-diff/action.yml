@@ -90,16 +90,18 @@ runs:
             ;;
         esac
 
-        # Match the web gate's conservative input hash: web tests import/read
-        # repo-level scripts (notably scripts/visual-qa.mjs), not just hub-web/.
-        # Decide coverage by paths independently of Rust's class, including
-        # Markdown fixtures. An unavailable diff must still run the checks.
+        # Web tests read hub-web/ plus named repo-level inputs (the journey
+        # catalog, scripts/visual-qa.mjs, the worker-memory wrapper, design
+        # tokens) and the CI workflow that runs them; scripts/classify-web-inputs.py
+        # owns that list (cas-7822). Decide coverage by paths independently of
+        # Rust's class, including Markdown fixtures. An unavailable diff or a
+        # failed classifier must still run the checks.
         web_check_needed=true
         if [[ -n "${merge_base:-}" ]]; then
-          if web_diff="$(git diff --name-only "$merge_base" HEAD -- hub-web scripts .github)"; then
-            [[ -n "$web_diff" ]] || web_check_needed=false
+          if web_signal="$(python3 scripts/classify-web-inputs.py "$merge_base" HEAD)"; then
+            [[ "$web_signal" != false ]] || web_check_needed=false
           else
-            echo "::warning title=CI web check::Could not diff web test inputs; running their checks"
+            echo "::warning title=CI web check::Could not classify web test inputs; running their checks"
           fi
         fi
         if [[ "$web_check_needed" == true && "$class" == docs-only ]]; then

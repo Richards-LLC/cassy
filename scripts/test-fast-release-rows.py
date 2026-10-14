@@ -168,7 +168,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 18)
+        self.assertEqual(len(proof['rows']), 19)
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):
@@ -198,7 +198,7 @@ class FastRows(unittest.TestCase):
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
                     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
-                    "ci-script-tests-changed", "fixture-paths-src"):
+                    "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -221,12 +221,14 @@ class FastRows(unittest.TestCase):
         self.assertTrue(path.read_text().startswith(f"fast-rows: PASS {head} "), path.read_text())
         self.assertIn(str(path), result.stdout)
 
-    def test_a_failed_or_dirty_run_writes_no_receipt_cas_12ab(self):
+    def test_a_failed_or_dirty_run_writes_no_pass_receipt_cas_12ab(self):
         self.write("docs/bad.md", "# Bad\n## Missing blank lines\nbody\n")
         self.commit()
         failed = self.fast()
         self.assertNotEqual(failed.returncode, 0)
-        self.assertFalse(self.receipt()[1].exists(), failed.stdout)
+        # cas-7bce: the failure receipt names rows and fixes, never PASS.
+        head, path = self.receipt()
+        self.assertFalse(path.exists() and path.read_text().startswith(f"fast-rows: PASS {head} "), failed.stdout)
         (self.repo / "docs/bad.md").unlink()
         self.commit()
         self.write("CHANGELOG.md", (self.repo / "CHANGELOG.md").read_text() + "\n- Uncommitted.\n")
@@ -528,6 +530,93 @@ sleep 2
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL test-shape", result.stdout)
+
+    # cas-7bce: the five failures of 2026-10-14 that each cost a 30-90 minute
+    # CI or merge-queue cycle. Each is refused by a second-scale fast row at
+    # park, with the exact fix named in the output and in the FAIL receipt the
+    # park refusal quotes.
+    def refused_at_park(self, row, files, fix):
+        command(self.repo, "git", "reset", "-q", "--hard", self.base)
+        command(self.repo, "git", "clean", "-qfd")
+        for path, body in files.items():
+            self.write(path, body)
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL " + row, result.stdout)
+        self.assertIn(f"FIX {row}: ", result.stdout)
+        self.assertIn(fix, result.stdout)
+        head, path = self.receipt()
+        receipt = path.read_text()
+        self.assertTrue(receipt.startswith(f"fast-rows: FAIL {head} rows={row} "), receipt)
+        self.assertIn(f"FIX {row}: ", receipt)
+        self.assertIn(fix, receipt)
+
+    def test_todays_late_failures_are_refused_at_park_with_the_fix_cas_7bce(self):
+        shape = {"scripts/check-test-shape.py": (ROOT / "scripts/check-test-shape.py").read_text()}
+        linter = bool(shutil.which("npx") or shutil.which("markdownlint-cli2"))
+        cases = [
+            # 1. The merge queue rejected the two_machine tests: a compile-time
+            # binary path does not exist on the archive shard runner.
+            ("test-shape", {**shape, "cas-cli/tests/distributed_factory_test_cases/two_machine.rs":
+                '#[test]\nfn peers_cli() {\n    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cas"));\n}\n'},
+             "cas::test_paths::cas_binary()"),
+            # 2. The gate rejected the coming version in a comment after the bump.
+            ("version-literals", {"crates/cas-core/src/lib.rs": "// Ships in 9.100.0 with the new store.\n"},
+             'env!("CARGO_PKG_VERSION")'),
+            ("version-literals", {"scripts/example.py": "# patched in 9.99.8\n"}, "9.99.x fixture value"),
+            # 5. Process-environment mutation without the guard, and a runtime
+            # read of the producer checkout: the environment failures.
+            ("test-env", {"cas-cli/tests/sample.rs": '#[test] fn sample() { std::env::set_var("HOME", "other"); }\n'},
+             "TestEnvGuard"),
+            ("fixture-paths-src", {"crates/cas-core/tests/reads.rs":
+                '#[test] fn reads() { let dir = env!("CARGO_MANIFEST_DIR"); let _ = std::fs::read_to_string(format!("{dir}/x")); }\n'},
+             "include_str!(concat!"),
+        ]
+        if linter:
+            cases += [
+                # 3. docs CI failed markdownlint on a report (MD022/MD032/MD036).
+                ("markdown-lint", {"docs/reports/2026-10-14-review/communication-review.md":
+                    "# Review\n## Verdict\nText.\n- item\n\n**Sources**\n\nMore.\n"}, "--fix"),
+                # 4. The merge-queue lint caught MD034 in a release report.
+                ("markdown-lint", {"docs/release-reports/v9.99.7.md":
+                    "# Release\n\nSee https://github.com/example/cloud/pull/155 for detail.\n"},
+                 "MD034: wrap bare URLs in <>"),
+            ]
+        for row, files, fix in cases:
+            with self.subTest(row=row, files=sorted(files)):
+                self.refused_at_park(row, files, fix)
+
+    def test_next_version_literal_elsewhere_is_noted_not_refused_cas_7bce(self):
+        self.write("crates/cas-core/src/lib.rs", "// SQLite 9.99.8 fixed it.\n")
+        self.commit()
+        self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("scripts/example.py", "# unrelated lane\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS version-literals", result.stdout)
+        log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
+        self.assertIn("NOTE pre-existing next-version literals", log)
+        self.assertIn("crates/cas-core/src/lib.rs:1:", log)
+
+    def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
+        body = "Verify the task.\n"
+        frontmatter = "---\nname: task-verifier\ndescription: Internal.\n---\n"
+        self.write("cas-cli/src/builtins/agents/task-verifier.body.md", body)
+        self.write(".claude/agents/task-verifier.md", frontmatter + body)
+        self.commit()
+        self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.refused_at_park("builtin-projections-src",
+                             {"cas-cli/src/builtins/agents/task-verifier.body.md": "Verify the task twice.\n"},
+                             "task-verifier.body.md verbatim")
+        command(self.repo, "git", "reset", "-q", "--hard", self.base)
+        self.write("cas-cli/src/builtins/agents/task-verifier.body.md", "Verify the task twice.\n")
+        self.write(".claude/agents/task-verifier.md", frontmatter + "Verify the task twice.\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS builtin-projections-src", result.stdout)
 
 
 class Budget(unittest.TestCase):

@@ -20,6 +20,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   gate stops and cancels the rows running after it. Scheduling events go to
   `schedule.tsv`, and `CAS_RELEASE_GATE_PARALLEL=1` restores sequential rows.
 
+### Changed — factory pushes run the fast rows; the call-shape lint is one Python row (cas-043b)
+
+- A worker's push of its factory branch runs `release-gate.sh --fast-rows`
+  first and is refused on failure with the `FIX` lines. A same-tip PASS
+  receipt makes a repeat push free. `CAS_SKIP_FAST_ROWS=<reason>` skips the
+  check, and every skip is logged.
+- The builtin and runtime MCP call-shape lint is now
+  `scripts/check-call-shapes.py`, the new `call-shapes` fast row (about 2.5 s).
+  A Rust test keeps its committed surface snapshot current.
+
 ### Added — a release can no longer ship that the operator cannot launch (cas-e719)
 
 - 3.51.0 refused `cas factory` and `cas claude <account>` for every operator

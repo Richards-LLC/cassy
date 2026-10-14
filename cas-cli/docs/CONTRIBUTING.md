@@ -669,6 +669,19 @@ fixture per failure:
 A failed row prints `FIX <row>: …`. On a committed tree the run writes a FAIL
 receipt that names the rows and those fixes, and the park refusal quotes them.
 
+The `call-shapes` row is the only implementation of the MCP call-shape lint
+(cas-043b). It runs `scripts/check-call-shapes.py` over shipped builtins and
+runtime Rust templates, using the committed `scripts/mcp-call-surface.json`.
+`mcp_action_surface_test::call_shape_surface_snapshot_matches_the_published_surface`
+keeps that snapshot equal to the live surface. On drift the test prints the
+`cp` command that refreshes the snapshot.
+
+The worker pre-push guard runs `scripts/fast-rows-pre-push.sh` for pushes of
+`refs/heads/factory/*`. A same-tip PASS receipt is reused. Otherwise the guard
+runs the fast rows against the CI push base and refuses a failure with its
+`FIX` lines. `CAS_SKIP_FAST_ROWS=<reason> git push` skips the guard. Each skip
+is appended to `<git-common-dir>/cas/fast-rows/overrides.log`.
+
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
 results on Linux and falls back to Python for timezone-qualified ISO values

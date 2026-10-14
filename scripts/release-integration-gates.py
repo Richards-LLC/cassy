@@ -15,6 +15,7 @@ FAST_ROWS = (
     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
     "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
+    "call-shapes",
 )
 REQUIRED_ROWS = (*FAST_ROWS, "ci-script-tests")
 

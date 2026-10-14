@@ -463,7 +463,7 @@ pub(crate) fn external_wake_condition_observation(
     }
 }
 
-fn resolve_external_git_commit(
+pub(super) fn resolve_external_git_commit(
     project: &Path,
     revision: &str,
 ) -> Result<Option<String>, CiWatchError> {
@@ -561,7 +561,7 @@ struct MergeQueuePullRequests {
 /// it inherits the operator's normal `gh auth`/token setup without persisting
 /// credentials in Cassy.
 pub(crate) struct GhCiTransport {
-    repo: String,
+    pub(super) repo: String,
     cwd: PathBuf,
     gh_binary: PathBuf,
 }
@@ -579,7 +579,10 @@ impl GhCiTransport {
         })
     }
 
-    fn gh_json<T: for<'de> Deserialize<'de>>(&self, args: &[String]) -> Result<T, CiWatchError> {
+    pub(super) fn gh_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        args: &[String],
+    ) -> Result<T, CiWatchError> {
         let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
         let output = run_command(

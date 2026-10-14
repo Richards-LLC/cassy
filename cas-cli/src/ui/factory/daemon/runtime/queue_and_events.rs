@@ -9046,20 +9046,35 @@ impl FactoryDaemon {
             Vec::new()
         };
 
-        let supervisor_queue =
-            if !due_reminders.is_empty() || !events.is_empty() || !external_ready.is_empty() {
-                open_supervisor_queue_store(self.app.cas_dir()).ok()
-            } else {
-                None
-            };
+        // cas-0f05: CI completion and PR landing are probed on GitHub off the
+        // loop. A finished probe hands back rows whose condition is true; the
+        // pending→fired transition below stays the durable edge.
+        let ci_ready = {
+            let session_name = self.session_name.clone();
+            let candidate_store = std::sync::Arc::clone(&reminder_store);
+            self.ci_wake_probe.poll_gh(
+                std::time::Instant::now(),
+                self.app.project_path(),
+                move || ci_wake_candidates(candidate_store.as_ref(), &session_name),
+            )
+        };
+
+        let any_due = !due_reminders.is_empty()
+            || !events.is_empty()
+            || !external_ready.is_empty()
+            || !ci_ready.is_empty();
+        let supervisor_queue = if any_due {
+            open_supervisor_queue_store(self.app.cas_dir()).ok()
+        } else {
+            None
+        };
 
         // Open prompt queue for PTY injection of fired reminders
-        let prompt_queue =
-            if !due_reminders.is_empty() || !events.is_empty() || !external_ready.is_empty() {
-                open_prompt_queue_store(self.app.cas_dir()).ok()
-            } else {
-                None
-            };
+        let prompt_queue = if any_due {
+            open_prompt_queue_store(self.app.cas_dir()).ok()
+        } else {
+            None
+        };
 
         let agent_id_to_name = &self.app.director_data().agent_id_to_name;
 
@@ -9094,6 +9109,21 @@ impl FactoryDaemon {
                 self.app.supervisor_name(),
                 agent_id_to_name,
                 Some(context),
+                self.app.cas_dir(),
+            );
+        }
+
+        for ready in &ci_ready {
+            let context = ReminderTriggerContext::ci(ready);
+            fire_reminder(
+                &ready.reminder,
+                &reminder_store,
+                &supervisor_queue,
+                &prompt_queue,
+                &self.session_name,
+                self.app.supervisor_name(),
+                agent_id_to_name,
+                Some(&context),
                 self.app.cas_dir(),
             );
         }
@@ -9394,6 +9424,52 @@ fn commander_history_message_text(text: &str) -> (Option<i64>, String) {
 /// `triggering_event` is the event or external condition that caused this
 /// reminder to fire. Its context is included in the durable payload and
 /// delivered prompt so the recipient knows what happened.
+/// Pending `ci_completed` / `merge_queue_landed` rows this factory session
+/// may fire, with their parsed conditions. An unparsable filter is logged and
+/// skipped, never treated as true.
+fn ci_wake_candidates(
+    reminder_store: &dyn cas_store::ReminderStore,
+    session_name: &str,
+) -> Vec<super::ci_wake::CiWakeCandidate> {
+    let mut candidates = Vec::new();
+    for event_type in super::ci_wake::CI_WAKE_EVENTS {
+        let reminders = match reminder_store.get_event_reminders(event_type) {
+            Ok(reminders) => reminders,
+            Err(error) => {
+                tracing::warn!(event_type, %error, "failed to load CI reminder candidates");
+                continue;
+            }
+        };
+        for reminder in reminders {
+            if !reminder_matches_factory_session(
+                reminder.session_id.as_deref(),
+                reminder.cross_session,
+                session_name,
+            ) {
+                continue;
+            }
+            let parsed = reminder
+                .trigger_filter
+                .as_ref()
+                .ok_or_else(|| "missing condition filter".to_string())
+                .and_then(|filter| super::ci_wake::parse_ci_wake_condition(event_type, filter));
+            match parsed {
+                Ok(condition) => candidates.push(super::ci_wake::CiWakeCandidate {
+                    reminder,
+                    condition,
+                }),
+                Err(error) => tracing::warn!(
+                    reminder_id = reminder.id,
+                    event_type,
+                    %error,
+                    "CI reminder has an invalid condition filter"
+                ),
+            }
+        }
+    }
+    candidates
+}
+
 struct ReminderTriggerContext {
     event_type: String,
     data: serde_json::Value,
@@ -9406,6 +9482,14 @@ impl ReminderTriggerContext {
             event_type: event.event_type().to_string(),
             data: event.to_json(),
             description: event.description(),
+        }
+    }
+
+    fn ci(ready: &super::ci_wake::CiWakeReady) -> Self {
+        Self {
+            event_type: ready.condition.event_type().to_string(),
+            data: ready.observation.to_json(&ready.condition),
+            description: ready.observation.description(),
         }
     }
 

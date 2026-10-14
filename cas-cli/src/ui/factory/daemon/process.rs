@@ -365,6 +365,7 @@ pub async fn run_daemon_after_fork(
         spawn_cancellation: None,
         last_spawn_queue_stall_scan: None,
         last_external_wake_scan: None,
+        ci_wake_probe: Default::default(),
         reported_stalled_spawn_requests: std::collections::HashSet::new(),
     };
 

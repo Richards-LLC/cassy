@@ -105,7 +105,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "remind_event",
         "remind: fire on task_completed, task_blocked, worker_idle, epic_completed, \
-         branch_contained_in or tag_exists instead of a delay.",
+         branch_contained_in, tag_exists, ci_completed or merge_queue_landed instead of a delay.",
     ),
     ("remind_filter", "remind: JSON filter for the event, e.g. {\"task_id\":\"cas-a1b2\"}."),
     ("remind_id", "remind_cancel: the reminder id."),

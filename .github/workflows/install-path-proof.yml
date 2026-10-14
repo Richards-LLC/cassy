@@ -114,7 +114,15 @@ jobs:
             <<<"$fresh_commands_output"
           grep -qF "Not found. Run 'cas init'" <<<"$fresh_commands_output"
 
-          echo 'PASS: macOS Apple Silicon install path, fresh shell, quarantine, bare cas, and doctor verified.'
+          # cas-e719: 3.51.0 installed fine and then refused `cas factory` and
+          # `cas claude <account>` for every operator on the default config.
+          echo 'Checking that an operator can launch the installed binary.'
+          smoke_url="https://raw.githubusercontent.com/$INSTALLER_REPOSITORY/${release_version:-main}/scripts/check-operator-launch.sh"
+          curl --fail --silent --show-error --location --retry 3 "$smoke_url" \
+            -o "$RUNNER_TEMP/check-operator-launch.sh"
+          bash "$RUNNER_TEMP/check-operator-launch.sh" "$HOME/.local/bin/cas"
+
+          echo 'PASS: macOS Apple Silicon install path, fresh shell, quarantine, bare cas, doctor, and operator launch verified.'
 
       - name: Upload macOS install proof transcript
         if: always()
@@ -143,7 +151,7 @@ jobs:
           exec > >(tee -a "$PROOF_TRANSCRIPT") 2>&1
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            bash ca-certificates coreutils curl grep tar
+            bash bsdutils ca-certificates coreutils curl git grep tar
           rm -rf -- /var/lib/apt/lists/*
           if command -v rustc >/dev/null 2>&1; then
             echo 'The proof container unexpectedly includes Rust.' >&2
@@ -224,7 +232,15 @@ jobs:
             <<<"$fresh_commands_output"
           grep -qF "Not found. Run 'cas init'" <<<"$fresh_commands_output"
 
-          echo 'PASS: clean Linux install path, fresh shell, bare cas, and doctor verified.'
+          # cas-e719: 3.51.0 installed fine and then refused `cas factory` and
+          # `cas claude <account>` for every operator on the default config.
+          echo 'Checking that an operator can launch the installed binary.'
+          smoke_url="https://raw.githubusercontent.com/$INSTALLER_REPOSITORY/${release_version:-main}/scripts/check-operator-launch.sh"
+          curl --fail --silent --show-error --location --retry 3 "$smoke_url" \
+            -o "$RUNNER_TEMP/check-operator-launch.sh"
+          bash "$RUNNER_TEMP/check-operator-launch.sh" "$HOME/.local/bin/cas"
+
+          echo 'PASS: clean Linux install path, fresh shell, bare cas, doctor, and operator launch verified.'
 
       - name: Upload Linux install proof transcript
         if: always()

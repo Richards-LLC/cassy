@@ -620,7 +620,7 @@ sleep 2
         self.assertIn("PASS builtin-projections-src", result.stdout)
 
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
-        """The v3.52.0 cut stopped at preflight on a draft committed hours earlier."""
+        """A cut once stopped at preflight on a draft committed hours earlier."""
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
         draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text()
         # The Dev top-level punch: the second line of the third fenced body.

@@ -1787,7 +1787,7 @@ check_fixture_paths_src() {
 # and Codex carries no .md agents. The init-generated settings and the
 # reference-history ledger need the binary or release prep, so they stay in
 # the full gate's builtin-projections row.
-# cas-e7d4: the v3.52.0 cut stopped at preflight on a Slack draft committed
+# cas-e7d4: a cut once stopped at preflight on a Slack draft committed
 # hours earlier (a 26-word Dev punch). Lint the drafts a lane changes at park,
 # with the announce stage's own implementation.
 check_release_notes_draft() {

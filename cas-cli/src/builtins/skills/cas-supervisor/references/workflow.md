@@ -424,6 +424,10 @@ When workers share the main directory, there's no branch merging — workers com
 2. Review their commits
 3. Clear worker context and assign next task
 
+### Lessons must remove causes
+
+Fix a recurring failure on the highest rung that fits — a default or auto-fix, then a seconds-long preflight, then a gate row, prose last. A lesson learned twice needs an open P0/P1 task that removes the cause, not another note. Tag lessons `operation:release-cut|spawn|report|epic-close`; starting that operation surfaces them.
+
 ## Handling Blockers
 
 - Workers set status to blocked and add a blocker note

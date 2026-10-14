@@ -168,7 +168,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 19)
+        self.assertEqual(len(proof['rows']), 20)
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):

@@ -30,7 +30,7 @@ task must leave no stale phase reminder.
 
 ### Time checkpoint: release or detached command
 
-```
+```text
 coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
   remind_message="Release <name>: inspect the authoritative job receipt and task state"
 ```
@@ -38,7 +38,7 @@ coordination action=remind remind_delay_secs=300 remind_ttl_secs=900 \
 The reminder is self-targeted by default. If the release finishes early, clean
 it up rather than letting it fire:
 
-```
+```text
 coordination action=remind_cancel remind_id=<reminder-id>
 ```
 
@@ -47,7 +47,7 @@ later bounded time reminder — do not accumulate timers.
 
 ### Event checkpoint: only for a concrete lifecycle event
 
-```
+```text
 coordination action=remind remind_event=task_completed remind_ttl_secs=1800 \
   remind_filter='{"task_id":"<task-id>"}' \
   remind_message="After this task completes, inspect its close/merge state once"
@@ -63,7 +63,7 @@ External conditions survive daemon/session restart and do not expire when
 `remind_ttl_secs` is omitted (`0` means no expiry). They require
 `cross_session=true` and a JSON filter:
 
-```
+```text
 coordination action=remind remind_event=branch_contained_in \
   remind_filter='{"commit":"<delivered-sha>","target_branch":"main"}' \
   cross_session=true remind_message="Delivery landed; inspect task and close"
@@ -75,7 +75,7 @@ coordination action=remind remind_event=tag_exists \
 
 For CI, wait on the runs themselves instead of a delay reminder:
 
-```
+```text
 coordination action=remind remind_event=ci_completed \
   remind_filter='{"sha":"<full 40-char sha>","workflow":"CI"}' \
   cross_session=true remind_message="CI finished on <sha>; merge or route the red job"

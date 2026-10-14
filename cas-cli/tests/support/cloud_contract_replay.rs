@@ -158,7 +158,8 @@ impl Replay {
 
     /// Send `exchange`'s request; returns the status and the parsed body.
     pub fn send(&mut self, exchange: &Exchange) -> (u16, Value) {
-        let mut url = format!("{}{}", self.base, self.substitute(&exchange.path));
+        let path = self.substitute(&exchange.path);
+        let mut url = format!("{}{path}", self.base);
         if let Some(query) = &exchange.query {
             let mut pairs = url::form_urlencoded::Serializer::new(String::new());
             for (key, value) in query {

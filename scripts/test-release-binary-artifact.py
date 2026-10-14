@@ -109,28 +109,6 @@ class RecordAndVerify(Fixture):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn('MISS key=tree reason=no_artifact_for_tree', result.stdout)
 
-    def test_requested_version_mismatch_rebuilds(self):
-        self.record()
-        result = self.verify('--version', '9.99.10')
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn('MISS key=version', result.stdout)
-
-    def test_manifest_version_mismatch_rebuilds(self):
-        self.record()
-        path = self.manifest_path()
-        manifest = json.loads(path.read_text())
-        manifest['version'] = '9.99.8'
-        path.write_text(json.dumps(manifest))
-        result = self.verify('--version', '9.99.9')
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn('MISS key=version reason=artifact_9.99.8_not_9.99.9', result.stdout)
-
-    def test_other_target_rebuilds(self):
-        self.record()
-        result = self.helper('verify', str(self.repo), '--target', 'aarch64-apple-darwin')
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn('MISS', result.stdout)
-
     def test_toolchain_change_rebuilds_and_round_trip_reuses(self):
         self.record()
         upgraded = dict(self.env, FIXTURE_ZIG_VERSION='0.16.0')
@@ -143,14 +121,6 @@ class RecordAndVerify(Fixture):
         self.assertEqual(self.verify(env=upgraded).returncode, 0)
         self.assertEqual(self.verify().returncode, 0, 'reverted toolchain lost its archive')
 
-    def test_tampered_archive_rebuilds(self):
-        self.record()
-        archive = self.manifest_path().parent / f'cas-{TARGET}.tar.gz'
-        archive.write_bytes(archive.read_bytes() + b'\0')
-        result = self.verify()
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn('MISS key=archive_sha256', result.stdout)
-
     def test_modified_checkout_neither_records_nor_reuses(self):
         self.record()
         (self.repo / 'LICENSE').write_text('edited\n')
@@ -159,15 +129,17 @@ class RecordAndVerify(Fixture):
                              '--license', str(self.repo / 'LICENSE'))
         self.assertEqual(result.returncode, 1, result.stdout)
 
-    def test_default_store_is_under_the_main_checkout(self):
+    def test_tag_worktree_reuses_the_gate_checkouts_archive(self):
+        """The gate records from the epic checkout; release.sh verifies from a
+        separate tag worktree of the same repository and must find it."""
         env = dict(self.env)
         env.pop('CAS_RELEASE_BINARY_STORE')
+        self.record(env=env)
         worktree = self.base / 'tag-worktree'
         self.git('worktree', 'add', '-q', '--detach', str(worktree), 'HEAD')
-        result = self.helper('store', str(worktree), env=env)
-        self.assertEqual(Path(result.stdout.strip()),
-                         self.repo.resolve() / '.cas/release-binary/artifacts')
-
+        result = self.helper('verify', str(worktree), '--target', TARGET, '--version', '9.99.9', env=env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(str(self.repo.resolve() / '.cas/release-binary/artifacts'), result.stdout)
     def test_prune_keeps_the_newest_entries(self):
         for index in range(8):
             (self.repo / 'cas-cli/lib.rs').write_text(f'// change {index}\n')

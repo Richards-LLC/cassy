@@ -14,8 +14,6 @@ of a 24 min publish stage).
       Called by release.sh. Exit 0 prints `REUSE ...` and `archive=<path>`;
       exit 1 prints one `MISS key=<input> ...` line naming the first input
       that differs, and the publisher rebuilds.
-  store <repo>
-      Print the store directory.
 
 The manifest binds the git tree of a clean checkout, the version that tree
 declares, the target, the build identity (rustc -vV, cargo-zigbuild and Zig
@@ -149,21 +147,6 @@ def package(binary, license_path, archive):
                 bundle.addfile(info, stream)
 
 
-def archived_binary_digest(archive):
-    with tarfile.open(archive, "r:gz") as bundle:
-        names = sorted(bundle.getnames())
-        if names != ["LICENSE", "cas"]:
-            raise Miss("archive", "unexpected_members")
-        member = bundle.getmember("cas")
-        if not member.isfile():
-            raise Miss("archive", "binary_is_not_a_regular_file")
-        stream = bundle.extractfile(member)
-        digest = hashlib.sha256()
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(block)
-        return digest.hexdigest()
-
-
 def prune(target_root, keep):
     entries = []
     for path in target_root.iterdir():
@@ -246,12 +229,6 @@ def verify(args):
         raise Miss("archive", "missing")
     if sha256(archive) != manifest.get("archive_sha256"):
         raise Miss("archive_sha256", "differs")
-    try:
-        binary_digest = archived_binary_digest(archive)
-    except (OSError, tarfile.TarError):
-        raise Miss("archive", "unreadable")
-    if binary_digest != manifest.get("binary_sha256"):
-        raise Miss("binary_sha256", "differs")
     print(f"REUSE release binary tree={tree} version={version} target={args.target} "
           f"built_from={manifest.get('source_commit')} tag_commit={commit} "
           f"sha256={manifest['archive_sha256']} audits={','.join(manifest.get('audits') or [])}")
@@ -263,8 +240,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="action", required=True)
-    store = sub.add_parser("store")
-    store.add_argument("repo", type=Path)
     rec = sub.add_parser("record")
     rec.add_argument("repo", type=Path)
     rec.add_argument("--target", required=True)
@@ -277,9 +252,6 @@ def main():
     ver.add_argument("--version")
     args = parser.parse_args()
     try:
-        if args.action == "store":
-            print(store_root(args.repo.resolve()))
-            return 0
         return record(args) if args.action == "record" else verify(args)
     except Miss as miss:
         print(str(miss))

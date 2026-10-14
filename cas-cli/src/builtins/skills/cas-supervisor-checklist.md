@@ -74,7 +74,7 @@ memory action=remember title="..." content="..." tags="decision"
 
 ## Epic Planning and Review
 
-Shape subtask specs (demo statements, spikes, fit checks) and review each delivery with [planning.md](../cas-supervisor/references/planning.md): tests added or updated for the change (they run once at assembly), no DRY/SRP or layer-boundary violations, interface and config compliance.
+Shape subtask specs (demo statements, spikes, fit checks) and review each delivery with [planning.md](../cas-supervisor/references/planning.md): tests added or updated for the change (they run once at the final gate: the merge queue, or local assembly), no DRY/SRP or layer-boundary violations, interface and config compliance.
 
 Supervisor close override constraints: [`supervisor_override`](../cas-supervisor/references/reference.md#supervisor-override).
 

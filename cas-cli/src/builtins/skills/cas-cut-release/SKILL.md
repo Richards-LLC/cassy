@@ -60,7 +60,10 @@ version and worktree, never a version-keyed path.
    It runs `preflight, assemble, prep, ledger, gate, pr-body, pipeline,
    publish, post-publication, announce, report, receipts, host-update` in that
    order. The ledger is the last prep step. `assemble` invokes stale-base heal
-   when required. The gate is a detached process group; inspect its recorded PID
+   when required. From main, `assemble` reuses the merge-queue run that proved
+   main's code input (`assembly-proof.py reuse-merge-queue`) and proves fresh
+   only on a named miss; the gate reuses that one proof for its suite rows and
+   runs the cheap and version-delta rows fresh. The gate is a detached process group; inspect its recorded PID
    with `kill -0`, never by process-name search. Every stage writes a SHA
    receipt, and the train preserves pipeline/publisher hand-off epochs.
    `post-publication` fills the draft with
@@ -90,7 +93,7 @@ version and worktree, never a version-keyed path.
    `--run-dir` and `--evidence file:line` options annotate the evidence line.
    Preflight warns about release tooling on unreleased epic or parked branches;
    bring those fixes onto main before the next cut. The checklist also needs the
-   full exact-SHA gate (the full suite on the assembled tree), queue/pipeline landed SHA, `annotated tag peels`,
+   full exact-SHA gate (every row on the assembled tree; suite rows may cite its recorded integration proof), queue/pipeline landed SHA, `annotated tag peels`,
    `release.tag-complete.epoch`, `release-published.receipt`, the matching
    workflow and asset proofs, `four Slack POSTED` entries through the
    `Violet` hub (never a personal Slack route), report HTML/PDF evidence,

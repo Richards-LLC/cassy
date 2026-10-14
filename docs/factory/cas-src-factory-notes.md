@@ -37,17 +37,20 @@ with `scripts/refresh-worker-build-cache.sh` during a quiet window.
 
 ## From `cas-supervisor/references/workflow.md` — Phase 4 assembly gate
 
-Step 3. Run the final assembled-tree gate. This is the epic's single Rust build:
-   workers never build, so one full build + test of the epic tip proves every
-   child and checks cross-task integration (add `cargo test -p cas --doc` when
-   the epic touches doctests):
+Step 3. The final assembled-tree gate in cas-src is the merge queue (cas-2970):
+   after lane CI and the lane compile, open the epic PR and let the queue run
+   the full workspace suite, doctests, archive mode and macOS Check on the exact
+   merged tree. Do not run a local full suite first. When a queue run fails and
+   needs local reproduction, the opt-in diagnostic is
+   `python3 scripts/assembly-proof.py prove <epic-worktree>`, or a direct suite
+   (add `cargo test -p cas --doc` when the epic touches doctests):
 
    ```bash
    cargo nextest run -p cas
    ```
 
-Step 5. After the fix lands, rerun the final assembled-tree gate yourself on the new
-   tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
+Step 5. After the fix lands, re-enqueue the PR. For a local diagnostic run,
+   capture the real exit code and record a fresh `ASSEMBLY_PROOF` for it:
 
    ```bash
    cargo nextest run -p cas > <artifacts_root>/<epic-id>/assembly-nextest.log 2>&1; echo $?
@@ -58,7 +61,7 @@ Step 5. After the fix lands, rerun the final assembled-tree gate yourself on the
 
 ## From `cas-supervisor/references/planning.md` — review cadence
 
-Phase 4 runs the full final-tree nextest gate for cross-task integration.
+Phase 4's full final-tree gate for cross-task integration is the merge queue run.
 
 ## From `cas-supervisor/references/worker-recovery.md` — legacy verification jail
 

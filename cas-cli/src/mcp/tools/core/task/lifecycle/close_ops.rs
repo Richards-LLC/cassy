@@ -2368,8 +2368,8 @@ fn epic_journey_binding(
 /// cas-74cb: why an epic's own close may defer its build proof to assembly,
 /// or `None` when it must still carry the scoped proof. Either the epic's
 /// latest passing ASSEMBLY_PROOF head contains the epic tip, or the tip is
-/// already contained in the default branch, whose release ran the full
-/// assembly gate (cas-459b / cas-a25c: lane deleted, content on main).
+/// already contained in the default branch, whose merge queue proved the
+/// landed tree (cas-2970; cas-459b / cas-a25c: lane deleted, content on main).
 fn epic_build_proof_basis(
     task: &Task,
     commit_receipt: Option<&str>,
@@ -2386,7 +2386,7 @@ fn epic_build_proof_basis(
         .find(|target| git_ref_exists(repo, target) && git_commit_is_ancestor(repo, &tip, target))
         .map(|target| {
             format!(
-                "its tip {short} is already contained in {target}, whose release ran the full assembly gate"
+                "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
             )
         })
 }
@@ -2395,7 +2395,7 @@ fn epic_build_proof_basis(
 /// the scoped-proof gate, naming the proof an epic is expected to carry.
 fn epic_assembly_proof_instruction(epic_id: &str) -> String {
     format!(
-        "An epic's build proof is its assembly (CONTRIBUTING): run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}, or merge the epic into the default branch, then retry close. Epic {epic_id} has no passing ASSEMBLY_PROOF covering its tip and its tip is not contained in the default branch."
+        "An epic's build proof is its integration proof (CONTRIBUTING): land the epic on the default branch through the merge queue, which proves the exact merged tree, then retry close. An opt-in local assembly also counts: run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}. Epic {epic_id} has no passing ASSEMBLY_PROOF covering its tip and its tip is not contained in the default branch."
     )
 }
 
@@ -9648,7 +9648,7 @@ impl CasCore {
                     }
                     (Some((epic_id, line)), _) => format!("covered by {epic_id}'s {line}"),
                     (None, Some(epic)) => format!(
-                        "pending the supervisor's ASSEMBLY_PROOF on {} (one build and test of the epic tip)",
+                        "pending {}'s integration proof (its merge-queue landing on the default branch, or an ASSEMBLY_PROOF of the epic tip)",
                         epic.id
                     ),
                     (None, None) => {

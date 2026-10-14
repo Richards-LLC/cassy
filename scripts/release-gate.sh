@@ -219,7 +219,7 @@ else
     scratch_base_origin='default'
     if [[ -f "$repo_root/scripts/release_env.py" ]] \
         && release_env_assignments="$(python3 "$repo_root/scripts/release_env.py" resolve \
-            --worktree "$repo_root" --format shell)"; then
+            --worktree "$repo_root")"; then
         eval "$release_env_assignments"
         if [[ -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
             scratch_base="$RELEASE_ENV_SCRATCH"
@@ -694,7 +694,7 @@ check_epic_worktree_zig() {
     # ZIG, this worktree's .context/zig, the main checkout's, the release
     # profile's pin, then PATH.
     if ! assignments="$(python3 "$repo_root/scripts/release_env.py" resolve \
-        --worktree "$repo_root" --format shell)"; then
+        --worktree "$repo_root")"; then
         printf 'epic-worktree-zig: scripts/release_env.py failed\n'
         return 1
     fi

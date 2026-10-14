@@ -24,7 +24,7 @@ The profile is the release env file (CAS_RELEASE_ENV_FILE, default
 lines stay untouched, and values of unmanaged names are never printed.
 
 Commands:
-  resolve --worktree W [--durable] [--create] [--link-zig] [--format shell|json]
+  resolve --worktree W [--durable] [--create] [--link-zig]   (shell assignments)
   doctor  --worktree W [--json]
   setup   --worktree W
 """
@@ -454,9 +454,6 @@ def command_resolve(args, env=os.environ) -> int:
     profile = read_profile(env_file(env))
     zig = resolve_zig(checkout, env, profile=profile, link=args.link_zig)
     scratch = resolve_scratch(checkout, env, durable=args.durable, create=args.create, profile=profile)
-    if args.format == "json":
-        print(json.dumps({"zig": asdict(zig), "scratch": asdict(scratch)}, indent=2, sort_keys=True))
-        return 0
     print(shell_assignments({
         "RELEASE_ENV_ZIG": zig.path,
         "RELEASE_ENV_ZIG_SOURCE": zig.source,
@@ -496,17 +493,8 @@ def check_env_file(env) -> list[Check]:
                       f"install -m 0600 /dev/null {shlex.quote(str(path))} && cas release setup")]
     if not os.access(path, os.R_OK):
         return [Check("release-env", "gap", f"{path} is not readable", f"chmod 0600 {shlex.quote(str(path))}")]
-    checks = []
-    names = sorted(read_profile(path))
-    checks.append(Check("release-env", "ok", f"{path} names: {' '.join(names) or '(none)'}"))
-    if path.stat().st_mode & 0o077:
-        checks.append(Check("release-env-mode", "warn", f"{path} is readable by other users",
-                            f"chmod 0600 {shlex.quote(str(path))}"))
-    if "CAS_POSTHOG_API_KEY" not in names:
-        checks.append(Check("release-env-secrets", "warn",
-                            "CAS_POSTHOG_API_KEY is absent; release builds ship without product analytics",
-                            f"add export CAS_POSTHOG_API_KEY=... to {shlex.quote(str(path))}"))
-    return checks
+    names = sorted(read_profile(path))  # names only: the file holds secrets
+    return [Check("release-env", "ok", f"{path} names: {' '.join(names) or '(none)'}")]
 
 
 def check_zig(checkout: Path, env, profile) -> list[Check]:
@@ -516,11 +504,7 @@ def check_zig(checkout: Path, env, profile) -> list[Check]:
     code, output = run_quiet([zig.path, "version"], 10, env)
     if code:
         return [Check("zig", "gap", f"{zig.path} ({zig.source}) does not run: {output[-200:]}", zig.fix)]
-    checks = [Check("zig", "ok", f"{zig.path} {output.splitlines()[0] if output else ''} ({zig.source})")]
-    if env.get("ZIG") and zig.source != "ZIG (environment)":
-        checks.append(Check("zig-env", "warn", "exported ZIG is unusable: " + "; ".join(zig.tried),
-                            "unset ZIG"))
-    return checks
+    return [Check("zig", "ok", f"{zig.path} {output.splitlines()[0] if output else ''} ({zig.source})")]
 
 
 def by_filesystem(checkouts: list[Path], host: Host = HOST) -> list[list[Path]]:
@@ -693,7 +677,6 @@ def main(argv=None) -> int:
     resolve.add_argument("--durable", action="store_true", help="refuse system temporary roots")
     resolve.add_argument("--create", action="store_true", help="create the scratch base directory")
     resolve.add_argument("--link-zig", action="store_true", help="symlink the main checkout's Zig in")
-    resolve.add_argument("--format", choices=("shell", "json"), default="shell")
     check = commands.add_parser("doctor", help="check every release prerequisite, one fix per gap")
     check.add_argument("--worktree", default=".")
     check.add_argument("--json", action="store_true")

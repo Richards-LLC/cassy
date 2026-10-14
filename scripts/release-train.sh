@@ -1397,7 +1397,7 @@ fi
 # the gate's own resolution names the gap.
 if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" || -z "${ZIG:-}" ]] \
     && release_env_assignments="$(python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
-        --durable --create --link-zig --format shell)"; then
+        --durable --create --link-zig)"; then
     eval "$release_env_assignments"
     if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" && -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
         export CAS_RELEASE_GATE_HOME_DIR="$RELEASE_ENV_SCRATCH"

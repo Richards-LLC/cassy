@@ -44,7 +44,7 @@ pub const PEER_LIVE_SECS: i64 = 300;
 pub const PEER_LISTING_WINDOW_SECS: i64 = 24 * 60 * 60;
 
 /// One supervisor of the same repo, as registered in Cassy Cloud.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Peer {
     pub agent_id: String,
     pub name: String,
@@ -170,9 +170,8 @@ fn age(secs: i64) -> String {
 /// `coordination action=peers`.
 pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
     // cas-f707: two short lines per peer, so the list fits 80 columns.
-    let mut out = crate::cloud::presence::wrap_line(&format!(
-        "Peers ({canonical_id}, via Cassy Cloud):"
-    ));
+    let mut out =
+        crate::cloud::presence::wrap_line(&format!("Peers ({canonical_id}, via Cassy Cloud):"));
     if peers.is_empty() {
         out.push_str("  no other supervisors of this repo seen in the last 24h\n");
         return out;
@@ -208,6 +207,22 @@ pub enum PeerDiscovery {
     NoProjectIdentity,
 }
 
+/// A plain operator terminal may have no harness session or registered
+/// ancestor PID. Agents registered in this project's own store still belong
+/// to this clone, so none of them are remote peers of the project.
+pub(crate) fn exclude_project_agents(
+    cas_root: &Path,
+    peers: &mut Vec<Peer>,
+) -> Result<(), crate::error::CasError> {
+    let local_ids: std::collections::HashSet<_> = crate::store::open_agent_store(cas_root)?
+        .list(None)?
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect();
+    peers.retain(|peer| !local_ids.contains(&peer.agent_id));
+    Ok(())
+}
+
 /// Look up the peers of the project rooted at `cas_root` through Cassy Cloud.
 pub fn discover_peers(
     cas_root: &Path,
@@ -227,11 +242,12 @@ pub fn discover_peers(
         .into_iter()
         .chain(std::iter::once(canonical_id.clone()))
         .collect::<Vec<_>>();
-    let peers = crate::cloud::CloudCoordinator::new(config)?
+    let mut peers = crate::cloud::CloudCoordinator::new(config)?
         .with_timeout(DISCOVERY_TIMEOUT)
         // cas-f707: ask the cloud for this project (petra-stella-cloud#151).
         .with_canonical_id(Some(canonical_id.clone()))
         .list_repo_peers(&canonical_id, &alias_class, self_id, Utc::now())?;
+    exclude_project_agents(cas_root, &mut peers)?;
     Ok(PeerDiscovery::Found {
         canonical_id,
         peers,
@@ -253,7 +269,7 @@ pub fn peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
 /// The caller's own registration state, from the record the daemon keeps
 /// (cas-f707). Empty when the caller is unknown or the project does not
 /// reach Cassy Cloud.
-fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
+pub(crate) fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
     let logged_in = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
         .is_ok_and(|config| config.is_logged_in());
     if !logged_in || crate::cloud::resolve_canonical_id(cas_root).is_none() {
@@ -301,12 +317,12 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
 /// After the peers: the epic splits agreed with them (cas-4736), then the
 /// mailbox footer. Both are read fresh from this clone, never cached with
 /// the discovery.
-fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+pub(crate) fn append_mailbox_status(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
     section.push_str(&crate::cloud::epic_split::render_splits(cas_root));
     append_mailbox_health(cas_root, self_id, section);
 }
 
-fn append_mailbox_health(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
+pub(crate) fn append_mailbox_health(cas_root: &Path, self_id: Option<&str>, section: &mut String) {
     let agents = crate::store::open_agent_store(cas_root).ok();
     if let Some(id) = self_id {
         let session = agents

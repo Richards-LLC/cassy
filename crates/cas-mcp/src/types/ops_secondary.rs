@@ -940,6 +940,23 @@ pub struct CoordinationRequest {
     )]
     pub action: String,
 
+    /// Expand peer supervisors with their claims, workers and branches.
+    #[schemars(
+        description = "peers only: include task claims, live workers and branches (read-only)"
+    )]
+    #[serde(default)]
+    pub detail: Option<bool>,
+
+    /// Select one peer supervisor; implies detail.
+    #[schemars(description = "peers only: supervisor name or name@machine; implies detail")]
+    #[serde(default)]
+    pub peer: Option<String>,
+
+    /// Machine-readable peer report with untruncated values.
+    #[schemars(description = "peers only: return one JSON document with untruncated values")]
+    #[serde(default)]
+    pub json: Option<bool>,
+
     // ========== Shared Fields ==========
     /// Agent ID, worktree ID, or branch name
     #[schemars(description = "Agent ID or worktree ID/branch name")]

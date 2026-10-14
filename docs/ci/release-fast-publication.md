@@ -28,13 +28,15 @@ Three facts decide the design:
    version-bump PR's merge — even though the tree they build is final the
    moment that PR lands.
 
-So the artifacts are built when the release PR merges, and the tag publishes
-bytes that already exist.
+So the artifacts are built when the release train pushes `release/<version>`,
+before the merge queue lands it, and the tag publishes bytes that already
+exist. The pushed branch carries the exact tree that lands on main: that held
+for 12 of 12 release PRs, 3.45.0 through 3.51.1 (cas-28eb).
 
 ## The architecture
 
 ```text
-release PR merges to main
+release train pushes release/<version>   (and later, the PR merges to main)
         |
         v
 release-prebuild.yml
@@ -68,9 +70,12 @@ expensive lanes.
 ### Why adoption is fail-safe and publication is fail-closed
 
 `scripts/find-release-prebuild.sh` only matches a **successful** prebuild run
-whose `head_sha` is exactly the commit being published, and only when both
-artifacts are present and unexpired. If that exact prebuild is queued or in
-progress, the lookup polls for up to 15 minutes (at 15-second intervals), then
+whose head commit is the commit being published or has exactly its tree, and
+only when both artifacts are present and unexpired. The tree match is what
+adopts the `release/<version>` run. An equal tree also means the same workflow
+file built it, and a different tree is never adopted. The persistent runner
+stays main-only: the `release/**` run builds Linux on a hosted runner. If a
+matching prebuild is queued or in progress, the lookup polls for up to 15 minutes (at 15-second intervals), then
 reports `found=false` with a prominent workflow warning if the run still has
 not produced both assets. Every other degraded input — no run, a partial run,
 expired artifacts, an API outage — also reports `found=false` with the same
@@ -151,14 +156,13 @@ worth knowing before enabling it:
 
 ## Cutting a release on the fast path
 
-1. Merge the version-bump PR to `main`. `Release Prebuild` starts on that push.
-2. Wait for its `Release prebuild summary` job. It states plainly whether a tag
-   will adopt the artifacts or fall back to building them inline.
-3. Push the tag (`scripts/release.sh --publish-tag`). The script reports the
-   same thing one last time before it pushes, and the workflow waits up to 15
-   minutes if the tag races the prebuild, so a tag is not silently pushed into
-   a cold path.
-4. Run the published-asset receipts once the release is published, then wait
+1. The release train pushes `release/<version>`; `Release Prebuild` starts on
+   that push and again when the PR lands on `main`.
+2. Push the tag as soon as the PR lands (`scripts/release.sh --publish-tag`).
+   The script reports whether the prebuild is ready, still running, or missing
+   without waiting for it. The workflow waits up to 15 minutes for a running
+   prebuild of this tree, so a tag is not silently pushed into a cold path.
+3. Run the published-asset receipts once the release is published, then wait
    for the advisory `Install path proof` workflow to finish green on macOS ARM
    and clean Linux before calling the release installable. Its transcript and
    manual consumer-Mac limitation are documented in

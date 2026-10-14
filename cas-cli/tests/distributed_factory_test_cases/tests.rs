@@ -380,28 +380,13 @@ fn test_factory_agent_active_tasks_count() {
 // Cloud Integration Tests (Require CAS_CLOUD_TOKEN)
 // =============================================================================
 
-/// The cloud these tests run against: the real one when `CAS_CLOUD_TOKEN` is
-/// set (`CAS_CLOUD_ENDPOINT` optional), otherwise the in-process fake
-/// (cas-8ca9), which is returned so it lives as long as the test.
-fn cloud_for_test() -> (
-    cas::cloud::CloudConfig,
-    Option<super::fake_cloud::FakeCloud>,
-) {
-    if let Some(token) = std::env::var("CAS_CLOUD_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty())
-    {
-        let endpoint =
-            std::env::var("CAS_CLOUD_ENDPOINT").unwrap_or_else(|_| "https://cas.cloud".to_string());
-        let config = cas::cloud::CloudConfig {
-            token: Some(token),
-            endpoint,
-            ..Default::default()
-        };
-        return (config, None);
-    }
-    let fake = super::fake_cloud::FakeCloud::start();
-    (fake.config(), Some(fake))
+/// The cloud these tests run against: the in-process fake by default, or the
+/// real Cassy Cloud through the namespacing proxy when `CAS_CLOUD_TOKEN_FILE`
+/// (or the legacy `CAS_CLOUD_TOKEN`) is set (cas-c7c7). The cloud is
+/// returned so it lives as long as the test, and its teardown runs at drop.
+fn cloud_for_test() -> (cas::cloud::CloudConfig, super::test_cloud::TestCloud) {
+    let cloud = super::test_cloud::TestCloud::start();
+    (cloud.config(), cloud)
 }
 
 #[test]
@@ -474,7 +459,7 @@ fn test_cloud_agent_sync_across_machines() {
 
 #[test]
 fn test_cloud_task_claiming_distributed() {
-    let (config, fake) = cloud_for_test();
+    let (config, _cloud) = cloud_for_test();
 
     // Create two coordinators (simulating two machines)
     let mut coordinator_a =
@@ -501,13 +486,11 @@ fn test_cloud_task_claiming_distributed() {
     // Agent A claims the task
     let claim_a = coordinator_a.claim(&task_id, 300, Some("Testing"));
 
-    // The fake serves claims, so there the claim must succeed outright.
-    if fake.is_some() {
-        assert!(
-            matches!(claim_a, Ok(cas::types::ClaimResult::Success(_))),
-            "{claim_a:?}"
-        );
-    }
+    // Both the fake and the real cloud serve claims, so it succeeds outright.
+    assert!(
+        matches!(claim_a, Ok(cas::types::ClaimResult::Success(_))),
+        "{claim_a:?}"
+    );
 
     // Handle case where task doesn't exist in cloud yet
     if let Ok(result) = &claim_a {

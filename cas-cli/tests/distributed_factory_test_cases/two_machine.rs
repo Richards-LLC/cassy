@@ -18,7 +18,7 @@ use cas::types::{Agent, AgentRole};
 use cas_store::QueueOrigin;
 
 use super::TestMachine;
-use super::fake_cloud::FakeCloud;
+use super::test_cloud::TestCloud;
 
 const WIDGETS: &str = "github.com/acme/widgets";
 
@@ -37,7 +37,7 @@ fn operator_cli(machine: &TestMachine, args: &[&str]) -> std::process::Command {
 #[test]
 fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     register(
         &alpha,
@@ -79,7 +79,7 @@ fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
 #[test]
 fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     let PeerDiscovery::Found { peers, .. } = discover_peers(&alpha.cas_dir, None).unwrap() else {
         panic!("expected project peer discovery");
@@ -96,7 +96,7 @@ fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
 #[test]
 fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     for via_pid in [false, true] {
         let mut caller = alpha.agent_store().get("a").unwrap();
@@ -122,7 +122,7 @@ fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
 #[test]
 fn cas_1caa_cli_without_self_resolves_token_account_and_worker_claims() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     CloudCoordinator::new(cloud.config())
         .unwrap()
@@ -147,7 +147,7 @@ fn cas_1caa_cli_without_self_resolves_token_account_and_worker_claims() {
 #[tokio::test]
 async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     let now = chrono::Utc::now();
     for (id, state) in [
@@ -291,14 +291,13 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
 #[tokio::test]
 async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
-    {
-        let mut state = cloud.state.lock().unwrap();
-        // b's agents belong to another member of a team project.
-        for id in ["b", "bw"] {
-            state.agents.get_mut(id).unwrap()["user_id"] = serde_json::json!("other-user");
-            state.agents.get_mut(id).unwrap()["team_id"] = serde_json::json!("test-team");
+    // b's agents belong to another member of a team project. One real
+    // account cannot stage that, so the real-cloud leg records a skip.
+    for id in ["b", "bw"] {
+        if !cloud.set_account(id, "other-user", "test-team") {
+            return;
         }
     }
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
@@ -338,7 +337,7 @@ async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
 #[tokio::test]
 async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importing_workers() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
     for n in 1..4 {
         register(
@@ -374,12 +373,8 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
     let mut task = cas::types::Task::new("cas-active".into(), "Implement peer awareness".into());
     task.status = cas::types::TaskStatus::InProgress;
     alpha.task_store().add(&task).unwrap();
-    {
-        let mut state = cloud.state.lock().unwrap();
-        for id in ["bw", "bw1", "bw2", "bw3"] {
-            state.agents.get_mut(id).unwrap()["metadata"]["branch"] =
-                serde_json::json!(format!("factory/{id}"));
-        }
+    for id in ["bw", "bw1", "bw2", "bw3"] {
+        cloud.set_metadata(id, "branch", &format!("factory/{id}"));
     }
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("a".into());
@@ -533,7 +528,7 @@ fn inbox(machine: &TestMachine) -> Vec<QueuedPrompt> {
 
 /// alpha and beta work github.com/acme/widgets (beta's clone spelled as its
 /// git remote); gamma works another repo. beta also runs a worker.
-fn three_machines(cloud: &FakeCloud) -> (TestMachine, TestMachine, TestMachine) {
+fn three_machines(cloud: &TestCloud) -> (TestMachine, TestMachine, TestMachine) {
     let (alpha, beta, gamma) = (
         TestMachine::new("machine-alpha"),
         TestMachine::new("machine-beta"),
@@ -558,7 +553,7 @@ fn three_machines(cloud: &FakeCloud) -> (TestMachine, TestMachine, TestMachine) 
 
 #[test]
 fn two_supervisors_discover_claim_message_reply_and_release() {
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
 
     // 1. Discovery: each sees the other, with machine and focus; never the
@@ -661,7 +656,7 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
 /// request, an urgent interrupt or an operator instruction.
 #[test]
 fn a_peer_supervisor_cannot_spawn_or_direct_the_other_machines_workers() {
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, beta, _gamma) = three_machines(&cloud);
 
     // Discovery never offers beta's worker as an addressable peer.
@@ -743,7 +738,7 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
     // ambient CAS_* environment.
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     // The fake serves on its own thread, so blocking setup here is safe.
-    let cloud = FakeCloud::start();
+    let cloud = TestCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("a".to_string());

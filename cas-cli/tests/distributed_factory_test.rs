@@ -14,7 +14,10 @@
 //! # Run all distributed factory tests
 //! cargo test --test integration_factory distributed_factory_test::
 //!
-//! # Run with cloud (requires CAS_CLOUD_TOKEN env var)
+//! # Run against the real cloud (cas-c7c7): a 0600 cloud.json or token file
+//! CAS_CLOUD_TOKEN_FILE=<path> CAS_CLOUD_TRANSCRIPT_DIR=<dir> cargo nextest run \
+//!     -p cas --test integration_factory -E 'test(two_machine) | test(test_cloud_)'
+//! # Legacy (requires CAS_CLOUD_TOKEN env var)
 //! CAS_CLOUD_TOKEN=xxx cargo test --test integration_factory distributed_factory_test::
 //! ```
 
@@ -91,6 +94,9 @@ mod peer_messages;
 
 #[path = "distributed_factory_test_cases/fake_cloud.rs"]
 mod fake_cloud;
+
+#[path = "distributed_factory_test_cases/test_cloud.rs"]
+mod test_cloud;
 
 #[path = "distributed_factory_test_cases/two_machine.rs"]
 mod two_machine;

@@ -61,7 +61,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Every release-train stage has a versioned budget in
   `scripts/release-stage-budgets.json`. The latency receipt records each
-  stage's time, its budget and any breach.
+  stage's time, its budget and any breach. Commit to main is measured too:
+  each task's park to the main commit that landed it, reported as the median
+  and the worst task, with the worst task budgeted at 30 minutes.
 - The release report has a new Pipeline latency section. It shows each stage
   against its budget and the stage's times in the previous five releases. A
   stage over budget fails the section and is named. The 3.52.0 cut, for

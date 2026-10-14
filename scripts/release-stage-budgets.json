@@ -1,7 +1,8 @@
 {
-  "comment": "Per-stage wall-time budgets for the release train, in seconds (cas-2bef). release-metrics.py compares each completed stage in stage-events.tsv with its budget. A breach fails the release report's latency section, and post-publication files a P0 task in `epic`. Loosening a budget is a reviewed change to this file. Targets come from epic cas-a229: commit to main within 30 minutes, main to published within 20.",
+  "comment": "Per-stage wall-time budgets for the release train, in seconds (cas-2bef). release-metrics.py compares each completed stage in stage-events.tsv with its budget; commit-to-main is the worst task's park to the main commit that landed it. A breach fails the release report's latency section, and post-publication files a P0 task in `epic`. Loosening a budget is a reviewed change to this file. Targets come from epic cas-a229: commit to main within 30 minutes, main to published within 20.",
   "epic": "cas-a229",
   "budgets": {
+    "commit-to-main": 1800,
     "preflight": 120,
     "assemble": 600,
     "prep": 120,

@@ -159,6 +159,8 @@ struct ReleaseEvidence {
     stage_budgets: Vec<(String, i64)>,
     budget_breaches: Option<Vec<String>>,
     stage_trend: Vec<(String, Vec<(String, i64)>)>,
+    /// (tasks, median seconds, worst task, worst seconds) from park to main.
+    commit_to_main: Option<(u64, i64, String, i64)>,
 }
 
 impl ReleaseEvidence {
@@ -200,6 +202,19 @@ impl ReleaseEvidence {
                     .filter_map(|item| item.split_once(':').map(|(stage, _)| stage.to_string()))
                     .collect()
             });
+        self.commit_to_main = values.get("COMMIT_TO_MAIN").and_then(|value| {
+            let fields: HashMap<&str, &str> = value
+                .split(',')
+                .filter_map(|item| item.split_once(':'))
+                .collect();
+            let (task, worst) = fields.get("worst")?.split_once(':')?;
+            Some((
+                fields.get("tasks")?.parse().ok()?,
+                fields.get("median")?.parse().ok()?,
+                task.to_string(),
+                worst.parse().ok()?,
+            ))
+        });
         self.interventions = values
             .get("INTERVENTIONS")
             .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
@@ -346,6 +361,13 @@ fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
                 .collect::<Vec<_>>()
                 .join("; ")
         )),
+    }
+    if let Some((tasks, median, task, worst)) = &evidence.commit_to_main {
+        output.push_str(&format!(
+            "Commit to main, from each task's park to the main commit that landed it: {tasks} tasks, median {}, worst {task} at {}. The worst task is budgeted as commit-to-main.\n\n",
+            format_duration(*median),
+            format_duration(*worst)
+        ));
     }
     output
         .push_str("| Stage | This release | Budget | Status | Earlier releases, oldest first |\n");
@@ -2624,7 +2646,8 @@ mod tests {
             ..ReleaseEvidence::default()
         };
         evidence.record_latency(&parse_key_values(
-            "STAGE_SECS=gate:3029,publish:1526,pr-body:0\n\
+            "COMMIT_TO_MAIN=tasks:13,median:302911,worst:cas-462b:319886\n\
+             STAGE_SECS=gate:3029,publish:1526,pr-body:0\n\
              STAGE_BUDGETS=gate:900,publish:1200\n\
              BUDGET_BREACHES=gate:3029/900,publish:1526/1200\n",
         ));
@@ -2641,6 +2664,10 @@ mod tests {
         );
         assert!(
             section.contains("| pr-body | 0s | none | no budget | unavailable |"),
+            "{section}"
+        );
+        assert!(
+            section.contains("13 tasks, median 5048m 31s, worst cas-462b at 5331m 26s."),
             "{section}"
         );
 

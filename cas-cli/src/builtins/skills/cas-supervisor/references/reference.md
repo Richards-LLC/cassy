@@ -214,3 +214,7 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
   - `epic_split` with no arguments, `coordination action=peers` and the Peers section of `worker_status` list the splits.
   - Neither side claims, releases or spawns for the other.
   - Cassy Cloud shows claims only within one user account. A peer on another account cannot see your claims, but the split refusal still holds on both sides, because each database records the agreement.
+- **Check your own presence first.** If the peers section opens with `Cloud presence: failing: <cause>` or ends with `Peer mailbox: not receiving: <cause>`, peers cannot see you or cannot reach you. Fix the cause before you rely on claims, splits or messages.
+- **Another account's claims are invisible.** A peer whose details read `Claims not visible (different account)` may still be working. Agree on ownership by message and record it with an epic split.
+- **Do not resend a retried message.** A send answered `queued for automatic retry as peer-outbox:<id>` is retried under one identity for up to 15 minutes. Check it with `message_status id=peer-outbox:<id>`. Send again only after the abandonment notice arrives and its cause is fixed.
+- **On a peer refusal, message the holder.** `⛔ HELD BY A PEER` and `⛔ SPLIT TO A PEER` name the holder and include the message command to send. Do not use `force=true` to settle a disagreement.

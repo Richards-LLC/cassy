@@ -28,56 +28,91 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   server, and the PreToolUse hook refuses the agent shell command. The
   operator at a terminal, and ordinary servers, are unaffected.
 
-### Added — a task one machine works is not started on another (cas-5f28)
+### Added — supervisors of one repository work together across machines (3.51)
 
-- When the project is logged in to Cassy Cloud, `task start` and
-  `task action=claim` also claim the task in the cloud. A session of the same
-  repository on another machine (or in another clone) that tries to start it
-  is refused. The refusal names the holder and its machine, and shows how to
-  message them. `force=true` takes the task over and says so.
-- Claims are scoped to the repository, so the same task id in two of your
-  repositories never collides.
-- Claims are released on close, release, reset, transfer, park and cancel.
-  The daemon heartbeat renews them every two minutes.
-- When the holder's machine stops, its claim runs out and a peer may start
-  the task with a stale-claim warning. When the cloud is unreachable, the
-  local lease applies, with a "peers not checked" warning.
-- Two sessions working children of the same epic (subtask start, epic start,
-  `focus_epic`) are told about each other; nothing is refused.
-- `spawn_workers` warns when a peer holds the task it pre-assigns.
-- `task start` of a pulled task already in progress under an assignee who is
-  not on this host names that assignee.
+Setup, a walkthrough with real output and a troubleshooting table:
+[peer supervisors guide](docs/guides/peer-supervisors.md).
 
-### Fixed — peers stay visible (cas-f707)
-
-- Was: a supervisor registered with Cassy Cloud once, at SessionStart, and a
-  failure was only printed. Now every registration path pushes, including
-  the MCP server's own registration and a replayed SessionStart. A failed
-  registration is retried on the next heartbeat, then with backoff up to
-  every 5 minutes. A heartbeat the cloud refuses with 404 or 401 registers
-  the agent again.
-- Was: the epic focus peers saw was frozen at SessionStart. Now
-  `focus_epic` pushes it, and every heartbeat carries the agent's project,
-  epic focus, branch and factory session, so a change shows within 30 s.
-- Registrations carry the branch checked out where the agent works
-  (`metadata.branch`).
-- A project that sets `cloud.auto_sync = false` keeps its agents out of the
-  registry. Agent names, hostnames and branches stay on the machine. `peers`
-  then says `Cloud presence: disabled (cloud.auto_sync=false)` and explains
-  that discovery is one-way. `worker_status --summary` flags a failing
-  registration.
-- The peers section fits an 80-column terminal: each peer takes two short
-  lines, and status lines wrap.
-- `cas status --verbose` draws its section rules in ASCII when the locale is
-  not UTF-8 (`LC_ALL=C`) (cas-867a).
-- `coordination action=peers`, `worker_status` and `cas status` open with
-  this agent's own state: `Cloud presence: registered` or
-  `Cloud presence: failing: <cause>`.
-- Peer discovery asks the cloud for this project
-  (`GET /api/agents?project=<canonical id>`), which also returns teammates'
-  agents on a team project. A peer the cloud reports `stale` is shown stale.
-- `cas status` no longer lists its own session as a peer. Claims and
-  discovery name a machine the same way.
+- **Discovery (cas-e477).** Was: a supervisor could not see the other
+  supervisors of its repository, on another machine or in another session.
+  Now: `coordination action=peers` lists them with machine, session, epic
+  focus and heartbeat age, and the same section appears in
+  `factory action=worker_status` and `cas status --verbose`. Supervisors of
+  other repositories are not listed.
+- **Messaging (cas-f9c7).** Was: a message to a supervisor on another machine
+  stayed in the local queue and never arrived. Now:
+  `coordination action=message target=<name>` (or `<name>@<machine>`) goes
+  through the Cassy Cloud mailbox. Replies use `in_reply_to`,
+  `message_status id=<peer message id>` reads delivery, and the recipient sees
+  the message labelled as from a peer supervisor. A peer message cannot be
+  urgent and carries no operator authority.
+- **Claims (cas-5f28).** Was: task leases were local, so two machines could
+  start the same task. Now: `task start` and `task action=claim` also claim
+  the task in Cassy Cloud and are refused with `⛔ HELD BY A PEER` when another
+  session of the repository holds it, naming the holder and its machine.
+  `force=true` takes it over and says so. Claims are released on close,
+  release, reset, transfer, park and cancel, and renewed every two minutes
+  while the lease is held. Claims are visible within one user account;
+  petra-stella-cloud#155 tracks teams.
+- **Presence (cas-f707).** Was: a supervisor registered with the cloud once,
+  at SessionStart, a failure was only printed, the focus peers saw was frozen,
+  and `cas status` listed its own session as a peer. Now: every registration
+  path registers, retrying with backoff up to every 5 minutes, and a heartbeat
+  the cloud answers with 404 or 401 registers again. Every heartbeat carries
+  the agent's project, focus, branch, factory session and hostname, so a focus
+  change shows within 30 s. Peers, `worker_status` and `cas status` open with
+  `Cloud presence: registered …` or `Cloud presence: failing: <cause>`, and
+  discovery asks the cloud for this project (`?project=<canonical id>`). A
+  project with `cloud.auto_sync = false` keeps its agents out of the registry
+  and says `Cloud presence: disabled (cloud.auto_sync=false)`.
+- **Claim safety (cas-0078, cas-f38e).** Was: a refused start could still move
+  the cloud claim to the refused agent, a lost claim was never taken back,
+  clearing an epic focus left its claim held for up to 30 minutes, and
+  `spawn_workers` warned about a peer's task only after queueing the worker.
+  Now: the holder keeps its claim, and a refused start names the holder and
+  when its claim runs out. `spawn_workers task_id=` on a peer-held task is
+  refused before anything is queued. The focus claim renews while the focus
+  stands and is released when it is cleared or moved. A claim lost to a peer
+  reports `⚠️  PEER CLAIM LOST`. Cloud calls no longer block the tool
+  handlers.
+- **Peer details (cas-559c).** Was: a peer showed only its focus, frozen at
+  start. Now: `coordination action=peers detail=true` (or `peer=<name>`) and
+  `cas peers --detail` show a peer's claims, live workers and branches. A peer
+  on another account reads `Claims not visible (different account)` rather
+  than an empty list.
+- **Epic split (cas-4736).** Was: two supervisors had no way to divide an
+  epic's children. Now:
+  `factory action=epic_split id=<epic> target=<peer> mine=<ids> theirs=<ids>`
+  claims your share and sends the proposal, and the peer answers with
+  `decision=accept` or `decision=reject`. Each side's start or spawn on the
+  other's children is refused with `⛔ SPLIT TO A PEER`. `decision=cancel`
+  releases only the canceller's claims, and an unanswered proposal expires
+  after `ttl_secs` (default 1800).
+- **Receiving (cas-13c7).** Was: a supervisor started before `cas login` never
+  began receiving peer messages, receive errors went quiet, and retrying a
+  send could deliver it twice. Now: receiving starts after login without a
+  restart, and peers and `worker_status` show `Peer mailbox: receiving.` or
+  `Peer mailbox: not receiving: <cause>`. A send that fails for a temporary
+  reason is kept as `peer-outbox:<id>` and retried for up to 15 minutes under
+  one identity, so the peer gets it once.
+- **Send outcomes (cas-a19b, GH #1186; cas-c384).** Was: a message to a live
+  supervisor on another machine could answer "queued — target not yet
+  registered, will deliver on registration", be dropped 15 minutes later, and
+  the sender was never told. Now: a peer send answers
+  `delivered to <name>@<machine> mailbox`. An unknown name fails at once with
+  `no supervisor or worker named <target> in this project or its peers`, and a
+  cloud failure names its cause. "will deliver on registration" appears only
+  for a name a pending local spawn will register. An abandoned message sends
+  its sender an inbox notice with its id and reason, and a cleanup sweep sends
+  one combined notice per sender rather than one per message (cas-c384).
+- **Terminal output (cas-f707, cas-867a).** Was: presence and peer lines ran
+  past 80 columns, and `cas status --verbose` drew its rules with "─" even
+  under `LC_ALL=C`. Now: status lines wrap, each peer takes two lines, and the
+  rules are ASCII when the locale is not UTF-8.
+- **Tests (cas-aa88).** Was: the hub test
+  `restart_force_terminates_a_recordless_lock_holder_and_starts_replacement`
+  failed intermittently on a timing race. Now: it waits for the old hub to
+  stop before the forced restart. No user-visible change.
 
 ## [3.50.1] - 2026-10-13
 

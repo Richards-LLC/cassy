@@ -77,7 +77,7 @@ For CI, wait on the runs themselves instead of a delay reminder:
 
 ```text
 coordination action=remind remind_event=ci_completed \
-  remind_filter='{"sha":"<full 40-char sha>","workflow":"CI"}' \
+  remind_filter='{"sha":"<full-40-char-sha>","workflow":"CI"}' \
   cross_session=true remind_message="CI finished on <sha>; merge or route the red job"
 ```
 

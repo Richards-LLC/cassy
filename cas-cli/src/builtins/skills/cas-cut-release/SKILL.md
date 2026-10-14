@@ -24,7 +24,7 @@ version and worktree, never a version-keyed path.
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,
    pending, or malformed evidence refuses the merge. Supervisors monitor CI;
    workers never poll CI.
-   Wait on CI with `remind_event=ci_completed` (`{"sha":"<full sha>"}`) and
+   Wait on CI with `remind_event=ci_completed` (`{"sha":"<full-sha>"}`) and
    on a queue landing with `remind_event=branch_contained_in`, both with
    `cross_session=true` — never a delay reminder.
 3. Start a clean detached or `release/` worktree from `origin/main`. Copy the

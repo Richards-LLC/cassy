@@ -77,6 +77,7 @@ class Shapes(unittest.TestCase):
             '// env!("CARGO_BIN_EXE_cas")\nfn helper() {}',
             'const DOC: &str = r#"env!("CARGO_BIN_EXE_cas")"#;',
             'fn helper() { Command::new(cas::test_paths::cas_binary()); }',
+            'fn helper() { cas::test_paths::binary("cas", option_env!("CARGO_BIN_EXE_cas").map(Into::into)); }',
             'const OTHER: &str = env!("CARGO_MANIFEST_DIR");',
         ]:
             with self.subTest(code=code):

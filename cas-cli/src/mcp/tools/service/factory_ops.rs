@@ -3807,6 +3807,13 @@ impl CasService {
                     )
                 })
                 .unwrap_or_default();
+            // cas-6f48: a red epic integration gate refuses merges into it.
+            // Like daemon health, it is urgent, so it sits above the scope
+            // heading; cloud presence and the mailbox footer stay below.
+            let health = format!(
+                "{}{health}",
+                crate::epic_gate::status_section(&self.inner.cas_root)
+            );
             let mailbox_session = factory_session.clone().or_else(|| {
                 self.inner
                     .get_registered_agent_id_read_only()
@@ -4123,6 +4130,11 @@ impl CasService {
                 crate::factory_daemon_health::worker_status_section(&self.inner.cas_root, session)
             })
             .unwrap_or_default();
+        // cas-6f48: a red epic integration gate refuses merges into it.
+        let daemon_health_section = format!(
+            "{}{daemon_health_section}",
+            crate::epic_gate::status_section(&self.inner.cas_root)
+        );
         let spawn_section = factory_session
             .clone()
             .and_then(|session| {
@@ -6764,6 +6776,11 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        // cas-6f48: the epic's integration gate (green tip, or red culprit).
+        report.push_str(&crate::epic_gate::epic_status_line(
+            &self.inner.cas_root,
+            epic.branch.as_deref().unwrap_or(parent_branch),
+        ));
         let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
         if !staged.is_empty() {
             report.push_str("\nStaged integration batch receipts:\n");

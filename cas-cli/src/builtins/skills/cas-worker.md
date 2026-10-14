@@ -23,8 +23,13 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    onto the supervisor's named target after checkpointing dirt.
    For an assigned QA-pass task, follow cas-qa-craft's Independent pass and
    `verification action=qa_record`; recording the verdict closes the QA task.
-3. Implement its scope, commit logical units with the task ID, and push unless
-   `delivery_mode=local_merge`. Add milestone `note_type=progress` notes.
+3. Implement its scope and commit logical units with the task ID, locally. Push
+   once, right before the close that parks it for merge (and once per review
+   round after that), unless `delivery_mode=local_merge`: every push to a
+   factory branch starts a CI run. Where the repo ships the fast release rows
+   (`scripts/release-gate.sh --fast-rows`), run them on the committed tip first:
+   `./scripts/release-gate.sh --fast-rows --base origin/<target>`. The park
+   refuses a tip without that PASS receipt. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
    and read [close-gate.md](references/close-gate.md). Close with
    `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain

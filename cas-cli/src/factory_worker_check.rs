@@ -356,6 +356,32 @@ fn test_receipt_path(cas_root: &Path, repo: &Path, head: &str, test: &TargetedTe
 }
 
 pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
+    let mut receipts = passing_test_records(cas_root, repo, head)
+        .into_iter()
+        .map(|(package, test)| {
+            format!("test: PASS {head} {package} {} {}", test.filter, test.count)
+        })
+        .collect::<Vec<_>>();
+    receipts.sort();
+    receipts.dedup();
+    receipts
+}
+
+/// cas-b38a: the packages with at least one passing targeted test at `head`
+/// in this worktree, sorted and once each. The close gate counts a delivered
+/// crate as tested when its package is listed here.
+pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
+    let mut packages = passing_test_records(cas_root, repo, head)
+        .into_iter()
+        .map(|(package, _)| package)
+        .collect::<Vec<_>>();
+    packages.sort();
+    packages.dedup();
+    packages
+}
+
+/// Every valid passing targeted-test receipt for `head` in this worktree.
+fn passing_test_records(cas_root: &Path, repo: &Path, head: &str) -> Vec<(String, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
     };
@@ -366,7 +392,7 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
-    let mut receipts = Vec::new();
+    let mut records = Vec::new();
     for entry in entries.flatten() {
         if !entry
             .file_name()
@@ -378,10 +404,10 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
         let record = std::fs::read(entry.path())
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok());
-        let Some(record) = record else {
+        let Some(mut record) = record else {
             continue;
         };
-        let Some(test) = record.test else {
+        let Some(test) = record.test.take() else {
             continue;
         };
         if record.repo == repo
@@ -395,15 +421,46 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
                 .as_ref()
                 .is_none_or(|harness| valid_package(harness))
         {
-            receipts.push(format!(
-                "test: PASS {head} {} {} {}",
-                record.packages[0], test.filter, test.count
-            ));
+            records.push((record.packages.remove(0), test));
         }
     }
-    receipts.sort();
-    receipts.dedup();
-    receipts
+    records
+}
+
+/// Write the receipt a passing targeted run leaves, for tests of the gates
+/// that read it (cas-b38a).
+#[cfg(test)]
+pub(crate) fn record_passing_test_for_tests(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+    package: &str,
+    filter: &str,
+) {
+    let repo = repo.canonicalize().expect("canonical repo");
+    let test = TargetedTest {
+        package: package.to_string(),
+        harness: None,
+        filter: filter.to_string(),
+    };
+    let path = test_receipt_path(cas_root, &repo, head, &test);
+    std::fs::create_dir_all(path.parent().expect("receipt directory"))
+        .expect("create receipt directory");
+    let record = CheckReceipt {
+        head: head.to_string(),
+        repo,
+        packages: vec![package.to_string()],
+        test: Some(TestReceipt {
+            filter: filter.to_string(),
+            harness: None,
+            count: 1,
+        }),
+    };
+    std::fs::write(
+        path,
+        serde_json::to_vec(&record).expect("serialize receipt"),
+    )
+    .expect("write receipt");
 }
 
 // Shared with parked-cache eviction: a cache cannot be evicted while its
@@ -583,6 +640,14 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     #[cfg(unix)]
     if let Some(lease) = &target_lease {
         lease.inherit(&mut command);
+        // cas-4ad0: test binaries start through a runner that closes the
+        // inherited lease, so a test's leaked child cannot hold the worktree.
+        if test.is_some()
+            && let Some(variable) = crate::factory_target_cache::owner::host_runner_env()
+        {
+            let runner = crate::factory_target_cache::owner::write_release_runner(&slots)?;
+            command.env(variable, runner);
+        }
     }
     let mut child = command
         .args(&cargo_args)
@@ -704,6 +769,73 @@ fi"#);
             assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
             assert_eq!(std::env::var_os("CARGO_BUILD_RUSTC_WRAPPER").unwrap(), cache.as_os_str(), "parent cache configuration is unchanged");
         }
+    }
+
+    /// cas-4ad0: through the real capped runner, a test binary started by
+    /// nextest runs through the release runner. It does not hold the target
+    /// lease, so a child it leaks cannot lock the worktree out. A plain
+    /// `cargo check` sets no runner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leaked_test_child_does_not_lock_the_worktree_out_cas_4ad0() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            &format!(
+                r#"if [ "$1" != nextest ]; then
+    [ -z "${{{variable}:-}}" ] || {{ echo 'check must not set a test runner' >&2; exit 3; }}
+    exit 0
+fi
+# The "test binary": runs through the runner, must not see the lease, leaks a child.
+"${{{variable}}}" python3 - <<'PY'
+import json, os, subprocess
+from pathlib import Path
+repo = Path.cwd()
+record, = [json.loads(p.read_text()) for p in (repo.parent.parent / 'worker-target-owners').glob('*.json')
+           if json.loads(p.read_text())['worktree'] == str(repo)]
+held = []
+for fd in os.listdir('/proc/self/fd'):
+    try:
+        stat = os.fstat(int(fd))
+    except OSError:
+        continue
+    if (stat.st_dev, stat.st_ino) == (record['lease_dev'], record['lease_ino']):
+        held.append(fd)
+assert not held, f'test binary inherited the lease on fd {{held}}'
+leak = subprocess.Popen(['sleep', '30'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, start_new_session=True)
+(repo / 'target/leaked-pid').write_text(str(leak.pid))
+PY
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
+'"#
+            ),
+        );
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &fake).unwrap();
+        let test_args =
+            ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
+        execute_at(&root, &test_args, &repo, &fake).unwrap();
+        let leaked: i32 = std::fs::read_to_string(repo.join("target/leaked-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only probes the leaked child this test caused.
+        let alive = unsafe { libc::kill(leaked, 0) } == 0;
+        let free = crate::factory_target_cache::owner::for_retirement(&root, &repo);
+        // SAFETY: kill only the leaked child this test caused.
+        unsafe { libc::kill(leaked, libc::SIGKILL) };
+        assert!(alive, "the leaked child outlives the run");
+        assert!(
+            free.is_ok_and(|lease| lease.is_some()),
+            "a leaked test child must not hold the worktree's target lease"
+        );
     }
 
     /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at
@@ -1277,6 +1409,9 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         other[5] = "test(other)".into();
         execute_at(&root, &other, &repo, &fake).unwrap();
         assert_eq!(passing_test_receipts(&root, &repo, &head).len(), 2);
+        // cas-b38a: the close gate reads the tested packages, once each.
+        assert_eq!(passing_test_packages(&root, &repo, &head), ["cas"]);
+        assert!(passing_test_packages(&root, &repo, &"b".repeat(40)).is_empty());
         fake_cargo(
             &fake,
             "printf '     Summary [ 0.01s] 0 tests run: 0 passed, 2 skipped\\n'",

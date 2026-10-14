@@ -15,6 +15,15 @@ TRAIN = Path(__file__).resolve().with_name("release-train.sh")
 INTEGRATE = TRAIN.with_name("release-integrate.py")
 
 
+def home_release_runs(home):
+    """Files in the fixture's version run dirs under a home's default artifacts
+    root, with size and mtime (cas-df75). The fixtures release v0.0.0, so a
+    leak lands in ~/.cas/artifacts/release/v0.0.0-*."""
+    root = Path(home) / ".cas/artifacts/release"
+    return {str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in sorted(root.glob("v0.0.0-*/**/*")) if path.is_file()}
+
+
 class IntegrationAssembly(unittest.TestCase):
     def setUp(self):
         inherited = {key: value for key, value in os.environ.items()
@@ -28,6 +37,11 @@ class IntegrationAssembly(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("CAS_RELEASE_ARTIFACTS_ROOT", None)
                         if old_artifacts is None else os.environ.__setitem__("CAS_RELEASE_ARTIFACTS_ROOT", old_artifacts))
         os.environ["CAS_RELEASE_ARTIFACTS_ROOT"] = str(Path(self.temp.name) / "artifacts")
+        # cas-df75: no fixture may read or write the real default run dir.
+        real_runs = home_release_runs(Path.home())
+        self.addCleanup(lambda: self.assertEqual(
+            home_release_runs(Path.home()), real_runs,
+            "a fixture wrote under ~/.cas/artifacts/release; use CAS_RELEASE_ARTIFACTS_ROOT"))
         self.root = Path(self.temp.name) / "project"
         self.root.mkdir()
         self.git("init", "-b", "main")
@@ -281,6 +295,41 @@ PY
         self.assertEqual(self.git("config", "--local", "cas.integrationBranch"), "integration/project")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
 
+    def test_multiple_legacy_branches_adopt_the_one_at_the_receipt_tip(self):
+        # cas-52de: several integration/ branches and no config refused assembly.
+        self.git("branch", "integration/old-release", self.base)
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Adopted integration/project", result.stderr)
+        self.assertEqual(self.git("config", "--local", "cas.integrationBranch"), "integration/project")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+
+    def test_multiple_legacy_branches_without_a_unique_receipt_match_still_refuse(self):
+        self.git("branch", "integration/twin", self.tip)
+        self.refused("Multiple legacy integration branches")
+
+    def test_release_docs_already_on_the_integration_tip_are_treated_as_applied(self):
+        # cas-52de: docs copied onto the release branch in steps conflicted
+        # with the integration tip, which already carried their final content.
+        self.git("checkout", "epic/one")
+        (self.root / "CHANGELOG.md").write_text("# Changelog\n\n## [0.0.0] - final\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "final changelog on the epic")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+        for step in ("## [0.0.0] - draft\n", "## [0.0.0] - final\n"):
+            (self.root / "CHANGELOG.md").write_text("# Changelog\n\n" + step)
+            self.git("add", "CHANGELOG.md")
+            self.git("commit", "-m", "copy changelog step")
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already on the integration tip", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_from_main_assembles_without_sweep_and_records_reason(self):
         self.git("update-ref", "refs/remotes/origin/main", self.tip)
         self.receipt_path.unlink()
@@ -426,6 +475,28 @@ PY
         self.assertEqual(result.stdout.splitlines()[0], "PASS release assembly")
         self.assertIn(self.tip, result.stdout)
 
+    def test_stale_home_run_dir_is_never_read_or_written_cas_df75(self):
+        """A stale assemble.integration.json from another repository in the
+        default run dir (~/.cas/artifacts/release/v0.0.0-project) neither
+        fails the assembly nor gains files: the fixture's artifacts root is
+        used instead."""
+        home = Path(self.temp.name) / "home"
+        stale = home / ".cas/artifacts/release/v0.0.0-project/assemble.integration.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(json.dumps({
+            "repository": "/tmp/elsewhere/project/.git", "tip": "9" * 40, "base": "9" * 40,
+            "mode": "from-main", "reason": "stale", "full_gate_required": True}))
+        before = home_release_runs(home)
+        old_home = os.environ["HOME"]
+        self.addCleanup(os.environ.__setitem__, "HOME", old_home)
+        os.environ["HOME"] = str(home)
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("another repository", result.stderr)
+        self.assertEqual(home_release_runs(home), before)
+        self.assertTrue((Path(os.environ["CAS_RELEASE_ARTIFACTS_ROOT"]) / "v0.0.0-project"
+                         / "interventions.log").is_file())
+
     def test_red_or_pending_sweep_refuses_old_tip(self):
         for status in ["CONFLICT", "FAILED", "RUNNING", "DEFERRED"]:
             self.receipt["status"] = status
@@ -542,6 +613,41 @@ PY
         self.assertNotEqual(assembled_tip, docs_tip)
         self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
         self.assertEqual(self.git("show", "--format=%s", "--no-patch", "HEAD"), "release docs")
+
+    def test_parallel_unreleased_sections_rebase_together_cas_7aa5(self):
+        """cas-7aa5: the integration tip and the release branch each add a
+        section under ## [Unreleased]. Assembly replays the release commit
+        without a conflict and keeps both sections; the driver is registered
+        from this checkout's scripts/cas-merge-drivers.py."""
+        base = "# Changelog\n\n## [Unreleased]\n\n## [0.0.0] - shipped\n\n- old\n"
+        self.git("checkout", "main")
+        (self.root / "CHANGELOG.md").write_text(base)
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "changelog")
+        main_tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", main_tip)
+        self.git("checkout", "-B", "epic/one", main_tip)
+        (self.root / ".gitattributes").write_text("CHANGELOG.md merge=cas-changelog\n")
+        (self.root / "CHANGELOG.md").write_text(
+            base.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n### Epic\n\n- epic entry\n\n"))
+        self.git("add", ".")
+        self.git("commit", "-m", "epic entry")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(base=main_tip, tip=self.tip, epics=[{"id": "one", "branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "-B", "release/test", main_tip)
+        (self.root / "CHANGELOG.md").write_text(
+            base.replace("## [Unreleased]\n\n", "## [Unreleased]\n\n### Release\n\n- release entry\n\n"))
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "release docs")
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = (self.root / "CHANGELOG.md").read_text()
+        self.assertNotIn("<<<<<<<", text)
+        self.assertLess(text.index("### Epic"), text.index("### Release"))
+        self.assertLess(text.index("### Release"), text.index("## [0.0.0]"))
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
 
     def test_changed_integration_refuses_wrong_receipt(self):
         self.git("update-ref", "refs/heads/integration/project", self.base)

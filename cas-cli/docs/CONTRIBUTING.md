@@ -196,6 +196,50 @@ with its own process group if fresh budget falls inside the 2 GiB headroom.
 These are admission estimates and sampled protection, not OS memory limits;
 other applications remain outside this cooperative protocol.
 
+#### The taste lane beside a proof (cas-833e)
+
+A rolling-integration proof holds exclusive intent for its whole run. Without
+a lane, every QA browser run during a sweep waited the full 600 s and expired.
+The taste lane admits **one** positively bounded worker run beside a proof:
+
+- **Eligible commands** (`worker-memory.py` `taste_eligible`): light commands
+  (tsc, Vite build, capped Vitest), a Playwright run capped at four workers
+  (cas-bb5e measured about 2.6 GiB peak at four), and the Commander visual QA
+  (one Chromium, sequential pages). Unknown, expanded, piped or backgrounded
+  commands are never eligible and wait for the proof as before.
+- **Memory rule.** Let `R` be the proof's reserve, `A` fresh `MemAvailable`,
+  `E` the run's estimate (at most 4 GiB), `H` the 2 GiB headroom and `F` a
+  2 GiB floor. The lane admits only when `R >= E + H + F` and `A >= E + H + F`.
+  A proof phase plans to use at most `A - R`, so at the proof's planned peak
+  the lane still leaves `R - E >= H + F` free. With the default reserve
+  (`max(8 GiB, RAM / 4)`), any host can lend one 4 GiB run. A 64 GiB host
+  keeps 12 GiB free at the proof's peak.
+- **No planning into the lane.** While `taste.lock` is held, the proof's
+  memory budget subtracts the lane's full recorded estimate, even though
+  `MemAvailable` already shows part of it. Later proof phases and a newly
+  admitted proof therefore never plan into it.
+- **One at a time.** `taste.lock` is exclusive. A second eligible run waits,
+  printing `proof running; taste lane busy`.
+- **Guard.** A lane run sits inside the proof's reserve, where the worker
+  budget is about zero by design. It is stopped only if `MemAvailable` falls
+  below the floor, which means some estimate was exceeded, and never because
+  the proof is at its peak.
+
+The rolling-integration sweep also waits `[factory].merge_sweep_quiet_secs`
+(default 300 s) after the last epic merge before starting. Each merge still
+cancels a stale running sweep at once, which releases the proof's admission
+in the gap, so a burst of merges runs one proof of the newest tip instead of
+a proof per merge.
+
+The default was measured on 2026-10-11's 21 epic merges, which arrived 1 to
+8 minutes apart, with a proof run of about 13 minutes:
+
+| Quiet period | Proofs started | Cancelled | Completed | Proof lock held |
+| --- | --- | --- | --- | --- |
+| 0 s (before) | 21 | 19 | 2 | 91% of 115 min |
+| 120 s | 16 | 14 | 2 | 61% |
+| 300 s | 7 | 5 | 2 | 38% |
+
 Verified frontend tests default to one Playwright worker, honour explicit requests
 up to four, and enforce two Vitest workers. A proof's own child script tests reuse
 its admitted budget rather than waiting on themselves. Use `TMPDIR` on the
@@ -572,8 +616,28 @@ The assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
 dry-run/ignore-error modes removed. A failing script suite retains its output
 and stops assembly before either Rust suite. The full release gate runs this
-same mandatory row before build and Rust test rows; it is excluded from the
-short `--fast-rows` lane checks.
+same mandatory row before build and Rust test rows. The short `--fast-rows`
+lane checks run only `ci-script-tests-changed`: the tier entries whose script
+or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
+Entries that take over 20 seconds alone are reported as deferred to the full
+row.
+
+The fast rows also run the no-build checks that the October 2026 release cut
+found only at assembly.
+Each runs when the lane changes its inputs, and the full gate always runs it:
+
+- `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
+  still matches a `test.step` title in its journey spec.
+- `builtin-skill-limits`: skill description, size and line limits checked on
+  the exact `include_str!` catalog bytes, mirroring the Rust tests.
+- `doctor-snapshot`: every doctor snapshot row sits in the group
+  `CheckGroup::for_name` assigns, and a lane that adds a
+  `recorder.mark(..)` phase also updates the snapshot.
+- `migration-registry`: every migration file is declared, registered and
+  listed in id order.
+
+Contract phrases were already part of `builtin-doc-hygiene`. On this host a
+lane spanning that release's three epics ran every fast row in about 25 seconds.
 
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
@@ -675,8 +739,27 @@ harness/session names in `scripts/assembly-proof.py`'s `IDENTITY` set from both
 the test environment and the fingerprint: factory/agent/session identity,
 `CAS_ROOT`, `CAS_CLONE_PATH`, `AI_AGENT`, `CLAUDECODE`,
 `CLAUDE_CODE_CHILD_SESSION`, `CAS_FACTORY_MODE`, `CAS_FACTORY_SUPERVISOR_CLI`
-and `CAS_FACTORY_WORKER_CLI`. A factory shell and a scrubbed release shell can
-therefore share the same proof without passing harness context to test children.
+and `CAS_FACTORY_WORKER_CLI`. It also removes the `HARNESS_NOISE` names
+(terminal, login-session, ssh-agent, interactive-editor, agent-harness and
+factory worker-spawn settings), every `CLAUDE_*` and `CODEX_*` variable, and
+credentials (`*_TOKEN`, `*_API_KEY`, `*_SECRET`, `*_PASSWORD`), each with a
+recorded reason (cas-398c). A factory shell, the factory daemon's background
+proof and a scrubbed release shell can therefore share one proof, so `--cut`
+reuses the daemon's proof of the same code input. Each receipt's
+`environment_policy` lists the included names and every excluded name with its
+reason; a miss names the differing included variable.
+
+Row proofs (cas-398c) extend the same key to `release-binary-isa` and
+`macos-check`, which depend only on the code input, toolchain and target.
+After a green integration run, the factory daemon calls
+`assembly-proof.py prove-rows` on the integration tip (deferred when the build
+guard reports the host busy; a newer merge cancels it). Each receipt, under
+`.cas/merge-sweeps/row-proofs/`, is keyed on the proof inputs plus the row,
+its target and a digest of the row's tools (cargo and `rustc -Vv`, plus
+cargo-zigbuild and objdump for the ISA audit; Zig is keyed by its bytes). A full gate
+runs `assembly-proof.py check-row` before the row cache: a hit records the row
+`REUSED` with its source SHA, and a miss prints the differing key and runs the
+row as before. `--only` and a no-reuse full gate never consume a row proof.
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.

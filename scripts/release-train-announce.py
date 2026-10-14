@@ -51,9 +51,10 @@ def body_lines(body: str) -> list[str]:
     return body.strip("\n").splitlines()
 
 
-# post-publication fills these from the published assets; they are the only
-# tokens a draft may carry before publication (preflight).
-DIGEST_TOKENS = frozenset({"{{LINUX_SHA256}}", "{{MACOS_SHA256}}"})
+# post-publication fills these from the release PR and the published assets;
+# they are the only tokens a draft may carry before publication (preflight).
+# cas-52de: {{RELEASE_PR}} is known only once the pipeline opens the PR.
+DIGEST_TOKENS = frozenset({"{{LINUX_SHA256}}", "{{MACOS_SHA256}}", "{{RELEASE_PR}}"})
 
 
 def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:

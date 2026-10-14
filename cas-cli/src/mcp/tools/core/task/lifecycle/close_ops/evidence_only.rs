@@ -50,7 +50,14 @@ pub(super) fn measure(repo: &Path, task: &Task, target: &str) -> Result<Measurem
     // the worker lane is never measured as its delivery.
     // GH #1167: evidence_only is a supervisor review of the artifact, so only
     // commits that name this task count as its own.
-    if super::no_code_task_without_own_commits_judged(repo, task, &target, None, true) {
+    // cas-b38a: an operations task that never declared a methodology and
+    // has no commit of its own (cas-3507: its work was a pull request in
+    // another repository) is judged the same way; a code methodology keeps
+    // the measurement below.
+    if super::no_code_task_without_own_commits_judged(repo, task, &target, None, true)
+        || (task.execution_note.is_none()
+            && super::task_without_own_commits_judged(repo, task, &target, None, true))
+    {
         return Ok(Measurement {
             base: target.clone(),
             tip: target,

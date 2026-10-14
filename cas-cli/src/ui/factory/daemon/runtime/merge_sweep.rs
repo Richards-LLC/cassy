@@ -26,6 +26,41 @@ mod rolling_integration;
 
 const LOG_DIR: &str = "merge-sweeps";
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// cas-bb5e: how often the coordinator asks the background journey
+/// scheduler to start a pending evaluation (rate cap and idle host permitting).
+const JOURNEY_TICK_INTERVAL: Duration = Duration::from_secs(60);
+
+fn journey_tick_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= JOURNEY_TICK_INTERVAL)
+}
+
+/// cas-833e: merges arrive in bursts. Each merge used to start a new
+/// integration sweep on the next poll, and every assembly proof holds host
+/// memory admission from its start, so a burst kept QA browser runs waiting.
+/// The gate keeps only the newest merge and releases it once no merge has
+/// arrived for the quiet period and the superseded sweep has finished.
+#[derive(Debug, Default)]
+struct QuietGate {
+    latest: Option<(Instant, SweepRequest)>,
+}
+
+impl QuietGate {
+    fn note(&mut self, request: SweepRequest, now: Instant) {
+        self.latest = Some((now, request));
+    }
+
+    fn holds(&self) -> bool {
+        self.latest.is_some()
+    }
+
+    fn due(&mut self, now: Instant, quiet: Duration, sweep_active: bool) -> Option<SweepRequest> {
+        let (noted, _) = self.latest.as_ref()?;
+        if sweep_active || now.saturating_duration_since(*noted) < quiet {
+            return None;
+        }
+        self.latest.take().map(|(_, request)| request)
+    }
+}
 const MAX_FAILURE_LINES: usize = 12;
 const MAX_NOTE_CHARS: usize = 1400;
 pub(super) const TEST_PROCESS_IDENTITY_ENV: &[&str] = &[
@@ -92,6 +127,8 @@ struct ActiveSweep {
 struct SweepSettings {
     enabled: bool,
     timeout: Duration,
+    /// cas-833e: `factory.merge_sweep_quiet_secs`.
+    quiet: Duration,
     cargo_build_jobs: String,
     nice_cargo: bool,
     max_concurrent_builders: usize,
@@ -129,6 +166,7 @@ impl From<&FactoryConfig> for SweepSettings {
             recovery_epics: None,
             enabled: config.merge_sweep,
             timeout: Duration::from_secs(config.merge_sweep_timeout_secs.max(1)),
+            quiet: Duration::from_secs(config.merge_sweep_quiet_secs),
             cargo_build_jobs: config.cargo_build_jobs.clone(),
             nice_cargo: config.nice_cargo,
             max_concurrent_builders: config.max_concurrent_builders,
@@ -166,7 +204,10 @@ pub(crate) struct MergeSweepCoordinator {
     active: HashMap<String, ActiveSweep>,
     completed: HashMap<String, String>,
     retry_after: Option<(Instant, SweepRequest)>,
+    quiet: QuietGate,
     unavailable_reported: bool,
+    journey_tick: Option<Instant>,
+    journey_tick_busy: Arc<AtomicBool>,
 }
 
 impl MergeSweepCoordinator {
@@ -187,7 +228,10 @@ impl MergeSweepCoordinator {
             active: HashMap::new(),
             completed: HashMap::new(),
             retry_after: None,
+            quiet: QuietGate::default(),
             unavailable_reported: false,
+            journey_tick: None,
+            journey_tick_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -197,7 +241,14 @@ impl MergeSweepCoordinator {
         cas_dir: &Path,
         config: &FactoryConfig,
     ) {
-        let mut requests = self.read_merge_events();
+        let settings = SweepSettings::from(config);
+        // cas-833e: a merge cancels a stale running sweep at once, which frees
+        // its host memory admission, but the next sweep waits in the quiet gate.
+        for request in self.read_merge_events() {
+            self.supersede_active(&request);
+            self.quiet.note(request, Instant::now());
+        }
+        let mut requests = Vec::new();
         if self
             .retry_after
             .as_ref()
@@ -207,12 +258,61 @@ impl MergeSweepCoordinator {
                 requests.push(request);
             }
         }
-        requests.extend(self.reap_finished(cas_dir).await);
-
-        let settings = SweepSettings::from(config);
+        let reaped = self.reap_finished(cas_dir).await;
+        // A superseded sweep's pending request is the merge the gate holds.
+        if !self.quiet.holds() {
+            requests.extend(reaped);
+        }
+        let active = self.active.contains_key("integration");
+        requests.extend(self.quiet.due(Instant::now(), settings.quiet, active));
         for request in requests {
             self.schedule(project_root, cas_dir, request, &settings, false);
         }
+        self.tick_journey_background(project_root, cas_dir, config);
+    }
+
+    /// cas-bb5e: start a pending background journey evaluation once the
+    /// rate cap and an idle host allow, even when no merge arrives. The
+    /// helper runs off the loop thread; one tick at a time.
+    fn tick_journey_background(
+        &mut self,
+        project_root: &Path,
+        cas_dir: &Path,
+        config: &FactoryConfig,
+    ) {
+        let now = Instant::now();
+        if !journey_tick_due(self.journey_tick, now) {
+            return;
+        }
+        self.journey_tick = Some(now);
+        let helper = project_root.join("scripts/journey-background.py");
+        if !helper.is_file() || self.journey_tick_busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let busy = Arc::clone(&self.journey_tick_busy);
+        let repo = project_root.to_path_buf();
+        let cas_dir = cas_dir.to_path_buf();
+        let config = config.clone();
+        std::thread::spawn(move || {
+            let idle =
+                crate::factory_build_guard::inspect(&cas_dir, &config, 0).live_cargo_workers == 0;
+            let mut command = Command::new("python3");
+            command
+                .arg(&helper)
+                .args(["tick", "--repo"])
+                .arg(&repo)
+                .current_dir(&repo)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if idle {
+                command.arg("--host-idle");
+            }
+            if let Err(error) = command.status() {
+                tracing::warn!(%error, "journey background tick failed");
+            }
+            busy.store(false, Ordering::Release);
+        });
     }
 
     async fn recover_once(
@@ -369,6 +469,19 @@ impl MergeSweepCoordinator {
         pending
     }
 
+    /// Cancel a running sweep of a different request; it becomes `pending`.
+    /// Returns whether a sweep is active.
+    fn supersede_active(&mut self, request: &SweepRequest) -> bool {
+        let Some(active) = self.active.get_mut("integration") else {
+            return false;
+        };
+        if &active.request != request {
+            active.pending = Some(request.clone());
+            active.cancel.store(true, Ordering::Relaxed);
+        }
+        true
+    }
+
     fn schedule(
         &mut self,
         project_root: &Path,
@@ -377,11 +490,7 @@ impl MergeSweepCoordinator {
         settings: &SweepSettings,
         strict_target: bool,
     ) {
-        if let Some(active) = self.active.get_mut("integration") {
-            if active.request != request {
-                active.pending = Some(request);
-                active.cancel.store(true, Ordering::Relaxed);
-            }
+        if self.supersede_active(&request) {
             return;
         }
         if self.completed.get(&request.epic_id) == Some(&request.commit) {
@@ -1173,7 +1282,20 @@ fn execute_sweep(
         }
     };
     drop(log);
-    let (summary, failures) = summarize_log(&log_path);
+    let (mut summary, mut failures) = summarize_log(&log_path);
+    let mut status = status;
+    // cas-ca55: compile infrastructure with no named test is an environment
+    // blocker with its fix, never a test failure to attribute to an epic.
+    if status == SweepStatus::Failed {
+        if let Some(blocker) = fs::read_to_string(&log_path)
+            .ok()
+            .and_then(|log| environment_blocker(&log, &failures))
+        {
+            status = SweepStatus::SetupFailed;
+            summary = blocker;
+            failures.clear();
+        }
+    }
     SweepResult {
         request,
         status,
@@ -1494,6 +1616,71 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
     (summary, failures)
 }
 
+/// cas-ca55: a failed run with no named test whose log shows a compile
+/// infrastructure fault (sccache, linker, disk) is an environment blocker.
+fn environment_blocker(log: &str, failures: &[String]) -> Option<String> {
+    // A named test failure (nextest `FAIL [`, libtest `test x ... FAILED`)
+    // means the build succeeded; that is a test failure, not infrastructure.
+    if failures.iter().any(|line| {
+        line.starts_with("FAIL [") || (line.starts_with("test ") && line.ends_with("FAILED"))
+    }) {
+        return None;
+    }
+    const CLASSES: &[(&str, &[&str], &str)] = &[
+        (
+            "disk",
+            &["No space left on device", "ENOSPC", "Disk quota exceeded"],
+            "free disk space under the target and cache directories, then rerun the sweep",
+        ),
+        (
+            "sccache",
+            &[
+                "sccache: error",
+                "sccache: caused by",
+                "sccache: encountered fatal error",
+            ],
+            // cas-3a29: a shared server started under a since-deleted TMPDIR
+            // fails every compile with "Failed to create temp dir".
+            "restart the sccache server with a stable TMPDIR (`sccache --stop-server; \
+             env TMPDIR=<stable dir> SCCACHE_IDLE_TIMEOUT=0 sccache --start-server`) or \
+             disable it (RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER=), then rerun the sweep",
+        ),
+        (
+            "linker",
+            &[
+                "linking with `",
+                "collect2: error",
+                "ld.lld: error",
+                "rust-lld: error",
+                "ld: cannot find",
+            ],
+            "check the linker toolchain and free memory/disk on the builder, then rerun the sweep",
+        ),
+        (
+            "memory",
+            &[
+                "signal: 9, SIGKILL",
+                "out of memory",
+                "Cannot allocate memory",
+            ],
+            "lower build parallelism or free memory on the builder, then rerun the sweep",
+        ),
+    ];
+    for (class, needles, fix) in CLASSES {
+        if let Some(evidence) = log
+            .lines()
+            .map(str::trim)
+            .find(|line| needles.iter().any(|needle| line.contains(needle)))
+        {
+            let evidence: String = evidence.chars().take(240).collect();
+            return Some(format!(
+                "environment blocker ({class}): {evidence}; fix: {fix}"
+            ));
+        }
+    }
+    None
+}
+
 fn append_epic_note(cas_dir: &Path, result: &SweepResult) {
     let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
         tracing::warn!(epic = %result.request.epic_id, "cannot open task store for merge sweep note");
@@ -1631,6 +1818,16 @@ fn first_output_line(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-bb5e: the coordinator asks the journey scheduler at most once a
+    /// minute; the first poll asks at once.
+    #[test]
+    fn cas_bb5e_journey_tick_is_throttled_to_once_a_minute() {
+        let now = Instant::now();
+        assert!(journey_tick_due(None, now));
+        assert!(!journey_tick_due(Some(now), now + Duration::from_secs(59)));
+        assert!(journey_tick_due(Some(now), now + JOURNEY_TICK_INTERVAL));
+    }
 
     #[test]
     fn unavailable_is_recorded_once_per_coordinator_session_across_merges() {
@@ -1855,6 +2052,108 @@ mod tests {
         let (summary, failures) = summarize_log(temp.path());
         assert_eq!(summary, "Summary: 1 failed");
         assert_eq!(failures, vec!["FAIL [ 0.1s] crate::broken"]);
+    }
+
+    /// cas-ca55: a compile-infrastructure failure with no test name is an
+    /// environment blocker with its fix, never a test failure.
+    #[test]
+    fn compile_infra_failure_is_an_environment_blocker_cas_ca55() {
+        let sccache = "   Compiling cas v9.99.0\nerror: failed to execute compile\n\
+                       sccache: error: Server startup failed: cache storage failed to read\n\
+                       error: could not compile `cas` (lib)\n";
+        let failures = vec!["error: could not compile `cas` (lib) FAILED".to_owned()];
+        let blocker = environment_blocker(sccache, &failures).expect("sccache is infra");
+        assert!(
+            blocker.starts_with("environment blocker (sccache)"),
+            "{blocker}"
+        );
+        assert!(blocker.contains("fix:"), "{blocker}");
+        assert!(!blocker.contains("nextest FAIL"), "{blocker}");
+
+        let linker = "error: linking with `cc` failed: exit status: 1\n  = note: collect2: error: ld returned 1 exit status\n";
+        assert!(
+            environment_blocker(linker, &[])
+                .unwrap()
+                .starts_with("environment blocker (linker)")
+        );
+        // cas-3a29: the shared server's TMPDIR was deleted under it.
+        let tmpdir = "error: failed to run `rustc`\nsccache: error: Failed to create temp dir\n";
+        let blocker = environment_blocker(tmpdir, &[]).unwrap();
+        assert!(blocker.contains("sccache --stop-server"), "{blocker}");
+        assert!(blocker.contains("Failed to create temp dir"), "{blocker}");
+        let disk = "error: failed to write target/debug/deps/x.rlib: No space left on device (os error 28)\n";
+        assert!(
+            environment_blocker(disk, &[])
+                .unwrap()
+                .starts_with("environment blocker (disk)")
+        );
+
+        // A named test failure is a test failure even when the log mentions infra.
+        let named = format!("{sccache}        FAIL [   0.2s] cas tests::broken\n");
+        let failures = vec!["FAIL [   0.2s] cas tests::broken".to_owned()];
+        assert_eq!(environment_blocker(&named, &failures), None);
+        // An ordinary compile error is not infrastructure.
+        assert_eq!(
+            environment_blocker("error[E0308]: mismatched types\n", &[]),
+            None
+        );
+    }
+
+    fn quiet_request(commit: &str) -> SweepRequest {
+        SweepRequest {
+            epic_id: "cas-baa3".to_string(),
+            target_branch: "epic/release".to_string(),
+            commit: commit.to_string(),
+        }
+    }
+
+    #[test]
+    fn cas_833e_a_merge_burst_starts_one_sweep_after_the_quiet_period() {
+        let quiet = Duration::from_secs(120);
+        let start = Instant::now();
+        let mut gate = QuietGate::default();
+        for (offset, commit) in [(0, "one"), (30, "two"), (60, "three")] {
+            gate.note(quiet_request(commit), start + Duration::from_secs(offset));
+        }
+        // Each merge restarts the wait: nothing starts inside the burst.
+        for offset in [60, 120, 179] {
+            assert_eq!(
+                gate.due(start + Duration::from_secs(offset), quiet, false),
+                None,
+                "{offset}s"
+            );
+        }
+        // Only the newest tip runs, once, after the burst has been quiet.
+        let due = gate.due(start + Duration::from_secs(180), quiet, false);
+        assert_eq!(due.map(|request| request.commit), Some("three".to_string()));
+        assert_eq!(
+            gate.due(start + Duration::from_secs(600), quiet, false),
+            None
+        );
+    }
+
+    #[test]
+    fn cas_833e_quiet_gate_waits_for_the_cancelled_sweep_and_zero_disables_the_wait() {
+        let start = Instant::now();
+        let mut gate = QuietGate::default();
+        gate.note(quiet_request("next"), start);
+        // A superseded sweep is still being torn down: never overlap it.
+        assert_eq!(
+            gate.due(start + Duration::from_secs(900), Duration::ZERO, true),
+            None
+        );
+        assert!(gate.holds());
+        let due = gate.due(start, Duration::ZERO, false);
+        assert_eq!(due.map(|request| request.commit), Some("next".to_string()));
+        assert!(!gate.holds());
+    }
+
+    #[test]
+    fn cas_833e_quiet_period_comes_from_factory_config() {
+        let mut config = FactoryConfig::default();
+        assert_eq!(SweepSettings::from(&config).quiet, Duration::from_secs(300));
+        config.merge_sweep_quiet_secs = 0;
+        assert_eq!(SweepSettings::from(&config).quiet, Duration::ZERO);
     }
 
     #[test]

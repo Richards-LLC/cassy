@@ -520,3 +520,172 @@ async fn unnamed_lane_commit_still_gates_code_and_worker_no_code_closes_gh1167()
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{id}");
     }
 }
+
+/// What an operations task looks like after its first close parked it
+/// (cas-3507): no execution_note, no commit of its own, a parked task branch
+/// that was never pushed, and the conflict preflight flag that came with it.
+fn parked_ops_task(id: &str) -> Task {
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some(format!("{LANE}-{id}"));
+    task.deliverables.merge_conflicted = true;
+    task
+}
+
+const PR: &str = "https://github.com/example/cloud/pull/149";
+
+/// cas-b38a: a parked operations task with no commit of its own closes when
+/// the supervisor declares it no-code on the merged pull request that did
+/// the work. Nothing of the lane is attributed to it.
+#[tokio::test]
+async fn parked_ops_task_closes_no_code_on_its_pull_request_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc07";
+    f.put(&parked_ops_task(id));
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "execution_note": "no-code", "external_ref": PR,
+        }),
+    )
+    .await;
+    assert_closed_without_lane(&f, id, &response);
+    let task = f.task(id);
+    assert_eq!(task.execution_note.as_deref(), Some("no-code"));
+    assert_eq!(task.external_ref.as_deref(), Some(PR));
+}
+
+/// cas-b38a: the same parked operations task closes by the supervisor's
+/// evidence_only review, citing the pull request, with no paths measured.
+#[tokio::test]
+async fn parked_ops_task_closes_by_evidence_on_its_pull_request_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc08";
+    f.put(&parked_ops_task(id));
+    let proof = f.artifact(id);
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "evidence_only": true, "evidence_only_artifact_path": proof,
+            "evidence_only_reference": PR,
+        }),
+    )
+    .await;
+    assert_closed_without_lane(&f, id, &response);
+    let closed = f.task(id);
+    assert!(!closed.deliverables.merge_conflicted);
+    let evidence = closed
+        .deliverables
+        .evidence_only
+        .clone()
+        .expect("evidence recorded");
+    assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
+    assert!(
+        closed
+            .notes
+            .contains("evidence-only close retired lane records"),
+        "{}",
+        closed.notes
+    );
+}
+
+/// cas-b38a: a code methodology keeps the evidence measurement. A test-first
+/// task with no commit of its own is not closed on evidence alone.
+#[tokio::test]
+async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-nc09";
+    let mut task = parked_ops_task(id);
+    task.execution_note = Some("test-first".into());
+    f.put(&task);
+    let proof = f.artifact(id);
+    let response = call(
+        &f.supervisor,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion merged and deployed",
+            "evidence_only": true, "evidence_only_artifact_path": proof,
+            "evidence_only_reference": PR,
+        }),
+    )
+    .await;
+    assert!(
+        response.contains("EVIDENCE ONLY CLOSE REJECTED"),
+        "{response}"
+    );
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
+}
+
+/// cas-12ab: the fast-rows receipt gate in isolation. A tree without the fast
+/// rows is never gated; with them, only a PASS receipt for the exact tip,
+/// in the clone's common dir, lets it park.
+#[test]
+fn fast_rows_receipt_gate_requires_the_exact_tip_where_the_rows_ship_cas_12ab() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "pub fn a() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "no fast rows"]);
+    let plain = git(repo, &["rev-parse", "HEAD"]);
+    assert!(fast_rows_receipt_refusal(repo, &plain, "main", "cas-fr01").is_none());
+
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::write(repo.join(FAST_ROWS_GATE_MARKER), "print('rows')\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "ship the fast rows"]);
+    let tip = git(repo, &["rev-parse", "HEAD"]);
+    let refusal = fast_rows_receipt_refusal(repo, &tip, "epic/x", "cas-fr01").expect("no receipt yet");
+    assert!(refusal.contains("FAST ROWS REQUIRED"), "{refusal}");
+    assert!(refusal.contains("./scripts/release-gate.sh --fast-rows --base origin/epic/x"), "{refusal}");
+
+    let receipts = repo.join(".git/cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join(format!("{plain}.pass")), format!("fast-rows: PASS {plain} base=x\n")).unwrap();
+    assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_some(), "another tip's receipt");
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: FAIL {tip}\n")).unwrap();
+    assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_some(), "not a PASS");
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=x\n")).unwrap();
+    assert!(fast_rows_receipt_refusal(repo, &tip, "main", "cas-fr01").is_none());
+}
+
+/// cas-12ab: a worker's close refuses to park a tip that ships the fast rows
+/// until `release-gate.sh --fast-rows` passed on it; with the receipt (written
+/// to the shared common dir, here from the worker's worktree) it parks.
+#[tokio::test]
+async fn worker_park_requires_a_same_tip_fast_rows_receipt_cas_12ab() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
+    std::fs::write(worker_path.join(FAST_ROWS_GATE_MARKER), "print('rows')\n").unwrap();
+    std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+    git(&worker_path, &["add", "."]);
+    git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
+    git(&worker_path, &["push", "-q", "origin", LANE]);
+    let tip = git(&worker_path, &["rev-parse", "HEAD"]);
+    let id = "cas-fr02";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
+
+    let refused = call(&f.worker, close.clone()).await;
+    if refused.contains("DELIVERY BRANCH UNRESOLVED") {
+        panic!("fixture did not reach the park: {refused}");
+    }
+    assert!(refused.contains("FAST ROWS REQUIRED"), "{refused}");
+    assert_ne!(f.task(id).status, TaskStatus::AwaitingMerge, "{refused}");
+
+    let common = git(&worker_path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let receipts = PathBuf::from(common).join("cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=main\n")).unwrap();
+    let parked = call(&f.worker, close).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(!parked.contains("FAST ROWS REQUIRED"), "{parked}");
+    assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+}

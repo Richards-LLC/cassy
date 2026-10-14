@@ -196,6 +196,50 @@ def write(args: argparse.Namespace) -> int:
     return status
 
 
+def verify_full(args: argparse.Namespace) -> int:
+    """cas-9f70: does this receipt prove the full journeys on the tree of --sha?
+
+    The release train posts `cas/full-journeys` only on exit 0, and the merge
+    queue then skips its Commander journeys for that tree. Every check fails
+    closed: a full-scope PASS of every catalog journey, produced by
+    journey-eval, from a commit whose tree is exactly the release tree, with
+    the catalog re-derived by the release revision's own selector.
+    """
+    repo = args.repo.resolve()
+    receipt = json.loads(args.receipt.read_text())
+    if not isinstance(receipt, dict):
+        raise ValueError('receipt is not a JSON object')
+    if receipt.get('schema') != 1 or receipt.get('producer') != 'journey-eval':
+        raise ValueError('receipt is not a schema-1 journey-eval receipt')
+    if receipt.get('scope') != 'full':
+        raise ValueError(f"receipt scope is {receipt.get('scope')!r}, not full")
+    if receipt.get('suite_exit') != 0 or receipt.get('errors'):
+        raise ValueError('receipt records a failed suite or runner errors')
+    ids, results = receipt.get('selection_ids'), receipt.get('results')
+    if not isinstance(ids, list) or not ids or not isinstance(results, list):
+        raise ValueError('receipt selects no journeys')
+    if [r.get('id') for r in results] != ids or any(
+            r.get('status') != 'PASS' or not r.get('passed') or r.get('failed') or r.get('skipped')
+            for r in results):
+        raise ValueError('receipt has a journey that did not pass')
+    head = receipt.get('head_sha', '')
+    if not re.fullmatch(r'[0-9a-f]{40}', head):
+        raise ValueError('receipt head is not a full commit id')
+    sha = git(repo, 'rev-parse', '--verify', f'{args.sha}^{{commit}}')
+    tree = git(repo, 'rev-parse', f'{sha}^{{tree}}')
+    try:
+        head_tree = git(repo, 'rev-parse', '--verify', f'{head}^{{tree}}')
+    except subprocess.CalledProcessError:
+        raise ValueError(f'receipt head {head} is not in this repository') from None
+    if head_tree != tree:
+        raise ValueError(f'receipt head {head} has tree {head_tree}, not the release tree {tree}')
+    catalog = [r['id'] for r in selection(repo, sha, sha, True)]
+    if not catalog or catalog != ids:
+        raise ValueError(f'receipt selection ({len(ids)} IDs) is not the full catalog at {sha} ({len(catalog)} IDs)')
+    print(f'journey receipt proves tree={tree} ({len(ids)} journeys, head {head})')
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
@@ -215,10 +259,16 @@ def main() -> int:
     p.add_argument('--tool-version', required=True)
     p.add_argument('--output', required=True, type=Path)
     p.set_defaults(handler=write)
+    p = sub.add_parser('verify-full')
+    p.add_argument('--repo', required=True, type=Path)
+    p.add_argument('--sha', required=True)
+    p.add_argument('--receipt', required=True, type=Path)
+    p.set_defaults(handler=verify_full)
     args = parser.parse_args()
     try:
         return args.handler(args)
-    except (ValueError, KeyError, OSError, subprocess.CalledProcessError, sqlite3.Error) as e:
+    except (ValueError, KeyError, TypeError, AttributeError, OSError,
+            subprocess.CalledProcessError, sqlite3.Error) as e:
         print(f'journey-receipt: {e}', file=sys.stderr)
         return 2
 

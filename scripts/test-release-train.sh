@@ -305,6 +305,34 @@ else
     bad "cas-be3a: the scratch blocker did not print the fix: $be3a_output"
 fi
 
+# cas-52de: a release worktree on another filesystem than its main checkout
+# and the configured scratch base also gets the worktree-placement fix.
+be3a_main="$tmp/be3a-main"
+git init -q -b main "$be3a_main"
+git -C "$be3a_main" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false \
+    commit -q --allow-empty -m base
+be3a_linked="$be3a_mount/scratch/release-linked"
+git -C "$be3a_main" worktree add -q -b release/v9.99.0 "$be3a_linked"
+be3a_output="$( (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_linked"
+    run_dir="$tmp/be3a-run"
+    artifacts_root="$tmp/artifacts"
+    CAS_RELEASE_ENV_FILE="$be3a_env"
+    CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
+    unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_scratch
+) 2>&1 )" && bad 'cas-52de: a cross-filesystem release worktree passed preflight'
+be3a_main_real="$(cd "$be3a_main" && pwd -P)"
+if [[ "$be3a_output" == *"filesystem boundary"* ]] \
+    && [[ "$be3a_output" == *"worktree add $be3a_main_real/.cas/release-v9.99.0 release/v9.99.0"* ]]; then
+    ok 'cas-52de: the scratch blocker also names a release worktree path on the scratch filesystem'
+else
+    bad "cas-52de: the scratch blocker did not name the worktree fix: $be3a_output"
+fi
+
 # cas-be3a: preflight refuses before any publish step when the report
 # renderer's browser is missing, and names the install command. The probe is
 # stubbed: the real one installs Playwright into a disposable workspace.
@@ -1495,6 +1523,9 @@ chmod +x "$post_publication_published"
 post_publication_latency="$repo_root/scripts/release-latency-receipt.sh"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
+# cas-52de: the draft's {{RELEASE_PR}} is filled here from the pipeline's PR.
+printf '\nRelease PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+printf '4242\n' >"$post_publication_run/pr-number.txt"
 post_publication_stderr="$tmp/post-publication.stderr"
 if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
@@ -1516,11 +1547,38 @@ if (
     && [[ -s "$post_publication_run/release-latency.receipt" ]] \
     && grep -qx 'WITHIN_BUDGET=false' "$post_publication_run/release-latency.receipt" \
     && grep -q '908s; over budget (600s)' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    && grep -qx 'Release PR #4242' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    && ! grep -qF '{{RELEASE_PR}}' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && ! grep -q 'command not found' "$post_publication_stderr"; then
-    ok 'gap 7: post-publication records an overrun and Dev trailer without blocking'
+    ok 'gap 7: post-publication records an overrun and Dev trailer, and fills the release PR, without blocking'
 else
     bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
 fi
+# Without the pipeline's PR number the token cannot be filled: a named error.
+printf '\nAgain PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+rm -f "$post_publication_run/pr-number.txt"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    cut_has_external_stage() { return 1; }
+    version=9.99.8
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
+    worktree="$stage_wt"
+    run_dir="$post_publication_run"
+    script_dir="$repo_root/scripts"
+    export POST_PUBLICATION_LANDED="$post_publication_run/landed-main.sha"
+    CAS_RELEASE_TRAIN_GH="$post_publication_gh" CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES=1 \
+    CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD="$post_publication_published" \
+    CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD="$post_publication_latency" \
+        release_train_post_publication
+) 2>"$post_publication_stderr"; then
+    bad 'post-publication filled {{RELEASE_PR}} without a PR number'
+elif grep -q 'pr-number.txt has no PR number' "$post_publication_stderr"; then
+    ok 'post-publication names the missing PR number instead of leaving {{RELEASE_PR}}'
+else
+    bad "missing PR number was not named: $(cat "$post_publication_stderr")"
+fi
+sed -i '/Again PR #{{RELEASE_PR}}/d' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 
 # Plant old evidence even when the preceding red run emitted no latency.
 [[ -s "$post_publication_run/release-latency.receipt" ]] || \
@@ -1639,6 +1697,10 @@ new_gh_stub() {
 #!/usr/bin/env bash
 state="$GH_STUB_STATE"
 printf '%s\n' "$*" >> "$state/calls.log"
+# cas-4cb8: the full-gate tree receipt is not part of the scripted poll sequence.
+if [[ "$1 $2 $3" == 'api --method POST' && "$*" == *'/statuses/'* ]]; then
+    exit 0
+fi
 # PR-run visibility is independent of the scripted merge-queue poll sequence.
 if [[ "$1 $2" == 'run list' && "$*" == *'--event pull_request'* ]]; then
     printf '[{"headSha":"%s"}]\n' "$GH_STUB_HEAD"
@@ -1954,6 +2016,122 @@ if grep -q 'pr comment' "$state/calls.log"; then
     ok 'the gate receipt is commented on the PR'
 else
     bad 'no gate receipt comment was posted'
+fi
+# cas-4cb8: the merge queue reuses the full gate only through this receipt.
+ok_sha="$(git -C "$wt_ok" rev-parse HEAD)"
+ok_tree="$(git -C "$wt_ok" rev-parse 'HEAD^{tree}')"
+if grep -qF "api --method POST repos/Richards-LLC/cassy/statuses/$ok_sha -f state=success -f context=cas/full-gate -f description=PASS tree=$ok_tree" "$state/calls.log"; then
+    ok 'the full-gate tree receipt is posted as a cas/full-gate status on the proven sha'
+else
+    bad "no cas/full-gate status for $ok_sha tree $ok_tree: $(grep statuses "$state/calls.log" || echo none)"
+fi
+# cas-9f70: without a full-journeys receipt the queue must still run the journeys.
+if ! grep -q 'context=cas/full-journeys' "$state/calls.log"; then
+    ok 'no full-journeys receipt: no cas/full-journeys status is posted'
+else
+    bad "a cas/full-journeys status was posted without a receipt: $(grep full-journeys "$state/calls.log")"
+fi
+
+# --- cas-9f70: the full-journeys receipt is bound to the exact release tree ---
+# journey-receipt.py verify-full is the train's only judge of a journeys
+# receipt. It runs from the proven revision, re-derives the full catalog with
+# that revision's selector, and binds the receipt's head to the gated tree.
+add_journey_inputs() {
+    local worktree="$1"
+    mkdir -p "$worktree/scripts"
+    cp "$repo_root/scripts/journey-receipt.py" "$worktree/scripts/journey-receipt.py"
+    cat >"$worktree/scripts/journeys-for-diff.py" <<'PY'
+import json
+print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J2'}]}))
+PY
+    git -C "$worktree" add scripts
+    git -C "$worktree" -c commit.gpgsign=false commit -q -m 'journey inputs'
+}
+# write_journey_receipt <path> <head> [scope] [ids] [status] [suite_exit] [errors]
+write_journey_receipt() {
+    mkdir -p "$(dirname "$1")"
+    python3 - "$@" <<'PY'
+import json, sys
+path, head = sys.argv[1], sys.argv[2]
+scope = sys.argv[3] if len(sys.argv) > 3 else 'full'
+ids = (sys.argv[4] if len(sys.argv) > 4 else 'HUB-J1,HUB-J2').split(',')
+status = sys.argv[5] if len(sys.argv) > 5 else 'PASS'
+suite_exit = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+errors = [sys.argv[7]] if len(sys.argv) > 7 and sys.argv[7] else []
+results = [{'id': i, 'status': status, 'passed': 1 if status == 'PASS' else 0,
+            'failed': 0 if status == 'PASS' else 1, 'skipped': 0} for i in ids]
+receipt = {'schema': 1, 'producer': 'journey-eval', 'kind': 'local', 'scope': scope,
+           'base_sha': head, 'head_sha': head, 'selection_ids': ids, 'results': results,
+           'tool_version': '1.59.0', 'suite_exit': suite_exit, 'errors': errors}
+open(path, 'w').write(json.dumps(receipt))
+PY
+}
+jr_wt="$(new_pipeline_fixture journeys-verify)"
+add_journey_inputs "$jr_wt"
+jr_sha="$(git -C "$jr_wt" rev-parse HEAD)"
+jr_old="$(git -C "$jr_wt" rev-parse HEAD~1)"
+git -C "$jr_wt" -c commit.gpgsign=false commit -q --allow-empty -m 'same tree, new commit'
+jr_same_tree="$(git -C "$jr_wt" rev-parse HEAD)"
+jr_dir="$tmp/journeys-verify-receipts"
+verify_journeys() {
+    python3 "$jr_wt/scripts/journey-receipt.py" verify-full --repo "$jr_wt" --sha "$jr_same_tree" --receipt "$1" >/dev/null 2>&1
+}
+write_journey_receipt "$jr_dir/valid.json" "$jr_sha"
+write_journey_receipt "$jr_dir/same-tree.json" "$jr_same_tree"
+write_journey_receipt "$jr_dir/other-tree.json" "$jr_old"
+write_journey_receipt "$jr_dir/affected.json" "$jr_sha" affected
+write_journey_receipt "$jr_dir/partial.json" "$jr_sha" full HUB-J1
+write_journey_receipt "$jr_dir/failed-row.json" "$jr_sha" full HUB-J1,HUB-J2 FAIL
+write_journey_receipt "$jr_dir/suite-exit.json" "$jr_sha" full HUB-J1,HUB-J2 PASS 1
+write_journey_receipt "$jr_dir/errors.json" "$jr_sha" full HUB-J1,HUB-J2 PASS 0 'native runner reported errors'
+write_journey_receipt "$jr_dir/unknown-head.json" 9999999999999999999999999999999999999999
+printf 'not json\n' >"$jr_dir/garbage.json"
+for name in valid same-tree; do
+    if verify_journeys "$jr_dir/$name.json"; then
+        ok "verify-full accepts a full PASS receipt whose head has the release tree ($name)"
+    else
+        bad "verify-full refused the $name receipt"
+    fi
+done
+for name in other-tree affected partial failed-row suite-exit errors unknown-head garbage missing; do
+    if verify_journeys "$jr_dir/$name.json"; then
+        bad "verify-full accepted the $name journeys receipt"
+    else
+        ok "verify-full refuses the $name journeys receipt"
+    fi
+done
+
+# The pipeline posts cas/full-journeys only for a receipt that verify-full accepts.
+run_pipeline_with_journeys() {
+    local name="$1" receipt_head="$2" wt state_dir run
+    wt="$(new_pipeline_fixture "$name")"
+    add_journey_inputs "$wt"
+    run="$(pipeline_run_dir "$wt")"
+    seed_gate_receipt "$run" "$wt"
+    case "$receipt_head" in
+        HEAD) write_journey_receipt "$run/journeys/journey-receipt.json" "$(git -C "$wt" rev-parse HEAD)" ;;
+        HEAD~1) write_journey_receipt "$run/journeys/journey-receipt.json" "$(git -C "$wt" rev-parse HEAD~1)" ;;
+    esac
+    state_dir="$tmp/state-$name"; mkdir -p "$state_dir"
+    printf '' > "$state_dir/pr-list.json"
+    printf '4242\n' > "$state_dir/pr-number.txt"
+    printf '%s\n' '[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]' > "$state_dir/checks-default.json"
+    printf '{"state":"MERGED","mergeCommit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state_dir/prview-default.json"
+    run_pipeline "$wt" "$state_dir" >"$state_dir/pipeline.out" 2>&1 || true
+    printf '%s %s %s\n' "$state_dir" "$(git -C "$wt" rev-parse HEAD)" "$(git -C "$wt" rev-parse 'HEAD^{tree}')"
+}
+read -r jstate jsha jtree < <(run_pipeline_with_journeys journeys-proven HEAD)
+if grep -qF "api --method POST repos/Richards-LLC/cassy/statuses/$jsha -f state=success -f context=cas/full-journeys -f description=PASS tree=$jtree" "$jstate/calls.log"; then
+    ok 'a verified full-journeys receipt is posted as cas/full-journeys on the proven sha and tree'
+else
+    bad "no cas/full-journeys status for $jsha tree $jtree: $(grep statuses "$jstate/calls.log" || echo none)"
+fi
+read -r jstate jsha jtree < <(run_pipeline_with_journeys journeys-stale HEAD~1)
+if ! grep -q 'context=cas/full-journeys' "$jstate/calls.log" \
+    && grep -q 'full-journeys receipt not posted' "$jstate/pipeline.out"; then
+    ok 'a journeys receipt for another tree is refused and names the refusal'
+else
+    bad "a stale journeys receipt was posted or silently ignored: $(grep full-journeys "$jstate/calls.log" "$jstate/pipeline.out" || echo none)"
 fi
 
 # Gap 5: enqueue waits for GitHub to resolve mergeability and report the
@@ -2923,6 +3101,19 @@ if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --res
     ok '--cut --resume is idempotent after gate and announce blockers despite a newer pending union'
 else
     bad 'final --cut --resume did not finish or reran the gate'
+fi
+# cas-a629: the two blockers above are timed events, each closed by its
+# stage's later completion, and resumes never move the first cut's clock.
+combined_metrics="$(python3 "$script_dir/release-metrics.py" "$combined_resume_dir" "$(date -u +%s)")"
+if grep -qx 'BLOCKER_COUNT=2' <<<"$combined_metrics" \
+    && grep -qE '^BLOCKER_COSTS=gate:[0-9]+,announce:[0-9]+$' <<<"$combined_metrics" \
+    && grep -qE '^CUT_TO_PUBLISHED_SECS=[0-9]+$' <<<"$combined_metrics" \
+    && grep -qx 'REQUEST_SOURCE=cut-start' <<<"$combined_metrics" \
+    && [[ "$(grep -c "$(printf '\t')start$" "$combined_resume_dir/stage-events.tsv")" -ge 13 ]] \
+    && [[ "$(wc -l <"$combined_resume_dir/cut.start.epoch")" == 1 ]]; then
+    ok 'a cut with gate and announce blockers records two priced, resolved blockers'
+else
+    bad "release metrics after two blockers: $combined_metrics"
 fi
 
 # A fixed epic advances integration after the first gate fails. Resume must

@@ -142,11 +142,19 @@ cut_preflight_check_scratch() {
     checkout_device="${CAS_RELEASE_TRAIN_CHECKOUT_DEVICE:-$(release_portable_stat_device "$worktree" || true)}"
     scratch_device="${CAS_RELEASE_TRAIN_SCRATCH_DEVICE:-$(release_portable_stat_device "$scratch_parent" || true)}"
     if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
-        local fix
+        local fix main_root
         if fix="$(release_portable_sibling_scratch_base "$worktree")"; then
             fix="set CAS_RELEASE_GATE_HOME_DIR=$fix (in the environment or $env_file_hint)"
         else
             fix="set CAS_RELEASE_GATE_HOME_DIR to a directory on the checkout's filesystem with no .cas ancestor"
+        fi
+        # cas-52de: or move the release worktree onto the scratch filesystem.
+        # The main checkout's .cas/release-v<version> is the usual place.
+        main_root="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+        main_root="${main_root%/.git}"
+        if [[ -n "$main_root" && -n "$scratch_device" \
+            && "$(release_portable_stat_device "$main_root" || true)" == "$scratch_device" ]]; then
+            fix="$fix; or create the release worktree on the scratch filesystem: git -C $main_root worktree add $main_root/.cas/release-v$version release/v$version"
         fi
         cut_preflight_block scratch-space \
             "filesystem boundary: checkout device=${checkout_device:-unknown} scratch-parent device=${scratch_device:-unknown} (scratch base $scratch); $fix"

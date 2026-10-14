@@ -107,7 +107,8 @@ PY_SCRATCH
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
     # Real defects in the new rows are covered by test-fast-release-rows.py.
-    for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases; do
+    for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases \
+        journeys-for-diff check-builtin-skill-limits check-doctor-snapshot check-migration-registry ci-script-tests-for-diff; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done
     cat >"$repo/cas-cli/Makefile" <<'EOF'
@@ -164,6 +165,9 @@ jobs:
         run: echo "$NOTES"
 EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
+    # release-integrate.py registers the cas-changelog driver from its sibling;
+    # without it the nested cas-7aa5 [Unreleased] replay conflicts.
+    cp "$script_dir/cas-merge-drivers.py" "$repo/scripts/cas-merge-drivers.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
     cp "$script_dir/release-learning.py" "$repo/scripts/release-learning.py"
     cat >"$repo/scripts/check-release-publish-toolchain.py" <<'PY_ZIG_FIXTURE'
@@ -507,6 +511,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
+        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -1769,7 +1774,7 @@ run_train_proof() {
         CAS_RELEASE_TRAIN_CAS=/bin/false CAS_RELEASE_TRAIN_CARGO="$repo/scripts/cargo-stub" \
         CAS_RELEASE_TRAIN_DATE=2099-01-02 CAS_RELEASE_TRAIN_PREFLIGHT_CMD=true \
         CAS_RELEASE_TRAIN_CUT_STOP_AFTER="$stop" CAS_RELEASE_TRAIN_CUT_POLL_SECS=1 \
-        CAS_RELEASE_TRAIN_CUT_GATE_TRIES=15 "$repo/scripts/release-train.sh" 9.99.8 "$repo" --cut "$@"
+        CAS_RELEASE_TRAIN_CUT_GATE_TRIES=120 "$repo/scripts/release-train.sh" 9.99.8 "$repo" --cut "$@"
 }
 # Resume the successful assembly receipt with a newly selected receipt output
 # location: neither suite may re-run at assemble or the first full gate.
@@ -1780,14 +1785,15 @@ if grep -q 'stopped after stage assemble' "$tmp/train-proof.log" \
     && grep -q 'stopped after stage gate' "$tmp/train-proof.log"; then
     train_run="$tmp/train-artifacts/v9.99.8-train-proof"
     if [[ "$(grep -c '^nextest run --workspace.*--no-fail-fast' "$tmp/cargo.log")" == 1 ]] \
-        && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 2 ]] \
+        && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 3 ]] \
+        && [[ "$(awk -F '\t' '$1 == "ci-script-tests" && $7 == "REUSED" {n++} END {print n+0}' "$train_run"/rows/*/timing.tsv)" == 1 ]] \
         && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]] \
         && [[ "$(grep -c '^zigbuild ' "$tmp/cargo.log" || true)" == 0 ]] \
         && grep -q '^Reused PASS ' "$train_run"/rows/*/release-binary-isa.log \
         && [[ "$(awk -F '\t' '$1 == "release-binary-isa" && $4 == 0 && $7 == "REUSED" {n++} END {print n+0}' "$train_run"/rows/*/timing.tsv)" == 1 ]] \
         && grep -q 'stage prep: done' "$tmp/train-proof.log" \
         && grep -q 'stage ledger: done' "$tmp/train-proof.log"; then
-        ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts'
+        ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts and the script tier'
     else
         bad "train sequence missed assembly reuse: $(cat "$tmp/cargo.log"); $(cat "$train_run/gate.log")"
     fi
@@ -1858,10 +1864,11 @@ else
     bad 'assemble prove reran an existing matching receipt'
 fi
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/proof-gate.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 3 ]] \
     && grep -qF 'PASS assembly receipt=' "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
+    && grep -qF 'PASS assembly receipt=' "$CAS_RELEASE_GATE_LOG_DIR/ci-script-tests.log" \
     && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
-    ok 'assembly retry and first full gate cite both proved rows without rerunning the archive suite'
+    ok 'assembly retry and first full gate cite all three proved rows (cas-398c: ci-script-tests too) without rerunning the archive suite'
 else
     bad "first gate missed assembly proof: $(cat "$tmp/proof-gate.log")"
 fi
@@ -1881,11 +1888,12 @@ PYFIX
 git -C "$repo" add .
 git -C "$repo" commit -qm 'simulate prep and ledger'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/proof-prep.log" 2>&1
-if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 3 ]] \
     && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/ci-script-tests.log" \
     && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
     && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
-    ok 'prep member versions, lock and ledger reuse both rows and cite the original proof SHA'
+    ok 'prep member versions, lock and ledger reuse all three proved rows and cite the original proof SHA'
 else
     bad "real-cut prep missed assembly proof: $(cat "$tmp/proof-prep.log")"
 fi
@@ -1908,8 +1916,8 @@ PYFIX
     git -C "$repo" add "$changed_file"
     git -C "$repo" commit -qm "fixture $change changed"
     run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/proof-$change.log" 2>&1
-    if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]]; then
-        ok "$change version invalidates both assembly rows"
+    if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]]; then
+        ok "$change version invalidates every assembly row"
     else
         bad "$change version incorrectly reused assembly proof"
     fi
@@ -2020,6 +2028,28 @@ if grep -qF '"mode": "serial"' "$tmp/serial-proof.log" \
     ok 'memory reserve selects the serial path and retains all proof legs'
 else
     bad "serial memory fallback failed: $(cat "$tmp/serial-proof.log")"
+fi
+
+# cas-398c: the factory daemon proves release-binary-isa and macos-check in
+# the background; the cut's full gate reuses both and names any miss.
+repo="$(new_fixture row-proof)"
+export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-proof-logs"
+run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove-rows "$repo" >"$tmp/row-proof.log" 2>&1
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/row-proof-gate.log" 2>&1
+if grep -qF 'row-proofs release-binary-isa=PASS macos-check=PASS' "$tmp/row-proof.log" \
+    && [[ "$(awk -F '\t' '$1 ~ /^(release-binary-isa|macos-check)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+    && grep -qF 'PASS row-proof row=release-binary-isa' "$CAS_RELEASE_GATE_LOG_DIR/release-binary-isa.log" \
+    && grep -qF 'PASS row-proof row=macos-check' "$CAS_RELEASE_GATE_LOG_DIR/macos-check.log"; then
+    ok 'background row proofs let the full gate reuse release-binary-isa and macos-check'
+else
+    bad "row proofs were not reused: $(cat "$tmp/row-proof.log" "$tmp/row-proof-gate.log")"
+fi
+CAS_FUTURE_TEST_INPUT=1 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/row-proof-miss.log" 2>&1
+if [[ "$(awk -F '\t' '$1 ~ /^(release-binary-isa|macos-check)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]] \
+    && grep -qF 'environment_key=CAS_FUTURE_TEST_INPUT' "$tmp/row-proof-miss.log"; then
+    ok 'a test-relevant variable refuses row-proof reuse and names the variable'
+else
+    bad "row proof reused across a changed test input: $(cat "$tmp/row-proof-miss.log")"
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

@@ -235,6 +235,10 @@ impl Config {
                 factory.merge_sweep_timeout_secs.to_string(),
             ),
             (
+                "factory.merge_sweep_quiet_secs".to_string(),
+                factory.merge_sweep_quiet_secs.to_string(),
+            ),
+            (
                 "factory.ai_enrichment.enabled".to_string(),
                 factory.ai_enrichment.enabled.to_string(),
             ),

@@ -21,6 +21,8 @@ readonly -a gate_check_ids=(
     version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
+    journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    fixture-paths-src
 )
 
 usage() {
@@ -432,10 +434,12 @@ run_check() {
     row_selected "$name" || return 0
     log="$row_log_dir/$name.log"
     started="$(date -u +%FT%TZ)"
-    # Assembly/recovery already proved the native suite and the queue's archive
-    # runner in a plain clone. Consume that proof even on the first full gate;
+    # Assembly/recovery already proved the CI script tiers, the native suite
+    # and the queue's archive runner in a plain clone of the same code input
+    # (the proof refuses a PASS unless all three passed on its tree). Consume
+    # that proof even on the first full gate (cas-398c: ci-script-tests too);
     # --only remains a fresh diagnostic and cannot consume authorization.
-    if [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(nextest|archive-mode)$ \
+    if [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
         if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then
@@ -451,9 +455,25 @@ run_check() {
             return 0
         fi
         printf '  %s\n' "$assembly_pass"
-    elif [[ -z "$only_rows" && "$no_reuse" == true && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+    elif [[ -z "$only_rows" && "$no_reuse" == false && "$name" =~ ^(release-binary-isa|macos-check)$ \
+        && -f "$repo_root/scripts/assembly-proof.py" ]]; then
+        # cas-398c: the factory daemon proves these rows in the background on
+        # a green integration tip, keyed on code input, toolchain, target and
+        # the test-relevant environment. A miss names the differing input and
+        # falls through to the row cache and then a fresh run.
+        local row_pass=''
+        if row_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check-row "$repo_root" "$name" 2>&1)"; then
+            source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$row_pass")"
+            print_result PASS "$name" "$command"
+            printf '  reused %s\n' "$row_pass"
+            printf '%s\n' "$row_pass" >"$log"
+            printf '%s\t%s\t%s\t0\t0\t0\tREUSED\t%s\n' "$name" "$started" "$started" "$source_sha" >>"$row_log_dir/timing.tsv"
+            return 0
+        fi
+        printf '  %s\n' "$row_pass"
+    elif [[ -z "$only_rows" && "$no_reuse" == true && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ ]]; then
         printf '  MISS assembly key=implementation reason=full_gate_required\n'
-    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode|ci-script-tests)$ ]]; then
         printf '  MISS assembly key=implementation reason=helper_missing\n'
     fi
     key="$(row_cache_key "$name" || true)"
@@ -776,24 +796,50 @@ check_version_literals() {
 # compiled test binary (cas-1f6e: a builtins unit test read docs/design copies
 # that way; the archive row could not catch it because the producer path still
 # existed here). The Rust guard below scans the embedded integration-test
-# sources; this scan covers the src-side test modules the guard cannot embed.
-# Compile-time `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), ...))` and
-# `include_bytes!` are shard-safe and are not matched.
-readonly src_runtime_manifest_dir_pattern='Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)|PathBuf::from\(env!\("CARGO_MANIFEST_DIR"\)\)|env!\("CARGO_MANIFEST_DIR"\)\)\.(join|parent)\('
+# sources; this scan covers the src-side test modules the guard cannot embed,
+# and the workspace crates' src and tests (cas-ae01: the merge queue failed
+# on a cas-store src guard that read_dir'ed its own src at runtime).
+# Matched: a manifest-relative Path/PathBuf, `.join`/`.parent` on one, a
+# std::fs call or File::open on the env! value, a runtime `format!` of it, and
+# binding it to a variable. Compile-time `include_str!(concat!(env!(
+# "CARGO_MANIFEST_DIR"), ...))` and `include_bytes!` are shard-safe and are
+# not matched.
+readonly src_runtime_manifest_dir_pattern='Path::new\(env!\("CARGO_MANIFEST_DIR"\)\)|PathBuf::from\(env!\("CARGO_MANIFEST_DIR"\)\)|env!\("CARGO_MANIFEST_DIR"\)\)\.(join|parent)\(|(fs::[a-z_]+|File::open)\(\s*&?\s*(concat!\(\s*)?env!\("CARGO_MANIFEST_DIR"\)|format!\([^;]*env!\("CARGO_MANIFEST_DIR"\)|=\s*env!\("CARGO_MANIFEST_DIR"\)\s*;'
+readonly -a src_runtime_manifest_dir_roots=(cas-cli/src crates/*/src crates/*/tests)
 # cas::test_paths::workspace_root() is the one sanctioned runtime probe; its
-# callers guard it with an explicit SKIP when the checkout is absent.
-readonly src_runtime_manifest_dir_allowlist='cas-cli/src/test_paths.rs'
+# callers guard it with an explicit SKIP when the checkout is absent. The two
+# crate tests are reviewed: an #[ignore]d live-traffic contract test, and a
+# fallback reached only when no test_tui binary sits beside the test binary.
+readonly -a src_runtime_manifest_dir_reviewed=(
+    cas-cli/src/test_paths.rs
+    crates/cas-mux/tests/claude_factory_contract_runtime.rs
+    crates/cas-tui-test/tests/tui_e2e_test.rs
+)
+
+# Runtime manifest-dir reads in the given files, minus the reviewed ones.
+src_runtime_manifest_dir_hits() {
+    local -a files=() path reviewed
+    for path in "$@"; do
+        for reviewed in "${src_runtime_manifest_dir_reviewed[@]}"; do
+            [[ "$path" == "$reviewed" ]] && continue 2
+        done
+        files+=("$path")
+    done
+    [[ "${#files[@]}" -gt 0 ]] || return 0
+    grep -nHE "$src_runtime_manifest_dir_pattern" "${files[@]}" 2>/dev/null || true
+}
 
 check_src_runtime_manifest_dir_reads() {
     local hits
-    hits="$(grep -rnE --include='*.rs' "$src_runtime_manifest_dir_pattern" cas-cli/src 2>/dev/null \
-        | grep -vF "$src_runtime_manifest_dir_allowlist:" || true)"
+    local -a files=()
+    mapfile -t files < <(find "${src_runtime_manifest_dir_roots[@]}" -name '*.rs' -type f 2>/dev/null | sort)
+    hits="$(src_runtime_manifest_dir_hits "${files[@]}")"
     if [[ -n "$hits" ]]; then
-        printf 'fixture-paths: cas-cli/src test modules read the producer checkout at runtime; embed the file with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) instead:\n%s\n' "$hits"
+        printf 'fixture-paths: test code reads the producer checkout at runtime; embed the file with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or use cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
         return 1
     fi
-    printf 'fixture-paths: no runtime CARGO_MANIFEST_DIR reads under cas-cli/src (allowlist: %s)\n' \
-        "$src_runtime_manifest_dir_allowlist"
+    printf 'fixture-paths: no runtime CARGO_MANIFEST_DIR reads under %s (reviewed: %s)\n' \
+        "${src_runtime_manifest_dir_roots[*]}" "${src_runtime_manifest_dir_reviewed[*]}"
 }
 
 check_fixture_paths() {
@@ -1475,6 +1521,83 @@ check_builtin_doc_hygiene() {
     python3 scripts/check-builtin-contract-phrases.py
 }
 
+# Fast mode runs a lane row only when the lane changes one of its inputs; the
+# full gate always runs it.
+lane_touches() {
+    [[ "$fast_rows" == true ]] || return 0
+    ! git diff --quiet "${fast_base:-HEAD^}" -- "$@"
+}
+
+check_journey_catalog() {
+    if ! lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
+        printf 'journey-catalog: no journey catalog or spec change\n'
+        return 0
+    fi
+    python3 scripts/journeys-for-diff.py --check
+}
+
+check_builtin_skill_limits() {
+    if ! lane_touches cas-cli/src/builtins.rs cas-cli/src/builtins AGENTS.md CLAUDE.md \
+        scripts/check-builtin-skill-limits.py; then
+        printf 'builtin-skill-limits: no builtin skill change\n'
+        return 0
+    fi
+    python3 scripts/check-builtin-skill-limits.py .
+}
+
+check_doctor_snapshot() {
+    if ! lane_touches cas-cli/src/cli/doctor.rs cas-cli/tests/snapshots scripts/check-doctor-snapshot.py; then
+        printf 'doctor-snapshot: no doctor or snapshot change\n'
+        return 0
+    fi
+    if [[ "$fast_rows" == true ]]; then
+        python3 scripts/check-doctor-snapshot.py . --base "${fast_base:-HEAD^}"
+    else
+        python3 scripts/check-doctor-snapshot.py .
+    fi
+}
+
+check_migration_registry() {
+    if ! lane_touches cas-cli/src/migration scripts/check-migration-registry.py; then
+        printf 'migration-registry: no migration change\n'
+        return 0
+    fi
+    python3 scripts/check-migration-registry.py .
+}
+
+# The no-build half of fixture-paths (cas-cc4d: it failed at assembly). Fast mode
+# scans the lane's changed cas-cli/src Rust files; the full gate scans all.
+check_fixture_paths_src() {
+    if [[ "$fast_rows" != true ]]; then
+        check_src_runtime_manifest_dir_reads
+        return
+    fi
+    local -a changed=()
+    local path hits=''
+    while IFS= read -r path; do
+        [[ "$path" == *.rs && -f "$path" ]] && changed+=("$path")
+    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- \
+        cas-cli/src ':(glob)crates/*/src/**' ':(glob)crates/*/tests/**')
+    if [[ "${#changed[@]}" -eq 0 ]]; then
+        printf 'fixture-paths-src: no cas-cli/src or crate src/tests Rust change\n'
+        return 0
+    fi
+    hits="$(src_runtime_manifest_dir_hits "${changed[@]}")"
+    if [[ -n "$hits" ]]; then
+        printf 'fixture-paths-src: cas-cli/src test modules read the producer checkout at runtime; use include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
+        return 1
+    fi
+    printf 'fixture-paths-src: no runtime CARGO_MANIFEST_DIR reads in %s changed file(s)\n' "${#changed[@]}"
+}
+
+check_ci_script_tests_changed() (
+    if [[ "$fast_rows" != true ]]; then
+        printf 'ci-script-tests-changed: the full gate runs every entry in ci-script-tests\n'
+        exit 0
+    fi
+    release_test_child python3 scripts/ci-script-tests-for-diff.py --base "${fast_base:-HEAD^}"
+)
+
 check_ci_script_tests() (
     # This is the queue's script-only preflight, not a Cargo test target.
     # Nested gate self-tests own their receipts and synchronization. Otherwise
@@ -1566,7 +1689,7 @@ if row_selected release-binary-isa && [[ "${failures[*]}" == *release-binary-isa
     exit 1
 fi
 run_check fixture-paths \
-    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src" \
+    "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src, crates/*/src or crates/*/tests" \
     check_fixture_paths
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \
@@ -1618,6 +1741,18 @@ else
 fi
 run_check test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
+run_check journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
+    check_journey_catalog
+run_check builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
+    check_builtin_skill_limits
+run_check doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
+    check_doctor_snapshot
+run_check migration-registry 'python3 scripts/check-migration-registry.py (every migration declared, registered, in order)' \
+    check_migration_registry
+run_check ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \
+    check_ci_script_tests_changed
+run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src, crates/*/src, crates/*/tests (changed files in fast mode)' \
+    check_fixture_paths_src
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree
@@ -1625,6 +1760,26 @@ run_check working-tree \
 if [[ "${#failures[@]}" -gt 0 ]]; then
     printf 'RELEASE GATE FAILED: %s\n' "${failures[*]}"
     exit 1
+fi
+
+# cas-12ab: a factory park requires this receipt for the exact delivered tip.
+# Only a committed tree earns it: uncommitted work is not what was checked.
+record_fast_rows_receipt() {
+    local head common dir
+    if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        printf 'fast rows: no receipt written: tracked files have uncommitted changes; commit, then rerun\n'
+        return 0
+    fi
+    head="$(git rev-parse HEAD 2>/dev/null)" || return 0
+    common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+    dir="$common/cas/fast-rows"
+    mkdir -p "$dir" || return 0
+    printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
+    printf 'fast rows: receipt %s\n' "$dir/$head.pass"
+}
+if [[ "$fast_rows" == true ]]; then
+    record_fast_rows_receipt
 fi
 
 if [[ -n "$only_rows" ]]; then

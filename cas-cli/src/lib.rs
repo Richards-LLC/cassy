@@ -36,6 +36,7 @@ pub mod config;
 pub mod consolidation;
 pub mod daemon;
 pub mod duplicate_check;
+pub mod epic_gate;
 pub mod error;
 pub mod extraction;
 mod light_lane;

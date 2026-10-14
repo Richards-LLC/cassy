@@ -91,12 +91,22 @@ cut_run_external_stage() {
     )
 }
 
+# Timed stage events for end-to-end release metrics (cas-a629): one
+# `<epoch>\t<stage>\t<start|done|blocked>` row per event, never rewritten, so
+# scripts/release-metrics.py can price every blocker from its block to its
+# stage's next completion.
+cut_stage_event() {
+    mkdir -p "$run_dir"
+    printf '%s\t%s\t%s\n' "$(date -u +%s)" "$1" "$2" >>"$run_dir/stage-events.tsv"
+}
+
 cut_record_blocker() {
     local stage="$1" blocker_file="$run_dir/blockers.log"
     mkdir -p "$run_dir"
     if ! grep -Fqx "$stage" "$blocker_file" 2>/dev/null; then
         printf '%s\n' "$stage" >>"$blocker_file"
     fi
+    cut_stage_event "$stage" blocked
 }
 
 cut_stage_failure() {
@@ -123,6 +133,7 @@ cut_run_stage() {
         return 0
     fi
     printf 'stage %s: start\n' "$stage"
+    cut_stage_event "$stage" start
     export CAS_RELEASE_TRAIN_STAGE="$stage"
     if declare -F "$function_name" >/dev/null 2>&1; then
         "$function_name" || status=$?
@@ -144,6 +155,7 @@ cut_run_stage() {
         python3 "$script_dir/release-integrate.py" "$worktree" --record-input || return 1
     fi
     cut_mark_stage_done "$stage"
+    cut_stage_event "$stage" done
     printf 'stage %s: done sha=%s receipt=%s\n' \
         "$stage" "$(tr -d '[:space:]' <"$receipt")" "$receipt"
 }
@@ -185,6 +197,18 @@ cut_run() {
     fi
     if [[ "$resume" == true && -s "$run_dir/blockers.log" ]]; then
         export CAS_RELEASE_TRAIN_BLOCKER_STAGES="$(paste -sd, "$run_dir/blockers.log")"
+    fi
+    # The first cut's start and the release request are recorded once; a
+    # resume never moves either clock (cas-a629). CAS_RELEASE_TRAIN_REQUESTED_AT
+    # (epoch seconds or ISO 8601 UTC) names when the release was asked for.
+    [[ -s "$run_dir/cut.start.epoch" ]] || date -u +%s >"$run_dir/cut.start.epoch"
+    if [[ ! -s "$run_dir/release.request.epoch" && -n "${CAS_RELEASE_TRAIN_REQUESTED_AT:-}" ]]; then
+        python3 "$script_dir/release-metrics.py" --normalize-request \
+            "$CAS_RELEASE_TRAIN_REQUESTED_AT" >"$run_dir/release.request.epoch" || {
+            rm -f "$run_dir/release.request.epoch"
+            printf 'error: CAS_RELEASE_TRAIN_REQUESTED_AT must be epoch seconds or ISO 8601 UTC, not after now\n' >&2
+            return 2
+        }
     fi
     printf 'cut start version=%s worktree=%s resume=%s\n' "$version" "$worktree" "$resume"
     if [[ "$resume" == true ]]; then

@@ -385,13 +385,29 @@ pub fn is_rebased_copy(repo: &Path, recorded: &str, tip: &str, target: &str) -> 
 /// `git patch-id --stable` of everything `head` brings over its merge-base
 /// with `target`. `None` when it cannot be computed or the change is empty.
 fn change_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
+    change_patch_id_excluding(repo, head, target, &[])
+}
+
+/// [`change_patch_id`] leaving out `excluded` paths (cas-0c988).
+fn change_patch_id_excluding(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    excluded: &[&str],
+) -> Option<String> {
     use std::io::Write;
     let base = Command::new("git").args(["merge-base", head, target]).current_dir(repo).output().ok()?;
     if !base.status.success() {
         return None;
     }
     let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
-    let diff = Command::new("git").args(["diff", "--no-color", &base, head]).current_dir(repo).output().ok()?;
+    let mut args = vec!["diff".to_string(), "--no-color".to_string(), base, head.to_string()];
+    if !excluded.is_empty() {
+        args.push("--".to_string());
+        args.push(".".to_string());
+        args.extend(excluded.iter().map(|path| format!(":(exclude){path}")));
+    }
+    let diff = Command::new("git").args(&args).current_dir(repo).output().ok()?;
     if !diff.status.success() || diff.stdout.is_empty() {
         return None;
     }
@@ -406,6 +422,79 @@ fn change_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
     let out = child.wait_with_output().ok()?;
     let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.to_string();
     (out.status.success() && !id.is_empty()).then_some(id)
+}
+
+/// cas-0c988: committed build output that a merge regenerates instead of
+/// merging. A delivery's reviewed content never includes it.
+pub const GENERATED_ARTIFACT_PATHS: &[&str] = &["hub-web/dist"];
+
+/// `git patch-id --stable` of the change `head` brings over its merge-base
+/// with `target`, leaving out [`GENERATED_ARTIFACT_PATHS`]. Two tips with the
+/// same id carry the same reviewed source, whatever their build output.
+pub fn source_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
+    change_patch_id_excluding(repo, head, target, GENERATED_ARTIFACT_PATHS)
+}
+
+/// cas-0c988: carry a passed or waived verdict from an earlier tip of this
+/// delivery to `head` when both carry the same source patch against
+/// `target`. Records the carried round and logs it; returns it.
+pub fn carry_verdict(
+    cas_root: &Path,
+    repo: &Path,
+    task: &Task,
+    passes: &[QaPass],
+    head: &str,
+    target: &str,
+) -> Option<QaPass> {
+    if passes
+        .iter()
+        .any(|pass| same_sha(&pass.bound_head, head) && pass.state.satisfies_gate())
+    {
+        return None;
+    }
+    let head_patch = source_patch_id(repo, head, target)?;
+    let from = passes
+        .iter()
+        .filter(|pass| {
+            !pass.is_withdrawn()
+                && pass.state.satisfies_gate()
+                && !same_sha(&pass.bound_head, head)
+        })
+        .find(|pass| {
+            source_patch_id(repo, &pass.bound_head, target).as_deref() == Some(head_patch.as_str())
+        })?;
+    let reason = format!(
+        "the reviewed source patch is byte-identical (patch-id {}); only generated build output ({}) differs",
+        &head_patch[..head_patch.len().min(12)],
+        GENERATED_ARTIFACT_PATHS.join(", "),
+    );
+    let carried = match cas_store::carry_qa_pass(
+        cas_root,
+        from,
+        head,
+        &from.branch,
+        &reason,
+        chrono::Utc::now(),
+    ) {
+        Ok(carried) => carried,
+        Err(error) => {
+            tracing::warn!(task = %task.id, %error, "cas-0c988: QA verdict could not be carried");
+            return None;
+        }
+    };
+    let line = format!(
+        "[{}] DECISION: independent QA verdict carried over from @{} to @{} (pass {} → {}): {reason}. (cas-0c988)",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        from.head8(),
+        carried.head8(),
+        from.id,
+        carried.id,
+    );
+    tracing::info!(task = %task.id, "{line}");
+    if let Ok(store) = crate::store::open_task_store(cas_root) {
+        let _ = store.append_note(&task.id, &line);
+    }
+    Some(carried)
 }
 
 /// First changed path matching a configured glob, with the glob it matched.
@@ -522,7 +611,12 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .filter(|sha| !sha.is_empty());
         let refusal = match head {
-            Some(head) => merge_gate(task, &qa, &passes, &head).err(),
+            // cas-0c988: a rebased tip carrying the reviewed source patch byte
+            // for byte keeps the verdict (logged). A raw `git merge` merges
+            // into the checked-out branch, so that is the target.
+            Some(head) => merge_gate(task, &qa, &passes, &head)
+                .err()
+                .filter(|_| carry_verdict(cas_root, cwd, task, &passes, &head, "HEAD").is_none()),
             None => Some(format!(
                 "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
                 task.id
@@ -2252,5 +2346,140 @@ mod tests {
         );
         assert_eq!(first_user_facing_path(&paths(&["cas-cli/src/lib.rs"]), &globs), None);
         assert_eq!(first_user_facing_path(&paths(&["a.css"]), &[]), None);
+    }
+
+    /// A repo where `factory/worker` changes the composer source and the
+    /// committed build output beside it.
+    fn dist_repo() -> (tempfile::TempDir, impl Fn(&[&str]) -> String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let git = move |args: &[&str]| -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "CAS Test")
+                .env("GIT_AUTHOR_EMAIL", "cas@example.test")
+                .env("GIT_COMMITTER_NAME", "CAS Test")
+                .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let write = |dir: &Path, path: &str, body: &str| {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        write(dir.path(), "hub-web/src/composer.ts", "export const gap = 4;\n");
+        write(dir.path(), "hub-web/dist/app.js", "gap=4\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["switch", "-q", "-c", "factory/worker"]);
+        write(dir.path(), "hub-web/src/composer.ts", "export const gap = 8;\n");
+        write(dir.path(), "hub-web/dist/app.js", "gap=8\n");
+        git(&["commit", "-q", "-am", "composer spacing"]);
+        (dir, git)
+    }
+
+    /// cas-0c988: the reviewer passed T1. A sibling UI lane lands; the worker
+    /// rebases and regenerates the build output (the dist now differs), the
+    /// reviewed source does not. The verdict carries to T2, logged, and the
+    /// merge gate accepts T2 with no new review.
+    #[test]
+    fn a_rebased_tip_with_the_same_source_patch_keeps_its_qa_verdict_cas_0c988() {
+        let (dir, git) = dist_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        let task = parked(&reviewed);
+        dispatch(cas.path(), &reviewed);
+        let now = chrono::Utc::now();
+        cas_store::claim_qa_pass(cas.path(), "cas-ui1", "reviewer", now).unwrap();
+        cas_store::resolve_qa_pass(
+            cas.path(),
+            "cas-ui1",
+            "reviewer",
+            cas_types::QaVerdict::Approved,
+            "approved at 390 and 1280",
+            None,
+            "/ledger/LEDGER.md",
+            now,
+        )
+        .unwrap();
+
+        // A sibling lane lands on main: other source, other build output.
+        git(&["switch", "-q", "main"]);
+        std::fs::write(repo.join("hub-web/src/list.ts"), "export const rows = 5;\n").unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.js"), "gap=4 rows=5\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "sibling list"]);
+        // The worker rebases; the dist conflicts and is regenerated.
+        git(&["switch", "-q", "factory/worker"]);
+        git(&["reset", "-q", "--hard", "main"]);
+        std::fs::write(repo.join("hub-web/src/composer.ts"), "export const gap = 8;\n").unwrap();
+        std::fs::write(repo.join("hub-web/dist/app.js"), "gap=8 rows=5\n").unwrap();
+        git(&["commit", "-q", "-am", "composer spacing"]);
+        let rebased = git(&["rev-parse", "HEAD"]);
+        assert_ne!(rebased, reviewed);
+        assert!(!is_rebased_copy(repo, &reviewed, &rebased, "main"), "the whole patch differs (dist)");
+        assert_eq!(
+            source_patch_id(repo, &reviewed, "main"),
+            source_patch_id(repo, &rebased, "main"),
+            "the reviewed source patch is byte-identical"
+        );
+        assert!(source_patch_id(repo, &rebased, "main").is_some());
+
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        let qa = QaConfig::default();
+        assert!(merge_gate(&task, &qa, &passes, &rebased).is_err(), "not yet carried");
+        let carried = carry_verdict(cas.path(), repo, &task, &passes, &rebased, "main")
+            .expect("the verdict carries to the rebased tip");
+        assert_eq!(carried.bound_head, rebased);
+        assert_eq!(carried.state, cas_types::QaPassState::Passed);
+        assert_eq!(carried.reviewer_agent_id.as_deref(), Some("reviewer"));
+        assert_eq!(carried.ledger_path.as_deref(), Some("/ledger/LEDGER.md"));
+        let summary = carried.summary.clone().unwrap_or_default();
+        assert!(summary.contains(&format!("carried over from @{}", &reviewed[..8])), "{summary}");
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        assert_eq!(merge_gate(&task, &qa, &passes, &rebased), Ok(()));
+        // Idempotent: the tip is covered now, nothing more is recorded.
+        assert!(carry_verdict(cas.path(), repo, &task, &passes, &rebased, "main").is_none());
+    }
+
+    /// cas-0c988: a rebase that also changed the reviewed source keeps no
+    /// verdict; a failed round never carries.
+    #[test]
+    fn a_changed_source_patch_or_a_failed_round_does_not_carry_cas_0c988() {
+        let (dir, git) = dist_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        let task = parked(&reviewed);
+        dispatch(cas.path(), &reviewed);
+        let now = chrono::Utc::now();
+        cas_store::claim_qa_pass(cas.path(), "cas-ui1", "reviewer", now).unwrap();
+        cas_store::resolve_qa_pass(cas.path(), "cas-ui1", "reviewer",
+            cas_types::QaVerdict::Approved, "ok", None, "/l/LEDGER.md", now).unwrap();
+        std::fs::write(repo.join("hub-web/src/composer.ts"), "export const gap = 12;\n").unwrap();
+        git(&["commit", "-q", "-a", "--amend", "-m", "composer spacing, retuned"]);
+        let changed = git(&["rev-parse", "HEAD"]);
+        assert_ne!(source_patch_id(repo, &reviewed, "main"), source_patch_id(repo, &changed, "main"));
+        let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
+        assert!(carry_verdict(cas.path(), repo, &task, &passes, &changed, "main").is_none());
+
+        let mut failed = passes.clone();
+        for pass in &mut failed {
+            pass.state = cas_types::QaPassState::Failed;
+        }
+        // Same source as the reviewed tip again, under a new sha.
+        std::fs::write(repo.join("hub-web/src/composer.ts"), "export const gap = 8;\n").unwrap();
+        git(&["commit", "-q", "-a", "--amend", "-m", "composer spacing, again"]);
+        let same_source = git(&["rev-parse", "HEAD"]);
+        assert_ne!(same_source, reviewed);
+        assert_eq!(source_patch_id(repo, &reviewed, "main"), source_patch_id(repo, &same_source, "main"));
+        assert!(carry_verdict(cas.path(), repo, &task, &failed, &same_source, "main").is_none());
     }
 }

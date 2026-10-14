@@ -516,6 +516,25 @@ export class ConversationView {
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
+      // cas-6a9b: a scroll that moved the thread up and off its tail is the
+      // reader, whatever else is in flight. Layout never does that: a pin
+      // only moves down to the tail, content growing below leaves scrollTop
+      // where it was, and a box that shrank or clamped keeps the tail in
+      // view. Before this, a reader who scrolled up within the two frames
+      // after a pin was ignored and the pending re-pin took them back down,
+      // and one whose thread had grown unseen was read as layout and pinned.
+      const scrollTop = this.element.scrollTop;
+      const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
+      if (readerLeftTail) {
+        this.following = false;
+        this.jump.hidden = false;
+        this.lastHeight = this.element.clientHeight;
+        this.lastContentHeight = this.element.scrollHeight;
+        this.scrolledTo = scrollTop;
+        if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
+        this.notePlace();
+        return;
+      }
       if (this.pinPending) return;
       // cas-16eed: the phone keyboard shrinks the thread, and the browser's
       // own scroll adjustment for that lands here before the resize observer

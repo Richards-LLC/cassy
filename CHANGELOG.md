@@ -7,6 +7,102 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — QA browser runs are no longer starved by a background assembly proof (cas-833e)
+
+- One positively bounded worker run (a Playwright run capped at four workers,
+  the Commander visual QA, or a light tsc/Vite/Vitest command) is admitted
+  beside a running assembly proof. It is admitted only when the proof's
+  reserve and fresh memory both keep its estimate, 2 GiB headroom and a 2 GiB
+  floor. The proof's later memory samples subtract the lane. Before this, such
+  runs waited 600 s and expired while an integration proof ran.
+- The rolling-integration sweep waits `[factory].merge_sweep_quiet_secs`
+  (default 300 s) after the last epic merge. A burst of merges runs one proof
+  of the newest tip, instead of restarting a proof on every merge. On
+  2026-10-11's 21 merges, 19 proofs were cancelled before finishing and the
+  proof lock was held 91% of the time. At 300 s the lock would have been held
+  38% of the time, with the same 2 completed proofs. The memory
+  model is documented in `cas-cli/docs/CONTRIBUTING.md`.
+
+### Changed — the merge queue can skip the Commander journeys too (cas-9f70)
+
+- `--pipeline` also posts a `cas/full-journeys` status for the proven commit
+  when `<run-dir>/journeys/journey-receipt.json` passes the new
+  `scripts/journey-receipt.py verify-full`, or the receipt named by
+  `CAS_RELEASE_TRAIN_JOURNEY_RECEIPT` does. To pass, it must be a full-scope
+  journey-eval PASS of every catalog journey, from a commit with exactly the
+  release tree. A queue entry with both the full-gate and the full-journeys
+  receipt for its tree skips the whole Commander step. Any other entry runs
+  the journeys, and a refused receipt is logged and posts nothing.
+
+### Changed — the merge queue reuses the release train's full gate (cas-4cb8)
+
+- When `--pipeline` pushes a release commit that the full gate proved, it
+  posts a `cas/full-gate` status naming that commit's tree. On a merge-queue
+  entry whose tree is exactly that tree, Fast Validation skips the nextest
+  suite, the doctests and the preflight steps the full gate already ran
+  (Commander typecheck, unit tests, build, visual QA, dist drift, and the
+  release publication guards). The Commander journeys, the compile checks and
+  `macOS Check` still run. Any other tree runs the full validation.
+- `docs/branch-protection/README.md` section 3 records the required-context
+  review. The ruleset itself is unchanged.
+
+### Fixed — the close gate names a missing qa-bundle citation (cas-147e)
+
+- When a user-facing task's notes cite no `qa-bundle:` and its
+  `journey-receipt.json` already passes for the delivered head, close now says
+  "no qa-bundle cited for selected IDs [...]". It names the bundle path to
+  cite and says the receipt is present. It no longer says "missing journey
+  receipt" and asks for a browser rerun. A missing or unusable receipt still
+  gets the `scripts/journey-eval.sh` repair.
+
+### Changed — fewer wasted CI rounds from factory lanes (cas-12ab)
+
+- In a repository that ships the fast release rows, a worker's park now
+  refuses a tip that has no `release-gate.sh --fast-rows` PASS for that exact
+  commit. The refusal names the command to run. A passing, committed run
+  writes the receipt under the clone's `.git/cas/fast-rows/`.
+- A newer push to the same `factory/*` branch cancels the CI run it
+  supersedes. Main, epic, tag, merge-queue and PR runs are unaffected.
+- The worker skill and worker contract now say to commit locally and push
+  once, when parking for merge.
+- `docs/ci/merge-queue-time.md` breaks down 3.47.0's merge-to-publisher time
+  and scopes the reuse of a validated-tree receipt in the merge queue.
+
+### Changed — parallel epics' CHANGELOG entries no longer conflict (cas-7aa5)
+
+- Two epics that each add a section under `## [Unreleased]` now merge with
+  both sections kept, in merge order. This holds in the rolling integration
+  sweep (including its `merge-tree` probes), in `worktree_merge` and in the
+  release-train assemble replay. A conflicting edit to a released section
+  still conflicts.
+- The `cas-changelog` driver lives in `scripts/cas-merge-drivers.py`. Cassy
+  installs it into the clone's git config and `info/attributes` before it
+  merges, as soon as any tree opts in through `.gitattributes`. For a manual
+  `git merge`, run `python3 scripts/cas-merge-drivers.py install` once per
+  clone.
+
+### Fixed — a merge request is no longer suppressed by another task's branch (cas-b3ab)
+
+- A worker's merge request for a task resumed on its per-task branch
+  (`factory/<worker>-<task>`) is judged by that branch. Before, it was judged
+  by the worker's default `factory/<worker>` branch, and when an earlier task
+  had merged from there the request was refused as "Merge already landed".
+
+### Changed — parallel hub-web lanes no longer conflict on the built bundle (cas-0c988)
+
+- `hub-web/dist` is marked `merge=cas-generated` in `.gitattributes`. A merge
+  keeps the target's copy without a conflict, then
+  `scripts/regenerate-generated-artifacts.sh` rebuilds the bundle from the
+  merged sources and commits it. Cassy's merges register the driver and run
+  the script; after a manual `git merge`, run
+  `git config merge.cas-generated.driver true` once per clone, then run the
+  script. The release still ships the committed bundle.
+- An independent QA verdict carries over a rebase when the delivery's source
+  patch, without `hub-web/dist`, is byte-identical. This applies at re-park,
+  at `worktree_merge` and at the raw-merge guard. The carried round keeps the
+  original reviewer and ledger, and is logged as a task note. A supervisor's
+  `qa_request` still opens a fresh round.
+
 ## [3.51.1] - 2026-10-14
 
 ### Fixed — operators could not launch Cassy on 3.51.0

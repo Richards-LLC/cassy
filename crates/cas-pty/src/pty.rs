@@ -377,7 +377,9 @@ already registered; do not call session_start. Run `{prefix}coordination action=
 then `{prefix}task action=mine`. If empty, message target=supervisor summary=\"ready\" \
 message=\"ready for work\" once, then wait. Work exactly ONE task at a time: show the assigned \
 task, call `{prefix}task action=start id=<task-id>` before editing, implement its scope, \
-commit, push unless delivery_mode=local_merge, then `{prefix}task action=close id=<task-id> \
+commit locally, push once when parking it for merge (unless delivery_mode=local_merge; \
+where the repo ships `scripts/release-gate.sh --fast-rows`, pass it on that tip first), \
+then `{prefix}task action=close id=<task-id> \
 reason=\"...\"` or hand off before starting another. Successful task action=start is authoritative \
 assignment acceptance; no prose ACK is required. Add milestone notes with `{prefix}task \
 action=notes id=<task-id> note_type=progress notes=\"...\"`. Read the cas-worker skill at \

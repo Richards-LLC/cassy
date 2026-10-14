@@ -205,6 +205,98 @@ fi
                 changed = copy.deepcopy(job);changed['if'] += " || startsWith(github.ref, 'refs/heads/epic/')"
                 self.assertFalse(valid(changed))
 
+    def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
+        factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
+        factory_cancel = "${{ startsWith(github.ref, 'refs/heads/factory/') }}"
+        def valid(workflow):
+            concurrency = workflow.get('concurrency', {})
+            return (concurrency.get('group') == factory_group
+                    and concurrency.get('cancel-in-progress') == factory_cancel)
+        workflow = self.ci()
+        self.assertTrue(valid(workflow))
+        for mutate in (
+            lambda w: w.pop('concurrency'),
+            lambda w: w['concurrency'].__setitem__('cancel-in-progress', True),
+            lambda w: w['concurrency'].__setitem__('group', 'ci-${{ github.ref }}'),
+            lambda w: w['concurrency'].__setitem__('cancel-in-progress', False),
+        ):
+            changed = copy.deepcopy(workflow)
+            mutate(changed)
+            self.assertFalse(valid(changed))
+
+    def test_queue_full_gate_reuse_skips_linux_lanes_but_never_macos_cas_4cb8(self):
+        jobs = self.ci()['jobs']
+        dedupe = jobs['fast-validation-main-push-dedupe']
+        self.assertEqual(dedupe['outputs']['reuse-source'], '${{ steps.tree-dedupe.outputs.reuse-source }}')
+        reuse = "needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'"
+        run = "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'"
+        def macos_runs_on_reuse(job):
+            return reuse in job['if'] and run in job['if']
+        self.assertTrue(macos_runs_on_reuse(jobs['macos-check']))
+        changed = copy.deepcopy(jobs['macos-check']); changed['if'] = changed['if'].replace(reuse, "false")
+        self.assertFalse(macos_runs_on_reuse(changed))
+        # The suite and doctests are proven by the full gate and skip on reuse.
+        for name in ['fast-validation-suite-build', 'fast-validation-suite-shards',
+                     'fast-validation-suite', 'fast-validation-docs']:
+            with self.subTest(job=name):
+                self.assertIn(run, jobs[name]['if'])
+                self.assertNotIn('full-gate', jobs[name]['if'])
+        # The preflight still runs on reuse: the full gate runs no journeys.
+        preflight = jobs['fast-validation-preflight']
+        self.assertIn(reuse, preflight['if'])
+        by_name = {step.get('name', ''): step for step in preflight['steps']}
+        web = by_name['Build and test Commander web assets']
+        self.assertEqual(web['env']['FULL_GATE_REUSE'], "${{ " + reuse + " }}")
+        gate_only = web['run'].split('if [[ "$FULL_GATE_REUSE" == true ]]; then', 1)[1].split('exit 0', 1)[0]
+        self.assertIn('npm run journeys -- --workers=4', gate_only)
+        guards = by_name['Test release publication guards']
+        self.assertIn("reuse-source != 'full-gate'", guards['if'])
+        for kept in ['Check', 'Test portable x86_64 ISA audit', 'Build (without MCP proxy)']:
+            self.assertNotIn('full-gate', by_name[kept].get('if', ''), kept)
+        rollup = {step.get('name', ''): step for step in jobs['fast-validation']['steps']}
+        report = rollup['Report the full-gate receipt reused by this merge-queue run']
+        self.assertIn('test "$PREFLIGHT" = success', report['run'])
+
+    def run_commander_step(self, full_gate, journeys):
+        """Run the real Commander step body with logging stubs for npm/npx/git."""
+        jobs = self.ci()['jobs']
+        steps = {s.get('name', ''): s for s in jobs['fast-validation-preflight']['steps']}
+        step = steps['Build and test Commander web assets']
+        dedupe = 'needs.fast-validation-main-push-dedupe.outputs.'
+        self.assertEqual(step['env']['FULL_GATE_REUSE'], '${{ ' + dedupe + "reuse-source == 'full-gate' }}")
+        self.assertEqual(step['env']['JOURNEYS_REUSE'], '${{ ' + dedupe + "journeys-reuse == 'true' }}")
+        sandbox = self.root / 'commander-step'
+        stubs, hub, scripts = sandbox / 'bin', sandbox / 'hub-web', sandbox / 'scripts'
+        for directory in (stubs, hub, scripts):
+            directory.mkdir(parents=True, exist_ok=True)
+        log = sandbox / 'calls.log'
+        for tool in ('npm', 'npx', 'git', 'sudo'):
+            (stubs / tool).write_text(f'#!/bin/sh\necho "{tool} $*" >>"{log}"\n')
+            (stubs / tool).chmod(0o755)
+        (scripts / 'test-ci-journey-evidence-upload.sh').write_text('exit 0\n')
+        environment = dict(os.environ, PATH=f'{stubs}:{os.environ["PATH"]}',
+                           FULL_GATE_REUSE='true' if full_gate else 'false',
+                           JOURNEYS_REUSE='true' if journeys else 'false')
+        result = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', step['run']],
+                                cwd=hub, env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return log.read_text() if log.exists() else ''
+
+    def test_queue_skips_commander_journeys_only_with_both_proofs_cas_9f70(self):
+        jobs = self.ci()['jobs']
+        dedupe = jobs['fast-validation-main-push-dedupe']
+        self.assertEqual(dedupe['outputs']['journeys-reuse'], '${{ steps.tree-dedupe.outputs.journeys-reuse }}')
+        journeys = 'npm run journeys -- --workers=4'
+        self.assertNotIn(journeys, self.run_commander_step(full_gate=True, journeys=True))
+        self.assertIn(journeys, self.run_commander_step(full_gate=True, journeys=False))
+        # A journeys proof without the full gate never skips anything.
+        both_missing = self.run_commander_step(full_gate=False, journeys=True)
+        self.assertIn(journeys, both_missing)
+        self.assertIn('npm test', both_missing)
+        rollup = {step.get('name', ''): step for step in jobs['fast-validation']['steps']}
+        report = rollup['Report the full-gate receipt reused by this merge-queue run']
+        self.assertIn('JOURNEYS_REUSE', report['env'])
+
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']
         def counts():

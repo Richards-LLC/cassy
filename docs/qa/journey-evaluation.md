@@ -102,6 +102,15 @@ of exactly the UI it ships.
    journey's receipts, including its trace, to
    `<artifact-dir>/journeys/<id>/`. It also writes `journeys/JOURNEYS.md`, with the
    `hub-web/dist` tree hash, the pass/fail result and the stage timings.
+   The factory daemon usually has this run done already. After a green
+   integration it evaluates each new `hub-web/dist` tree in the background
+   (`scripts/journey-background.py`). It runs one evaluation at a time and
+   never cancels one; it then evaluates only the newest pending tree, and
+   only when the host has no cargo builds, at most once per 30 minutes. A
+   `--full` run whose dist tree, `hub-web` tree, catalog and runner match a
+   passing background receipt copies that run's artifacts instead of
+   starting browsers, and writes `journey-reuse.json`.
+   `JOURNEY_EVAL_FRESH=1` forces a fresh run. Step 2 is unchanged.
 2. **Evaluate.** A different agent from any implementer of the epic, on the
    `taste` lane, gets [journey-evaluator-brief.md](journey-evaluator-brief.md).
    It watches every journey's screencast, reads its stage screenshots and

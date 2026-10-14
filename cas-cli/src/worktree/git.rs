@@ -146,6 +146,78 @@ pub enum GitError {
 /// Result type for git operations
 pub type Result<T> = std::result::Result<T, GitError>;
 
+/// cas-0c988: the `.gitattributes` value marking committed build output.
+pub const GENERATED_MERGE_ATTRIBUTE: &str = "merge=cas-generated";
+/// cas-0c988: the repository script that rebuilds generated output after a merge.
+pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-artifacts.sh";
+/// cas-7aa5: the `.gitattributes` value for CHANGELOG.md's [Unreleased] union driver.
+pub const CHANGELOG_MERGE_ATTRIBUTE: &str = "merge=cas-changelog";
+/// cas-7aa5: Cassy's merge drivers, embedded so a merge on any tree (or in
+/// `merge-tree`) runs the same driver whatever the checkout carries.
+const MERGE_DRIVERS_PY: &str = include_str!("../../../scripts/cas-merge-drivers.py");
+
+/// cas-0c988, cas-7aa5: register Cassy's merge drivers for every merge in
+/// the repository at `dir` when the checkout or the `incoming` revision opts
+/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`).
+///
+/// The embedded `cas-merge-drivers.py` is written to the git common dir and
+/// its `install` registers `merge.cas-*` in git config and the attributes in
+/// `$GIT_COMMON_DIR/info/attributes`. That file applies to every merge in
+/// the clone, including the sweep's `merge-tree` probe and a merge whose
+/// checked-out tree has not received the `.gitattributes` line yet: the
+/// 2026-10-11 sweep met the opt-in on the second epic it merged. Best effort:
+/// without python3 the generated-output driver is still configured, and
+/// CHANGELOG conflicts stay ordinary conflicts.
+pub(crate) fn ensure_merge_drivers(dir: &Path, incoming: Option<&str>) {
+    let marks = |text: &str| {
+        text.contains(GENERATED_MERGE_ATTRIBUTE) || text.contains(CHANGELOG_MERGE_ATTRIBUTE)
+    };
+    let opted = std::fs::read_to_string(dir.join(".gitattributes")).is_ok_and(|text| marks(&text))
+        || incoming.is_some_and(|revision| {
+            Command::new("git")
+                .args(["show", &format!("{revision}:.gitattributes")])
+                .current_dir(dir)
+                .output()
+                .is_ok_and(|out| out.status.success() && marks(&String::from_utf8_lossy(&out.stdout)))
+        });
+    if !opted {
+        return;
+    }
+    let common = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()));
+    let installed = common.is_some_and(|common| {
+        let script = common.join("cas").join("cas-merge-drivers.py");
+        let current = std::fs::read_to_string(&script).ok();
+        if current.as_deref() != Some(MERGE_DRIVERS_PY) {
+            if std::fs::create_dir_all(common.join("cas")).is_err()
+                || std::fs::write(&script, MERGE_DRIVERS_PY).is_err()
+            {
+                return false;
+            }
+        }
+        Command::new("python3")
+            .arg(&script)
+            .arg("install")
+            .arg(dir)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    });
+    if !installed {
+        tracing::warn!(dir = %dir.display(), "cas merge drivers could not be installed; configuring the generated-output driver only");
+        for (key, value) in [
+            ("merge.cas-generated.name", "generated build output: keep ours, regenerate after the merge"),
+            ("merge.cas-generated.driver", "true"),
+        ] {
+            let _ = Command::new("git").args(["config", key, value]).current_dir(dir).output();
+        }
+    }
+}
+
 /// Status of a worktree's uncommitted/unmerged state
 #[derive(Debug, Clone)]
 pub struct WorktreeDirtyStatus {
@@ -1322,6 +1394,18 @@ impl GitOperations {
             self.ensure_merge_target_checked_out(dir, target)?;
         }
 
+        // cas-0c988: committed build output (hub-web/dist) is regenerated
+        // after the merge, never hand-merged. Register the driver its
+        // `.gitattributes` names before git needs it.
+        ensure_merge_drivers(dir, Some(branch));
+        let pre_merge_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+
         let mut args = vec!["merge"];
         if no_ff {
             args.push("--no-ff");
@@ -1357,6 +1441,11 @@ impl GitOperations {
             return Err(GitError::CommandFailed(combined.trim().to_string()));
         }
 
+        // cas-0c988: rebuild generated output from the merged sources.
+        if let Some(pre_merge_head) = pre_merge_head.as_deref() {
+            self.regenerate_generated_artifacts(dir, pre_merge_head);
+        }
+
         // Get the merge commit hash
         let commit_output = Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -1372,6 +1461,57 @@ impl GitOperations {
         } else {
             Ok(None)
         }
+    }
+
+    /// cas-0c988: run the merged tree's `scripts/regenerate-generated-artifacts.sh
+    /// <pre-merge-head> <merged-head>` in `dir`. The repository owns what is
+    /// generated and how; the script commits any rebuilt output. A failure
+    /// keeps the merge (no conflict was left behind) and is reported in the
+    /// merge receipt, since the committed output may now lag its sources.
+    fn regenerate_generated_artifacts(&self, dir: &Path, pre_merge_head: &str) {
+        let script = dir.join(REGENERATE_ARTIFACTS_SCRIPT);
+        if !script.is_file() {
+            return;
+        }
+        let merged = match Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir).output() {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            _ => return,
+        };
+        if merged == pre_merge_head {
+            return;
+        }
+        let output = Command::new("bash")
+            .arg(&script)
+            .arg(pre_merge_head)
+            .arg(&merged)
+            .current_dir(dir)
+            .output();
+        let failure = match output {
+            Ok(out) if out.status.success() => return,
+            Ok(out) => format!(
+                "exit {}: {}",
+                out.status,
+                branch_ops::first_line(&format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stderr),
+                    String::from_utf8_lossy(&out.stdout)
+                ))
+            ),
+            Err(error) => error.to_string(),
+        };
+        let note = format!(
+            "\n⚠️  Generated output not regenerated after merging {}: {REGENERATE_ARTIFACTS_SCRIPT} failed ({failure}). \
+             The merge kept the target's copy of the generated files; rebuild them from the merged \
+             sources and commit (for hub-web: `cd hub-web && npm run build`), or CI's dist check fails.",
+            short_tip(&merged),
+        );
+        tracing::warn!("{}", note.trim());
+        // Nothing is reset here: a shared checkout may hold unrelated work.
+        let mut notes = self
+            .stale_checkout_notes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        notes.push(note);
     }
 
     /// Paths a merge of `source` into `target` would actually touch

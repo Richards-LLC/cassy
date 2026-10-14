@@ -43,6 +43,8 @@
 #   CAS_RELEASE_TRAIN_FAST_BASE   comparison ref for small-delta admission
 #   CAS_RELEASE_TRAIN_FAST_MAX_FILES default 5
 #   CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT optional supervisor proof receipt
+#   CAS_RELEASE_TRAIN_JOURNEY_RECEIPT default <run-dir>/journeys/journey-receipt.json
+#       (full-scope journey-eval receipt; --pipeline posts cas/full-journeys for it)
 #   CAS_RELEASE_TRAIN_POLL_SECS   default 45 (checks) / 60 (queue watch)
 #   CAS_RELEASE_TRAIN_CHECK_TRIES default 40
 #   CAS_RELEASE_TRAIN_WATCH_TRIES default 60
@@ -106,6 +108,8 @@ readonly -a gate_rows=(
     version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
+    journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    fixture-paths-src
 )
 
 # Cross-cutting audit hook. The --cut dispatcher marks nested calls with
@@ -478,6 +482,49 @@ mergeability_and_checks_ready() {
     ' >/dev/null 2>&1
 }
 
+# cas-4cb8: tell the merge queue that this exact tree passed the full gate. The
+# queue's Fast Validation reuses a `cas/full-gate` success status whose
+# description names the queue tree (scripts/check-ci-merge-queue-validation.sh);
+# macOS Check still runs there. Best effort: without it the queue validates in full.
+post_full_gate_tree_receipt() {
+    local repo_slug="$1" sha="$2" tree
+    tree="$(git -C "$worktree" rev-parse "$sha^{tree}" 2>/dev/null)" || return 0
+    if gh_cmd api --method POST "repos/$repo_slug/statuses/$sha" -f state=success -f context=cas/full-gate \
+        -f "description=PASS tree=$tree" >/dev/null 2>&1; then
+        pipeline_log "full-gate receipt posted: cas/full-gate PASS tree=$tree on $sha"
+    else
+        pipeline_log "full-gate receipt not posted on $sha; the merge queue will run the full Fast Validation"
+    fi
+}
+
+# cas-9f70: the full gate has no journeys row. When the supervisor's
+# `scripts/journey-eval.sh <run-dir>/journeys --full` receipt (or
+# CAS_RELEASE_TRAIN_JOURNEY_RECEIPT) proves every catalog journey on this exact
+# tree, post `cas/full-journeys` so the queue also skips its Commander
+# journeys. The proven revision's journey-receipt.py verify-full judges the
+# receipt; anything it refuses posts nothing and the queue runs the journeys.
+post_full_journeys_tree_receipt() {
+    local repo_slug="$1" sha="$2" tree receipt verdict
+    receipt="${CAS_RELEASE_TRAIN_JOURNEY_RECEIPT:-$run_dir/journeys/journey-receipt.json}"
+    if [[ ! -f "$receipt" ]]; then
+        pipeline_log "no full-journeys receipt at $receipt; the merge queue will run the Commander journeys"
+        return 0
+    fi
+    tree="$(git -C "$worktree" rev-parse "$sha^{tree}" 2>/dev/null)" || return 0
+    if ! verdict="$(python3 "$worktree/scripts/journey-receipt.py" verify-full \
+        --repo "$worktree" --sha "$sha" --receipt "$receipt" 2>&1)"; then
+        pipeline_log "full-journeys receipt not posted on $sha: ${verdict:-verify-full failed}; the merge queue will run the Commander journeys"
+        return 0
+    fi
+    pipeline_log "$verdict"
+    if gh_cmd api --method POST "repos/$repo_slug/statuses/$sha" -f state=success -f context=cas/full-journeys \
+        -f "description=PASS tree=$tree" >/dev/null 2>&1; then
+        pipeline_log "full-journeys receipt posted: cas/full-journeys PASS tree=$tree on $sha"
+    else
+        pipeline_log "full-journeys receipt not posted on $sha (status API); the merge queue will run the Commander journeys"
+    fi
+}
+
 run_pipeline() {
     local gate_status gate_sha current_sha
     gate_status="$(cat "$run_dir/gate.done" 2>/dev/null || true)"
@@ -540,6 +587,8 @@ run_pipeline() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$branch" "${pushed_sha:-none}" "$gate_sha" "$lease" \
         >>"$run_dir/pipeline.pushes.log"
     pipeline_log "pushed $branch local=$gate_sha previous=${pushed_sha:-none} lease=$lease"
+    post_full_gate_tree_receipt "$repo_slug" "$gate_sha"
+    post_full_journeys_tree_receipt "$repo_slug" "$gate_sha"
 
     local pr_number
     pr_number="$(gh_cmd pr list -R "$repo_slug" --head "$branch" --json number 2>/dev/null \

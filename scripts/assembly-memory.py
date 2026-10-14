@@ -345,7 +345,7 @@ def stable_wrapper(root, env):
              for name in ("assembly-memory.py", "assembly-proof.py")}
     # Every helper assembly-proof.py loads from its own directory must sit
     # beside the staged copy, or the guard fails to import inside rustc.
-    for helper in ("release_scratch.py", "proof_target.py", "host_memory.py"):
+    for helper in ("release_scratch.py", "release_env.py", "proof_target.py", "host_memory.py"):
         helper_path = Path(__file__).with_name(helper)
         if helper_path.is_file():
             files[helper_path.name] = helper_path.read_bytes()

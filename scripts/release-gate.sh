@@ -269,14 +269,30 @@ reference_history_script="${RELEASE_GATE_GEN_REFERENCE_HISTORY:-$repo_root/scrip
 # variable becomes an override rather than a prerequisite. /var/tmp mirrors the
 # merge-queue runner: outside every checkout and outside $HOME.
 # cas-fed5: /Users/Shared on macOS, where /var/tmp is a Cassy disposable root.
+# cas-9f61: unset, the base comes from scripts/release_env.py, the resolver the
+# release train and assembly-proof share: a provisioned base on the checkout's
+# filesystem, else the platform default when it is on that filesystem, else
+# cas-release-gate beside the checkout. It is exported so every child
+# (release_scratch.py registration included) agrees on the same base.
 scratch_base_default="$(release_portable_default_scratch_base)"
 readonly scratch_base_default
 if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
     scratch_base="$CAS_RELEASE_GATE_HOME_DIR"
-    scratch_base_origin='CAS_RELEASE_GATE_HOME_DIR'
+    scratch_base_origin="${CAS_RELEASE_GATE_SCRATCH_ORIGIN:-CAS_RELEASE_GATE_HOME_DIR}"
 else
     scratch_base="$scratch_base_default"
     scratch_base_origin='default'
+    if [[ -f "$repo_root/scripts/release_env.py" ]] \
+        && release_env_assignments="$(python3 "$repo_root/scripts/release_env.py" resolve \
+            --worktree "$repo_root")"; then
+        eval "$release_env_assignments"
+        if [[ -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
+            scratch_base="$RELEASE_ENV_SCRATCH"
+            scratch_base_origin="release_env.py: $RELEASE_ENV_SCRATCH_SOURCE"
+        fi
+    fi
+    export CAS_RELEASE_GATE_HOME_DIR="$scratch_base"
+    export CAS_RELEASE_GATE_SCRATCH_ORIGIN="$scratch_base_origin"
 fi
 readonly scratch_base scratch_base_origin
 scratch_archive_history_file="$(dirname "$scratch_base")/.cas-release-gate-last-archive-size-bytes"
@@ -761,38 +777,23 @@ check_epic_worktree_fresh() {
 # compiler even though the main checkout does. Resolve it before Cargo-backed
 # rows run and export the absolute path for every child of this gate.
 check_epic_worktree_zig() {
-    local configured common_dir main_checkout candidate resolved
-    configured="${ZIG:-}"
-    if [[ -n "$configured" ]]; then
-        [[ "$configured" = /* ]] || configured="$repo_root/$configured"
-        if [[ -x "$configured" ]]; then
-            resolved="$(cd "$(dirname "$configured")" && pwd -P)/$(basename "$configured")"
-            export ZIG="$resolved"
-            printf 'epic-worktree-zig: using executable ZIG=%s (environment)\n' "$ZIG"
-            return 0
-        fi
+    local assignments
+    # cas-9f61: the same order as every release tool (scripts/release_env.py):
+    # ZIG, this worktree's .context/zig, the main checkout's, the release
+    # profile's pin, then PATH.
+    if ! assignments="$(python3 "$repo_root/scripts/release_env.py" resolve \
+        --worktree "$repo_root")"; then
+        printf 'epic-worktree-zig: scripts/release_env.py failed\n'
+        return 1
     fi
-
-    candidate="$repo_root/.context/zig/zig"
-    if [[ -x "$candidate" ]]; then
-        export ZIG="$candidate"
-        printf 'epic-worktree-zig: using executable ZIG=%s (epic worktree)\n' "$ZIG"
+    eval "$assignments"
+    if [[ -n "$RELEASE_ENV_ZIG" ]]; then
+        export ZIG="$RELEASE_ENV_ZIG"
+        printf 'epic-worktree-zig: using executable ZIG=%s (%s)\n' "$ZIG" "$RELEASE_ENV_ZIG_SOURCE"
         return 0
     fi
-
-    common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-    main_checkout="${common_dir%/.git}"
-    [[ -n "$main_checkout" ]] || main_checkout="$repo_root"
-    candidate="$main_checkout/.context/zig/zig"
-    if [[ -x "$candidate" ]]; then
-        export ZIG="$candidate"
-        printf 'epic-worktree-zig: using executable ZIG=%s (main checkout)\n' "$ZIG"
-        return 0
-    fi
-
-    printf 'epic-worktree-zig: no executable Zig compiler found in ZIG, %s, or %s\n' \
-        "$repo_root/.context/zig/zig" "$main_checkout/.context/zig/zig"
-    printf 'epic-worktree-zig: refusing the release; run ./scripts/bootstrap-zig.sh\n'
+    printf 'epic-worktree-zig: no executable Zig compiler found: %s\n' "$RELEASE_ENV_ZIG_TRIED"
+    printf 'epic-worktree-zig: refusing the release; run ./scripts/bootstrap-zig.sh (%s)\n' "$RELEASE_ENV_ZIG_FIX"
     return 1
 }
 

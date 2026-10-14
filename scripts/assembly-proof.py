@@ -27,6 +27,7 @@ import tomllib
 # Also support the existing importlib fixture/receipt consumers.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_scratch
+import release_env
 
 _target_spec = importlib.util.spec_from_file_location("proof_target", Path(__file__).with_name("proof_target.py"))
 proof_target = importlib.util.module_from_spec(_target_spec)
@@ -274,17 +275,13 @@ def test_environment(root):
     env = {key: value for key, value in os.environ.items() if exclusion_reason(key) is None}
     with_cargo_bin(env)
     env.setdefault("CAS_INIT_TIMEOUT_SECS", "900")
-    if "ZIG" in env:
-        zig = Path(env["ZIG"])
-        if not zig.is_absolute():
-            zig = root / zig
+    # cas-9f61: the resolver every release tool shares. The resolved path is
+    # canonical, so hardlinked sibling worktrees represent the same Zig.
+    zig = release_env.resolve_zig(root, env)
+    if zig.path:
+        env["ZIG"] = zig.path
     else:
-        zig = root / ".context/zig/zig"
-        if not zig.is_file():
-            zig = common_dir(root).parent / ".context/zig/zig"
-    if zig.is_file():
-        # Different hardlink paths in sibling worktrees represent the same Zig.
-        env["ZIG"] = str(zig.resolve())
+        env.pop("ZIG", None)
     return env
 
 
@@ -433,8 +430,17 @@ def no_cas_ancestor(path):
             raise ValueError("plain clone must have no .cas ancestor: " + str(parent))
 
 
-def clone_scratch(env):
-    scratch = Path(env.get("CAS_RELEASE_GATE_HOME_DIR") or "/var/tmp/cas-release-gate/base").resolve()
+def clone_scratch(env, root=None):
+    configured = env.get("CAS_RELEASE_GATE_HOME_DIR")
+    if not configured and root is not None:
+        # cas-9f61: the same durable base the release train and gate resolve,
+        # on the checkout's filesystem, so nothing is exported by hand.
+        resolved = release_env.resolve_scratch(root, env, durable=True)
+        if not resolved.base or resolved.problem:
+            raise ValueError(f"no clone scratch base (CAS_RELEASE_GATE_HOME_DIR unset): {resolved.problem}; tried "
+                             + "; ".join(resolved.rejected) + f"; fix: {resolved.fix}")
+        configured = resolved.base
+    scratch = Path(configured or "/var/tmp/cas-release-gate/base").resolve()
     # Keep the temp-root list in sync with known_repos::temp_root and
     # cloud::ephemeral_project:
     # a plain clone must exercise durable-project discovery, not a throwaway.
@@ -737,9 +743,12 @@ def prove(root):
 
 def prove_owned(root):
     # Refuse an unusable clone context before tool probing or the native suite.
-    scratch = clone_scratch(os.environ)
+    scratch = clone_scratch(os.environ, root)
     scratch_report = release_scratch.sweep(root, scratch, clean=True)
     expected, env = inputs(root)
+    # Gate rows and their scratch registration read the same base (a
+    # CAS_RELEASE_GATE_* control, so not a key input).
+    env["CAS_RELEASE_GATE_HOME_DIR"] = str(scratch)
     path = receipt_path(root, expected)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("a") as lock:

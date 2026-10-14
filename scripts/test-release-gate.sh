@@ -28,6 +28,10 @@ trap 'rm -rf "$tmp"' EXIT
 # default-scratch-base fixture below deliberately runs with it UNSET.
 : "${CAS_RELEASE_GATE_HOME_DIR:=$tmp/gate-scratch/base}"
 export CAS_RELEASE_GATE_HOME_DIR
+# cas-9f61: keep scripts/release_env.py off this host's release profile and
+# `cas config` staging.scratch_root, so Zig and scratch resolve from fixtures.
+export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
+export CAS_RELEASE_ENV_SCRATCH_ROOT=""
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen
@@ -96,12 +100,13 @@ PY_SCRATCH_SWEEP_FIXTURE
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
-path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
+path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ, root)",
     "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()").replace(
     "snapshot = memory_snapshot()",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    cp "$script_dir/release_env.py" "$repo/scripts/release_env.py"
     cp "$script_dir/release-binary-artifact.py" "$repo/scripts/release-binary-artifact.py"
     # cas-e719: the smoke itself has its own self-test and real-binary test;
     # here the row must hand it this tree's recorded release binary.
@@ -1238,15 +1243,18 @@ run_gate_unset_home() {
 
 repo="$(new_fixture default-scratch-base)"
 output="$(run_gate_unset_home "$repo" 2>&1 || true)"
-# cas-db34: the default is per host (/Users/Shared on macOS, where /var/tmp is
-# a Cassy disposable root); ask the gate's own helper which one applies.
-default_scratch_base="$(bash -c 'source "$1"; release_portable_default_scratch_base' _ "$repo/scripts/release-portable.sh")"
-if grep -qF "scratch base: $default_scratch_base (from default)" <<<"$output" \
+# cas-9f61: unset, the gate asks scripts/release_env.py — the resolver the
+# train and assembly-proof share — for this checkout's base; ask it directly
+# which one applies here (the platform default when it shares the checkout's
+# filesystem, else cas-release-gate beside the checkout).
+eval "$(cd "$repo" && env -u CAS_RELEASE_GATE_HOME_DIR python3 scripts/release_env.py resolve --worktree "$repo")"
+if [[ -n "$RELEASE_ENV_SCRATCH" ]] \
+    && grep -qF "scratch base: $RELEASE_ENV_SCRATCH (from release_env.py: $RELEASE_ENV_SCRATCH_SOURCE)" <<<"$output" \
     && grep -qF 'PASS archive-mode' <<<"$output" \
     && grep -qF 'PASS snapshot-portability' <<<"$output"; then
-    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the gate default, and the scratch rows run'
+    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the shared resolver base, and the scratch rows run'
 else
-    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the gate default (output: $output)"
+    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the resolver base ${RELEASE_ENV_SCRATCH:-none} (output: $output)"
 fi
 
 # ...and an explicit value still wins, named in the receipt so a reader can see

@@ -179,7 +179,7 @@ jobs:
         if: needs.prebuild-runner-route.outputs.mode == 'hosted'
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-linux-x86_64-${{ hashFiles('Cargo.lock') }}
+          key: release-linux-x86_64
           cache-on-failure: true
 
       - name: Install Zig
@@ -273,10 +273,14 @@ jobs:
               "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
+      # cas-542e: no Cargo.lock hash in `key`. Every release bumps workspace
+      # versions in Cargo.lock, and `key` is part of the restore prefix, so the
+      # previous release's dependencies never restored (8 of 9 runs were cold,
+      # 21-25 min). rust-cache appends its own lockfile hash to the saved key.
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: release-macos-aarch64-${{ hashFiles('Cargo.lock') }}
+          key: release-macos-aarch64
           cache-on-failure: true
 
       - name: Build

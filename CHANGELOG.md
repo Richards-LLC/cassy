@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — operators could not launch Cassy on 3.51.0
+
+- `cas factory` and `cas claude <account>` refused to start from the
+  operator's own terminal ("… is set, so this runs inside an agent session")
+  when `factory.nice_cargo` was on (the default), because Cassy exported its own
+  build-throttle variable before checking, and when the shell exported Claude
+  Code preferences such as `CLAUDE_CODE_NATIVE_CURSOR`. The operator-only check
+  now reads exact agent identity markers only; build knobs and user preferences
+  no longer lock the operator out. Real agent sessions are still refused.
+
+### Fixed — closing epics whose work already shipped
+
+- An epic whose branch is already contained in main can now close with a
+  full-suite journey receipt from any main commit that contains it, and
+  branchless epics bind to their children's trunk deliveries. Unmerged epics
+  keep the exact-tip rule.
+
 ### Removed — Jev decision support
 
 - The Jev client is gone: the `cas jev` command, the `jev` MCP tool, the

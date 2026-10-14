@@ -110,8 +110,7 @@ cut_preflight_check_tag() {
 cut_preflight_resolve_env() {
     local resolved
     # Shell variables a caller set without exporting still count.
-    resolved="$(CAS_RELEASE_ENV_FILE="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" \
-        CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-}" ZIG="${ZIG:-}" \
+    resolved="$(CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-}" ZIG="${ZIG:-}" \
         CAS_RELEASE_PORTABLE_STAT="${CAS_RELEASE_PORTABLE_STAT:-}" \
         python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
         --durable --create --link-zig)" || {
@@ -124,7 +123,6 @@ cut_preflight_resolve_env() {
 cut_preflight_check_scratch() {
     local scratch
     local probe archive required available previous scratch_parent checkout_device scratch_device
-    local env_file_hint="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
     cut_preflight_resolve_env || return $?
     scratch="$RELEASE_ENV_SCRATCH"
     if [[ -z "$scratch" ]]; then
@@ -150,7 +148,7 @@ cut_preflight_check_scratch() {
         if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
             fix="unset CAS_RELEASE_GATE_HOME_DIR so scripts/release_env.py derives a base on the checkout's filesystem"
         else
-            fix="pin a base on the checkout's filesystem with \`cas release setup\` (writes $env_file_hint)"
+            fix="see \`python3 scripts/release_env.py doctor --worktree $worktree\`"
         fi
         # cas-52de: or move the release worktree onto the scratch filesystem.
         # The main checkout's .cas/release-v<version> is the usual place.
@@ -192,11 +190,10 @@ cut_preflight_check_scratch() {
 cut_preflight_check_env() {
     local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" names
     [[ -r "$env_file" ]] || {
-        cut_preflight_block release-env "release env file $env_file is not readable; create it with \`cas release setup\`"
+        cut_preflight_block release-env "release env file $env_file is not readable"
         return $?
     }
-    # Names only: the file holds release secrets. Its scratch and Zig pins are
-    # read by scripts/release_env.py in the scratch and Zig checks below.
+    # Names only: the file holds release secrets.
     names="$(grep -oE '^(export )?[A-Z_][A-Z0-9_]*=' "$env_file" | sed 's/=$//; s/^export //' | tr '\n' ' ')"
     printf 'release env names: %s\n' "$names"
 }

@@ -902,7 +902,7 @@ p.prove(root)
         # cas-9f61: no hand export; the base release_env.py derives for this
         # checkout reaches the proof, and a gap refuses before any tool runs.
         resolved = proof.release_env.ScratchResolution(
-            "/home/cas-release-gate/base", "checkout filesystem cas-release-gate", True, "/home", "K")
+            "/home/cas-release-gate/base", "checkout filesystem cas-release-gate", "/home")
         for env in ({}, {"CAS_RELEASE_GATE_HOME_DIR": ""}):
             with self.subTest(env=env), mock.patch.dict(proof.os.environ, env, clear=True), \
                     mock.patch.object(proof.release_env, "resolve_scratch", return_value=resolved) as resolve, \
@@ -914,7 +914,7 @@ p.prove(root)
                 self.assertTrue(resolve.call_args.kwargs["durable"])
                 self.assertEqual(sweep.call_args.args[1], Path("/home/cas-release-gate/base"))
         gap = proof.release_env.ScratchResolution(
-            "", "", True, "/srv", "K", ["platform default /var/tmp/cas-release-gate: under system temporary root"],
+            "", "", "/srv", ["platform default /var/tmp/cas-release-gate: under system temporary root"],
             "no usable scratch base on the checkout filesystem /srv", "sudo install -d /srv/cas-release-gate")
         with mock.patch.dict(proof.os.environ, {}, clear=True), \
                 mock.patch.object(proof.release_env, "resolve_scratch", return_value=gap), \

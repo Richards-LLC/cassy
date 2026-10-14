@@ -799,20 +799,17 @@ Manual assembly commands need no exported scratch base or Zig (cas-9f61).
 lane compile, the release gate and the release train). Its scratch base is on
 the checkout filesystem, outside `/tmp`, `/var/tmp`, `/private/tmp`,
 `/private/var/tmp`, the configured `TMPDIR`, and every `.cas` ancestor. Candidates
-in order: an exported `CAS_RELEASE_GATE_HOME_DIR`; the release profile's
-per-filesystem pin; `<staging.scratch_root>/cas-release-gate`;
+in order: an exported `CAS_RELEASE_GATE_HOME_DIR`; `<staging.scratch_root>/cas-release-gate`;
 `<mount>/cas/scratch/cas-release-gate`; `<mount>/cas-release-gate/base`
 (for example `/home/cas-release-gate/base`); the platform default; and
 `cas-release-gate` beside the checkout. The plain clone must be outside Cassy's
 disposable roots so discovery and update tests exercise durable projects.
 Assembly refuses an unsafe or missing base before tool probing or either suite
 and names the provisioning command. Zig resolves from `ZIG`, then the
-checkout's `.context/zig`, the main checkout's, the profile's pin, then `PATH`.
-`cas release setup` pins the discovered values in `~/.cas/release.env`
-(`CAS_RELEASE_ENV_FILE`) inside a managed block, leaving its secrets untouched.
-`cas release doctor` checks Zig, scratch per filesystem, the toolchain, the
-env file, `gh auth` and the merge-queue query in seconds, with one fix command
-per gap.
+checkout's `.context/zig`, the main checkout's, then `PATH`. Both resolve
+every time; nothing is persisted. `python3 scripts/release_env.py doctor`
+checks Zig, scratch per filesystem, the toolchain, the env file, `gh auth` and
+the merge-queue query in seconds, with one fix command per gap.
 
 The script tier must pass, and both Rust contexts must report nonzero passed
 tests, before an atomic PASS is written

@@ -2,17 +2,12 @@ use crate::mcp::tools::service::imports::*;
 
 const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
-use crate::ui::factory::daemon::runtime::ci_wake::{
-    EXTERNAL_CI_COMPLETED_EVENT, EXTERNAL_MERGE_QUEUE_LANDED_EVENT, parse_ci_wake_condition,
-};
+use crate::ui::factory::daemon::runtime::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
 
 fn is_external_reminder_event(event_type: &str) -> bool {
     matches!(
         event_type,
-        EXTERNAL_BRANCH_CONTAINED_EVENT
-            | EXTERNAL_TAG_EXISTS_EVENT
-            | EXTERNAL_CI_COMPLETED_EVENT
-            | EXTERNAL_MERGE_QUEUE_LANDED_EVENT
+        EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT
     )
 }
 
@@ -56,8 +51,7 @@ fn validate_external_reminder(
                 EXTERNAL_BRANCH_CONTAINED_EVENT => {
                     "{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}"
                 }
-                EXTERNAL_CI_COMPLETED_EVENT => "{\"sha\":\"<sha>\",\"workflow\":\"CI\"}",
-                EXTERNAL_MERGE_QUEUE_LANDED_EVENT => "{\"pr\":<number>}",
+                EXTERNAL_CI_COMPLETED_EVENT => "{\"sha\":\"<full sha>\",\"workflow\":\"CI\"}",
                 _ => "{\"tag\":\"<tag>\"}",
             }
         )
@@ -93,8 +87,8 @@ fn validate_external_reminder(
                 return Err("external tag must be a valid git ref name".to_string());
             }
         }
-        EXTERNAL_CI_COMPLETED_EVENT | EXTERNAL_MERGE_QUEUE_LANDED_EVENT => {
-            parse_ci_wake_condition(event_type, filter)?;
+        EXTERNAL_CI_COMPLETED_EVENT => {
+            crate::ui::factory::daemon::runtime::ci_watch::parse_ci_completed(filter)?;
         }
         _ => unreachable!("checked by is_external_reminder_event"),
     }
@@ -361,7 +355,6 @@ impl CasService {
                 EXTERNAL_BRANCH_CONTAINED_EVENT,
                 EXTERNAL_TAG_EXISTS_EVENT,
                 EXTERNAL_CI_COMPLETED_EVENT,
-                EXTERNAL_MERGE_QUEUE_LANDED_EVENT,
             ];
             if !valid_events.contains(&event_type.as_str()) {
                 return Err(Self::error(
@@ -781,33 +774,5 @@ mod tests {
         )
         .is_err());
         assert!(validate_external_reminder("tag_exists", Some(&tag), true, -1).is_err());
-    }
-
-    #[test]
-    fn ci_reminder_validation_accepts_sha_branch_and_pr_filters() {
-        let sha = serde_json::json!({"sha": "fba7a3365", "workflow": "CI"});
-        assert!(validate_external_reminder("ci_completed", Some(&sha), true, 0).is_ok());
-        assert!(validate_external_reminder("ci_completed", Some(&sha), false, 0).is_err());
-        assert!(validate_external_reminder("ci_completed", None, true, 0)
-            .unwrap_err()
-            .contains("\"sha\""));
-        let branch = serde_json::json!({"branch": "factory/kind-tiger-16"});
-        assert!(validate_external_reminder("ci_completed", Some(&branch), true, 0).is_ok());
-        assert!(validate_external_reminder(
-            "ci_completed",
-            Some(&serde_json::json!({"sha": "zz"})),
-            true,
-            0
-        )
-        .is_err());
-        let pr = serde_json::json!({"pr": 1193});
-        assert!(validate_external_reminder("merge_queue_landed", Some(&pr), true, 0).is_ok());
-        assert!(validate_external_reminder(
-            "merge_queue_landed",
-            Some(&serde_json::json!({"pr": "next"})),
-            true,
-            0
-        )
-        .is_err());
     }
 }

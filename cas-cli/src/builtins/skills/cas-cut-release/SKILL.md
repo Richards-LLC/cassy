@@ -23,12 +23,10 @@ version and worktree, never a version-keyed path.
    <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,
    pending, or malformed evidence refuses the merge. Supervisors monitor CI;
-   workers never poll CI. Wait on CI and the merge queue with event
-   reminders, never a delay: `remind_event=ci_completed
-   remind_filter='{"branch":"<lane>","event":"push"}'` (or `{"sha":…}`)
-   before `--check-lane`, and `remind_event=merge_queue_landed
-   remind_filter='{"pr":<n>}'` after enqueueing, each with
-   `cross_session=true` (`references/reminders.md` in cas-supervisor).
+   workers never poll CI.
+   Wait on CI with `remind_event=ci_completed` (`{"sha":"<full sha>"}`) and
+   on a queue landing with `remind_event=branch_contained_in`, both with
+   `cross_session=true` — never a delay reminder.
 3. Start a clean detached or `release/` worktree from `origin/main`. Copy the
    reviewed dated CHANGELOG section and draft from the epic into this worktree
    and commit them; preflight reads the release checkout. Confirm
@@ -81,9 +79,7 @@ version and worktree, never a version-keyed path.
    The pipeline waits for `MERGEABLE` plus the required
    status-check rollup before enqueueing, defaulting to 60 attempts at 5 seconds.
 5. If the command stops, answer only the named blocker, then rerun the exact
-   printed `--cut --resume` command. When the blocker is a CI run or queue
-   landing you must wait for, set the matching event reminder and end the
-   turn; resume when it fires. Use `scripts/release-train.sh <version>
+   printed `--cut --resume` command. Use `scripts/release-train.sh <version>
    <release-worktree> --status` for bounded, read-only state. A targeted
    `--gate --only <row,row>` is diagnostic and never authorizes pipeline.
 6. Done when the receipt checklist holds; never call the release published before. It needs the

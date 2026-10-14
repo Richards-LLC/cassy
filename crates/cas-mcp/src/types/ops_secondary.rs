@@ -773,13 +773,10 @@ pub struct FactoryRequest {
     /// Event type that triggers the reminder (event-based trigger). External
     /// durable conditions are `branch_contained_in` with filter
     /// `{"commit":"<sha-or-ref>","target_branch":"main"}` and
-    /// `tag_exists` with filter `{"tag":"<tag>"}`; GitHub conditions are
-    /// `ci_completed` with `{"sha":"<sha>","workflow":"CI"}` (or
-    /// `{"branch":"<branch>"}`, optional `event`) and `merge_queue_landed`
-    /// with `{"pr":<number>}`. External conditions require
-    /// `cross_session=true` and default to no expiry.
+    /// `tag_exists` with filter `{"tag":"<tag>"}`; external conditions
+    /// require `cross_session=true` and default to no expiry.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', 'ci_completed', or 'merge_queue_landed'. External conditions require cross_session=true; use JSON filters {commit,target_branch}, {tag}, {sha|branch,workflow?,event?} or {pr}."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. External conditions require cross_session=true; use JSON filters {commit,target_branch}, {tag} or {sha,workflow?}."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
@@ -1294,12 +1291,10 @@ pub struct CoordinationRequest {
 
     /// Event type that triggers reminder. External durable conditions are
     /// `branch_contained_in` with `{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}`
-    /// and `tag_exists` with `{\"tag\":\"<tag>\"}`; GitHub conditions are
-    /// `ci_completed` with `{\"sha\":\"<sha>\",\"workflow\":\"CI\"}` and
-    /// `merge_queue_landed` with `{\"pr\":<number>}`. All require
+    /// and `tag_exists` with `{\"tag\":\"<tag>\"}`; both require
     /// `cross_session=true` and default to no expiry.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', 'ci_completed', or 'merge_queue_landed'. External conditions require cross_session=true; use JSON filters {commit,target_branch}, {tag}, {sha|branch,workflow?,event?} or {pr}."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. External conditions require cross_session=true; use JSON filters {commit,target_branch}, {tag} or {sha,workflow?}."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,

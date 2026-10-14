@@ -3541,11 +3541,7 @@
         },
         {
           "text": "remind_event=ci_completed",
-          "reason": "Release CI and merge-queue waits are event reminders, not delay reminders (cas-0f05)."
-        },
-        {
-          "text": "remind_event=merge_queue_landed",
-          "reason": "Release CI and merge-queue waits are event reminders, not delay reminders (cas-0f05)."
+          "reason": "CI waits are event reminders, not delay reminders (cas-0f05)."
         }
       ],
       "absent": [
@@ -4242,11 +4238,7 @@
         },
         {
           "text": "remind_event=ci_completed",
-          "reason": "Supervisor CI and merge-queue waits are event reminders, not delay reminders (cas-0f05)."
-        },
-        {
-          "text": "remind_event=merge_queue_landed",
-          "reason": "Supervisor CI and merge-queue waits are event reminders, not delay reminders (cas-0f05)."
+          "reason": "CI waits are event reminders, not delay reminders (cas-0f05)."
         }
       ],
       "absent": [],

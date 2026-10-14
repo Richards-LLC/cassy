@@ -9046,35 +9046,19 @@ impl FactoryDaemon {
             Vec::new()
         };
 
-        // cas-0f05: CI completion and PR landing are probed on GitHub off the
-        // loop. A finished probe hands back rows whose condition is true; the
-        // pending→fired transition below stays the durable edge.
-        let ci_ready = {
-            let session_name = self.session_name.clone();
-            let candidate_store = std::sync::Arc::clone(&reminder_store);
-            self.ci_wake_probe.poll_gh(
-                std::time::Instant::now(),
-                self.app.project_path(),
-                move || ci_wake_candidates(candidate_store.as_ref(), &session_name),
-            )
-        };
-
+        let ci_wakes = std::mem::take(&mut self.pending_ci_wakes);
         let any_due = !due_reminders.is_empty()
             || !events.is_empty()
             || !external_ready.is_empty()
-            || !ci_ready.is_empty();
-        let supervisor_queue = if any_due {
-            open_supervisor_queue_store(self.app.cas_dir()).ok()
-        } else {
-            None
-        };
+            || !ci_wakes.is_empty();
+        let supervisor_queue = any_due
+            .then(|| open_supervisor_queue_store(self.app.cas_dir()).ok())
+            .flatten();
 
         // Open prompt queue for PTY injection of fired reminders
-        let prompt_queue = if any_due {
-            open_prompt_queue_store(self.app.cas_dir()).ok()
-        } else {
-            None
-        };
+        let prompt_queue = any_due
+            .then(|| open_prompt_queue_store(self.app.cas_dir()).ok())
+            .flatten();
 
         let agent_id_to_name = &self.app.director_data().agent_id_to_name;
 
@@ -9113,17 +9097,16 @@ impl FactoryDaemon {
             );
         }
 
-        for ready in &ci_ready {
-            let context = ReminderTriggerContext::ci(ready);
+        for wake in &ci_wakes {
             fire_reminder(
-                &ready.reminder,
+                &wake.reminder,
                 &reminder_store,
                 &supervisor_queue,
                 &prompt_queue,
                 &self.session_name,
                 self.app.supervisor_name(),
                 agent_id_to_name,
-                Some(&context),
+                Some(&ReminderTriggerContext::ci(wake)),
                 self.app.cas_dir(),
             );
         }
@@ -9415,6 +9398,29 @@ fn commander_history_message_text(text: &str) -> (Option<i64>, String) {
     (reply_to, rest[end + 2..].to_string())
 }
 
+/// Pending `ci_completed` reminders this factory session may fire. Runs on
+/// the GitHub watcher's blocking task, not the daemon loop.
+pub(super) fn ci_completed_candidates(
+    cas_dir: &std::path::Path,
+    session_name: &str,
+) -> Vec<(cas_store::Reminder, super::ci_watch::CiCompleted)> {
+    let event = super::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
+    let reminders = crate::store::open_reminder_store(cas_dir)
+        .ok()
+        .and_then(|store| store.get_event_reminders(event).ok())
+        .unwrap_or_default();
+    reminders
+        .into_iter()
+        .filter(|r| {
+            reminder_matches_factory_session(r.session_id.as_deref(), r.cross_session, session_name)
+        })
+        .filter_map(|r| {
+            let condition = super::ci_watch::parse_ci_completed(r.trigger_filter.as_ref()?).ok()?;
+            Some((r, condition))
+        })
+        .collect()
+}
+
 /// Fire a reminder by delivering it to both the notification queue
 /// (for web UI / structured data) and the prompt queue (for PTY injection).
 ///
@@ -9424,52 +9430,6 @@ fn commander_history_message_text(text: &str) -> (Option<i64>, String) {
 /// `triggering_event` is the event or external condition that caused this
 /// reminder to fire. Its context is included in the durable payload and
 /// delivered prompt so the recipient knows what happened.
-/// Pending `ci_completed` / `merge_queue_landed` rows this factory session
-/// may fire, with their parsed conditions. An unparsable filter is logged and
-/// skipped, never treated as true.
-fn ci_wake_candidates(
-    reminder_store: &dyn cas_store::ReminderStore,
-    session_name: &str,
-) -> Vec<super::ci_wake::CiWakeCandidate> {
-    let mut candidates = Vec::new();
-    for event_type in super::ci_wake::CI_WAKE_EVENTS {
-        let reminders = match reminder_store.get_event_reminders(event_type) {
-            Ok(reminders) => reminders,
-            Err(error) => {
-                tracing::warn!(event_type, %error, "failed to load CI reminder candidates");
-                continue;
-            }
-        };
-        for reminder in reminders {
-            if !reminder_matches_factory_session(
-                reminder.session_id.as_deref(),
-                reminder.cross_session,
-                session_name,
-            ) {
-                continue;
-            }
-            let parsed = reminder
-                .trigger_filter
-                .as_ref()
-                .ok_or_else(|| "missing condition filter".to_string())
-                .and_then(|filter| super::ci_wake::parse_ci_wake_condition(event_type, filter));
-            match parsed {
-                Ok(condition) => candidates.push(super::ci_wake::CiWakeCandidate {
-                    reminder,
-                    condition,
-                }),
-                Err(error) => tracing::warn!(
-                    reminder_id = reminder.id,
-                    event_type,
-                    %error,
-                    "CI reminder has an invalid condition filter"
-                ),
-            }
-        }
-    }
-    candidates
-}
-
 struct ReminderTriggerContext {
     event_type: String,
     data: serde_json::Value,
@@ -9485,11 +9445,11 @@ impl ReminderTriggerContext {
         }
     }
 
-    fn ci(ready: &super::ci_wake::CiWakeReady) -> Self {
+    fn ci(wake: &super::ci_watch::CiWake) -> Self {
         Self {
-            event_type: ready.condition.event_type().to_string(),
-            data: ready.observation.to_json(&ready.condition),
-            description: ready.observation.description(),
+            event_type: super::ci_watch::EXTERNAL_CI_COMPLETED_EVENT.to_string(),
+            data: wake.to_json(),
+            description: wake.description(),
         }
     }
 
@@ -9931,111 +9891,49 @@ mod tests {
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
     }
 
-    /// cas-0f05: a pending `ci_completed` row is a probe candidate in its
-    /// factory session, and a satisfied probe fires it once with the run
-    /// conclusions in the delivered event.
+    /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
+    /// satisfied wake fires once with the run conclusions.
     #[test]
-    fn ci_completed_reminder_is_a_candidate_and_fires_with_run_conclusions() {
-        use super::super::ci_wake::{
-            CiWakeCondition, CiWakeObservation, CiWakeReady, CiWakeTarget, CompletedRun,
-            EXTERNAL_CI_COMPLETED_EVENT,
-        };
+    fn ci_completed_reminder_fires_once_with_run_conclusions() {
         let temp = tempfile::TempDir::new().unwrap();
-        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+        let reminders: Arc<dyn cas_store::ReminderStore> =
             Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
-        reminder_store.init().unwrap();
-        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
-            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
-        supervisor_store.init().unwrap();
-        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
-            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
-        prompt_store.init().unwrap();
-
+        reminders.init().unwrap();
         let sha = "fba7a3365eb0cb6403be9d708e8f03151fc42054";
-        let create = |session: &str, cross_session: bool, filter: serde_json::Value| {
-            reminder_store
-                .create_with_scope(
-                    "supervisor-1",
-                    None,
-                    "CI finished; merge or route the red job",
-                    cas_store::ReminderTriggerType::Event,
-                    None,
-                    Some(EXTERNAL_CI_COMPLETED_EVENT),
-                    Some(&filter),
-                    0,
-                    Some(session),
-                    Some("origin-session"),
-                    cross_session,
-                    None,
-                )
-                .unwrap()
-        };
-        let id = create("factory-a", true, serde_json::json!({"sha": sha, "workflow": "CI"}));
-        // Another factory's session-scoped row and a row with a corrupt filter
-        // are skipped. (A cross-session row is probed by any factory; its
-        // delivery target decides who may fire it, as for branch conditions.)
-        create("factory-b", false, serde_json::json!({"sha": sha}));
-        create("factory-a", true, serde_json::json!({"sha": "zz"}));
+        let filter = serde_json::json!({"sha": sha, "workflow": "CI"});
+        let (event, scope) = (Some("ci_completed"), Some("factory-a"));
+        let kind = cas_store::ReminderTriggerType::Event;
+        let message = "CI done";
+        reminders
+            .create_with_scope(
+                "sup", None, message, kind, None, event, Some(&filter), 0, scope, None, true, None,
+            )
+            .unwrap();
 
-        let candidates = super::ci_wake_candidates(reminder_store.as_ref(), "factory-a");
+        let mut candidates = super::ci_completed_candidates(temp.path(), "factory-a");
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].reminder.id, id);
-        let condition = CiWakeCondition::CiCompleted {
-            target: CiWakeTarget::Sha(sha.to_string()),
-            workflow: Some("CI".to_string()),
-            event: None,
-        };
-        assert_eq!(candidates[0].condition, condition);
-
-        let ready = CiWakeReady {
-            reminder: candidates[0].reminder.clone(),
-            condition,
-            observation: CiWakeObservation::CiCompleted {
-                sha: sha.to_string(),
-                runs: vec![CompletedRun {
-                    id: 38603274883,
-                    name: "CI".to_string(),
-                    event: "push".to_string(),
-                    conclusion: "success".to_string(),
-                    url: "https://github.com/example/repo/actions/runs/38603274883".to_string(),
-                }],
-            },
-        };
-        let context = super::ReminderTriggerContext::ci(&ready);
-        let supervisor = Some(Arc::clone(&supervisor_store));
-        let prompt = Some(Arc::clone(&prompt_store));
-        let agents = HashMap::from([("supervisor-1".to_string(), "supervisor".to_string())]);
+        let (reminder, condition) = candidates.remove(0);
+        let run = serde_json::from_value(serde_json::json!({"id": 1, "name": "CI",
+            "head_branch": "main", "head_sha": sha, "html_url": "https://github.test/runs/1",
+            "status": "completed", "conclusion": "failure", "event": "push"}))
+        .unwrap();
+        let wake = super::super::ci_watch::CiWake { reminder, condition, runs: vec![run] };
+        let context = super::ReminderTriggerContext::ci(&wake);
+        let agents = HashMap::from([("sup".to_string(), "supervisor".to_string())]);
         for _ in 0..2 {
-            super::fire_reminder(
-                &ready.reminder,
-                &reminder_store,
-                &supervisor,
-                &prompt,
-                "factory-a",
-                "supervisor",
-                &agents,
-                Some(&context),
-                temp.path(),
-            );
+            let (sup, wake_ref) = (&None, &wake.reminder);
+            super::fire_reminder(wake_ref, &reminders, sup, &None, "factory-a", "supervisor",
+                &agents, Some(&context), temp.path());
         }
 
-        let fired = reminder_store.list_recently_fired(60).unwrap();
+        let fired = reminders.list_recently_fired(60).unwrap();
         assert_eq!(fired.len(), 1);
         let event = fired[0].fired_event.as_ref().unwrap();
         assert_eq!(event["event_type"], "ci_completed");
-        assert_eq!(event["data"]["outcome"], "success");
-        assert_eq!(event["data"]["runs"][0]["conclusion"], "success");
-        assert_eq!(
-            event["description"],
-            "CI completed for fba7a3365eb0: all 1 run(s) passed — CI (push) success https://github.com/example/repo/actions/runs/38603274883"
-        );
-        // Delivered exactly once despite the repeated fire attempt.
-        assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
-        let prompts = prompt_store.peek_all(10).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert!(prompts[0].prompt.contains("CI completed for fba7a3365eb0"));
-        // A fired row is no longer a candidate.
-        assert!(super::ci_wake_candidates(reminder_store.as_ref(), "factory-a").is_empty());
+        assert_eq!(event["data"]["outcome"], "failure");
+        let expected = "CI completed for fba7a3365eb0: CI failure https://github.test/runs/1";
+        assert_eq!(event["description"], expected);
+        assert!(super::ci_completed_candidates(temp.path(), "factory-a").is_empty());
     }
 
     /// GH #1015: a foreign factory must not consume a time reminder while

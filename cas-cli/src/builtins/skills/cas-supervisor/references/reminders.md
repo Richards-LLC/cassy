@@ -10,8 +10,8 @@ authoritative task/worker state once before acting.
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
 | Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, tell worker to re-close, then cancel any phase reminder |
-| GitHub CI run or merge-queue landing | Record the SHA or PR and end the turn | One `ci_completed` or `merge_queue_landed` event reminder — never a delay | It fires within 60 s of completion with the conclusions; act on them once |
-| Long release, publication, or other detached job with no GitHub event | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
+| GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
+| Long release, publication, or other detached job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
 | Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |
 | Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |
 | Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One event reminder with a TTL | Cancel it if the phase completes through another path |
@@ -53,10 +53,9 @@ coordination action=remind remind_event=task_completed remind_ttl_secs=1800 \
   remind_message="After this task completes, inspect its close/merge state once"
 ```
 
-Without `remind_filter` the reminder fires on any task's completion. `task_completed` is a real event; a vague hope such as "when CI is ready"
-is not — use `ci_completed` below. For a parked delivery whose completion is
-an externally observable git or GitHub condition, use the durable external
-triggers below instead of a finite timer.
+Without `remind_filter` the reminder fires on any task's completion. `task_completed` is a real event; vague hopes such as "when CI is ready" are
+not. For a parked delivery whose completion is an externally observable git
+condition, use the durable external triggers below instead of a finite timer.
 
 ### Durable external checkpoint: branch or tag
 
@@ -74,34 +73,20 @@ coordination action=remind remind_event=tag_exists \
   cross_session=true remind_message="Release tag exists; inspect the authoritative receipt"
 ```
 
-### Durable external checkpoint: CI run or merge-queue landing
-
-A delay reminder over CI wakes you long after the run finished. Wait on the
-run itself:
+For CI, wait on the runs themselves instead of a delay reminder:
 
 ```
 coordination action=remind remind_event=ci_completed \
-  remind_filter='{"sha":"<pushed-sha>","workflow":"CI"}' \
+  remind_filter='{"sha":"<full 40-char sha>","workflow":"CI"}' \
   cross_session=true remind_message="CI finished on <sha>; merge or route the red job"
-
-coordination action=remind remind_event=merge_queue_landed \
-  remind_filter='{"pr":<number>}' \
-  cross_session=true remind_message="PR landed; close the task and continue the release"
 ```
 
-`ci_completed` takes `sha` (7–40 hex; use the full SHA for a commit that
-exists only on GitHub, such as a merge-queue commit) or `branch` (follows the
-branch's forge tip), plus optional `workflow` (name such as `CI`, or file such
-as `ci.yml`) and `event` (`push`, `pull_request`, `merge_group`). It fires once
-every matching run for that commit has completed; without `workflow` or
-`event`, scheduled runs are ignored. The fired event carries `outcome`
-(`success`/`failure`) and each run's conclusion and URL, so read it instead
-of re-querying GitHub. `merge_queue_landed` fires when the PR merges (with the
-merge commit) or is closed unmerged; an ejected PR stays open and arrives as
-the existing ejection wake. The daemon probes GitHub every 30 s while such a
-reminder is pending, off its loop.
+It fires within a minute once every run for that SHA (or only the named
+workflow) has completed, carrying each run's conclusion and URL and an
+overall `outcome`. Without `workflow`, scheduled runs are ignored. For a
+merge-queue landing, use `branch_contained_in` with `"target_branch":"main"`.
 
-The daemon checks origin for branch and tag conditions on a bounded one-minute cadence. A local-only tag
+The daemon checks origin on a bounded one-minute cadence. A local-only tag
 cannot satisfy `tag_exists`; the tag must be published to origin. A failed
 remote check leaves the reminder pending. The fired description includes the
 remote ref and SHA, and the reminder fires once when the condition becomes
@@ -109,11 +94,9 @@ true, delivering the existing supervisor notification and prompt-queue wake.
 
 ## Role patterns
 
-- **Supervisors:** after dispatch, end the turn. For CI on a pushed SHA or a
-  PR in the merge queue, set one `ci_completed` / `merge_queue_landed`
-  reminder. For any other long official release or publication step, schedule
-  one bounded checkpoint only when there is no push expected before the next
-  decision. On firing, inspect the official
+- **Supervisors:** after dispatch, end the turn. For a long official release or
+  merge/publication queue, schedule one bounded checkpoint only when there is
+  no push expected before the next decision. On firing, inspect the official
   receipt and task/worker state once, then merge, release, reassign, or set one
   superseding checkpoint. Never retain reminders after merge or close.
 - **Workers:** before ending a turn for a detached command, persist the command

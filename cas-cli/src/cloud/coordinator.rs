@@ -223,6 +223,11 @@ impl CloudCoordinator {
         self.config.token.as_deref().unwrap_or("")
     }
 
+    /// The cloud config (endpoint, login) this coordinator was built from.
+    pub fn cloud_config(&self) -> &CloudConfig {
+        &self.config
+    }
+
     /// The repo identity this coordinator scopes its calls to.
     pub fn canonical_id(&self) -> Option<&str> {
         self.canonical_id.as_deref()

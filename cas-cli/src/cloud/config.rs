@@ -1610,6 +1610,14 @@ impl CloudConfig {
         self.token.as_ref().is_some_and(|t| !t.is_empty())
     }
 
+    /// Whether `other` reaches Cassy Cloud as the same login: same endpoint,
+    /// token and team (cas-66c7). Clients built from one config must be
+    /// rebuilt when the other differs, e.g. after `cas login` or a token
+    /// rotation. Sync timestamps and other bookkeeping are ignored.
+    pub fn same_credentials(&self, other: &CloudConfig) -> bool {
+        self.endpoint == other.endpoint && self.token == other.token && self.team_id == other.team_id
+    }
+
     /// Clear authentication (logout)
     pub fn logout(&mut self) {
         self.token = None;

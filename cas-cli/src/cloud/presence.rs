@@ -286,6 +286,18 @@ pub fn ensure_registered(
     }
 }
 
+/// Make a failing registration due now (cas-66c7): the login it failed
+/// with has changed, so waiting out the backoff would only delay recovery.
+pub fn retry_now(cas_root: &Path, agent_id: &str) {
+    if let Some(mut record) = load(cas_root, agent_id)
+        && record.state == PresenceState::Failing
+        && record.next_retry_at.is_some()
+    {
+        record.next_retry_at = None;
+        save(cas_root, &record);
+    }
+}
+
 /// One heartbeat-tick of presence upkeep for `agent`. See the module docs.
 pub fn tick(
     coordinator: &CloudCoordinator,

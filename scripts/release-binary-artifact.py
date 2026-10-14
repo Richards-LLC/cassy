@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Record the gate's audited release binary and let the publisher reuse it.
 
-One local release build per release tree (cas-c096). On the 3.51.1 cut the
-gate's release-binary-isa row built and audited the x86_64 release binary
-(614 s), then release.sh cold-compiled the same tree again in the tag worktree
-(11 min of a 24 min publish stage).
+One local release build per release tree (cas-c096). Before this, the gate's
+release-binary-isa row built and audited the x86_64 release binary (614 s),
+then release.sh cold-compiled the same tree again in the tag worktree (11 min
+of a 24 min publish stage).
 
   record <repo> --target T --binary B --license L [--audit NAME ...]
       Called by release-gate.sh after every audit passed. Packages B and L

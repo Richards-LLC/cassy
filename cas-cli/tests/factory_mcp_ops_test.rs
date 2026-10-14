@@ -522,6 +522,9 @@ fn factory_req(action: &str) -> FactoryRequest {
 
 fn coord_req(action: &str) -> CoordinationRequest {
     CoordinationRequest {
+        detail: None,
+        peer: None,
+        json: None,
         action: action.to_string(),
         id: None,
         task_id: None,
@@ -6663,6 +6666,9 @@ fn coord_msg(
     urgent: Option<bool>,
 ) -> CoordinationRequest {
     CoordinationRequest {
+        detail: None,
+        peer: None,
+        json: None,
         action: action.to_string(),
         id: None,
         task_id: None,

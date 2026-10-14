@@ -1,0 +1,42 @@
+Cloud presence: registered (focus cas-soundwave, branch
+  factory/sup-soundwave, registered 0s ago)
+[OK] 1 peer supervisor | 1 live
+Repo github.com/acme/widgets
+sup-prowl [live]
+  Machine prowl
+  Session factory-prowl
+  Focus   cas-prowl
+  Heartbeat 0s ago
+  Branch  factory/sup-prowl
+  Claims  3 | age since renewal (s)
+       30 cas-task-0 [claimed; title not synced]
+          Owner sup-prowl
+       30 cas-task-1 [claimed; title not synced]
+          Owner prowl-worker-0
+       30 cas-task-2 [claimed; title not synced]
+          Owner prowl-worker-1
+  Workers 4 live (read-only)
+    prowl-worker-0 [active]
+      Branch factory/prowl-worker-0
+      Tasks cas-task-1
+    prowl-worker-1 [active]
+      Branch factory/prowl-worker-1
+      Tasks cas-task-2
+    prowl-worker-2 [active]
+      Branch factory/prowl-worker-2
+      Tasks none
+    prowl-worker-3 [active]
+      Branch factory/prowl-worker-3
+      Tasks none
+Epic splits:
+  split-accepted [accepted, outgoing] epic cas-shared
+    with sup-prowl@prowl
+    mine cas-mine
+    theirs cas-theirs
+    decided 10-14 00:07 UTC | Agreed ownership
+  split-expired [expired, outgoing] epic cas-shared
+    with sup-prowl@prowl
+    mine cas-mine
+    theirs cas-theirs
+    Agreed ownership
+Peer mailbox: not receiving: daemon has not reported a mailbox poll.

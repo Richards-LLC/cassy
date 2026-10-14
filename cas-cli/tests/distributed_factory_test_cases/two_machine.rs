@@ -22,6 +22,458 @@ use super::fake_cloud::FakeCloud;
 
 const WIDGETS: &str = "github.com/acme/widgets";
 
+fn operator_cli(machine: &TestMachine, args: &[&str]) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cas"));
+    command
+        .args(args)
+        .current_dir(machine.cas_dir.parent().unwrap())
+        .env("CAS_ROOT", &machine.cas_dir)
+        .env_remove("CAS_CLONE_PATH")
+        .env_remove("CAS_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID");
+    command
+}
+
+#[test]
+fn cas_1caa_operator_excludes_project_agents_without_session_or_ancestor_pid() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    register(
+        &alpha,
+        "local-session",
+        "sup-local-session",
+        AgentRole::Supervisor,
+        "local-session",
+        "cas-local",
+    );
+    // No local agent has this operator process as an ancestor. Both local
+    // supervisors still belong to this project rather than its peer list.
+    for agent in alpha.agent_store().list(None).unwrap() {
+        assert_eq!(agent.pid, None);
+    }
+    for args in [
+        vec!["peers", "--json"],
+        vec!["peers", "--detail", "--json"],
+        vec!["peers"],
+        vec!["peers", "--detail"],
+    ] {
+        let result = operator_cli(&alpha, &args).output().unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let text = String::from_utf8(result.stdout).unwrap();
+        if args.contains(&"--json") {
+            let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let peers = report["peers"].as_array().unwrap();
+            assert_eq!(peers.len(), 1, "{args:?}: {text}");
+            assert_eq!(peers[0]["supervisor"]["agent_id"], "b");
+        } else {
+            assert!(text.contains("1 peer supervisor"), "{args:?}: {text}");
+            assert!(
+                !text.contains("sup-a") && !text.contains("sup-local-session"),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cas_1caa_operator_shared_discovery_excludes_project_agents() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    let PeerDiscovery::Found { peers, .. } = discover_peers(&alpha.cas_dir, None).unwrap() else {
+        panic!("expected project peer discovery");
+    };
+    assert_eq!(
+        peers
+            .iter()
+            .map(|p| p.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b"]
+    );
+}
+
+#[test]
+fn cas_1caa_cli_uses_claude_session_and_parent_pid_to_exclude_self() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    for via_pid in [false, true] {
+        let mut caller = alpha.agent_store().get("a").unwrap();
+        caller.pid = via_pid.then_some(std::process::id());
+        alpha.agent_store().update(&caller).unwrap();
+        let mut command = operator_cli(&alpha, &["peers", "--json"]);
+        if !via_pid {
+            command.env("CLAUDE_CODE_SESSION_ID", "a");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let peers = report["peers"].as_array().unwrap();
+        assert_eq!(peers.len(), 1, "via_pid={via_pid}: {report}");
+        assert_eq!(peers[0]["supervisor"]["agent_id"], "b");
+    }
+}
+
+#[test]
+fn cas_1caa_cli_without_self_resolves_token_account_and_worker_claims() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    CloudCoordinator::new(cloud.config())
+        .unwrap()
+        .with_agent_id("bw")
+        .claim("cas-visible", 600, None)
+        .unwrap();
+    let result = operator_cli(&alpha, &["peers", "--peer", "sup-b", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let peer = &report["peers"][0];
+    assert_eq!(peer["claims_visibility"], "same_account", "{report}");
+    assert_eq!(peer["claims"][0]["task_id"], "cas-visible");
+    assert_eq!(peer["workers"][0]["claims"][0]["task_id"], "cas-visible");
+}
+
+#[tokio::test]
+async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    let now = chrono::Utc::now();
+    for (id, state) in [
+        ("expired-proposal", cas_store::SplitState::Pending),
+        ("accepted-split", cas_store::SplitState::Accepted),
+    ] {
+        cas_store::insert_epic_split(
+            &alpha.cas_dir,
+            &cas_store::EpicSplit {
+                id: id.into(),
+                epic_id: "cas-shared".into(),
+                local_agent_id: "a".into(),
+                peer_agent_id: "b".into(),
+                peer_name: "sup-b".into(),
+                peer_machine: "machine-beta".into(),
+                direction: cas_store::SplitDirection::Outgoing,
+                mine: vec!["cas-mine".into()],
+                theirs: vec!["cas-theirs".into()],
+                state,
+                reason: Some("agreed ownership with a deliberately long explanation ".repeat(4)),
+                message_id: None,
+                expires_at: now - chrono::Duration::minutes(1),
+                created_at: now - chrono::Duration::minutes(10),
+                decided_at: (state == cas_store::SplitState::Accepted).then_some(now),
+            },
+        )
+        .unwrap();
+    }
+    let records = alpha.cas_dir.join("cloud_presence");
+    std::fs::create_dir_all(&records).unwrap();
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    for state in ["registered", "failing"] {
+        std::fs::write(
+            records.join("a.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "agent_id": "a", "state": state, "cause": "registration unavailable", "failures": 2,
+                "last_attempt_at": chrono::Utc::now(), "registered_at": chrono::Utc::now(),
+                "next_retry_at": null, "focus": "cas-alpha", "branch": "factory/sup-a"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for json in [false, true] {
+            let request = serde_json::from_value(
+                serde_json::json!({"action":"peers", "detail":true, "json":json}),
+            )
+            .unwrap();
+            let result = service
+                .coordination(rmcp::handler::server::wrapper::Parameters(request))
+                .await
+                .unwrap();
+            let text = &result.content[0].as_text().unwrap().text;
+            if json {
+                let report: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(report["cloud_presence"]["state"], state);
+                assert_eq!(report["cloud_presence"]["focus"], "cas-alpha");
+                assert!(
+                    report["cloud_presence_message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(state)
+                );
+                assert!(
+                    report["mailbox_status"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Peer mailbox:")
+                );
+                assert!(
+                    !report["mailbox_status"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Epic splits:")
+                );
+                let splits = report["epic_splits"].as_array().expect("structured splits");
+                assert_eq!(splits.len(), 2);
+                let expired = splits
+                    .iter()
+                    .find(|s| s["id"] == "expired-proposal")
+                    .unwrap();
+                assert_eq!(expired["state"], "pending");
+                assert_eq!(expired["display_state"], "expired");
+                assert_eq!(expired["direction"], "outgoing");
+                assert_eq!(expired["epic_id"], "cas-shared");
+                assert_eq!(expired["peer_name"], "sup-b");
+                assert_eq!(expired["peer_machine"], "machine-beta");
+                assert_eq!(expired["mine"], serde_json::json!(["cas-mine"]));
+                assert_eq!(expired["theirs"], serde_json::json!(["cas-theirs"]));
+                assert!(expired["expires_at"].is_string());
+                assert!(expired["decided_at"].is_null());
+                let accepted = splits.iter().find(|s| s["id"] == "accepted-split").unwrap();
+                assert_eq!(accepted["display_state"], "accepted");
+                assert!(accepted["decided_at"].is_string());
+                assert!(expired["reason"].as_str().unwrap().len() > 72);
+            } else {
+                assert!(
+                    text.starts_with(&format!("Cloud presence: {state}")),
+                    "{text}"
+                );
+                let peers_at = text.find("[OK]").unwrap();
+                let splits_at = text.find("Epic splits:").unwrap();
+                let mailbox_at = text.find("Peer mailbox:").unwrap();
+                assert!(peers_at < splits_at && splits_at < mailbox_at, "{text}");
+                assert!(
+                    text.contains("expired-proposal [expired, outgoing]"),
+                    "{text}"
+                );
+                assert!(
+                    text.lines()
+                        .all(|line| ratatui::text::Line::raw(line).width() <= 72),
+                    "{text}"
+                );
+                if state == "failing" {
+                    assert!(text.contains("registration unavailable"), "{text}");
+                }
+            }
+        }
+    }
+    std::fs::write(
+        alpha.cas_dir.join("config.toml"),
+        format!("[project]\ncanonical_id=\"{WIDGETS}\"\n[cloud]\nauto_sync=false\n"),
+    )
+    .unwrap();
+    let request =
+        serde_json::from_value(serde_json::json!({"action":"peers", "detail":true})).unwrap();
+    let result = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .starts_with("Cloud presence: disabled (cloud.auto_sync=false)")
+    );
+}
+
+#[tokio::test]
+async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, _beta, _gamma) = three_machines(&cloud);
+    {
+        let mut state = cloud.state.lock().unwrap();
+        for id in ["b", "bw"] {
+            state.agents.get_mut(id).unwrap()["user_id"] = serde_json::json!("other-user");
+        }
+    }
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    for json in [true, false] {
+        let request = serde_json::from_value(
+            serde_json::json!({"action":"peers", "peer":"sup-b", "json":json}),
+        )
+        .unwrap();
+        let result = service
+            .coordination(rmcp::handler::server::wrapper::Parameters(request))
+            .await
+            .unwrap();
+        let text = &result.content[0].as_text().unwrap().text;
+        if json {
+            let report: serde_json::Value = serde_json::from_str(text).unwrap();
+            let peer = &report["peers"][0];
+            assert_eq!(peer["claims_visibility"], "different_account");
+            assert_eq!(peer["user_id"], "other-user");
+            assert_eq!(peer["team_id"], "test-team");
+            assert_eq!(peer["workers"].as_array().unwrap().len(), 1);
+        } else {
+            assert!(
+                text.contains("Claims not visible (different account)"),
+                "{text}"
+            );
+            assert!(text.contains("Tasks not visible"), "{text}");
+            assert!(
+                !text.contains("Claims  0") && !text.contains("Tasks none"),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importing_workers() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let (alpha, beta, _gamma) = three_machines(&cloud);
+    for n in 1..4 {
+        register(
+            &beta,
+            &format!("bw{n}"),
+            &format!("beta-worker-{n}"),
+            AgentRole::Worker,
+            "b",
+            "cas-f9c7",
+        );
+    }
+    register(
+        &beta,
+        "other-session",
+        "unrelated-worker",
+        AgentRole::Worker,
+        "other",
+        "cas-other",
+    );
+    let config = cloud.config();
+    for (task, owner) in [
+        ("cas-held", "b"),
+        ("cas-active", "bw"),
+        ("cas-unsynced", "bw1"),
+    ] {
+        CloudCoordinator::new(config.clone())
+            .unwrap()
+            .with_agent_id(owner)
+            .with_canonical_id(Some(WIDGETS.into()))
+            .claim(task, 600, None)
+            .unwrap();
+    }
+    let mut task = cas::types::Task::new("cas-active".into(), "Implement peer awareness".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    alpha.task_store().add(&task).unwrap();
+    {
+        let mut state = cloud.state.lock().unwrap();
+        for id in ["bw", "bw1", "bw2", "bw3"] {
+            state.agents.get_mut(id).unwrap()["metadata"]["branch"] =
+                serde_json::json!(format!("factory/{id}"));
+        }
+    }
+    let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("a".into());
+    let service = cas::mcp::CasService::new(core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "peers", "peer": "sup-b", "detail": true, "json": true
+    }))
+    .unwrap();
+    let result = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    let text = result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+        .collect::<String>();
+    let detail: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let peers = detail["peers"].as_array().unwrap();
+    assert_eq!(peers.len(), 1, "{detail}");
+    let peer = &peers[0];
+    assert_eq!(peer["supervisor"]["focus"], "cas-f9c7");
+    assert_eq!(peer["supervisor"]["machine_id"], "machine-beta");
+    assert_eq!(peer["supervisor"]["session"], "factory-b");
+    assert_eq!(peer["claims"].as_array().unwrap().len(), 3);
+    let active = peer["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["task_id"] == "cas-active")
+        .unwrap();
+    assert_eq!(active["title"], task.title);
+    assert_eq!(active["status"], "in_progress");
+    assert!(active["age_secs"].as_i64().unwrap() >= 0);
+    let workers = peer["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 4, "{workers:?}");
+    let worker = workers.iter().find(|w| w["agent_id"] == "bw").unwrap();
+    assert_eq!(worker["branch"], "factory/bw");
+    assert_eq!(worker["claims"][0]["task_id"], "cas-active");
+    assert!(alpha.agent_store().get("bw").is_err());
+    assert!(
+        open_spawn_queue_store(&alpha.cas_dir)
+            .unwrap()
+            .peek(10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        resolve_peer_target(&peers_of(&alpha.cas_dir, "a"), "beta-worker")
+            .unwrap()
+            .is_none()
+    );
+    // The selector alone expands details; workers remain unselectable peers.
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "peers", "peer": "sup-b@machine-beta", "json": true
+    }))
+    .unwrap();
+    let selected = service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    let selected = selected.content[0].as_text().unwrap();
+    let selected: serde_json::Value = serde_json::from_str(&selected.text).unwrap();
+    assert_eq!(selected["detail"], true);
+    assert_eq!(selected["peers"][0]["workers"].as_array().unwrap().len(), 4);
+    for peer in ["beta-worker", "sup-missing"] {
+        let request =
+            serde_json::from_value(serde_json::json!({"action": "peers", "peer": peer})).unwrap();
+        let error = service
+            .coordination(rmcp::handler::server::wrapper::Parameters(request))
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.contains("not found") && error.message.contains(peer),
+            "{error}"
+        );
+    }
+    // CLI parity uses the actual binary built with this integration harness.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cas"))
+        .args(["peers", "--peer", "sup-b", "--json"])
+        .current_dir(alpha.cas_dir.parent().unwrap())
+        .env("CAS_ROOT", &alpha.cas_dir)
+        .env("CAS_SESSION_ID", "a")
+        .env_remove("CAS_CLONE_PATH")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["peers"][0]["workers"].as_array().unwrap().len(), 4);
+    assert_eq!(cli["peers"][0]["claims"].as_array().unwrap().len(), 3);
+}
+
 /// Register `id` in the cloud (as the daemon does) and in the machine's own
 /// store, in factory session `factory-<session>`.
 fn register(

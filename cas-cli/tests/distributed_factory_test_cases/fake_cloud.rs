@@ -156,6 +156,9 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
                 "last_heartbeat": now(),
                 "active_tasks": 0,
                 "metadata": body["metadata"],
+                "user_id": "test-user",
+                "team_id": "test-team",
+                "project_id": body["metadata"]["canonical_id"],
             });
             state.agents.insert(id, agent.clone());
             (200, json!({"status": "success", "agent": agent}))
@@ -184,7 +187,9 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
                         project,
                         &[],
                     ),
-                    None => true,
+                    // An unscoped lookup is account-owned, unlike team
+                    // discovery. This fake's bearer belongs to test-user.
+                    None => agent["user_id"].as_str().is_none_or(|id| id == "test-user"),
                 })
                 .cloned()
                 .collect();

@@ -29,6 +29,7 @@ pub use knowledge_cmd::{
     load_symbols as knowledge_symbols_with_limit,
 };
 mod known_repos;
+mod peers;
 mod project_overview_cmd;
 mod provider_default;
 mod release_report;
@@ -295,6 +296,9 @@ pub enum Commands {
     /// Show session status
     Status(StatusArgs),
 
+    /// Show this repository's peer supervisors through Cassy Cloud
+    Peers(peers::PeersArgs),
+
     /// Show local provider rate-limit and credit availability
     Limits(LimitsArgs),
 
@@ -469,6 +473,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Hub(_)
         | Commands::Config(_)
         | Commands::Status(_)
+        | Commands::Peers(_)
         | Commands::Limits(_)
         | Commands::StatusLine(_)
         | Commands::Mcp(_)
@@ -680,6 +685,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Jev(_) => "jev".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
+        Commands::Peers(_) => "peers".to_string(),
         Commands::Limits(_) => "limits".to_string(),
         Commands::StatusLine(_) => "statusline".to_string(),
         Commands::Hook(_) => "hook".to_string(),
@@ -816,6 +822,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
             config::execute_subcommand(cmd, cli, &root)
         }
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
+        Commands::Peers(args) => peers::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
         Commands::StatusLine(args) => statusline::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Hook(args) => hook::execute(args, cli),

@@ -28,6 +28,7 @@ pub mod code_embeddings;
 pub mod embeddings;
 // cas-e477: peer supervisor discovery through the cloud agent registry.
 pub mod peers;
+pub mod peers_detail;
 pub mod presence;
 // cas-f9c7: cross-machine supervisor messaging through a cloud peer mailbox.
 pub mod peer_mailbox;

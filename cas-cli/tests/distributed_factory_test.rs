@@ -15,10 +15,8 @@
 //! cargo test --test integration_factory distributed_factory_test::
 //!
 //! # Run against the real cloud (cas-c7c7): a 0600 cloud.json or token file
-//! CAS_CLOUD_TOKEN_FILE=<path> CAS_CLOUD_TRANSCRIPT_DIR=<dir> cargo nextest run \
+//! CAS_TEST_CLOUD_TOKEN_FILE=<path> CAS_TEST_CLOUD_TRANSCRIPT_DIR=<dir> cargo nextest run \
 //!     -p cas --test integration_factory -E 'test(two_machine) | test(test_cloud_)'
-//! # Legacy (requires CAS_CLOUD_TOKEN env var)
-//! CAS_CLOUD_TOKEN=xxx cargo test --test integration_factory distributed_factory_test::
 //! ```
 
 use std::path::PathBuf;

@@ -301,6 +301,23 @@ mod ambient_scrub_tests {
     }
 
     #[test]
+    fn real_cloud_run_controls_survive_because_only_tests_read_them() {
+        // cas-c7c7: a guarded distributed test must still see that this run
+        // targets the real cloud, or it silently falls back to the fake.
+        for key in [
+            "CAS_TEST_CLOUD_TOKEN_FILE",
+            "CAS_TEST_CLOUD_ENDPOINT",
+            "CAS_TEST_CLOUD_TRANSCRIPT_DIR",
+        ] {
+            assert!(!is_scrubbed_ambient_env_key(key), "{key}");
+        }
+        // The product's own cloud selectors stay scrubbed.
+        for key in ["CAS_CLOUD_ENDPOINT", "CAS_CLOUD_TOKEN", "CAS_CLOUD_TOKEN_FILE"] {
+            assert!(is_scrubbed_ambient_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
     fn the_init_watchdog_budget_survives_because_it_is_only_a_clock() {
         // cas-c0411: scrubbing this put a test's child `cas init` back on the
         // 300s default that a saturated release gate had just raised, and the

@@ -381,8 +381,8 @@ fn test_factory_agent_active_tasks_count() {
 // =============================================================================
 
 /// The cloud these tests run against: the in-process fake by default, or the
-/// real Cassy Cloud through the namespacing proxy when `CAS_CLOUD_TOKEN_FILE`
-/// (or the legacy `CAS_CLOUD_TOKEN`) is set (cas-c7c7). The cloud is
+/// real Cassy Cloud through the namespacing proxy when
+/// `CAS_TEST_CLOUD_TOKEN_FILE` is set (cas-c7c7). The cloud is
 /// returned so it lives as long as the test, and its teardown runs at drop.
 fn cloud_for_test() -> (cas::cloud::CloudConfig, super::test_cloud::TestCloud) {
     let cloud = super::test_cloud::TestCloud::start();

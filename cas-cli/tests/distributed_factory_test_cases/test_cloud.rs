@@ -1,11 +1,13 @@
 //! cas-c7c7: the cloud a distributed test runs against: the in-process fake
 //! by default, or the real Cassy Cloud when a token is supplied.
 //!
-//! Real mode is enabled by `CAS_CLOUD_TOKEN_FILE`, a 0600 file holding either
-//! a `cloud.json` (`{"endpoint", "token"}`) or a bare token. The legacy
-//! `CAS_CLOUD_TOKEN` variable is also read. `CAS_CLOUD_ENDPOINT` overrides
-//! the endpoint, which otherwise comes from the file or defaults to
-//! production.
+//! Real mode is enabled by `CAS_TEST_CLOUD_TOKEN_FILE`, a 0600 file holding
+//! either a `cloud.json` (`{"endpoint", "token"}`) or a bare token.
+//! `CAS_TEST_CLOUD_ENDPOINT` overrides the endpoint, which otherwise comes
+//! from the file or defaults to production. The `CAS_TEST_CLOUD_` prefix
+//! survives `TestEnvGuard`'s scrub of ambient `CAS_*` state, so a guarded test
+//! never silently falls back to the fake; the product reads none of these
+//! variables.
 //!
 //! In real mode a local proxy stands in front of the cloud, so every test
 //! runs unchanged on real HTTP:
@@ -19,7 +21,7 @@
 //!   test's scratch `.cas` directories hold a placeholder, never the
 //!   credential. The token is never printed or recorded.
 //! - **Transcripts:** it records every exchange, ids in the test's own
-//!   terms, into `CAS_CLOUD_TRANSCRIPT_DIR` when that is set.
+//!   terms, into `CAS_TEST_CLOUD_TRANSCRIPT_DIR` when that is set.
 //! - **Teardown:** on drop it releases every claim it saw, acks every
 //!   message it saw leased, rejects anything still queued for the run's
 //!   agents, and shuts every agent down. It then verifies the result and
@@ -142,22 +144,19 @@ impl TestCloud {
 /// `(endpoint, token)` when a real-cloud run was requested.
 fn real_credentials() -> Option<(String, String)> {
     let mut endpoint = None;
-    let token = match std::env::var("CAS_CLOUD_TOKEN_FILE").ok().filter(|p| !p.is_empty()) {
-        Some(path) => {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("CAS_CLOUD_TOKEN_FILE {path}: {error}"));
-            match serde_json::from_str::<Value>(&text) {
-                Ok(Value::Object(config)) => {
-                    endpoint = config.get("endpoint").and_then(Value::as_str).map(str::to_string);
-                    config.get("token").and_then(Value::as_str).map(str::to_string)
-                }
-                _ => Some(text.trim().to_string()),
-            }
+    let path = std::env::var("CAS_TEST_CLOUD_TOKEN_FILE").ok().filter(|p| !p.is_empty())?;
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("CAS_TEST_CLOUD_TOKEN_FILE {path}: {error}"));
+    let token = match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(config)) => {
+            endpoint = config.get("endpoint").and_then(Value::as_str).map(str::to_string);
+            config.get("token").and_then(Value::as_str).map(str::to_string)
         }
-        None => std::env::var("CAS_CLOUD_TOKEN").ok(),
+        _ => Some(text.trim().to_string()),
     }
-    .filter(|token| !token.is_empty())?;
-    let endpoint = std::env::var("CAS_CLOUD_ENDPOINT")
+    .filter(|token| !token.is_empty())
+    .unwrap_or_else(|| panic!("CAS_TEST_CLOUD_TOKEN_FILE {path} holds no token"));
+    let endpoint = std::env::var("CAS_TEST_CLOUD_ENDPOINT")
         .ok()
         .filter(|e| !e.is_empty())
         .or(endpoint)
@@ -488,7 +487,7 @@ impl Drop for RealCloud {
         let checks = self.teardown();
         self.server.unblock();
         let run = self.run.lock().unwrap();
-        if let Ok(dir) = std::env::var("CAS_CLOUD_TRANSCRIPT_DIR") {
+        if let Ok(dir) = std::env::var("CAS_TEST_CLOUD_TRANSCRIPT_DIR") {
             let dir = std::path::PathBuf::from(dir);
             let _ = std::fs::create_dir_all(&dir);
             let document = json!({
@@ -664,4 +663,27 @@ fn the_real_cloud_proxy_namespaces_ids_and_tears_down() {
     let state = fake.state.lock().unwrap();
     assert!(state.agents.values().all(|agent| agent["_shutdown"] == true), "every agent shut down");
     assert!(state.locks.values().all(|lock| lock["status"] != "active"), "every claim released");
+}
+
+/// Two runs share one account (parallel tests on one token): neither sees
+/// the other's agents or claims in an account-wide listing, so a test's view
+/// of "the account" is its own run (cas-c7c7; the first real-cloud leg failed
+/// when one test listed another test's lock).
+#[test]
+fn concurrent_runs_on_one_account_never_see_each_other() {
+    use cas::cloud::CloudCoordinator;
+    use cas::types::Agent;
+    let fake = FakeCloud::start();
+    let first = TestCloud::Real(RealCloud::start(fake.url.clone(), "test-token".into()));
+    let second = TestCloud::Real(RealCloud::start(fake.url.clone(), "test-token".into()));
+    let mut holder = CloudCoordinator::new(first.config()).unwrap();
+    holder.register(&Agent::new("a".into(), "sup-a".into())).unwrap();
+    holder.claim("cas-t1", 600, None).unwrap();
+    let mut other = CloudCoordinator::new(second.config()).unwrap();
+    other.register(&Agent::new("b".into(), "sup-b".into())).unwrap();
+
+    assert_eq!(other.list_locks().unwrap().len(), 0, "the first run's claim is not the second run's");
+    assert_eq!(holder.list_locks().unwrap().len(), 1, "a run still sees its own claim");
+    let theirs: Vec<String> = other.list_agent_infos().unwrap().into_iter().map(|agent| agent.id).collect();
+    assert_eq!(theirs, ["b"], "the second run lists only its own agents");
 }

@@ -1,0 +1,63 @@
+name: Measure macOS release-fast LTO (cas-542e follow-up, never merged)
+
+on:
+  push:
+    branches:
+      - "measure/brave-fox-8-macos-lto"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS release-fast lto=${{ matrix.lto }}
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        lto: [thin, "off"]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_FAST_LTO: ${{ matrix.lto }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - run: ./scripts/bootstrap-zig.sh
+      - name: Build (cold, no cache, same as a release prebuild)
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: |
+          sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string || true
+          start=$(date +%s)
+          cargo build -p cas --profile release-fast --target aarch64-apple-darwin --locked --timings
+          end=$(date +%s)
+          echo "TOTAL_BUILD_SECONDS=$((end - start))"
+          bin=target/aarch64-apple-darwin/release-fast/cas
+          strip "$bin"
+          echo "STRIPPED_BYTES=$(stat -f %z "$bin")"
+          python3 - <<'PY'
+          import re, glob
+          html = open(sorted(glob.glob('target/cargo-timings/cargo-timing-*.html'))[-1]).read()
+          m = re.search(r'const UNIT_DATA = (\[.*?\]);', html, re.S)
+          import json
+          for u in json.loads(m.group(1)):
+              if u['name'] == 'cas' and u.get('target', '').strip() in ('', 'lib', '(lib)', 'bin "cas"'):
+                  print('UNIT', u['name'], u.get('target'), 'duration', round(u['duration'], 1), 'rmeta', u.get('rmeta_time'))
+          PY
+      - name: Startup timing (20 x cas --version)
+        run: |
+          bin=target/aarch64-apple-darwin/release-fast/cas
+          "$bin" --version
+          python3 - "$bin" <<'PY'
+          import subprocess, sys, time, statistics
+          xs = []
+          for _ in range(20):
+              t = time.perf_counter(); subprocess.run([sys.argv[1], '--version'], capture_output=True); xs.append(time.perf_counter() - t)
+          print('VERSION_MEDIAN_MS', round(statistics.median(xs) * 1000, 2))
+          PY

@@ -15,7 +15,6 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use serde_json::{Map, Value};
 
@@ -54,12 +53,18 @@ pub fn fixtures(group: &str) -> Vec<Exchange> {
     exchanges
 }
 
+/// The fixtures are embedded at compile time: archive-run tests never read
+/// the producer checkout at runtime.
 fn recorded(group: &str) -> Vec<Exchange> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/cloud_contract")
-        .join(format!("{group}.json"));
-    let document: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let text = match group {
+        "agents" => include_str!("../fixtures/cloud_contract/agents.json"),
+        "claims" => include_str!("../fixtures/cloud_contract/claims.json"),
+        "peer_messages" => include_str!("../fixtures/cloud_contract/peer_messages.json"),
+        "teardown" => include_str!("../fixtures/cloud_contract/teardown.json"),
+        other => panic!("no recorded group {other}"),
+    };
+    let document: Value =
+        serde_json::from_str(text).unwrap_or_else(|error| panic!("{group}.json: {error}"));
     document["exchanges"]
         .as_array()
         .unwrap()

@@ -28,6 +28,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **User-facing task gate:** tasks labelled per `qa.user_facing_labels` need a `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics and internal tasks are exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
 - **Only you build Rust:** workers park unbuilt; at epic assembly build + test the tip once and note `ASSEMBLY_PROOF: head=<sha> result=PASS command=<cmd> log=<path>` on the epic.
+- **Lessons remove causes:** [ladder and tags](references/workflow.md#lessons-must-remove-causes).
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
 - **Pane budget:** at most ~150 words; Answer first with bullets/table; keep findings, rejection reasons, measurements, and merge receipts; no process narration or recap.
 - **Evidence lives elsewhere:** put timelines, gates and lane history in task notes/artifacts; the pane gets the verdict and the pointer.

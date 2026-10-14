@@ -191,15 +191,10 @@ print('zigbuild config parsed (gate dispatch fixture)')
 PY_ZIG_FIXTURE
 
     cp -R "$script_dir/release-train.d" "$repo/scripts/"
-    cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
-    # The nested integration fixtures have their own release version. Keep it
-    # distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
-    python3 - "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-path.write_text(path.read_text().replace('9.99.7', '9.98.7'))
-PY_NESTED_VERSION
+    # The assemble-stale-base row runs this suite (~6 s). Only the case that
+    # proves the row installs the real one; every other full-gate fixture
+    # dispatches a stub (cas-e919).
+    printf '%s\n' 'print("assemble-stale-base fixture stub")' >"$repo/scripts/test-release-integration.py"
     cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
@@ -562,6 +557,7 @@ run_scenario() {
     assert_named_failure "$3" "$output"
 }
 
+section_release_binary_isa() {
 # The new row must audit the staged executable, including code introduced by
 # dependencies, before the train can authorize pr-body/pipeline.
 repo="$(new_fixture release-binary-isa)"
@@ -640,12 +636,10 @@ if grep -qF 'learn=release-binary-isa' "$isa_run/blockers.log" \
 else
     bad "release-binary-isa could not map the publish rescue: $output"
 fi
-if [[ "${1:-}" == --release-binary-isa-only ]]; then
-    printf '\n%s passed, %s failed\n' "$pass" "$fail"
-    test "$fail" -eq 0
-    exit
-fi
 
+}
+
+section_admission_and_script_tier() {
 # cas-728e: copied producers must use real admission in a private pool. The
 # wait case also proves that isolation did not become an admission bypass.
 repo="$(new_fixture host-memory-admission)"
@@ -730,6 +724,16 @@ assert_named_failure version-literals "$output"
 # The learned assemble-stale-base diagnosis must remain an executable,
 # independently selectable row, not only a parsed failure-log marker.
 repo="$(new_fixture assemble-stale-base-row)"
+# The nested integration fixtures have their own release version. Keep it
+# distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
+python3 - "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
+from pathlib import Path
+import sys
+source, target = map(Path, sys.argv[1:])
+target.write_text(source.read_text().replace('9.99.7', '9.98.7'))
+PY_NESTED_VERSION
+git -C "$repo" add scripts/test-release-integration.py
+git -C "$repo" -c user.email=gate@fixture -c user.name=gate commit -qm 'real integration suite'
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only assemble-stale-base 2>&1 || true)"
 if grep -qF 'PASS assemble-stale-base' <<<"$output" \
     && grep -qF 'RELEASE GATE PASSED: selected checks are green' <<<"$output"; then
@@ -822,6 +826,9 @@ for make_mode in -n -i -t; do
     fi
 done
 
+}
+
+section_failure_scenarios() {
 run_scenario workspace-check GATE_FIXTURE_CHECK_FAIL workspace-tests
 run_scenario macos-check-run GATE_FIXTURE_MACOS_FAIL macos-check
 run_scenario macos-target-install GATE_FIXTURE_RUSTUP_FAIL macos-check
@@ -906,6 +913,9 @@ else
     bad "hub-web-visual-qa dependency install contract failed (output: $output; npm log: $(cat "$tmp/npm.log" 2>/dev/null || true))"
 fi
 
+}
+
+section_web_and_source_rows() {
 # cas-83ff. Building Commander web assets must prove committed dist stays in
 # sync with src, and the later visual-QA row must reuse the same npm install.
 repo="$(new_fixture hub-web-dist-drift)"
@@ -1165,6 +1175,9 @@ else
     bad "--learn did not record the nextest factory build-guard diagnosis: $learn_output"
 fi
 
+}
+
+section_scratch_and_selection() {
 # cas-4ccc. A populated .cas/proxy.toml ABOVE the worktree is readable by any
 # test that resolves project config by walking up from its cwd. The gate must
 # neutralize it and name it — never refuse, because blocking a release on the
@@ -1371,6 +1384,11 @@ else
     bad "archive extraction was not ready before nextest: $archive_gate_output"
 fi
 
+if grep -qE '^INSTA_WORKSPACE_ROOT=.*/workspace-remap :: nextest run --archive-file .*--no-fail-fast' "$archive_env_log"; then
+    ok 'archive consumer pins snapshot workspace and completes all binaries like CI'
+else
+    bad 'archive consumer drifted from CI snapshot-root or no-fail-fast contract'
+fi
 if python3 - "$archive_env_log" "$CAS_RELEASE_GATE_HOME_DIR" <<'PY_TEMP_PLACEMENT'
 from pathlib import Path
 import re
@@ -1427,6 +1445,9 @@ else
     bad "nextest or archive-mode leaked factory identity: $(cat "$factory_env_log") (output: $output)"
 fi
 
+}
+
+section_environment_and_receipts() {
 # cas-c0411. The `cas init` watchdog budget the gate hands its children is the
 # fix for a release that failed on wall clock: a test's child `cas init` hit the
 # 300s default while the box was saturated, and the archive-mode row died with
@@ -1565,12 +1586,10 @@ output="$(run_gate "$repo" GATE_FIXTURE_EMPTY_SUITE "$repo/scripts/release-gate.
 assert_named_failure nextest "$output"
 assert_named_failure archive-mode "$output"
 assert_named_failure doctests "$output"
-if grep -qE '^INSTA_WORKSPACE_ROOT=.*/workspace-remap :: nextest run --archive-file .*--no-fail-fast' "$archive_env_log"; then
-    ok 'archive consumer pins snapshot workspace and completes all binaries like CI'
-else
-    bad 'archive consumer drifted from CI snapshot-root or no-fail-fast contract'
-fi
 
+}
+
+section_row_cache() {
 # Receipts from real fixture executions, never forged PASS to prove success.
 repo="$(new_fixture row-cache)"
 : >"$tmp/cargo.log"
@@ -1771,6 +1790,9 @@ else
 fi
 unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
 
+}
+
+section_train_proof() {
 # Full train entry point: assemble prove -> prep -> ledger -> detached gate.
 repo="$(new_fixture train-proof)"
 cp -R "$script_dir/release-train.d" "$repo/scripts/"
@@ -2141,6 +2163,9 @@ else
 fi
 unset CAS_RELEASE_GATE_LOG_DIR
 
+}
+
+section_admission_barriers() {
 # Admission barriers exercise the real shell seam with fake Cargo. A compiled
 # producer must wait for script PASS/test serialization, then abort promptly
 # when another leg fails, keeping compile stderr out of numeric timing fields.
@@ -2218,6 +2243,50 @@ if [[ "$(awk -F '\t' '$1 ~ /^(release-binary-isa|macos-check)$/ && $7 == "REUSED
     ok 'a test-relevant variable refuses row-proof reuse and names the variable'
 else
     bad "row proof reused across a changed test input: $(cat "$tmp/row-proof-miss.log")"
+fi
+
+}
+
+# cas-e919: the sections share no state, so they run in parallel, each in its
+# own scratch tree, and their output is printed in order. A section that
+# stops early (set -e) is a failure, never a lost case.
+run_sections() {
+    local name
+    local -A pids=()
+    for name in "$@"; do
+        (
+            tmp="$tmp/$name"
+            CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base"
+            mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
+            pass=0 fail=0
+            "$name"
+            printf '%s %s\n' "$pass" "$fail" >"$tmp.count"
+        ) >"$tmp/$name.log" 2>&1 &
+        pids[$name]=$!
+    done
+    for name in "$@"; do
+        wait "${pids[$name]}" || true
+        cat "$tmp/$name.log"
+        local p f
+        if read -r p f <"$tmp/$name.count"; then
+            pass=$((pass + p)) fail=$((fail + f))
+        else
+            bad "$name stopped before its last case"
+        fi
+    done
+}
+if [[ "${1:-}" == --release-binary-isa-only ]]; then
+    run_sections section_release_binary_isa
+else
+    run_sections section_release_binary_isa \
+        section_admission_and_script_tier \
+        section_failure_scenarios \
+        section_web_and_source_rows \
+        section_scratch_and_selection \
+        section_environment_and_receipts \
+        section_row_cache \
+        section_train_proof \
+        section_admission_barriers
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

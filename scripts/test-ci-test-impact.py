@@ -193,6 +193,44 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertEqual(len(receipt["post_merge_missed"]), 1)
         self.assertEqual(receipt["recall"], 0)
 
+    # cas-38ac: nextest 0.9.100+ prints a progress counter after the duration.
+    # These lines are copied from CI run 38488688135's run-0.log.
+    NEXTEST_FAIL = (
+        "\x1b[31;1m        FAIL\x1b[0m [   0.136s] ( 3528/11850) \x1b[35;1mcas\x1b[0m "
+        "\x1b[36mmcp::daemon::presence_tests\x1b[0m\x1b[36m::\x1b[0m"
+        "\x1b[34;1mcas_f707_eager_registration_path_pushes_to_the_cloud\x1b[0m\n"
+        "\x1b[31;1m     Summary\x1b[0m [ 306.322s] \x1b[1m11850\x1b[0m tests run: "
+        "\x1b[1m11849\x1b[0m \x1b[32;1mpassed\x1b[0m, \x1b[1m1\x1b[0m \x1b[31;1mfailed\x1b[0m\n"
+    )
+    NEXTEST_FAILURE = {"package": "cas", "binary": "cas",
+                       "test": "mcp::daemon::presence_tests::cas_f707_eager_registration_path_pushes_to_the_cloud"}
+
+    def test_failure_line_with_progress_counter_is_recorded_not_uncertain(self):
+        log = self.root / "run.log"
+        log.write_text(self.NEXTEST_FAIL)
+        receipt = impact.record(self.select(), [log], 100, 1.0, self.root / "receipt.json", "scoped")
+        self.assertEqual(receipt["failures"], [self.NEXTEST_FAILURE])
+        self.assertFalse(receipt["uncertain"])
+
+    def test_history_reparses_the_log_of_a_receipt_the_old_parser_left_uncertain(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("receipt.json", json.dumps({"failures": [], "uncertain": True}))
+            zipped.writestr("run-0.log", self.NEXTEST_FAIL)
+        payloads = [json.dumps({"artifacts": [{"name": "ci-test-impact-fixture", "id": 7, "expired": False}]}).encode(), archive.getvalue()]
+        class Opener:
+            def open(self, request, timeout):
+                return io.BytesIO(payloads.pop(0))
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "fixture/repo", "GH_TOKEN": "fixture-token"}), \
+                patch.object(impact.urllib.request, "build_opener", lambda handler: Opener()):
+            impact.collect_history(self.history)
+        self.assertEqual(json.loads(self.history.read_text()), {"failures": [self.NEXTEST_FAILURE], "uncertain": False})
+        # A failed cas lib unit test reruns exactly, instead of widening to the workspace.
+        command = self.select("cas-cli/tests/alpha_test.rs")["commands"][0]
+        self.assertIn("--lib", command["args"])
+        self.assertIn("test(=" + self.NEXTEST_FAILURE["test"] + ")", command["args"][-1])
+        self.assertIn("alpha_test", command["stems"])
+
     def test_success_without_failures_does_not_claim_perfect_recall(self):
         plan = self.select()
         log = self.root / "run.log"

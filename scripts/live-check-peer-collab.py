@@ -552,10 +552,9 @@ class Run:
         ping = f"live-check-ping-{self.rid}-{secrets.token_hex(3)}"
         sent = self.message(self.a, a, b, f"ping {ping}", f"{ping}: please reply")
         evidence["sent"] = sent
-        match = re.search(r"\b(pm_[A-Za-z0-9_-]+)", sent.get("text", ""))
-        if sent.get("is_error") or not match or "Cassy Cloud" not in sent.get("text", ""):
+        peer_message = peer_message_id(sent.get("text", ""))
+        if sent.get("is_error") or not peer_message or "Cassy Cloud" not in sent.get("text", ""):
             raise StepFailed(f"the message did not go via Cassy Cloud: {sent.get('text', '')[:400]}")
-        peer_message = match.group(1)
         evidence["peer_message_id"] = peer_message
         notification = self.delivered_locally(self.b, b, a, ping, "prowl_delivery", evidence)
         pong = f"live-check-pong-{self.rid}-{secrets.token_hex(3)}"
@@ -680,51 +679,148 @@ class Run:
         self.sessions["b"] = f"{self.sessions['b']}r"
         return swept
 
-    def step_offline_catchup(self, evidence, notes):
-        a, b = self.names["a"], self.names["b"]
-        self.restart_prowl(evidence, "prowl")
-        tokens = [f"live-check-offline-{self.rid}-{i}-{secrets.token_hex(2)}" for i in (1, 2)]
-        evidence["sent_while_offline"] = [
-            self.message(self.a, a, b, f"offline {token}", token) for token in tokens
-        ]
-        self.launch(self.b, self.sessions["b"], b, [self.names["bw"]])
+    def set_token(self, machine, valid):
+        token = self._tokens[0 if machine is self.a else 1]
+        if valid:
+            return machine.call("cloud-token", "--run-dir", machine.run_dir, input=token + "\n")
+        return machine.call("cloud-token", "--run-dir", machine.run_dir, "--invalid")
 
-        def counts():
-            return {token: len([row for row in self.queued_rows(self.b, token)
-                                if row.get("target") == b]) for token in tokens}
+    def line_in(self, machine, agent, prefix):
+        text = self.peers_text(machine, agent)
+        return next((l for l in text.splitlines() if l.startswith(prefix)), ""), text
+
+    def step_offline_catchup(self, evidence, notes):
+        """prowl's supervisor keeps its identity while its mailbox is offline
+        (its cloud token is swapped for an invalid one); soundwave sends two
+        messages; once prowl is back online each lands exactly once, in order.
+        A full factory restart is not used: it gives the supervisor a new
+        agent id, so messages addressed to the old one are not its to claim."""
+        a, b = self.names["a"], self.names["b"]
+        self.set_token(self.b, valid=False)
+
+        def offline():
+            line, _ = self.line_in(self.b, b, "Peer mailbox:")
+            return line.startswith("Peer mailbox: not receiving"), line
+
+        evidence["prowl_mailbox_offline"] = self.wait_for("prowl's mailbox not receiving", offline, 90, interval=5)
+        tokens = [f"live-check-offline-{self.rid}-{i}-{secrets.token_hex(2)}" for i in (1, 2)]
+        sent = [self.message(self.a, a, b, f"offline {token}", token) for token in tokens]
+        evidence["sent_while_offline"] = sent
+        ids = [peer_message_id(s_.get("text", "")) for s_ in sent]
+        if any(s_.get("is_error") for s_ in sent) or not all(ids):
+            raise StepFailed(f"sends while prowl was offline failed: {[s_.get('text', '')[:200] for s_ in sent]}")
+        evidence["status_while_offline"] = [
+            self.a.tool(a, "coordination", action="message_status", id=m).get("text", "") for m in ids]
+        time.sleep(20)  # a mailbox poll while offline: nothing may arrive
+        early = {token: len([r for r in self.queued_rows(self.b, token) if r.get("target") == b]) for token in tokens}
+        evidence["queued_while_offline"] = early
+        if any(early.values()):
+            raise StepFailed(f"messages arrived while prowl's mailbox was offline: {early}")
+        self.set_token(self.b, valid=True)
+
+        def rows():
+            return {token: [r for r in self.queued_rows(self.b, token) if r.get("target") == b] for token in tokens}
 
         def caught_up():
-            current = counts()
-            return all(count >= 1 for count in current.values()), current
+            current = rows()
+            return all(current.values()), {k: len(v) for k, v in current.items()}
 
         self.wait_for("both offline messages queued for prowl's supervisor", caught_up,
-                      self.args.delivery_timeout + 30)
+                      self.args.delivery_timeout + 60)
         time.sleep(20)  # one more mailbox poll: a duplicate would land now
-        final = counts()
-        evidence["queued_occurrences"] = final
-        duplicates = {token: count for token, count in final.items() if count != 1}
-        if duplicates:
-            raise StepFailed(f"offline messages were not delivered exactly once: {duplicates}")
+        final = rows()
+        evidence["queued_after"] = final
+        counts = {token: len(found) for token, found in final.items()}
+        if any(count != 1 for count in counts.values()):
+            raise StepFailed(f"offline messages were not delivered exactly once: {counts}")
+        order = [final[token][0]["id"] for token in tokens]
+        if order != sorted(order):
+            raise StepFailed(f"offline messages arrived out of order: rows {order}")
+        evidence["prowl_mailbox_after"], _ = self.line_in(self.b, b, "Peer mailbox:")
+        evidence["status_after"] = [
+            self.a.tool(a, "coordination", action="message_status", id=m).get("text", "") for m in ids]
 
     def step_presence_recovery(self, evidence, notes):
-        if not self.standin:
-            raise StepSkipped("needs the stand-in's fault injection; not runnable against the real cloud")
-        evidence["faults"] = self.standin_admin("POST", "/__standin/faults", {"register_fail": 2})
+        """prowl's factory restarts with an invalid cloud token, so its
+        registration fails; once the token is valid again, cas-f707 presence
+        re-registers it and soundwave sees the new session live."""
+        b = self.names["b"]
         self.restart_prowl(evidence, "prowl")
-        self.launch(self.b, self.sessions["b"], self.names["b"], [self.names["bw"]])
+        self.set_token(self.b, valid=False)
+        self.launch(self.b, self.sessions["b"], b, [self.names["bw"]])
 
+        def failing():
+            line, _ = self.line_in(self.b, b, "Cloud presence:")
+            return "failing" in line or "not registered" in line, line
+
+        evidence["presence_while_failing"] = self.wait_for(
+            "prowl's cloud presence failing", failing, 90, interval=5)
+        self.set_token(self.b, valid=True)
         session = self.sessions["b"]
 
         def listed():
-            # The restarted supervisor, not its stale earlier registration:
-            # the peer line must carry the new session.
             view = self.peers_text(self.a, self.names["a"])
-            line = next((l for l in view.splitlines()
-                         if self.names["b"] in l and f"session {session} " in l + " "), "")
-            return bool(line) and "[live]" in line, view
+            block = next((blk for blk in peer_blocks(view)
+                          if blk.split()[0:1] == [b] and f"session {session} " in blk + " "), "")
+            return bool(block) and "[live]" in block, view
 
         evidence["soundwave_peers"] = self.wait_for(
-            "prowl's supervisor live again after two failed registrations", listed, 150, interval=10)
+            "prowl's restarted supervisor live again after failed registrations", listed, 400, interval=10)
+        evidence["presence_after"], _ = self.line_in(self.b, b, "Cloud presence:")
+
+    # ---- cloud cleanup ---------------------------------------------------
+
+    def cloud_api(self, token, method, path, body=None):
+        import urllib.error
+        import urllib.request
+        request = urllib.request.Request(
+            self.endpoint + path, method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw = response.read()
+                return response.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code, error.read().decode(errors="replace")[:300]
+        except Exception as error:
+            return None, f"{type(error).__name__}: {error}"
+
+    def cloud_cleanup(self):
+        """Leave nothing in the cloud: drain messages queued for any scratch
+        agent, shut every scratch agent down (which releases its claims), and
+        confirm the scratch project lists no active agent."""
+        if not self._tokens or not self.endpoint:
+            return {"skipped": "no cloud configured"}
+        report = {"drained": [], "shutdown": []}
+        for index, machine in enumerate(self.machines):
+            token = self._tokens[index]
+            try:
+                ids = [agent["id"] for agent in machine.call("agent-ids", "--run-dir", machine.run_dir)["agents"]]
+            except Exception as error:
+                ids, report[f"{machine.label}_ids_error"] = [], str(error)
+            if ids:
+                consumer = f"live-check-cleanup-{self.rid}-{machine.label}"
+                code, claimed = self.cloud_api(token, "POST", "/api/peer-messages/claim", {
+                    "project_ids": [self.canonical], "recipient_agent_ids": ids[:50],
+                    "consumer_id": consumer, "max": 50, "lease_secs": 30})
+                messages = claimed.get("messages", []) if isinstance(claimed, dict) else []
+                if messages:
+                    self.cloud_api(token, "POST", "/api/peer-messages/ack", {
+                        "consumer_id": consumer,
+                        "acks": [{"id": m["id"], "outcome": "delivered"} for m in messages]})
+                report["drained"] += [m["id"] for m in messages]
+            for agent_id in ids:
+                code, body = self.cloud_api(token, "POST", f"/api/agents/{agent_id}/shutdown", {})
+                report["shutdown"].append({"machine": machine.label, "id": agent_id, "status": code})
+        code, listed = self.cloud_api(self._tokens[0], "GET",
+                                      f"/api/agents?project={self.canonical}&limit=100")
+        agents = listed.get("agents", []) if isinstance(listed, dict) else []
+        report["project_agents_after"] = [(a.get("name"), a.get("status")) for a in agents]
+        report["active_left"] = [a.get("name") for a in agents if a.get("status") not in ("shutdown",)]
+        report["list_status"] = code
+        return report
 
     # ---- teardown -------------------------------------------------------
 
@@ -749,6 +845,10 @@ class Run:
             except Exception as error:
                 entry["error"] = f"{type(error).__name__}: {error}"
             report[machine.label] = entry
+        try:
+            report["cloud"] = self.cloud_cleanup()
+        except Exception as error:
+            report["cloud"] = {"error": f"{type(error).__name__}: {error}"}
         if self.standin:
             proc = self.standin["proc"]
             proc.terminate()
@@ -787,6 +887,26 @@ class Run:
         self.teardown_report = report
         self.write("teardown.json", report)
         return report
+
+
+def peer_blocks(view):
+    """Split a `coordination action=peers` view into one text block per peer:
+    a line indented two spaces starts a peer, deeper-indented lines continue it
+    ("  sup-b [live] on prowl, heartbeat 3s ago" / "    session s | focus -")."""
+    blocks = []
+    for line in view.splitlines():
+        if line.startswith("  ") and not line.startswith("   ") and line.strip():
+            blocks.append(line.strip())
+        elif line.startswith("   ") and blocks:
+            blocks[-1] += " " + line.strip()
+    return blocks
+
+
+def peer_message_id(text):
+    """The cloud id in a send receipt: production uses UUIDs, the stand-in
+    `pm_N` ("... via Cassy Cloud (peer message <id>, queued) ...")."""
+    found = re.search(r"peer message ([0-9A-Za-z_-]+)", text)
+    return found.group(1) if found else None
 
 
 def machine_stream(machine, *args, timeout=180):
@@ -915,7 +1035,7 @@ def main(argv=None):
         not entry.get("processes_left") and not entry.get("error")
         and (args.keep or entry.get("run_root", {}).get("ok"))
         for label, entry in teardown.items() if label in ("soundwave", "prowl")
-    )
+    ) and not teardown.get("cloud", {}).get("active_left") and not teardown.get("cloud", {}).get("error")
     unchanged = all(teardown.get(label, {}).get("installed_cas", {}).get("unchanged")
                     for label in ("soundwave", "prowl"))
     summary = {

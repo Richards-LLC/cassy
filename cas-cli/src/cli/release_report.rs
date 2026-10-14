@@ -151,7 +151,7 @@ struct ReleaseEvidence {
     /// run predates priced blockers.
     blocker_costs: Vec<(String, i64, bool)>,
     /// cas-9734: rescues that repeated an already-learned lesson.
-    lesson_recurrence: Option<crate::lesson_recurrence::ReleaseRecurrence>,
+    lesson_recurrence: Option<String>,
 }
 
 impl ReleaseEvidence {
@@ -244,13 +244,6 @@ impl ReleaseEvidence {
             .collect::<Vec<_>>()
             .join("; ");
         format!("{count} — {} blocked: {each}", format_duration(total))
-    }
-
-    fn lesson_recurrence_summary(&self) -> String {
-        self.lesson_recurrence
-            .as_ref()
-            .map(|recurrence| escape_table(&recurrence.summary()))
-            .unwrap_or_else(|| "unavailable".to_string())
     }
 
     fn publication_timing(&self) -> String {
@@ -754,15 +747,7 @@ fn acquire_sources(
         );
     }
 
-    let mut release_evidence = find_release_evidence(tag, &release);
-    release_evidence.lesson_recurrence = crate::lesson_recurrence::release_runs_root().and_then(|root| {
-        let history = crate::lesson_recurrence::failure_history(
-            &fs::read_to_string(project_root.join(crate::lesson_recurrence::FAILURE_LOG)).ok()?,
-        );
-        crate::lesson_recurrence::recent_releases(&root, &history, usize::MAX, Utc::now().date_naive())
-            .into_iter()
-            .find(|release| release.release == tag)
-    });
+    let release_evidence = find_release_evidence(tag, &release);
     if release_evidence.green_to_published_seconds.is_none() {
         warnings.push(
             "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/"
@@ -1391,8 +1376,8 @@ fn assemble_markdown(
         sources.release_evidence.blocker_summary()
     ));
     output.push_str(&format!(
-        "| Lesson recurrence | {} | Rescues whose learn= lesson was already in the failure log before the cut; blockers.log and supervisor-interventions.md |\n",
-        sources.release_evidence.lesson_recurrence_summary()
+        "| Lesson recurrence | {} | Rescues whose learn= lesson was already in the failure log; lesson-recurrence.receipt |\n",
+        sources.release_evidence.lesson_recurrence.as_deref().map_or("unavailable".to_string(), escape_table)
     ));
     output.push_str(&format!(
         "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
@@ -2140,6 +2125,9 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         if values.contains_key("PUBLISH_LATENCY_SECONDS") {
             evidence.record_latency(&values);
         }
+        if let Some((summary, _)) = lesson_recurrence_summary(&values) {
+            evidence.lesson_recurrence = Some(summary);
+        }
         if values.contains_key("PUBLISH_LATENCY_SECONDS") || path_text.contains("published.receipt")
         {
             evidence.receipt_path = Some(path.display().to_string());
@@ -2157,6 +2145,42 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         }
     }
     evidence
+}
+
+/// cas-9734: release-learning.py's lesson-recurrence.receipt as one line, and
+/// whether the release repeated a learned lesson.
+pub(crate) fn lesson_recurrence_summary(values: &HashMap<String, String>) -> Option<(String, bool)> {
+    let rescues: u64 = values.get("LESSON_RESCUES")?.parse().ok()?;
+    let recurred: u64 = values.get("LESSON_RECURRED")?.parse().ok()?;
+    if rescues == 0 {
+        return Some(("0 rescues".to_string(), false));
+    }
+    let mut summary = format!(
+        "{recurred} of {rescues} rescue{} ({}%) repeated a learned lesson",
+        if rescues == 1 { "" } else { "s" },
+        (recurred * 100 + rescues / 2) / rescues
+    );
+    if let Some(classes) = values.get("LESSON_RECURRED_CLASSES").filter(|classes| !classes.is_empty()) {
+        summary.push_str(&format!(": {}", classes.replace(',', ", ")));
+    }
+    Some((summary, recurred > 0))
+}
+
+/// The newest release run's lesson recurrence: (run directory, summary, repeated).
+pub(crate) fn latest_lesson_recurrence() -> Option<(String, String, bool)> {
+    let root = dirs::home_dir()?.join(".cas/artifacts/release");
+    fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|run| {
+            let receipt = run.path().join("lesson-recurrence.receipt");
+            let modified = fs::metadata(&receipt).and_then(|meta| meta.modified()).ok()?;
+            let (summary, repeated) =
+                lesson_recurrence_summary(&parse_key_values(&fs::read_to_string(&receipt).ok()?))?;
+            Some((modified, run.file_name().to_string_lossy().into_owned(), summary, repeated))
+        })
+        .max_by_key(|(modified, ..)| *modified)
+        .map(|(_, run, summary, repeated)| (run, summary, repeated))
 }
 
 fn parse_key_values(content: &str) -> HashMap<String, String> {
@@ -2573,12 +2597,10 @@ Dev reply
         );
         // cas-9734: the release's lesson recurrence rate.
         assert!(report.contains("| Lesson recurrence | unavailable |"), "{report}");
-        sources.release_evidence.lesson_recurrence =
-            Some(crate::lesson_recurrence::ReleaseRecurrence {
-                release: "v2.4.0".to_string(),
-                rescues: 3,
-                recurred: vec!["scratch-base".to_string(), "version-literals".to_string()],
-            });
+        sources.release_evidence.lesson_recurrence = lesson_recurrence_summary(&parse_key_values(
+            "LESSON_RESCUES=3\nLESSON_RECURRED=2\nLESSON_RECURRED_CLASSES=scratch-base,version-literals\n",
+        ))
+        .map(|(summary, _)| summary);
         let measured = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(
             measured.contains(

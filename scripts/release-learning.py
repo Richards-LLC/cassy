@@ -94,7 +94,24 @@ def evidence_rows(run_dir):
             yield filename, number, line
 
 
+def measure(root, run_dir):
+    """Write lesson-recurrence.receipt: rescues whose learn= class was already
+    in the failure log (a row's own --learn entry, recurrence=N, excluded)."""
+    counts = failure_counts(root)
+    rescues, recurred = 0, []
+    for _, _, line in evidence_rows(run_dir):
+        rescues += 1
+        own = 1 if re.search(r'(?:^|\s)recurrence=[0-9]+(?=\s|$)', line) else 0
+        learned = re.findall(r'(?:^|\s)learn=([a-z0-9:-]+)(?=\s|$)', line)
+        if learned and counts.get(learned[0], 0) - own >= 1:
+            recurred.append(learned[0])
+    (run_dir / 'lesson-recurrence.receipt').write_text(
+        f'LESSON_RESCUES={rescues}\nLESSON_RECURRED={len(recurred)}\n'
+        f'LESSON_RECURRED_CLASSES={",".join(recurred)}\n')
+
+
 def check(root, run_dir):
+    measure(root, run_dir)
     lessons = executable_lessons(root)
     counts = failure_counts(root)
     failures = 0
@@ -298,6 +315,9 @@ def main():
             previous = int(options['previous']) if 'previous' in options else None
             map_rows(root, Path(args[0]), args[1], references, mode == '--validate-map',
                      options.get('task') or None, previous)
+            return 0
+        if mode == '--measure':
+            measure(root, Path(args[0]))
             return 0
         if mode == '--require-cause-task':
             # Prints the prior recurrence count for --learn's new entry.

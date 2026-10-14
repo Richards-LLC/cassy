@@ -205,6 +205,20 @@ cut_run_stage receipts
             self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.log.read_bytes(), before)
 
+    def test_receipt_measures_rescues_that_repeat_a_learned_lesson(self):
+        # The recorded 3.51.0 run: two rescues mapped to existing lessons, one to a task.
+        self.log.write_text(
+            '- 2026-09-02 — **version-literals** — Symptom: literal Root cause: no env!\n'
+            '- 2026-10-10 — **scratch-base** — Symptom: tmpfs Root cause: base\n'
+            '- 2026-10-14 — **assemble-stale-base** — Symptom: new Root cause: new\n')
+        (self.run_dir / 'blockers.log').write_text(
+            'preflight learn=scratch-base\ngate learn=version-literals\nreceipts task=cas-1543\n'
+            'assemble learn=assemble-stale-base recurrence=1\n')
+        self.command('python3', str(HELPER), '--measure', str(self.repo), str(self.run_dir))
+        self.assertEqual((self.run_dir / 'lesson-recurrence.receipt').read_text(),
+                         'LESSON_RESCUES=4\nLESSON_RECURRED=2\n'
+                         'LESSON_RECURRED_CLASSES=scratch-base,version-literals\n')
+
     def warn(self):
         return self.command('python3', str(HELPER), '--warn-tooling', str(self.repo))
 

@@ -233,16 +233,29 @@ fn repair_command(ctx: &EvidenceContext<'_>, base: &str, full: bool) -> String {
 
 /// All referenced evidence must stay in the owning task's artifact namespace.
 fn owned_path(ctx: &EvidenceContext<'_>, directory: &Path, cited: &str) -> Result<PathBuf, String> {
-    let root = ctx
-        .task_artifacts_dir
+    owned_path_under(
+        ctx.task_artifacts_dir,
+        directory,
+        cited,
+        "the owning task artifact directory",
+    )
+}
+
+fn owned_path_under(
+    root: &Path,
+    directory: &Path,
+    cited: &str,
+    boundary: &str,
+) -> Result<PathBuf, String> {
+    let root = root
         .canonicalize()
-        .map_err(|e| format!("task artifacts unreadable: {e}"))?;
+        .map_err(|e| format!("artifacts root {} unreadable: {e}", root.display()))?;
     let path = directory
         .join(super::expand_home(cited))
         .canonicalize()
         .map_err(|e| format!("journey receipt unreadable: {e}"))?;
     if !path.starts_with(root) || !path.is_file() {
-        return Err("journey receipt escapes the owning task artifact directory".into());
+        return Err(format!("journey receipt escapes {boundary}"));
     }
     Ok(path)
 }
@@ -256,6 +269,18 @@ pub fn validate_journey_receipt(
 ) -> Result<PathBuf, EvidenceRefusal> {
     let fail = |problem: String| EvidenceRefusal::new(problem, repair_command(ctx, base, full));
     let path = owned_path(ctx, ctx.task_artifacts_dir, &path.to_string_lossy()).map_err(&fail)?;
+    validate_owned_receipt(ctx, path, base, ids, full)
+}
+
+/// Validates a receipt already resolved inside its permitted namespace.
+fn validate_owned_receipt(
+    ctx: &EvidenceContext<'_>,
+    path: PathBuf,
+    base: &str,
+    ids: &[String],
+    full: bool,
+) -> Result<PathBuf, EvidenceRefusal> {
+    let fail = |problem: String| EvidenceRefusal::new(problem, repair_command(ctx, base, full));
     let receipt: JourneyReceipt = serde_json::from_slice(
         &std::fs::read(&path).map_err(|e| fail(format!("unreadable journey receipt: {e}")))?,
     )
@@ -458,24 +483,126 @@ pub fn check_close_journeys(
     )))
 }
 
-pub fn check_epic_journeys(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
-    let ids = select_journeys(ctx.repo, ctx.delivered_head, ctx.delivered_head, None)
-        .map_err(|e| EvidenceRefusal::new(e, repair_command(ctx, ctx.delivered_head, true)))?;
-    let citation = ctx
-        .notes
+/// The last `journey-receipt:` citation in an epic's notes.
+fn cited_epic_receipt(notes: &str) -> Option<&str> {
+    notes
         .lines()
         .filter_map(|line| {
             line.split_once(RECEIPT_CITATION)
                 .and_then(|(_, rest)| rest.split_whitespace().next())
         })
         .last()
-        .ok_or_else(|| {
-            EvidenceRefusal::new(
-                "epic assembly has no full-suite journey receipt",
-                repair_command(ctx, ctx.delivered_head, true),
-            )
-        })?;
+}
+
+pub fn check_epic_journeys(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
+    let ids = select_journeys(ctx.repo, ctx.delivered_head, ctx.delivered_head, None)
+        .map_err(|e| EvidenceRefusal::new(e, repair_command(ctx, ctx.delivered_head, true)))?;
+    let citation = cited_epic_receipt(ctx.notes).ok_or_else(|| {
+        EvidenceRefusal::new(
+            "epic assembly has no full-suite journey receipt",
+            repair_command(ctx, ctx.delivered_head, true),
+        )
+    })?;
     validate_journey_receipt(ctx, Path::new(citation), ctx.delivered_head, &ids, true)
+}
+
+/// cas-e6038: an epic whose delivery is already contained in trunk. Its own
+/// tip is history; the full suite can only honestly run on a trunk commit.
+pub struct TrunkBinding<'a> {
+    /// Trunk ref measured, e.g. `origin/main`.
+    pub trunk: &'a str,
+    /// Commits the receipt head must contain: the epic tip, or for a
+    /// branchless epic its children's trunk-contained delivery anchors.
+    /// Empty means trunk membership alone binds the receipt.
+    pub contained: &'a [String],
+    /// `<artifacts_root>/<project-key>`: any task directory of this project
+    /// may hold the cited receipt.
+    pub artifacts_root: &'a Path,
+}
+
+/// What a merged epic's accepted receipt answers for.
+#[derive(Debug)]
+pub struct TrunkJourneyAcceptance {
+    pub receipt: PathBuf,
+    pub head: String,
+    /// Containment proof for the decision note.
+    pub proof: String,
+}
+
+fn trunk_repair_command(ctx: &EvidenceContext<'_>, binding: &TrunkBinding<'_>) -> String {
+    let contained = if binding.contained.is_empty() {
+        String::new()
+    } else {
+        format!(" containing {}", binding.contained.join(", "))
+    };
+    format!(
+        "from a checkout of a {}{contained} commit run scripts/journey-eval.sh {} --full --workers=4 (no journey filter); cite {RECEIPT_CITATION} <absolute receipt path under {}> on the epic",
+        binding.trunk,
+        ctx.task_artifacts_dir.display(),
+        binding.artifacts_root.display()
+    )
+}
+
+/// cas-e6038: accept a full-suite receipt whose head is any trunk commit
+/// containing the epic's delivery, cited from any task artifact directory
+/// under the project artifacts root. Containment is the binding; every
+/// other receipt rule (provenance, full scope, complete catalog at that
+/// head) is unchanged.
+pub fn check_merged_epic_journeys(
+    ctx: &EvidenceContext<'_>,
+    binding: &TrunkBinding<'_>,
+) -> Result<TrunkJourneyAcceptance, EvidenceRefusal> {
+    let refuse = |problem: String| EvidenceRefusal::new(problem, trunk_repair_command(ctx, binding));
+    let citation = cited_epic_receipt(ctx.notes)
+        .ok_or_else(|| refuse("epic assembly has no full-suite journey receipt".into()))?;
+    let path = owned_path_under(
+        binding.artifacts_root,
+        ctx.task_artifacts_dir,
+        citation,
+        "the project artifacts root",
+    )
+    .map_err(&refuse)?;
+    let receipt: JourneyReceipt = serde_json::from_slice(
+        &std::fs::read(&path).map_err(|e| refuse(format!("unreadable journey receipt: {e}")))?,
+    )
+    .map_err(|e| refuse(format!("malformed journey receipt: {e}")))?;
+    let head = receipt.head_sha;
+    if !is_full_sha(&head)
+        || git(ctx.repo, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_none()
+        || git(ctx.repo, &["merge-base", "--is-ancestor", &head, binding.trunk]).is_none()
+    {
+        return Err(refuse(format!(
+            "journey receipt head {head} is not a commit contained in {}",
+            binding.trunk
+        )));
+    }
+    if let Some(missing) = binding
+        .contained
+        .iter()
+        .find(|commit| git(ctx.repo, &["merge-base", "--is-ancestor", commit, &head]).is_none())
+    {
+        return Err(refuse(format!(
+            "journey receipt head {head} does not contain the epic delivery {missing}"
+        )));
+    }
+    let head_ctx = EvidenceContext {
+        delivered_head: &head,
+        ..*ctx
+    };
+    let ids = select_journeys(ctx.repo, &head, &head, None)
+        .map_err(|e| EvidenceRefusal::new(e, trunk_repair_command(ctx, binding)))?;
+    let receipt = validate_owned_receipt(&head_ctx, path, &head, &ids, true)
+        .map_err(|refusal| EvidenceRefusal::new(refusal.problem, trunk_repair_command(ctx, binding)))?;
+    let proof = if binding.contained.is_empty() {
+        format!("receipt head {head} is contained in {}", binding.trunk)
+    } else {
+        format!(
+            "receipt head {head} is contained in {} and contains {}",
+            binding.trunk,
+            binding.contained.join(", ")
+        )
+    };
+    Ok(TrunkJourneyAcceptance { receipt, head, proof })
 }
 
 /// A failed QA verdict may preserve failing journeys. Approval must cover the

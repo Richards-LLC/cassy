@@ -23,13 +23,6 @@ impl Config {
                 self.get("hub.tailscale_serve").unwrap(),
             ),
             (
-                "jev.gate.shadow".into(),
-                self.get("jev.gate.shadow").unwrap(),
-            ),
-            ("jev.model".into(), self.get("jev.model").unwrap()),
-            ("jev.key_file".into(), self.get("jev.key_file").unwrap()),
-            ("jev.enabled".into(), self.get("jev.enabled").unwrap()),
-            (
                 "slack.transport".to_string(),
                 self.get("slack.transport").unwrap(),
             ),

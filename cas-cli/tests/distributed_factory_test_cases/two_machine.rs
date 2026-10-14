@@ -776,3 +776,45 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
     );
     assert!(cloud.messages_to("b").is_empty());
 }
+
+/// cas-c7c7 (O2): one machine label everywhere a peer's machine is named.
+/// Discovery, a claim refusal, and a peer message's envelope and reply
+/// target all name beta's machine the same way. Epic-split notices read the
+/// same stamped sender machine as the envelope.
+#[test]
+fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
+    let cloud = TestCloud::start();
+    let (alpha, beta, _gamma) = three_machines(&cloud);
+
+    let peers_a = peers_of(&alpha.cas_dir, "a");
+    let discovered = peers_a[0].machine.clone();
+
+    // A claim refusal names the holder's machine.
+    let claims_a = PeerClaims::for_project(&alpha.cas_dir).unwrap();
+    let claims_b = PeerClaims::for_project(&beta.cas_dir).unwrap();
+    assert_eq!(
+        claims_b.acquire("cas-t300", ClaimKind::Task, "b", "sup-b", 600, &|id| id == "b" || id == "bw"),
+        Acquire::Claimed
+    );
+    let refused = match claims_a.acquire("cas-t300", ClaimKind::Task, "a", "sup-a", 600, &|id| id == "a") {
+        Acquire::PeerHolds(hold) => hold.holder.expect("the holder is named").machine,
+        other => panic!("alpha must be refused while beta holds cas-t300: {other:?}"),
+    };
+
+    // A peer message's envelope and its reply target name the sender's machine.
+    let to_a = resolve_peer_target(&peers_of(&beta.cas_dir, "b"), "sup-a").unwrap().unwrap();
+    send_to_peer(&beta.cas_dir, "b", to_a, "label check", Some("label"), None).unwrap();
+    assert_eq!(tick(&alpha, "a").delivered, 1);
+    let envelope = parse_envelope(&inbox(&alpha)[0].prompt).unwrap();
+
+    assert_eq!(
+        [refused.as_str(), envelope.machine.as_str()],
+        [discovered.as_str(), discovered.as_str()],
+        "discovery, the claim refusal and the envelope must name beta's machine alike"
+    );
+    assert!(
+        inbox(&alpha)[0].prompt.contains(&format!("target=sup-b@{discovered}")),
+        "the reply target uses the same label: {}",
+        inbox(&alpha)[0].prompt
+    );
+}

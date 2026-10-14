@@ -38,7 +38,23 @@ pub struct Exchange {
 
 /// The recorded exchanges of `group` (`agents`, `claims`, `peer_messages`,
 /// `teardown`), in capture order, without the computed teardown summary.
+/// An elided oversized request body (`{"_oversized_body_bytes": n}`) is
+/// rebuilt as the capture built it: the group's `send` body with a `body` of
+/// `n`-ish characters, just past the 64000-character limit.
 pub fn fixtures(group: &str) -> Vec<Exchange> {
+    let mut exchanges = recorded(group);
+    let template = exchanges.iter().find(|exchange| exchange.name == "send").and_then(|e| e.body.clone());
+    for exchange in exchanges.iter_mut() {
+        let elided = exchange.body.as_ref().is_some_and(|body| body.get("_oversized_body_bytes").is_some());
+        if elided && let Some(mut body) = template.clone() {
+            body["body"] = Value::String("b".repeat(64_001));
+            exchange.body = Some(body);
+        }
+    }
+    exchanges
+}
+
+fn recorded(group: &str) -> Vec<Exchange> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/cloud_contract")
         .join(format!("{group}.json"));

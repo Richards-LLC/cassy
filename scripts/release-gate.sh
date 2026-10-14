@@ -1874,7 +1874,8 @@ check_working_tree() {
 #                fails without running. An unselected row imposes nothing.
 #   abort=<why>  failure stops the gate: running rows after it are cancelled
 #                and nothing after it starts; earlier rows still report.
-# Output and timing keep canonical row order; events go to schedule.tsv.
+# Each row gets a private TMPDIR. Output and timing keep canonical row order;
+# events go to schedule.tsv.
 # CAS_RELEASE_GATE_PARALLEL=1 restores sequential rows.
 declare -a gate_rows=()
 declare -A row_command=() row_function=() row_index=() row_cpu=() row_mem=() row_excl=()
@@ -1950,6 +1951,11 @@ gate_launch() {
     local name="$1"
     (
         trap - EXIT
+        # A private TMPDIR per row: concurrent rows (and their test fixtures
+        # and nested gates) never share a temp tree. The guardian removes it
+        # with the gate's registered scratch.
+        export TMPDIR="$sched_dir/$name.tmp"
+        mkdir -p "$TMPDIR"
         known="${#failures[@]}"
         if [[ -z "${row_function[$name]}" ]]; then
             print_result SKIP "$name" "${row_command[$name]}"

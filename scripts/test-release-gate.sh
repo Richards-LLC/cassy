@@ -302,8 +302,15 @@ if [[ -n "${GATE_FIXTURE_SPAN_LOG:-}" ]]; then
   case "$span_name" in
     ?*)
       printf 'start %s %s\n' "$span_name" "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
+      # A fixed temp name, as fixtures and nested tools use: concurrent rows
+      # must not see each other's file.
+      [[ -z "${GATE_FIXTURE_TMP_PROBE:-}" ]] || printf '%s\n' "$span_name" >"${TMPDIR:-/tmp}/gate-fixture-probe"
       sleep_variable="GATE_FIXTURE_SLEEP_${span_name//-/_}"
       sleep "${!sleep_variable:-${GATE_FIXTURE_ROW_SLEEP:-0}}"
+      if [[ -n "${GATE_FIXTURE_TMP_PROBE:-}" && "$(cat "${TMPDIR:-/tmp}/gate-fixture-probe")" != "$span_name" ]]; then
+        printf 'temp collision: %s found %s\n' "$span_name" "$(cat "${TMPDIR:-/tmp}/gate-fixture-probe")" >&2
+        exit 1
+      fi
       printf 'end %s %s\n' "$span_name" "$(python3 -c 'import time; print(time.time())')" >>"$GATE_FIXTURE_SPAN_LOG"
       ;;
   esac
@@ -612,14 +619,17 @@ section_concurrency() {
     logs="$tmp/concurrency-rows"
     : >"$spans"
     # The release build outlasts the script tier's wait for assemble-stale-base.
+    # Every timed row writes the same fixed temp file name while it overlaps
+    # the others; a shared TMPDIR makes a row fail with "temp collision".
     output="$(CAS_RELEASE_GATE_LOG_DIR="$logs" GATE_FIXTURE_SPAN_LOG="$spans" GATE_FIXTURE_ROW_SLEEP=2 \
+        GATE_FIXTURE_TMP_PROBE=1 \
         GATE_FIXTURE_SLEEP_release_binary_isa=12 \
         run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
     rows="$(receipt_rows "$output")"
     timing_rows="$(awk -F '\t' 'NR > 1 {print $1}' "$logs/timing.tsv" | paste -sd, -)"
     if grep -qF 'RELEASE GATE PASSED' <<<"$output" && [[ "$rows" == "$gate_canonical_rows" \
         && "$timing_rows" == "$gate_canonical_rows" ]]; then
-        ok 'concurrent gate keeps canonical receipt and timing.tsv row order'
+        ok 'concurrent gate keeps canonical receipt and timing.tsv row order, with a private TMPDIR per row'
     else
         bad "concurrent gate reordered receipts (rows: $rows; timing: $timing_rows; output: $output)"
     fi

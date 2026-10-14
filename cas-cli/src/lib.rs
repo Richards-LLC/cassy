@@ -69,6 +69,7 @@ pub mod hub;
 pub mod hybrid_search;
 pub(crate) mod internal_llm;
 pub mod knowledge;
+pub mod lesson_recurrence;
 pub mod logging;
 pub mod maintenance_jobs;
 pub mod memory_migration;

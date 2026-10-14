@@ -150,6 +150,8 @@ struct ReleaseEvidence {
     /// (stage, seconds, resolved); empty with `blocker_count` set means the
     /// run predates priced blockers.
     blocker_costs: Vec<(String, i64, bool)>,
+    /// cas-9734: rescues that repeated an already-learned lesson.
+    lesson_recurrence: Option<crate::lesson_recurrence::ReleaseRecurrence>,
 }
 
 impl ReleaseEvidence {
@@ -242,6 +244,13 @@ impl ReleaseEvidence {
             .collect::<Vec<_>>()
             .join("; ");
         format!("{count} — {} blocked: {each}", format_duration(total))
+    }
+
+    fn lesson_recurrence_summary(&self) -> String {
+        self.lesson_recurrence
+            .as_ref()
+            .map(|recurrence| escape_table(&recurrence.summary()))
+            .unwrap_or_else(|| "unavailable".to_string())
     }
 
     fn publication_timing(&self) -> String {
@@ -745,7 +754,21 @@ fn acquire_sources(
         );
     }
 
-    let release_evidence = find_release_evidence(tag, &release);
+    let mut release_evidence = find_release_evidence(tag, &release);
+    release_evidence.lesson_recurrence = crate::lesson_recurrence::release_runs_root().and_then(|root| {
+        let fallback_cut = release_evidence
+            .tag_published_at
+            .as_deref()
+            .and_then(|published| DateTime::parse_from_rfc3339(published).ok())
+            .map(|published| published.with_timezone(&Utc).date_naive())
+            .unwrap_or_else(|| Utc::now().date_naive());
+        crate::lesson_recurrence::for_release(
+            &root,
+            version,
+            &crate::lesson_recurrence::FailureHistory::load(Some(project_root)),
+            fallback_cut,
+        )
+    });
     if release_evidence.green_to_published_seconds.is_none() {
         warnings.push(
             "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/"
@@ -1372,6 +1395,10 @@ fn assemble_markdown(
     output.push_str(&format!(
         "| Blockers | {} | Each blocked stage, from the block to its next completion; receipt BLOCKER_COSTS |\n",
         sources.release_evidence.blocker_summary()
+    ));
+    output.push_str(&format!(
+        "| Lesson recurrence | {} | Rescues whose learn= lesson was already in the failure log before the cut; blockers.log and supervisor-interventions.md |\n",
+        sources.release_evidence.lesson_recurrence_summary()
     ));
     output.push_str(&format!(
         "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
@@ -2550,6 +2577,22 @@ Dev reply
             report.contains("| Blockers | 2 — 38m 20s blocked: gate 10m 0s; pipeline 28m 20s |"),
             "{report}"
         );
+        // cas-9734: the release's lesson recurrence rate.
+        assert!(report.contains("| Lesson recurrence | unavailable |"), "{report}");
+        sources.release_evidence.lesson_recurrence =
+            Some(crate::lesson_recurrence::ReleaseRecurrence {
+                release: "v2.4.0".to_string(),
+                rescues: 3,
+                recurred: vec!["scratch-base".to_string(), "version-literals".to_string()],
+            });
+        let measured = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(
+            measured.contains(
+                "| Lesson recurrence | 2 of 3 rescues (67%) repeated a learned lesson: scratch-base, version-literals |"
+            ),
+            "{measured}"
+        );
+        sources.release_evidence.lesson_recurrence = None;
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(unavailable.contains("| Manual interventions | unavailable |"));

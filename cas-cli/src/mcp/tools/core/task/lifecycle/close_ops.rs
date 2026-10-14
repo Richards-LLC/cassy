@@ -13880,12 +13880,45 @@ pub(crate) fn fast_rows_receipt_refusal(
     let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .map(|out| std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))?;
     let receipt = common.join("cas").join("fast-rows").join(format!("{head}.pass"));
-    if std::fs::read_to_string(&receipt)
-        .is_ok_and(|text| text.starts_with(&format!("fast-rows: PASS {head} ")))
-    {
+    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
+    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
         return None;
     }
     let target = target.strip_prefix("origin/").unwrap_or(target);
+    // cas-7bce: a failed run on this exact tip names its rows and fixes; quote
+    // them so the refusal says what to change, not only what to rerun.
+    if let Some(header) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(&format!("fast-rows: FAIL {head} ")))
+    {
+        let rows = header
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("rows="))
+            .unwrap_or("unknown");
+        let fixes: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .filter(|line| line.starts_with("FIX "))
+            .take(20)
+            .collect();
+        let fixes = if fixes.is_empty() {
+            "- read the failed row logs in the gate output".to_string()
+        } else {
+            fixes
+                .iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        return Some(format!(
+            "⚠️ FAST ROWS FAILED before {task_id} parks: `release-gate.sh --fast-rows` failed on the \
+             delivered tip {} (rows: {rows}).\n\nFix:\n{fixes}\n\nCommit the fix, rerun \
+             `./scripts/release-gate.sh --fast-rows --base origin/{target}` until it passes, then \
+             push and close again (cas-7bce).",
+            &head[..head.len().min(12)],
+        ));
+    }
     Some(format!(
         "⚠️ FAST ROWS REQUIRED before {task_id} parks: no `release-gate.sh --fast-rows` PASS \
          receipt covers the delivered tip {}.\n\nIn your worktree, with everything committed, run \

@@ -22,7 +22,7 @@ readonly -a gate_check_ids=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src
+    fixture-paths-src builtin-projections-src
 )
 
 usage() {
@@ -829,8 +829,54 @@ check_version_literals() {
 
     if [[ "$found" == true ]]; then
         printf 'version-literals: source/test files contain %s; use env!("CARGO_PKG_VERSION") or a fixture value\n' "$version"
+        printf 'FIX: replace each %s above with env!("CARGO_PKG_VERSION") or a 9.99.x fixture value; comments count too\n' "$version"
         return 1
     fi
+    [[ "$fast_rows" == true ]] || return 0
+    check_next_version_literals "${roots[@]}"
+}
+
+# The next release's version, written into a lane before the bump, passes the
+# current-version scan at park and fails the release gate after the bump
+# (3.51.0: a comment naming the coming version). Fast mode refuses every next
+# patch, minor and major literal in the files this lane changes, and only notes
+# pre-existing ones elsewhere: another lane's literal is not this lane's fix.
+next_release_versions() {
+    local major minor patch
+    IFS=. read -r major minor patch <<<"$version"
+    printf '%s\n' "$major.$minor.$((patch + 1))" "$major.$((minor + 1)).0" "$((major + 1)).0.0"
+}
+
+check_next_version_literals() {
+    local file hits='' elsewhere
+    local -a patterns=() changed=()
+    while IFS= read -r file; do
+        patterns+=(-e "$file")
+    done < <(next_release_versions)
+    while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
+        case "$file" in
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+        esac
+        changed+=("$file")
+    done < <(git diff -z --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- "$@" 2>/dev/null)
+    if [[ "${#changed[@]}" -gt 0 ]]; then
+        hits="$(grep -nHIF "${patterns[@]}" -- "${changed[@]}" 2>/dev/null || true)"
+    fi
+    if [[ -n "$hits" ]]; then
+        printf '%s\n' "$hits"
+        printf 'version-literals: this lane writes a next release version (%s); it fails the release gate once the version is bumped\n' \
+            "$(next_release_versions | paste -sd, -)"
+        printf 'FIX: replace each next-version literal above with env!("CARGO_PKG_VERSION"), a 9.99.x fixture value, or prose without the number (comments count too)\n'
+        return 1
+    fi
+    elsewhere="$(git grep -nIF "${patterns[@]}" -- "$@" ':(exclude)*.md' ':(exclude)*/reference-history.json' \
+        ':(exclude)*/Cargo.toml' ':(exclude)*/Cargo.lock' 2>/dev/null || true)"
+    if [[ -n "$elsewhere" ]]; then
+        printf 'version-literals: NOTE pre-existing next-version literals outside this lane (not refused here; they fail the release gate after the bump):\n%s\n' \
+            "$elsewhere"
+    fi
+    printf 'version-literals: no %s or next-version literal in %s changed file(s)\n' "$version" "${#changed[@]}"
 }
 
 # Runtime reads of the producer checkout through CARGO_MANIFEST_DIR pass on
@@ -1523,6 +1569,7 @@ check_changelog_and_versions() {
         current="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$file" | head -n1)"
         if [[ "$current" != "$version" ]]; then
             printf 'version-alignment: %s is %s; expected %s\n' "$file" "${current:-missing}" "$version"
+            printf 'FIX: set version = "%s" in %s; only the release cut bumps versions\n' "$version" "$file"
             return 1
         fi
     done
@@ -1687,9 +1734,51 @@ check_fixture_paths_src() {
     hits="$(src_runtime_manifest_dir_hits "${changed[@]}")"
     if [[ -n "$hits" ]]; then
         printf 'fixture-paths-src: cas-cli/src test modules read the producer checkout at runtime; use include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/..")) or cas::test_paths::workspace_root() with an explicit skip:\n%s\n' "$hits"
+        printf 'FIX: embed each file above with include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/<path>")), or read it through cas::test_paths::workspace_root() with an explicit SKIP when absent\n'
         return 1
     fi
     printf 'fixture-paths-src: no runtime CARGO_MANIFEST_DIR reads in %s changed file(s)\n' "${#changed[@]}"
+}
+
+# The no-build half of builtin-projections: the root Claude projection of the
+# task-verifier agent is its frontmatter plus the embedded body, byte for byte,
+# and Codex carries no .md agents. The init-generated settings and the
+# reference-history ledger need the binary or release prep, so they stay in
+# the full gate's builtin-projections row.
+check_builtin_projections_src() {
+    local body='cas-cli/src/builtins/agents/task-verifier.body.md'
+    local projection='.claude/agents/task-verifier.md' stray
+    if ! lane_touches cas-cli/src/builtins/agents cas-cli/src/builtins.rs .claude/agents .codex/agents; then
+        printf 'builtin-projections-src: no builtin agent or root projection change\n'
+        return 0
+    fi
+    [[ -f "$body" ]] || {
+        printf 'builtin-projections-src: %s is missing\n' "$body"
+        return 0
+    }
+    if ! python3 - "$projection" "$body" <<'PY'
+import sys
+projection, body = sys.argv[1:]
+try:
+    actual = open(projection).read()
+except OSError as error:
+    sys.exit(f"builtin-projections-src: missing {projection}: {error}")
+expected = open(body).read()
+if not actual.startswith("---\nname: task-verifier\n") or not actual.endswith("\n---\n" + expected):
+    sys.exit(f"builtin-projections-src: {projection} diverged from its embedded body {body}")
+PY
+    then
+        printf 'FIX: rewrite %s as its frontmatter followed by %s verbatim (cp the body under the closing ---), then commit both\n' \
+            "$projection" "$body"
+        return 1
+    fi
+    stray="$(find .codex/agents -maxdepth 1 -name '*.md' 2>/dev/null || true)"
+    if [[ -n "$stray" ]]; then
+        printf 'builtin-projections-src: root .codex/agents carries .md agents:\n%s\n' "$stray"
+        printf 'FIX: git rm the .md files above; Codex installs no .md agents\n'
+        return 1
+    fi
+    printf 'builtin-projections-src: %s matches %s\n' "$projection" "$body"
 }
 
 check_ci_script_tests_changed() (
@@ -1855,19 +1944,52 @@ run_check ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (
     check_ci_script_tests_changed
 run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src, crates/*/src, crates/*/tests (changed files in fast mode)' \
     check_fixture_paths_src
+run_check builtin-projections-src 'task-verifier root projection equals its embedded body; no .md Codex agents (lane change only in fast mode)' \
+    check_builtin_projections_src
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree
 
-if [[ "${#failures[@]}" -gt 0 ]]; then
-    printf 'RELEASE GATE FAILED: %s\n' "${failures[*]}"
-    exit 1
-fi
+# cas-7bce: the fix a failed fast row needs, when its log does not print a
+# specific `FIX:` line itself. The park refusal quotes these verbatim.
+fast_row_fix() {
+    case "$1" in
+        failure-log) printf 'give every entry in %s a **<gate-row-id>** that exists in release-gate.sh, or a manual: marker' "$failure_log_rel" ;;
+        changelog-and-versions) printf 'keep ## [Unreleased] and the current release section (with a bullet) in CHANGELOG.md; put new bullets under [Unreleased]' ;;
+        release-script) printf 'restore the guarded contract lines in scripts/release.sh that the row log names' ;;
+        release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
+        procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
+        test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
+        test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
+        builtin-doc-hygiene) printf 'remove the operator data, or restore the contract phrase listed in scripts/builtin-contract-phrases.json, as the row log names' ;;
+        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
+        builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
+        doctor-snapshot) printf 'add the new doctor phase to its row group and update the reviewed doctor snapshot' ;;
+        migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
+        ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;
+        *) printf 'read the row log and rerun this command after fixing' ;;
+    esac
+}
+
+# Prints `FIX <row>: <text>` for each failed row: the row's own FIX lines
+# (file:line specific) first, otherwise the generic fix above.
+fast_row_fixes() {
+    local row fixes
+    for row in "${failures[@]}"; do
+        fixes="$(grep -h 'FIX: ' "$row_log_dir/$row.log" 2>/dev/null | sed 's/.*FIX: //' | head -n 5 || true)"
+        [[ -n "$fixes" ]] || fixes="$(fast_row_fix "$row")"
+        while IFS= read -r line; do
+            printf 'FIX %s: %s\n' "$row" "$line"
+        done <<<"$fixes"
+    done
+}
 
 # cas-12ab: a factory park requires this receipt for the exact delivered tip.
 # Only a committed tree earns it: uncommitted work is not what was checked.
+# cas-7bce: a failed run on a committed tree writes a FAIL receipt naming the
+# rows and their fixes, so the park refusal can quote the exact fix.
 record_fast_rows_receipt() {
-    local head common dir
+    local outcome="$1" head common dir
     if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
         printf 'fast rows: no receipt written: tracked files have uncommitted changes; commit, then rerun\n'
         return 0
@@ -1876,12 +1998,30 @@ record_fast_rows_receipt() {
     common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
     dir="$common/cas/fast-rows"
     mkdir -p "$dir" || return 0
-    printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
+    if [[ "$outcome" == PASS ]]; then
+        printf 'fast-rows: PASS %s base=%s version=%s at=%s\n' "$head" "${fast_base:-HEAD^}" "$version" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$dir/$head.pass"
+    else
+        {
+            printf 'fast-rows: FAIL %s rows=%s base=%s version=%s at=%s\n' "$head" "$(IFS=,; printf '%s' "${failures[*]}")" \
+                "${fast_base:-HEAD^}" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            fast_row_fixes
+        } >"$dir/$head.pass.tmp.$$" && mv "$dir/$head.pass.tmp.$$" "$dir/$head.pass"
+    fi
     printf 'fast rows: receipt %s\n' "$dir/$head.pass"
 }
+
+if [[ "${#failures[@]}" -gt 0 ]]; then
+    if [[ "$fast_rows" == true ]]; then
+        fast_row_fixes
+        record_fast_rows_receipt FAIL
+    fi
+    printf 'RELEASE GATE FAILED: %s\n' "${failures[*]}"
+    exit 1
+fi
+
 if [[ "$fast_rows" == true ]]; then
-    record_fast_rows_receipt
+    record_fast_rows_receipt PASS
 fi
 
 if [[ -n "$only_rows" ]]; then

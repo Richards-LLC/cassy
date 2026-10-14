@@ -649,6 +649,25 @@ Each runs when the lane changes its inputs, and the full gate always runs it:
 Contract phrases were already part of `builtin-doc-hygiene`. On this host a
 lane spanning that release's three epics ran every fast row in about 25 seconds.
 
+Each second-scale failure that reached CI or the merge queue on 2026-10-14
+is refused at park (cas-7bce). `scripts/test-fast-release-rows.py` holds one
+fixture per failure:
+
+- `test-shape`: integration tests under `cas-cli/tests` and `crates/*/tests`
+  may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
+  archive shards lack.
+- `version-literals`: fast mode also refuses the next patch, minor and major
+  version in the lane's changed files, comments included. The release gate
+  scans for the bumped version. Pre-existing next-version literals elsewhere
+  are printed as a NOTE.
+- `markdown-lint`: the changed-Markdown lint runs with the CI config and pin.
+- `test-env` and `fixture-paths-src`: the environment failures.
+- `builtin-projections-src`: the no-build half of `builtin-projections`. It
+  checks that the root task-verifier projection matches its embedded body.
+
+A failed row prints `FIX <row>: …`. On a committed tree the run writes a FAIL
+receipt that names the rows and those fixes, and the park refusal quotes them.
+
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
 results on Linux and falls back to Python for timezone-qualified ISO values

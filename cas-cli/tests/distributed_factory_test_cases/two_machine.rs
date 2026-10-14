@@ -149,6 +149,33 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();
     let (alpha, _beta, _gamma) = three_machines(&cloud);
+    let now = chrono::Utc::now();
+    for (id, state) in [
+        ("expired-proposal", cas_store::SplitState::Pending),
+        ("accepted-split", cas_store::SplitState::Accepted),
+    ] {
+        cas_store::insert_epic_split(
+            &alpha.cas_dir,
+            &cas_store::EpicSplit {
+                id: id.into(),
+                epic_id: "cas-shared".into(),
+                local_agent_id: "a".into(),
+                peer_agent_id: "b".into(),
+                peer_name: "sup-b".into(),
+                peer_machine: "machine-beta".into(),
+                direction: cas_store::SplitDirection::Outgoing,
+                mine: vec!["cas-mine".into()],
+                theirs: vec!["cas-theirs".into()],
+                state,
+                reason: Some("agreed ownership with a deliberately long explanation ".repeat(4)),
+                message_id: None,
+                expires_at: now - chrono::Duration::minutes(1),
+                created_at: now - chrono::Duration::minutes(10),
+                decided_at: (state == cas_store::SplitState::Accepted).then_some(now),
+            },
+        )
+        .unwrap();
+    }
     let records = alpha.cas_dir.join("cloud_presence");
     std::fs::create_dir_all(&records).unwrap();
     let core = cas::mcp::CasCore::with_daemon(alpha.cas_dir.clone(), None, None);
@@ -191,14 +218,50 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
                         .unwrap()
                         .starts_with("Peer mailbox:")
                 );
+                assert!(
+                    !report["mailbox_status"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Epic splits:")
+                );
+                let splits = report["epic_splits"].as_array().expect("structured splits");
+                assert_eq!(splits.len(), 2);
+                let expired = splits
+                    .iter()
+                    .find(|s| s["id"] == "expired-proposal")
+                    .unwrap();
+                assert_eq!(expired["state"], "pending");
+                assert_eq!(expired["display_state"], "expired");
+                assert_eq!(expired["direction"], "outgoing");
+                assert_eq!(expired["epic_id"], "cas-shared");
+                assert_eq!(expired["peer_name"], "sup-b");
+                assert_eq!(expired["peer_machine"], "machine-beta");
+                assert_eq!(expired["mine"], serde_json::json!(["cas-mine"]));
+                assert_eq!(expired["theirs"], serde_json::json!(["cas-theirs"]));
+                assert!(expired["expires_at"].is_string());
+                assert!(expired["decided_at"].is_null());
+                let accepted = splits.iter().find(|s| s["id"] == "accepted-split").unwrap();
+                assert_eq!(accepted["display_state"], "accepted");
+                assert!(accepted["decided_at"].is_string());
+                assert!(expired["reason"].as_str().unwrap().len() > 72);
             } else {
                 assert!(
                     text.starts_with(&format!("Cloud presence: {state}")),
                     "{text}"
                 );
                 let peers_at = text.find("[OK]").unwrap();
+                let splits_at = text.find("Epic splits:").unwrap();
                 let mailbox_at = text.find("Peer mailbox:").unwrap();
-                assert!(peers_at < mailbox_at, "{text}");
+                assert!(peers_at < splits_at && splits_at < mailbox_at, "{text}");
+                assert!(
+                    text.contains("expired-proposal [expired, outgoing]"),
+                    "{text}"
+                );
+                assert!(
+                    text.lines()
+                        .all(|line| ratatui::text::Line::raw(line).width() <= 72),
+                    "{text}"
+                );
                 if state == "failing" {
                     assert!(text.contains("registration unavailable"), "{text}");
                 }

@@ -802,7 +802,8 @@ fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
     };
 
     // A peer message's envelope and its reply target name the sender's machine.
-    let to_a = resolve_peer_target(&peers_of(&beta.cas_dir, "b"), "sup-a").unwrap().unwrap();
+    let peers_b = peers_of(&beta.cas_dir, "b");
+    let to_a = resolve_peer_target(&peers_b, "sup-a").unwrap().unwrap();
     send_to_peer(&beta.cas_dir, "b", to_a, "label check", Some("label"), None).unwrap();
     assert_eq!(tick(&alpha, "a").delivered, 1);
     let envelope = parse_envelope(&inbox(&alpha)[0].prompt).unwrap();

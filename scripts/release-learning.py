@@ -145,6 +145,10 @@ def check(root, run_dir):
                    + ' --run-dir ' + shlex.quote(str(run_dir))
                    + ' --evidence ' + shlex.quote(f'{filename}:{number}'))
         print(f'  → {command}', file=sys.stderr)
+        print('  → or, when an open task owns the fix: scripts/release-gate.sh --learn-task'
+              ' "${RELEASE_FAILURE_TASK:?set open task id}"'
+              f' --run-dir {shlex.quote(str(run_dir))} --evidence {shlex.quote(f"{filename}:{number}")}',
+              file=sys.stderr)
     if failures:
         return 1
     print('receipts release-learning: every rescue maps to a learned gate row or an open task')
@@ -165,9 +169,15 @@ def require_cause_task(root, check_id, task, previous=None):
 
 
 def map_rows(root, run_dir, check_id, references, validate_only=False, task=None, previous=None):
-    if not validate_only and check_id not in executable_lessons(root):
+    # cas-297d: check_id None is --learn-task: an open task owns the fix and
+    # each row keeps its own learn= lesson, whose recurrence rule still holds.
+    if check_id is None:
+        if not task or not task_open(root, task):
+            raise ValueError(f'{task} is not an open task')
+    elif not validate_only and check_id not in executable_lessons(root):
         raise ValueError(f'{check_id} has no failure-log entry with an executable gate row')
-    require_cause_task(root, check_id, task, previous)
+    else:
+        require_cause_task(root, check_id, task, previous)
     changes = {}
     for reference in references:
         filename, number = reference.rsplit(':', 1)
@@ -178,6 +188,12 @@ def map_rows(root, run_dir, check_id, references, validate_only=False, task=None
         index = int(number) - 1
         if index >= len(rows) or not rows[index].strip() or rows[index].lstrip().startswith('#'):
             raise ValueError(f'missing evidence row: {reference}')
+        if check_id is None:
+            own = 1 if re.search(r'(?:^|\s)recurrence=[0-9]+(?=\s|$)', rows[index]) else 0
+            for learned in re.findall(r'(?:^|\s)learn=([a-z0-9:-]+)(?=\s|$)', rows[index]):
+                require_cause_task(root, learned, task, failure_counts(root).get(learned, 0) - own)
+            rows[index] = re.sub(r'\s+task=\S+', '', rows[index]) + f' task={task}'
+            continue
         stripped = r'\s+(?:learn|task|recurrence)=\S+' if task else r'\s+(?:learn|recurrence)=\S+'
         rows[index] = (re.sub(stripped, '', rows[index]) + f' learn={check_id}'
                        + (f' recurrence={previous + 1}' if previous is not None else '')
@@ -316,6 +332,9 @@ def main():
             previous = int(options['previous']) if 'previous' in options else None
             map_rows(root, Path(args[0]), args[1], references, mode == '--validate-map',
                      options.get('task') or None, previous)
+            return 0
+        if mode == '--map-task':
+            map_rows(root, Path(args[0]), None, args[2:], task=args[1])
             return 0
         if mode == '--measure':
             measure(root, Path(args[0]))

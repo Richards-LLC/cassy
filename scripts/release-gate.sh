@@ -18,7 +18,7 @@ cd "$repo_root"
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests hub-web-tests release-binary-isa fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
@@ -28,21 +28,42 @@ readonly -a gate_check_ids=(
 usage() {
     printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
     printf '       %s --fast-rows [--base <ref>]\n' "$0"
-    printf '       %s --learn "<symptom>" "<cause>" "<check-id>" [--run-dir <dir> --evidence <file:line> ...]\n' "$0"
+    printf '       %s --learn "<symptom>" "<cause>" "<check-id>" [--rung default|preflight|gate|prose] [--task <open P0/P1 task>] [--run-dir <dir> --evidence <file:line> ...]\n' "$0"
 }
 
 learn() {
     local symptom="$1" cause="$2" check_id="$3"
     local date entry path before mapping_dir='' known registered=false
-    local -a mapping_rows=()
+    local rung='' cause_task='' previous
+    local -a mapping_rows=() task_args=()
     shift 3
     while (($#)); do
         case "$1" in
             --run-dir) [[ $# -ge 2 ]] || return 2; mapping_dir="$2"; shift 2 ;;
             --evidence) [[ $# -ge 2 ]] || return 2; mapping_rows+=("$2"); shift 2 ;;
+            --rung) [[ $# -ge 2 ]] || return 2; rung="$2"; shift 2 ;;
+            --task) [[ $# -ge 2 ]] || return 2; cause_task="$2"; shift 2 ;;
             *) printf 'error: unknown --learn option %s\n' "$1" >&2; return 2 ;;
         esac
     done
+    # cas-9734: prevention first. Record the rung this lesson reached: a
+    # default or auto-fix, a seconds-long preflight, a late gate row, or prose.
+    [[ -n "$rung" ]] || { [[ "$check_id" == manual:* ]] && rung=prose || rung=gate; }
+    case "$rung" in
+        default|preflight|gate|prose) ;;
+        *) printf 'error: --rung must be default, preflight, gate or prose: %s\n' "$rung" >&2; return 2 ;;
+    esac
+    [[ "$check_id" != manual:* || "$rung" != gate ]] || {
+        printf 'error: %s has no gate row; record --rung prose, or add the row\n' "$check_id" >&2; return 2;
+    }
+    [[ -z "$cause_task" || "$cause_task" =~ ^cas-[a-z0-9]+$ ]] || {
+        printf 'error: invalid --task %s\n' "$cause_task" >&2; return 2;
+    }
+    [[ -z "$cause_task" ]] || task_args=(--task "$cause_task")
+    # A lesson learned twice already is not sticking: refuse another prose
+    # entry or learn= mapping without an open P0/P1 cause-removing task.
+    previous="$(python3 "$repo_root/scripts/release-learning.py" --require-cause-task "$repo_root" \
+        "$check_id" "$cause_task")" || return 2
     if [[ -n "$mapping_dir" || ${#mapping_rows[@]} -gt 0 ]]; then
         [[ -n "$mapping_dir" && ${#mapping_rows[@]} -gt 0 ]] || {
             printf 'error: --run-dir and --evidence are required together\n' >&2; return 2;
@@ -52,7 +73,7 @@ learn() {
         done
         "$registered" || { printf 'error: learned evidence needs an executable gate row: %s\n' "$check_id" >&2; return 2; }
         python3 "$repo_root/scripts/release-learning.py" --validate-map "$repo_root" \
-            "$mapping_dir" "$check_id" "${mapping_rows[@]}" || return $?
+            "$mapping_dir" "$check_id" ${task_args[@]+"${task_args[@]}"} "${mapping_rows[@]}" || return $?
     fi
     [[ "$symptom" != *$'\n'* && "$cause" != *$'\n'* ]] || {
         printf 'error: --learn values must be single-line strings\n' >&2
@@ -63,7 +84,7 @@ learn() {
         return 2
     }
     date="$(date -u +%F)"
-    entry="- $date — **$check_id** — Symptom: $symptom Root cause: $cause Release: operator-reported."
+    entry="- $date — **$check_id** — Symptom: $symptom Root cause: $cause Recurrence: $((previous + 1)). Rung: $rung.${cause_task:+ Task: $cause_task.} Release: operator-reported."
     for path in "$failure_log_rel"; do
         [[ -f "$path" ]] || {
             printf 'error: missing failure log %s\n' "$path" >&2
@@ -82,13 +103,13 @@ learn() {
     done
     if [[ -n "$mapping_dir" ]]; then
         python3 "$repo_root/scripts/release-learning.py" --map "$repo_root" \
-            "$mapping_dir" "$check_id" "${mapping_rows[@]}" || return $?
+            "$mapping_dir" "$check_id" --previous "$previous" ${task_args[@]+"${task_args[@]}"} "${mapping_rows[@]}" || return $?
     fi
     if [[ -x "$repo_root/scripts/gen-builtin-reference-history.sh" ]]; then
         "$repo_root/scripts/gen-builtin-reference-history.sh"
         printf 'Regenerated builtin reference history after --learn; commit the ledger before starting a gate.\n'
     fi
-    printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release before retrying.\n' "$check_id"
+    printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release,operation:release-cut before retrying (the next cut surfaces it).\n' "$check_id"
 }
 
 if [[ "${1:-}" == '--learn' ]]; then
@@ -1105,6 +1126,23 @@ build_audit_record_release_binary() {
         || printf 'WARN release binary not recorded; the publisher will rebuild this tree\n'
 }
 
+# cas-e719: 3.51.0 shipped unable to launch `cas factory`/`cas claude` on the
+# default config, and no row launched the real binary as an operator. Smoke
+# this tree's audited release binary (the archive release-binary-isa records)
+# from a clean operator shell; an agent context must still be refused.
+check_operator_launch_smoke() {
+    local verdict archive staging="$tmp_dir/operator-launch-smoke"
+    check_epic_worktree_zig || return $?
+    if ! verdict="$(release_binary_artifact_ready 2>&1)"; then
+        printf 'operator-launch-smoke: no audited release binary for this tree: %s\n' "$verdict"
+        printf 'operator-launch-smoke: the release-binary-isa row records it; run that row first\n'
+        return 1
+    fi
+    archive="$(sed -n 's/^archive=//p' <<<"$verdict")"
+    mkdir -p "$staging" && tar -xzf "$archive" -C "$staging" cas || return $?
+    release_test_child "$repo_root/scripts/check-operator-launch.sh" "$staging/cas"
+}
+
 check_macos() {
     local rustup_bin="${RUSTUP:-rustup}" macos_cc="$tmp_dir/macos-check-cc"
     if ! command -v "$rustup_bin" >/dev/null 2>&1; then
@@ -1889,6 +1927,9 @@ if row_selected release-binary-isa && [[ "${failures[*]}" == *release-binary-isa
     printf 'RELEASE GATE FAILED: %s (release binary ISA audit refused before pr-body/pipeline)\n' "${failures[*]}"
     exit 1
 fi
+run_check operator-launch-smoke \
+    'scripts/check-operator-launch.sh <release-binary-isa archive cas> (throwaway HOME, cas init defaults, clean operator shell; agent refused)' \
+    check_operator_launch_smoke
 run_check fixture-paths \
     "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src, crates/*/src or crates/*/tests" \
     check_fixture_paths

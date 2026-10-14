@@ -31,8 +31,8 @@ A signal is the memory's *epistemic role*; `entry_type` is how Cassy recalls it.
 ## Procedure (manual)
 
 1. **Collect candidates.** Read the session and list findings that are project-, user- or session-specific. General programming advice is not a memory.
-2. **Dedupe.** For each candidate, run `search action=search query="<the finding>"`. If a near-duplicate exists, do not draft it again; note the existing memory's ID in `dedup_hits`.
-3. **Draft.** One signal per draft. Fill every field of the schema below and give an honest `confidence`.
+2. **Dedupe.** For each candidate, run `search action=search query="<the finding>"`. If a near-duplicate exists, do not draft it again; note the existing memory's ID in `dedup_hits`. A duplicate of a pattern or correction means the lesson did not stick: propose a cause-removing fix (a default or auto-fix, then a seconds-long preflight, then a gate row) as a task instead of another memory.
+3. **Draft.** One signal per draft. Fill every field of the schema below and give an honest `confidence`. Tag a lesson about an operation `operation:<release-cut|spawn|report|epic-close>` so starting that operation surfaces it.
 4. **Preview.** Show the drafts to the user and drop the ones they reject.
 5. **Store.** For each accepted draft with empty `dedup_hits` and `confidence ≥ 0.6` (≥ 0.5 for corrections), run `memory action=remember content="<content>" entry_type=<entry_type> scope=<scope> tags="<tags>"`. The overlap gate there is the backstop.
 

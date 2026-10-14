@@ -150,6 +150,8 @@ struct ReleaseEvidence {
     /// (stage, seconds, resolved); empty with `blocker_count` set means the
     /// run predates priced blockers.
     blocker_costs: Vec<(String, i64, bool)>,
+    /// cas-9734: rescues that repeated an already-learned lesson.
+    lesson_recurrence: Option<String>,
 }
 
 impl ReleaseEvidence {
@@ -1374,6 +1376,10 @@ fn assemble_markdown(
         sources.release_evidence.blocker_summary()
     ));
     output.push_str(&format!(
+        "| Lesson recurrence | {} | Rescues whose learn= lesson was already in the failure log; lesson-recurrence.json |\n",
+        sources.release_evidence.lesson_recurrence.as_deref().map_or("unavailable".to_string(), escape_table)
+    ));
+    output.push_str(&format!(
         "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
         sources
             .release_evidence
@@ -2119,6 +2125,11 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         if values.contains_key("PUBLISH_LATENCY_SECONDS") {
             evidence.record_latency(&values);
         }
+        if path.file_name().and_then(|name| name.to_str()) == Some("lesson-recurrence.json") {
+            evidence.lesson_recurrence = serde_json::from_str::<LessonRecurrence>(&content)
+                .ok()
+                .map(|recurrence| recurrence.summary());
+        }
         if values.contains_key("PUBLISH_LATENCY_SECONDS") || path_text.contains("published.receipt")
         {
             evidence.receipt_path = Some(path.display().to_string());
@@ -2136,6 +2147,52 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         }
     }
     evidence
+}
+
+/// cas-9734: `<run-dir>/lesson-recurrence.json`, written by release-learning.py.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct LessonRecurrence {
+    pub version: String,
+    pub rescues: u64,
+    pub recurrences: u64,
+    pub rate: f64,
+    pub classes: Vec<String>,
+}
+
+impl LessonRecurrence {
+    /// `2 of 4 rescues (50%) repeated a learned lesson: scratch-base, version-literals`
+    pub(crate) fn summary(&self) -> String {
+        let mut summary = format!(
+            "{} of {} rescue{} ({:.0}%) repeated a learned lesson",
+            self.recurrences,
+            self.rescues,
+            if self.rescues == 1 { "" } else { "s" },
+            self.rate * 100.0
+        );
+        if !self.classes.is_empty() {
+            summary.push_str(&format!(": {}", self.classes.join(", ")));
+        }
+        summary
+    }
+}
+
+/// Every recorded release run's lesson recurrence, newest version first.
+pub(crate) fn lesson_recurrences() -> Vec<LessonRecurrence> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let mut runs: Vec<LessonRecurrence> = fs::read_dir(home.join(".cas/artifacts/release"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|run| fs::read_to_string(run.path().join("lesson-recurrence.json")).ok())
+        .filter_map(|json| serde_json::from_str(&json).ok())
+        .collect();
+    let key = |run: &LessonRecurrence| -> Vec<u64> {
+        run.version.split('.').map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    runs.sort_by_key(|run| std::cmp::Reverse(key(run)));
+    runs
 }
 
 fn parse_key_values(content: &str) -> HashMap<String, String> {
@@ -2550,6 +2607,21 @@ Dev reply
             report.contains("| Blockers | 2 — 38m 20s blocked: gate 10m 0s; pipeline 28m 20s |"),
             "{report}"
         );
+        // cas-9734: the release's lesson recurrence rate.
+        assert!(report.contains("| Lesson recurrence | unavailable |"), "{report}");
+        let recorded: LessonRecurrence = serde_json::from_str(
+            r#"{"version":"9.98.0","rescues":4,"recurrences":2,"rate":0.5,"classes":["scratch-base","version-literals"]}"#,
+        )
+        .unwrap();
+        sources.release_evidence.lesson_recurrence = Some(recorded.summary());
+        let measured = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(
+            measured.contains(
+                "| Lesson recurrence | 2 of 4 rescues (50%) repeated a learned lesson: scratch-base, version-literals |"
+            ),
+            "{measured}"
+        );
+        sources.release_evidence.lesson_recurrence = None;
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(unavailable.contains("| Manual interventions | unavailable |"));

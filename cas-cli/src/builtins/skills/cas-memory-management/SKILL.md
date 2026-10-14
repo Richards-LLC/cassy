@@ -67,6 +67,16 @@ the other fields are optional and apply to the actions described here.
 - `personal`: set `true` on `remember` to skip team auto-promotion. An
   explicit `team_id` takes precedence.
 
+## Lessons That Must Stick
+
+A lesson about an operation is tagged `operation:<op>` (`release-cut`,
+`spawn`, `report` or `epic-close`). Starting that operation surfaces
+every tagged lesson as a short checklist, so the tag, not wording, decides
+recall. Prefer removing the cause: a default or auto-fix, then a seconds-long
+preflight, then a gate row; a memory is the last rung. Name the rung the
+lesson reached in its body. A lesson that recurs after two entries needs a
+P0/P1 task that removes the cause.
+
 ## Content and Frontmatter
 
 The `content` field is the authoritative memory body. It may begin with a YAML

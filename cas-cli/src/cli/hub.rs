@@ -165,6 +165,10 @@ pub struct HubPairArgs {
     /// running hub's Tailscale Serve URL, then `hub.public_url`)
     #[arg(long)]
     pub hub_url: Option<String>,
+    /// cas-e719: run only the operator-only gate, print `launch check: ...`
+    /// and exit before minting anything (the release operator launch smoke).
+    #[arg(long, hide = true)]
+    pub check_launch: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -186,6 +190,10 @@ pub struct HubAuthorizeArgs {
     /// Approve without an interactive confirmation prompt
     #[arg(long)]
     pub yes: bool,
+    /// cas-e719: run only the operator-only gate, print `launch check: ...`
+    /// and exit before contacting the relay (the release operator launch smoke).
+    #[arg(long, hide = true)]
+    pub check_launch: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1977,6 +1985,20 @@ fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
         .iter()
         .map(|scope| Scope::parse(scope))
         .collect::<Result<_>>()?;
+    // cas-e719: the launch smoke runs under a throwaway HOME, whose hub the
+    // gate below would not consider the operator's, so it checks the gate
+    // itself rather than through `pairing_targets_operator_hub`.
+    if args.check_launch {
+        if let Some(refusal) = crate::config::operator_policy::operator_action_refusal(
+            "Pairing a Commander device",
+            "run `cas hub pair` yourself from your own terminal",
+            &crate::config::operator_policy::InvocationContext::from_process(),
+        ) {
+            anyhow::bail!(refusal);
+        }
+        println!("launch check: the operator may pair a Commander device");
+        return Ok(());
+    }
     // cas-3c26: only the operator mints an invitation for their own machine
     // hub, and only after confirming the origin and scopes at their own
     // terminal. A hub under another HOME (a journey fixture) controls nothing

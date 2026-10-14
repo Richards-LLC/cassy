@@ -68,10 +68,30 @@ fn claims_visibility(viewer: Option<&str>, owner: Option<&AgentInfo>) -> ClaimsV
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PeerEpicSplit {
+    pub id: String,
+    pub epic_id: String,
+    pub peer_name: String,
+    pub peer_machine: String,
+    pub direction: &'static str,
+    pub mine: Vec<String>,
+    pub theirs: Vec<String>,
+    /// Stored state; expiry does not mutate the record.
+    pub state: &'static str,
+    pub display_state: &'static str,
+    pub reason: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
     pub cloud_presence: Option<super::presence::PresenceRecord>,
     pub cloud_presence_message: String,
     pub mailbox_status: String,
+    pub epic_splits: Vec<PeerEpicSplit>,
+    #[serde(skip)]
+    pub(crate) epic_splits_message: String,
     pub canonical_id: Option<String>,
     pub detail: bool,
     pub status: String,
@@ -82,11 +102,32 @@ pub struct PeerReport {
 impl PeerReport {
     pub(crate) fn new(cas_root: &Path, self_id: Option<&str>, detail: bool) -> Self {
         let mut mailbox_status = String::new();
-        peers::append_mailbox_status(cas_root, self_id, &mut mailbox_status);
+        peers::append_mailbox_health(cas_root, self_id, &mut mailbox_status);
+        let now = Utc::now();
+        let epic_splits = cas_store::list_epic_splits(cas_root)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|split| PeerEpicSplit {
+                state: split.state.as_str(),
+                display_state: split.display_state(now),
+                direction: split.direction.as_str(),
+                id: split.id,
+                epic_id: split.epic_id,
+                peer_name: split.peer_name,
+                peer_machine: split.peer_machine,
+                mine: split.mine,
+                theirs: split.theirs,
+                reason: split.reason,
+                expires_at: split.expires_at,
+                decided_at: split.decided_at,
+            })
+            .collect();
         Self {
             cloud_presence: self_id.and_then(|id| super::presence::load(cas_root, id)),
             cloud_presence_message: peers::presence_line(cas_root, self_id),
             mailbox_status,
+            epic_splits,
+            epic_splits_message: super::epic_split::render_splits(cas_root),
             canonical_id: super::resolve_canonical_id(cas_root),
             detail,
             status: "ready".into(),
@@ -375,7 +416,7 @@ pub fn ascii_terminal() -> bool {
 /// Plain text, with no terminal control sequences from untrusted metadata.
 /// The same report supplies the JSON form, which preserves the full values.
 pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> String {
-    let width = width.clamp(40, 100);
+    let width = width.clamp(40, 72);
     let clean = |value: &str| -> String {
         value
             .chars()
@@ -502,6 +543,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 line(format!("      Tasks {task_label}"));
             }
         }
+    }
+    for split_line in report.epic_splits_message.lines() {
+        line(split_line.to_string());
     }
     for mailbox_line in report.mailbox_status.lines() {
         line(mailbox_line.to_string());

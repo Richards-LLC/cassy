@@ -170,9 +170,8 @@ fn age(secs: i64) -> String {
 /// `coordination action=peers`.
 pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
     // cas-f707: two short lines per peer, so the list fits 80 columns.
-    let mut out = crate::cloud::presence::wrap_line(&format!(
-        "Peers ({canonical_id}, via Cassy Cloud):"
-    ));
+    let mut out =
+        crate::cloud::presence::wrap_line(&format!("Peers ({canonical_id}, via Cassy Cloud):"));
     if peers.is_empty() {
         out.push_str("  no other supervisors of this repo seen in the last 24h\n");
         return out;

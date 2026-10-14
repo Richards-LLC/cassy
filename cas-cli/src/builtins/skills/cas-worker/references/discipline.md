@@ -60,9 +60,10 @@ a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
 targeted-test exception, park and name the unverified crates for the supervisor.
 
-The supervisor runs the full build and tests once at epic assembly and records
+The full build and tests run once at the epic's final gate: the merge queue
+where base has one, otherwise the supervisor's assembly, which records
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` on
-the epic. Child closes reference it; assembly failures return as follow-up tasks.
+the epic. Child closes reference it; final-gate failures return as follow-up tasks.
 
 ## Browser checks
 

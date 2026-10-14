@@ -1,4 +1,4 @@
-mod ci_watch;
+pub(crate) mod ci_watch;
 mod client_input;
 mod cloud;
 mod commander_mirror;

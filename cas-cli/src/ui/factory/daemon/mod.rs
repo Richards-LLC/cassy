@@ -374,6 +374,9 @@ pub struct FactoryDaemon {
     last_spawn_queue_stall_scan: Option<Instant>,
     /// Last bounded probe for durable external reminder conditions.
     last_external_wake_scan: Option<Instant>,
+    /// cas-0f05: satisfied `ci_completed` reminders from the GitHub watcher,
+    /// fired on the next reminder pass.
+    pending_ci_wakes: Vec<runtime::ci_watch::CiWake>,
     /// cas-2702: spawn queue request ids already reported as stalled, so the
     /// warning is emitted once per request rather than every scan.
     reported_stalled_spawn_requests: std::collections::HashSet<i64>,

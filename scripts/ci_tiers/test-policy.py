@@ -224,6 +224,45 @@ fi
             mutate(changed)
             self.assertFalse(valid(changed))
 
+    @staticmethod
+    def gh_expr(expression, context):
+        """Evaluate a GitHub `if:` expression over a flat context mapping."""
+        import re
+        body = expression.strip()
+        if body.startswith('${{') and body.endswith('}}'):
+            body = body[3:-2]
+        body = re.sub(r'\b(?:github|needs|steps)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
+        return bool(eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b)}))
+
+    def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
+        job = self.ci()['jobs']['macos-check']
+        def context(event, ref, run='false', reuse='', diff='rust-touched'):
+            return {'github.event_name': event, 'github.ref': ref, 'github.base_ref': 'main',
+                    'github.event.repository.default_branch': 'main', 'needs.ci-diff.outputs.class': diff,
+                    'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': run,
+                    'needs.fast-validation-main-push-dedupe.outputs.reuse-source': reuse}
+        cases = [
+            # A deduplicated main push still runs: it saves main's Darwin cache.
+            (context('push', 'refs/heads/main'), True),
+            (context('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1-abc', run='true'), True),
+            (context('push', 'refs/heads/main', diff='docs-only'), False),
+            (context('push', 'refs/heads/factory/x', run='true'), False),
+        ]
+        for ctx, expected in cases:
+            with self.subTest(event=ctx['github.event_name'], ref=ctx['github.ref'], diff=ctx['needs.ci-diff.outputs.class']):
+                self.assertEqual(self.gh_expr(job['if'], ctx), expected)
+        # Mutation control: without the main-push clause main never warms the cache.
+        without = job['if'].replace("|| (github.event_name == 'push' && github.ref == 'refs/heads/main')", '')
+        self.assertNotEqual(without, job['if'])
+        self.assertFalse(self.gh_expr(without, cases[0][0]))
+        # Only main saves the cargo cache; queue and tag refs restore main's copy.
+        cache = next(step for step in job['steps'] if str(step.get('uses', '')).startswith('Swatinem/rust-cache'))
+        save_if = cache['with']['save-if']
+        for ref, expected in [('refs/heads/main', True), ('refs/heads/gh-readonly-queue/main/pr-1-abc', False)]:
+            with self.subTest(save_ref=ref):
+                self.assertEqual(self.gh_expr(save_if, {'github.ref': ref}), expected)
+
     def test_queue_full_gate_reuse_skips_linux_lanes_but_never_macos_cas_4cb8(self):
         jobs = self.ci()['jobs']
         dedupe = jobs['fast-validation-main-push-dedupe']

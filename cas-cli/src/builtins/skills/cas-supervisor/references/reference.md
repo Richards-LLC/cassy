@@ -18,9 +18,10 @@ closes with `execution_note=no-code external_ref=<PR URL>`, or by
 non-empty audit reason and are recorded as a decision note. Workers never run
 Rust builds or tests, so do not demand a scoped `--proof` receipt or a
 `loaded_proof` note from them: the declared risk and `proof_targets` tell you
-what your one assembly build + test of the epic tip must cover, and its
+what the epic's one integration proof must cover: its merge-queue run where
+base has a queue, otherwise one assembly build + test of the epic tip and its
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`
-note on the epic is the proof child closes reference. A non-Rust
+note on the epic. Child closes reference that proof. A non-Rust
 `risk=platform` task still carries its worker `platform_proof` receipt.
 
 Two of those are supervisor-specific and easy to confuse:

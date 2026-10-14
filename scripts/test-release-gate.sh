@@ -2166,6 +2166,89 @@ if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode|ci-script-tests)$/ && $7 == "
 else
     bad "real-cut prep missed assembly proof: $(cat "$tmp/proof-prep.log")"
 fi
+
+# cas-2970: a from-main gate (no reuse) honors only the integration proof its
+# assemble recorded. `assembly` reuses this run's two-context proof for its
+# three rows; `merge-queue` reuses the queue run that proved an ancestor with
+# the same code input for the suite rows it ran. Everything else runs fresh.
+reused_rows() {
+    awk -F '\t' '$7 == "REUSED" {print $1}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" | sort | paste -sd, -
+}
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=assembly \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-assembly.log" 2>&1 || true
+if [[ "$(reused_rows)" == archive-mode,ci-script-tests,nextest ]] \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'a from-main gate reuses its own fresh assembly proof for exactly its three rows'
+else
+    bad "from-main assembly-proof reuse: $(reused_rows); $(cat "$tmp/mq-assembly.log")"
+fi
+if CAS_RELEASE_GATE_INTEGRATION_PROOF=bogus run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 \
+    >"$tmp/mq-bogus.log" 2>&1; then
+    bad 'an unknown integration proof was accepted'
+elif grep -qF 'must be merge-queue or assembly' "$tmp/mq-bogus.log"; then
+    ok 'an unknown integration proof is refused by name'
+else
+    bad "unknown integration proof failed without naming it: $(cat "$tmp/mq-bogus.log")"
+fi
+cat >"$tmp/fake-gh" <<'PY_FAKE_GH'
+#!/usr/bin/env python3
+import json, os, sys
+responses = json.load(open(os.environ["GATE_FIXTURE_GH_RESPONSES"]))
+path = sys.argv[2] if sys.argv[1:2] == ["api"] and len(sys.argv) == 3 else ""
+if path not in responses and "/actions/artifacts?" in path:
+    responses[path] = {"total_count": 0, "artifacts": []}
+if path not in responses:
+    sys.exit("fixture gh: no response for " + path)
+print(json.dumps(responses[path]))
+PY_FAKE_GH
+chmod +x "$tmp/fake-gh"
+python3 - "$tmp/gh-responses.json" "$proof_sha" "$(git -C "$repo" rev-parse "$proof_sha^{tree}")" <<'PY_GH_RESPONSES'
+import json, sys
+path, sha, tree = sys.argv[1:]
+json.dump({
+    f"/repos/Richards-LLC/cassy/actions/artifacts?name=merge-queue-validated-tree-{tree}&per_page=100":
+        {"artifacts": [{"expired": False, "workflow_run": {"id": 777}}]},
+    "/repos/Richards-LLC/cassy/actions/runs/777":
+        {"event": "merge_group", "status": "completed", "conclusion": "success",
+         "path": ".github/workflows/ci.yml", "head_sha": sha,
+         "html_url": "https://github.com/Richards-LLC/cassy/actions/runs/777"}}, open(path, "w"))
+PY_GH_RESPONSES
+if CAS_RELEASE_TRAIN_GH="$tmp/fake-gh" GATE_FIXTURE_GH_RESPONSES="$tmp/gh-responses.json" \
+    run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" reuse-merge-queue "$repo" >"$tmp/mq-reuse.log" 2>&1 \
+    && grep -qF "PASS merge-queue receipt=" "$tmp/mq-reuse.log" \
+    && grep -qF "source_sha=$proof_sha" "$tmp/mq-reuse.log"; then
+    ok 'reuse-merge-queue walks past the prep delta to the queue-proved commit'
+else
+    bad "reuse-merge-queue: $(cat "$tmp/mq-reuse.log")"
+fi
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-gate.log" 2>&1 || true
+mq_expected=archive-mode,ci-script-tests,doctests,fixture-paths,hub-web-dist-drift,hub-web-tests,hub-web-visual-qa,macos-check,nextest
+if [[ "$(reused_rows)" == "$mq_expected" ]] \
+    && grep -qF 'run=https://github.com/Richards-LLC/cassy/actions/runs/777' "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -q '^workspace-tests' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && grep -q '^builtin-projections' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'a merge-queue from-main gate reuses the queue suite rows and runs the version-delta rows fresh'
+else
+    bad "merge-queue gate reuse: $(reused_rows); $(cat "$tmp/mq-gate.log")"
+fi
+mq_head="$(git -C "$repo" rev-parse HEAD)"
+printf '// code after the queue run\n' >>"$repo/cas-cli/tests/smoke.rs"
+git -C "$repo" add cas-cli/tests/smoke.rs
+git -C "$repo" commit -qm 'fixture code change after the queue run'
+CAS_RELEASE_GATE_NO_REUSE=1 CAS_RELEASE_GATE_INTEGRATION_PROOF=merge-queue \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/mq-changed.log" 2>&1 || true
+if [[ -z "$(reused_rows)" ]] && grep -qF 'MISS merge-queue key=' "$tmp/mq-changed.log" \
+    && ! CAS_RELEASE_TRAIN_GH="$tmp/fake-gh" GATE_FIXTURE_GH_RESPONSES="$tmp/gh-responses.json" \
+        run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" reuse-merge-queue "$repo" >"$tmp/mq-miss.log" 2>&1 \
+    && grep -qF 'no_successful_merge_queue_run_for_code_input' "$tmp/mq-miss.log"; then
+    ok 'a code change after the queue run misses the queue receipt and every row runs fresh'
+else
+    bad "changed code reused the queue receipt: $(reused_rows); $(cat "$tmp/mq-changed.log")"
+fi
+git -C "$repo" reset -q --hard "$mq_head"
 for change in manifest-dependency lock-dependency non-member; do
     changed_file=Cargo.lock
     [[ "$change" != manifest-dependency ]] || changed_file=cas-cli/Cargo.toml

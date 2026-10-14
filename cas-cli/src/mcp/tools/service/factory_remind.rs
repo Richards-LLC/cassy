@@ -2,11 +2,12 @@ use crate::mcp::tools::service::imports::*;
 
 const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
+use crate::ui::factory::daemon::runtime::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
 
 fn is_external_reminder_event(event_type: &str) -> bool {
     matches!(
         event_type,
-        EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT
+        EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT
     )
 }
 
@@ -46,10 +47,12 @@ fn validate_external_reminder(
     let filter = filter.ok_or_else(|| {
         format!(
             "{event_type} reminders require remind_filter JSON: {}",
-            if event_type == EXTERNAL_BRANCH_CONTAINED_EVENT {
-                "{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}"
-            } else {
-                "{\"tag\":\"<tag>\"}"
+            match event_type {
+                EXTERNAL_BRANCH_CONTAINED_EVENT => {
+                    "{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}"
+                }
+                EXTERNAL_CI_COMPLETED_EVENT => "{\"sha\":\"<full sha>\",\"workflow\":\"CI\"}",
+                _ => "{\"tag\":\"<tag>\"}",
             }
         )
     })?;
@@ -83,6 +86,9 @@ fn validate_external_reminder(
             if tag.is_some_and(|value| value.starts_with('-') || value.ends_with('/')) {
                 return Err("external tag must be a valid git ref name".to_string());
             }
+        }
+        EXTERNAL_CI_COMPLETED_EVENT => {
+            crate::ui::factory::daemon::runtime::ci_watch::parse_ci_completed(filter)?;
         }
         _ => unreachable!("checked by is_external_reminder_event"),
     }
@@ -348,6 +354,7 @@ impl CasService {
                 "epic_completed",
                 EXTERNAL_BRANCH_CONTAINED_EVENT,
                 EXTERNAL_TAG_EXISTS_EVENT,
+                EXTERNAL_CI_COMPLETED_EVENT,
             ];
             if !valid_events.contains(&event_type.as_str()) {
                 return Err(Self::error(

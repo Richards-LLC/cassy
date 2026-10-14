@@ -99,7 +99,7 @@ class FastRows(unittest.TestCase):
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
-                       "check-migration-registry.py", "ci-script-tests-for-diff.py"):
+                       "check-migration-registry.py", "ci-script-tests-for-diff.py", "release-train-announce.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
         self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
@@ -198,7 +198,8 @@ class FastRows(unittest.TestCase):
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
                     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
-                    "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src"):
+                    "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
+                    "release-notes-draft"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -617,6 +618,24 @@ sleep 2
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS builtin-projections-src", result.stdout)
+
+    def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
+        """The v3.52.0 cut stopped at preflight on a draft committed hours earlier."""
+        path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
+        draft = (ROOT / "docs/release-notes/2026-10-14-v3.51.1-slack.md").read_text()
+        punch = next(line for line in draft.splitlines() if line.startswith("Was: the operator-only gate"))
+        self.write(path, draft)
+        self.commit()
+        self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("scripts/example.py", "# unrelated lane\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no release-notes draft change",
+                      (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
+        self.refused_at_park("release-notes-draft",
+                             {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
+                             "dev-top-level top-level punch exceeds 25 words")
 
 
 class Budget(unittest.TestCase):

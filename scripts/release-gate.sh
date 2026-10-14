@@ -22,7 +22,7 @@ readonly -a gate_check_ids=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src builtin-projections-src
+    fixture-paths-src builtin-projections-src release-notes-draft
 )
 
 usage() {
@@ -1787,6 +1787,34 @@ check_fixture_paths_src() {
 # and Codex carries no .md agents. The init-generated settings and the
 # reference-history ledger need the binary or release prep, so they stay in
 # the full gate's builtin-projections row.
+# cas-e7d4: the v3.52.0 cut stopped at preflight on a Slack draft committed
+# hours earlier (a 26-word Dev punch). Lint the drafts a lane changes at park,
+# with the announce stage's own implementation.
+check_release_notes_draft() {
+    local -a drafts=()
+    local path
+    if [[ "$fast_rows" != true ]]; then
+        printf 'release-notes-draft: the cut preflight lints this release draft\n'
+        return 0
+    fi
+    while IFS= read -r path; do
+        [[ -f "$path" ]] && drafts+=("$path")
+    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- ':(glob)docs/release-notes/*-slack.md')
+    if [[ "${#drafts[@]}" -eq 0 ]]; then
+        printf 'release-notes-draft: no release-notes draft change\n'
+        return 0
+    fi
+    local output
+    output="$(python3 scripts/release-train-announce.py --lint "${drafts[@]}" 2>&1)" && {
+        printf '%s\n' "$output"
+        return 0
+    }
+    printf '%s\n' "$output"
+    printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
+        "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
+    return 1
+}
+
 check_builtin_projections_src() {
     local body='cas-cli/src/builtins/agents/task-verifier.body.md'
     local projection='.claude/agents/task-verifier.md' stray
@@ -1991,6 +2019,8 @@ run_check fixture-paths-src 'no runtime CARGO_MANIFEST_DIR reads in cas-cli/src,
     check_fixture_paths_src
 run_check builtin-projections-src 'task-verifier root projection equals its embedded body; no .md Codex agents (lane change only in fast mode)' \
     check_builtin_projections_src
+run_check release-notes-draft 'python3 scripts/release-train-announce.py --lint <changed docs/release-notes/*-slack.md> (fast mode; the cut preflight lints the release draft)' \
+    check_release_notes_draft
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree

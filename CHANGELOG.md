@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — release-notes drafts are linted at park (cas-e7d4)
+
+- A new `release-notes-draft` fast row runs the announce lint on each
+  `docs/release-notes/*-slack.md` that a lane changes. It uses the same
+  implementation as the cut preflight and the announce stage
+  (`release-train-announce.py --lint`), with placeholders allowed, and prints
+  a `FIX:` line naming the failing body. A lane that leaves the drafts alone
+  pays nothing. The v3.52.0 cut stopped at preflight on a 26-word Dev
+  top-level that had been committed hours earlier.
+
 ### Added — map a release blocker to an open task with one command (cas-297d)
 
 - `scripts/release-gate.sh --learn-task <task-id> --run-dir <dir> --evidence

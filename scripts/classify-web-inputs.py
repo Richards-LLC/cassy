@@ -4,9 +4,14 @@
 The Commander step (typecheck, unit tests, build, visual QA, dist drift and the
 journeys) costs ~19 min per merge-queue entry. It runs when the diff changes
 anything that step reads: hub-web itself, the journey catalog, the repo-level
-files hub-web's scripts and tests load, or the CI workflow that runs it. A
-change elsewhere in scripts/ or .github/ no longer triggers it (cas-7822: PR #1191
-touched one unrelated script and spent 1132 s in the step).
+files hub-web's scripts and tests load, or this classifier. A change elsewhere
+in scripts/ or .github/ no longer triggers it (cas-7822: PR #1191 touched one
+unrelated script and spent 1132 s in the step). That includes
+.github/workflows/ci.yml (cas-c846: PR #1198 changed only ci.yml outside
+hub-web, ran ~13 min of journeys and was ejected twice by them).
+scripts/test-hub-web-gate.py and scripts/ci_tiers/test-policy.py pin the step's
+wiring in ci.yml instead, and the release train still runs the full journeys
+(cas-9f70) before publication.
 
 Fail-closed: a Git failure exits nonzero, and the caller then runs the web
 check.
@@ -35,10 +40,10 @@ WEB_INPUTS = (
     'scripts/release_env.py',
     # Run inside the CI Commander step.
     'scripts/test-ci-journey-evidence-upload.sh',
-    # The decision itself, and the workflow that runs the step.
+    # The decision itself. The workflow that runs the step is not an input
+    # (cas-c846): test-hub-web-gate.py pins its wiring without the journeys.
     'scripts/classify-web-inputs.py',
     '.github/actions/classify-required-diff/',
-    '.github/workflows/ci.yml',
 )
 
 

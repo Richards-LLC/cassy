@@ -30,6 +30,11 @@ struct Registry {
     heartbeats: Vec<(String, u16)>,
     /// The `metadata` body of every heartbeat, in order.
     heartbeat_metadata: Vec<Value>,
+    /// cas-66c7: when set, every request with another bearer token is
+    /// refused with 401, as production refuses an invalid API key.
+    valid_token: Option<String>,
+    /// Requests refused for their token.
+    rejected_tokens: Vec<String>,
 }
 
 /// The `/api/agents` routes of Cassy Cloud as shipped (cloud PR #153), with
@@ -50,6 +55,18 @@ impl Respond for FakeCloud {
         let mut state = self.state();
         let path = request.url.path().to_string();
         let now = chrono::Utc::now().to_rfc3339();
+        if let Some(valid) = state.valid_token.clone() {
+            let sent = request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            if sent != format!("Bearer {valid}") {
+                state.rejected_tokens.push(sent);
+                return ResponseTemplate::new(401).set_body_string(r#"{"error":"Invalid API key"}"#);
+            }
+        }
         match (request.method.as_str(), path.as_str()) {
             ("POST", "/api/agents/register") => {
                 let body: Value = serde_json::from_slice(&request.body).unwrap();
@@ -560,4 +577,73 @@ async fn cas_f707_auto_sync_false_opts_out_of_presence_and_says_so() {
     assert_eq!(fx.cloud.state().registrations.len(), 1);
     let shown = crate::cloud::peers::peers_section(&fx.cas_root, Some(me));
     assert!(shown.starts_with("Cloud presence: registered"), "{shown}");
+}
+
+/// cas-66c7: rewrite the project's cloud.json token as `cas login` (or a
+/// rotation) would, leaving the endpoint as it is.
+fn write_token(cas_root: &Path, token: Option<&str>) {
+    let mut config = CloudConfig::load_from_cas_dir(cas_root).unwrap();
+    config.token = token.map(str::to_string);
+    config.save_to_cas_dir(cas_root).unwrap();
+}
+
+fn daemon_for(cas_root: &Path) -> EmbeddedDaemon {
+    EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: cas_root.to_path_buf(),
+        index_code: false,
+        ..Default::default()
+    })
+}
+
+/// A factory started before `cas login` registers on the first heartbeat
+/// after the token appears, without a restart.
+#[tokio::test]
+async fn cas_66c7_a_late_login_registers_without_a_restart() {
+    let (fx, _) = fixture("cas-571d").await;
+    write_token(&fx.cas_root, None);
+    let daemon = daemon_for(&fx.cas_root);
+    let me = "sup-66c7-late";
+    session_start(&daemon, me, "late-sup").await;
+    heartbeat_tick(&daemon).await;
+    assert!(fx.cloud.state().registrations.is_empty(), "logged out: nothing sent");
+
+    write_token(&fx.cas_root, Some("synthetic-test-token"));
+    heartbeat_tick(&daemon).await;
+    assert_eq!(fx.cloud.state().registrations.len(), 1, "registered within one tick");
+    assert_eq!(
+        presence::load(&fx.cas_root, me).unwrap().state,
+        PresenceState::Registered
+    );
+    assert_eq!(
+        peer_ids(&fx.cas_root, "someone-else"),
+        vec![(me.to_string(), Some("cas-571d".to_string()))]
+    );
+}
+
+/// A factory started with an invalid token re-registers once the token is
+/// fixed (or rotated), without a restart, and stops using the old one.
+#[tokio::test]
+async fn cas_66c7_a_fixed_or_rotated_token_reregisters_without_a_restart() {
+    let (fx, _) = fixture("cas-571d").await;
+    fx.cloud.state().valid_token = Some("rotated-token".to_string());
+    write_token(&fx.cas_root, Some("stale-token"));
+    let daemon = daemon_for(&fx.cas_root);
+    let me = "sup-66c7-rotated";
+    session_start(&daemon, me, "rotated-sup").await;
+    let record = presence::load(&fx.cas_root, me).unwrap();
+    assert_eq!(record.state, PresenceState::Failing);
+    assert!(record.cause.unwrap_or_default().contains("401"));
+
+    write_token(&fx.cas_root, Some("rotated-token"));
+    let rejected_before = fx.cloud.state().rejected_tokens.len();
+    heartbeat_tick(&daemon).await;
+    let record = presence::load(&fx.cas_root, me).unwrap();
+    assert_eq!(record.state, PresenceState::Registered, "{record:?}");
+    let state = fx.cloud.state();
+    assert_eq!(
+        state.rejected_tokens.len(),
+        rejected_before,
+        "no request after the fix used the stale token"
+    );
+    assert_eq!(state.agents.len(), 1);
 }

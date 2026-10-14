@@ -321,6 +321,15 @@ class SigtermTeardownTest(unittest.TestCase):
         self.check_signal(signal.SIGHUP)
 
 
+class PeerMessageIdTest(unittest.TestCase):
+    def test_send_receipts_from_production_and_the_stand_in_parse(self):
+        production = ("Message sent to peer supervisor sup-b@prowl via Cassy Cloud (peer message "
+                      "7fbc15f5-15b7-46f1-8f94-997903f2fa0b, queued): delivered to sup-b@prowl mailbox.")
+        self.assertEqual(live_check.peer_message_id(production), "7fbc15f5-15b7-46f1-8f94-997903f2fa0b")
+        self.assertEqual(live_check.peer_message_id("via Cassy Cloud (peer message pm_1, queued)"), "pm_1")
+        self.assertIsNone(live_check.peer_message_id("no supervisor or worker named x"))
+
+
 class ScratchGuardTest(unittest.TestCase):
     def test_remove_refuses_anything_but_a_live_check_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

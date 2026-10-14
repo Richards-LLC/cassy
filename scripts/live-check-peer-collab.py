@@ -552,10 +552,9 @@ class Run:
         ping = f"live-check-ping-{self.rid}-{secrets.token_hex(3)}"
         sent = self.message(self.a, a, b, f"ping {ping}", f"{ping}: please reply")
         evidence["sent"] = sent
-        match = re.search(r"\b(pm_[A-Za-z0-9_-]+)", sent.get("text", ""))
-        if sent.get("is_error") or not match or "Cassy Cloud" not in sent.get("text", ""):
+        peer_message = peer_message_id(sent.get("text", ""))
+        if sent.get("is_error") or not peer_message or "Cassy Cloud" not in sent.get("text", ""):
             raise StepFailed(f"the message did not go via Cassy Cloud: {sent.get('text', '')[:400]}")
-        peer_message = match.group(1)
         evidence["peer_message_id"] = peer_message
         notification = self.delivered_locally(self.b, b, a, ping, "prowl_delivery", evidence)
         pong = f"live-check-pong-{self.rid}-{secrets.token_hex(3)}"
@@ -707,11 +706,11 @@ class Run:
         tokens = [f"live-check-offline-{self.rid}-{i}-{secrets.token_hex(2)}" for i in (1, 2)]
         sent = [self.message(self.a, a, b, f"offline {token}", token) for token in tokens]
         evidence["sent_while_offline"] = sent
-        ids = [re.search(r"peer message ([0-9a-zA-Z_-]+)", s_.get("text", "")) for s_ in sent]
+        ids = [peer_message_id(s_.get("text", "")) for s_ in sent]
         if any(s_.get("is_error") for s_ in sent) or not all(ids):
             raise StepFailed(f"sends while prowl was offline failed: {[s_.get('text', '')[:200] for s_ in sent]}")
         evidence["status_while_offline"] = [
-            self.a.tool(a, "coordination", action="message_status", id=m.group(1)).get("text", "") for m in ids]
+            self.a.tool(a, "coordination", action="message_status", id=m).get("text", "") for m in ids]
         time.sleep(20)  # a mailbox poll while offline: nothing may arrive
         early = {token: len([r for r in self.queued_rows(self.b, token) if r.get("target") == b]) for token in tokens}
         evidence["queued_while_offline"] = early
@@ -739,7 +738,7 @@ class Run:
             raise StepFailed(f"offline messages arrived out of order: rows {order}")
         evidence["prowl_mailbox_after"], _ = self.line_in(self.b, b, "Peer mailbox:")
         evidence["status_after"] = [
-            self.a.tool(a, "coordination", action="message_status", id=m.group(1)).get("text", "") for m in ids]
+            self.a.tool(a, "coordination", action="message_status", id=m).get("text", "") for m in ids]
 
     def step_presence_recovery(self, evidence, notes):
         """prowl's factory restarts with an invalid cloud token, so its
@@ -888,6 +887,13 @@ class Run:
         self.teardown_report = report
         self.write("teardown.json", report)
         return report
+
+
+def peer_message_id(text):
+    """The cloud id in a send receipt: production uses UUIDs, the stand-in
+    `pm_N` ("... via Cassy Cloud (peer message <id>, queued) ...")."""
+    found = re.search(r"peer message ([0-9A-Za-z_-]+)", text)
+    return found.group(1) if found else None
 
 
 def machine_stream(machine, *args, timeout=180):

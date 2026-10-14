@@ -101,6 +101,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A release over budget files one P0 task in the pipeline epic, carrying the
   measured time, the budget and the receipt paths. Before this, regressions
   had to be reconstructed by hand from logs.
+## [3.52.0] - 2026-10-14
+
+### Fixed — "Jump to latest" on a phone thread (cas-6a9b)
+
+- Scrolling up through a long conversation on a phone no longer pulls you
+  back to the newest message while new messages arrive, and "Jump to latest"
+  appears reliably once you have scrolled away from the bottom.
 
 ### Fixed — QA browser runs are no longer starved by a background assembly proof (cas-833e)
 

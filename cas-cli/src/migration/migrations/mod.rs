@@ -245,6 +245,7 @@ mod m266_code_parent_target_indexes;
 mod m267_supervisor_queue_add_prompt_delivered_at;
 mod m268_peer_message_outbox;
 mod m269_epic_splits;
+mod m270_entries_purge_harness_prompt_captures;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -527,6 +528,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m267_supervisor_queue_add_prompt_delivered_at::MIGRATION,
     m268_peer_message_outbox::MIGRATION,
     m269_epic_splits::MIGRATION,
+    m270_entries_purge_harness_prompt_captures::MIGRATION,
 ];
 
 #[cfg(test)]

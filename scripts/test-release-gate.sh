@@ -179,15 +179,10 @@ print('zigbuild config parsed (gate dispatch fixture)')
 PY_ZIG_FIXTURE
 
     cp -R "$script_dir/release-train.d" "$repo/scripts/"
-    cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
-    # The nested integration fixtures have their own release version. Keep it
-    # distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
-    python3 - "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-path.write_text(path.read_text().replace('9.99.7', '9.98.7'))
-PY_NESTED_VERSION
+    # The assemble-stale-base row runs this suite (~6 s). Only the case that
+    # proves the row installs the real one; every other full-gate fixture
+    # dispatches a stub (cas-e919).
+    printf '%s\n' 'print("assemble-stale-base fixture stub")' >"$repo/scripts/test-release-integration.py"
     cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
@@ -662,6 +657,16 @@ assert_named_failure version-literals "$output"
 # The learned assemble-stale-base diagnosis must remain an executable,
 # independently selectable row, not only a parsed failure-log marker.
 repo="$(new_fixture assemble-stale-base-row)"
+# The nested integration fixtures have their own release version. Keep it
+# distinct from this gate's 9.99.7 so source-literal checks stay meaningful.
+python3 - "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py" <<'PY_NESTED_VERSION'
+from pathlib import Path
+import sys
+source, target = map(Path, sys.argv[1:])
+target.write_text(source.read_text().replace('9.99.7', '9.98.7'))
+PY_NESTED_VERSION
+git -C "$repo" add scripts/test-release-integration.py
+git -C "$repo" -c user.email=gate@fixture -c user.name=gate commit -qm 'real integration suite'
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only assemble-stale-base 2>&1 || true)"
 if grep -qF 'PASS assemble-stale-base' <<<"$output" \
     && grep -qF 'RELEASE GATE PASSED: selected checks are green' <<<"$output"; then

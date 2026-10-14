@@ -30,6 +30,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `scripts/check-call-shapes.py`, the new `call-shapes` fast row (about 2.5 s).
   A Rust test keeps its committed surface snapshot current.
 
+### Added — release-notes drafts are linted at park (cas-e7d4)
+
+- A new `release-notes-draft` fast row runs the announce lint on each
+  `docs/release-notes/*-slack.md` that a lane changes. It uses the same
+  implementation as the cut preflight and the announce stage
+  (`release-train-announce.py --lint`), with placeholders allowed, and prints
+  a `FIX:` line naming the failing body. A lane that leaves the drafts alone
+  pays nothing. The v3.52.0 cut stopped at preflight on a 26-word Dev
+  top-level that had been committed hours earlier.
+
+### Added — map a release blocker to an open task with one command (cas-297d)
+
+- `scripts/release-gate.sh --learn-task <task-id> --run-dir <dir> --evidence
+  <file:line>` records `task=<id>` on a `blockers.log` or
+  `supervisor-interventions.md` row after checking that the task is open.
+  This uses the same `release-learning.py` map path as `--learn`.
+- A refused receipts stage now prints this command next to `--learn`. A
+  supervisor no longer hand-edits the release run directory, which the
+  factory workspace hook refuses because it sits outside the write roots.
+
 ### Added — a release can no longer ship that the operator cannot launch (cas-e719)
 
 - 3.51.0 refused `cas factory` and `cas claude <account>` for every operator
@@ -79,6 +99,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Markdown reports, and test environment.
 - A failed row prints `FIX <row>: …`. A failed run on a committed tip writes
   a FAIL receipt, and the worker park refusal quotes its rows and fixes.
+
+### Added — Release stage budgets fail the report and file a P0 (cas-2bef)
+
+- Every release-train stage has a versioned budget in
+  `scripts/release-stage-budgets.json`. The latency receipt records each
+  stage's time, its budget and any breach. Commit to main is measured too:
+  each task's park to the main commit that landed it, reported as the median
+  and the worst task, with the worst task budgeted at 30 minutes.
+- The release report has a new Pipeline latency part, under Evidence and scope. It shows each stage
+  against its budget and the stage's times in the previous five releases. A
+  stage over budget fails the section and is named. The 3.52.0 cut, for
+  example, had a 50-minute gate against a 15-minute budget.
+- A release over budget files one P0 task in the pipeline epic, carrying the
+  measured time, the budget and the receipt paths. Before this, regressions
+  had to be reconstructed by hand from logs.
 
 ### Fixed — QA browser runs are no longer starved by a background assembly proof (cas-833e)
 

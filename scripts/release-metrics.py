@@ -12,6 +12,15 @@ before the tag. This reports the whole wall clock and what cost it:
   stage-events.tsv, priced from the block to that stage's next completion (to
   publication if it never completed: `<stage>:<secs>+`).
 - STAGE_SECS: each completed stage's last attempt, start to done.
+- COMMIT_TO_MAIN (cas-2bef): for each task merged into the epic since the
+  previous release tag, its park (last "Task awaiting merge" event in
+  .cas/cas.db before its epic merge) to the main commit that landed it. The
+  task id comes from the factory merge's subject, or else its merged tip.
+  Reported as `tasks:<n>,median:<secs>,worst:<task>:<secs>`; the worst task
+  is budgeted as the `commit-to-main` stage at the front of STAGE_SECS.
+- STAGE_BUDGETS and BUDGET_BREACHES (cas-2bef): the versioned budgets in
+  release-stage-budgets.json, and each completed stage over its budget as
+  `<stage>:<secs>/<budget>` (`none` when every stage fits).
 
 Runs recorded before stage events existed report BLOCKER_COUNT from
 blockers.log and their costs as unavailable.
@@ -25,10 +34,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import json
+import os
+import re
+import sqlite3
+import statistics
+import subprocess
 import sys
 import time
 
 UNAVAILABLE = "unavailable"
+BUDGETS = Path(__file__).with_name("release-stage-budgets.json")
+
+
+def budgets() -> dict[str, int]:
+    return {stage: int(secs) for stage, secs in json.loads(BUDGETS.read_text())["budgets"].items()}
 
 
 def epoch_file(path: Path) -> int | None:
@@ -100,11 +120,65 @@ def stage_seconds(rows: list[tuple[int, str, str]]) -> list[tuple[str, int]]:
     return list(durations.items())
 
 
+TASK_ID = re.compile(r"\bcas-[0-9a-f]{4,5}\b")
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+
+
+def task_db() -> Path:
+    if os.environ.get("CAS_RELEASE_TASK_DB"):
+        return Path(os.environ["CAS_RELEASE_TASK_DB"])
+    common = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    return common.parent / ".cas" / "cas.db"
+
+
+def commit_to_main(run_dir: Path) -> tuple[int, int, str, int] | None:
+    """(tasks, median, worst task, worst secs) for the tasks this release
+    landed, or None when the landed commit, tags, merges or parks are absent."""
+    try:
+        landed = (run_dir / "landed-main.sha").read_text().strip()
+        previous = git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", f"{landed}^").strip()
+        mains = [line.split() for line in git(
+            "log", "--first-parent", "--reverse", "--format=%H %ct", f"{previous}..{landed}").splitlines()]
+        merges = [line.split(" ", 2) for line in git(
+            "log", "--merges", "--format=%H %ct %s", f"{previous}..{landed}").splitlines()]
+        db = sqlite3.connect(f"file:{task_db()}?mode=ro", uri=True)
+    except (OSError, subprocess.CalledProcessError, sqlite3.Error):
+        return None
+    durations: dict[str, int] = {}
+    for sha, merged_at, subject in merges:
+        # The task is named in the merge subject, or else by the merged tip.
+        if "factory/" not in subject:
+            continue
+        match = TASK_ID.search(subject) or TASK_ID.search(git("log", "-1", "--format=%s", f"{sha}^2"))
+        if not match or match.group(0) in durations:
+            continue
+        task = match.group(0)
+        landed_at = next((int(ct) for main, ct in mains if subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, main]).returncode == 0), None)
+        parks = [row[0] for row in db.execute(
+            "SELECT created_at FROM events WHERE entity_id = ? AND event_type = 'task_blocked' "
+            "AND summary LIKE 'Task awaiting merge%' ORDER BY created_at", (task,))]
+        # The delivery that merged: its last park before the epic merge.
+        parked = max((epoch for epoch in (
+            int(datetime.fromisoformat(park[:19]).replace(tzinfo=timezone.utc).timestamp()) for park in parks)
+            if epoch <= int(merged_at)), default=None)
+        if landed_at is not None and parked is not None:
+            durations[task] = landed_at - parked
+    if not durations:
+        return None
+    worst = max(durations, key=durations.get)
+    return len(durations), int(statistics.median(durations.values())), worst, durations[worst]
+
+
 def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
     if run_dir is None or not run_dir.is_dir():
         return [(key, UNAVAILABLE) for key in (
             "REQUESTED_AT_EPOCH", "REQUEST_SOURCE", "CUT_STARTED_AT_EPOCH", "REQUEST_TO_PUBLISHED_SECS",
-            "CUT_TO_PUBLISHED_SECS", "BLOCKER_COUNT", "BLOCKER_COSTS", "BLOCKED_SECS", "STAGE_SECS")]
+            "CUT_TO_PUBLISHED_SECS", "BLOCKER_COUNT", "BLOCKER_COSTS", "BLOCKED_SECS", "STAGE_SECS",
+            "COMMIT_TO_MAIN", "STAGE_BUDGETS", "BUDGET_BREACHES")]
     cut = epoch_file(run_dir / "cut.start.epoch")
     request = epoch_file(run_dir / "release.request.epoch")
     source = "recorded" if request is not None else ("cut-start" if cut is not None else UNAVAILABLE)
@@ -114,19 +188,24 @@ def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
         return str(published - start) if start is not None and published >= start else UNAVAILABLE
 
     rows = events(run_dir)
+    landing = commit_to_main(run_dir)
     if rows:
         priced = blockers(rows, published)
         count = str(len(priced))
         costs = ",".join(f"{stage}:{secs}{'' if resolved else '+'}" for stage, secs, resolved in priced) or "none"
         blocked = str(sum(secs for _, secs, _ in priced))
-        stages = ",".join(f"{stage}:{secs}" for stage, secs in stage_seconds(rows)) or "none"
     else:
         try:
             legacy = [line.strip() for line in (run_dir / "blockers.log").read_text().splitlines() if line.strip()]
         except OSError:
             legacy = []
         count = str(len(dict.fromkeys(legacy)))
-        costs = blocked = stages = UNAVAILABLE
+        costs = blocked = UNAVAILABLE
+    limits = budgets()
+    measured = ([("commit-to-main", landing[3])] if landing else []) + stage_seconds(rows)
+    stages = ",".join(f"{stage}:{secs}" for stage, secs in measured) or UNAVAILABLE
+    breaches = (",".join(f"{stage}:{secs}/{limits[stage]}" for stage, secs in measured
+                         if stage in limits and secs > limits[stage]) or "none") if measured else UNAVAILABLE
     return [
         ("REQUESTED_AT_EPOCH", str(request) if request is not None else UNAVAILABLE),
         ("REQUEST_SOURCE", source),
@@ -137,6 +216,10 @@ def metrics(run_dir: Path | None, published: int) -> list[tuple[str, str]]:
         ("BLOCKER_COSTS", costs),
         ("BLOCKED_SECS", blocked),
         ("STAGE_SECS", stages),
+        ("COMMIT_TO_MAIN", f"tasks:{landing[0]},median:{landing[1]},worst:{landing[2]}:{landing[3]}"
+         if landing else UNAVAILABLE),
+        ("STAGE_BUDGETS", ",".join(f"{stage}:{secs}" for stage, secs in limits.items())),
+        ("BUDGET_BREACHES", breaches),
     ]
 
 

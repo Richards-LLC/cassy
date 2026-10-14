@@ -16,6 +16,7 @@ FAST_ROWS = (
     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
     "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
     "call-shapes",
+    "release-notes-draft",
 )
 REQUIRED_ROWS = (*FAST_ROWS, "ci-script-tests")
 

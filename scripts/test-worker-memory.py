@@ -543,7 +543,7 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
         # Relocate only the lease directory to avoid touching a production proof.
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py', 'proof_target.py']:
+        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py', 'release_env.py', 'proof_target.py']:
             shutil.copy(ROOT / 'scripts' / name, scripts / name)
         (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
             "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
@@ -577,7 +577,7 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
     def test_package_build_typecheck_and_visual_qa_wait_at_actual_entrypoints(self):
         scripts = self.root / 'scripts'
         scripts.mkdir()
-        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py', 'proof_target.py']:
+        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py', 'release_env.py', 'proof_target.py']:
             shutil.copy(ROOT / 'scripts' / name, scripts / name)
         (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
             "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))

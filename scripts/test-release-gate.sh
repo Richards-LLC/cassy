@@ -28,6 +28,10 @@ trap 'rm -rf "$tmp"' EXIT
 # default-scratch-base fixture below deliberately runs with it UNSET.
 : "${CAS_RELEASE_GATE_HOME_DIR:=$tmp/gate-scratch/base}"
 export CAS_RELEASE_GATE_HOME_DIR
+# cas-9f61: keep scripts/release_env.py off this host's release profile and
+# `cas config` staging.scratch_root, so Zig and scratch resolve from fixtures.
+export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
+export CAS_RELEASE_ENV_SCRATCH_ROOT=""
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen
@@ -96,12 +100,13 @@ PY_SCRATCH_SWEEP_FIXTURE
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
-path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
+path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ, root)",
     "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()").replace(
     "snapshot = memory_snapshot()",
     "snapshot = {'total_bytes': 64 * GIB, 'available_bytes': 60 * GIB, 'source': 'fixture'}"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    cp "$script_dir/release_env.py" "$repo/scripts/release_env.py"
     cp "$script_dir/release-binary-artifact.py" "$repo/scripts/release-binary-artifact.py"
     # cas-e719: the smoke itself has its own self-test and real-binary test;
     # here the row must hand it this tree's recorded release binary.
@@ -576,7 +581,7 @@ fi
 # cas-dcb4: the gate schedules independent rows concurrently under declared
 # resources. Spans come from the fake Cargo, visual-QA and script fixtures;
 # the receipt, timing.tsv and failure reporting keep canonical row order.
-readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,working-tree'
+readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
 
 # span_check <log> overlap A B | disjoint A B... | max | wall
 span_check() {
@@ -828,7 +833,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes \
+        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -1533,15 +1538,18 @@ run_gate_unset_home() {
 
 repo="$(new_fixture default-scratch-base)"
 output="$(run_gate_unset_home "$repo" 2>&1 || true)"
-# cas-db34: the default is per host (/Users/Shared on macOS, where /var/tmp is
-# a Cassy disposable root); ask the gate's own helper which one applies.
-default_scratch_base="$(bash -c 'source "$1"; release_portable_default_scratch_base' _ "$repo/scripts/release-portable.sh")"
-if grep -qF "scratch base: $default_scratch_base (from default)" <<<"$output" \
+# cas-9f61: unset, the gate asks scripts/release_env.py — the resolver the
+# train and assembly-proof share — for this checkout's base; ask it directly
+# which one applies here (the platform default when it shares the checkout's
+# filesystem, else cas-release-gate beside the checkout).
+eval "$(cd "$repo" && env -u CAS_RELEASE_GATE_HOME_DIR python3 scripts/release_env.py resolve --worktree "$repo")"
+if [[ -n "$RELEASE_ENV_SCRATCH" ]] \
+    && grep -qF "scratch base: $RELEASE_ENV_SCRATCH (from release_env.py: $RELEASE_ENV_SCRATCH_SOURCE)" <<<"$output" \
     && grep -qF 'PASS archive-mode' <<<"$output" \
     && grep -qF 'PASS snapshot-portability' <<<"$output"; then
-    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the gate default, and the scratch rows run'
+    ok 'an unset CAS_RELEASE_GATE_HOME_DIR takes the shared resolver base, and the scratch rows run'
 else
-    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the gate default (output: $output)"
+    bad "unset CAS_RELEASE_GATE_HOME_DIR did not take the resolver base ${RELEASE_ENV_SCRATCH:-none} (output: $output)"
 fi
 
 # ...and an explicit value still wins, named in the receipt so a reader can see

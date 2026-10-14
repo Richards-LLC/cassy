@@ -100,7 +100,7 @@ class FastRows(unittest.TestCase):
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
-                       "mcp-call-surface.json", "fast-rows-pre-push.sh"):
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         (self.repo / "scripts/fast-rows-pre-push.sh").chmod(0o755)
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
@@ -170,7 +170,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 20)
+        self.assertEqual(len(proof['rows']), 21)
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):
@@ -201,7 +201,7 @@ class FastRows(unittest.TestCase):
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
                     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
                     "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
-                    "call-shapes"):
+                    "call-shapes", "release-notes-draft"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -662,6 +662,25 @@ sleep 2
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS builtin-projections-src", result.stdout)
+
+    def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
+        """A cut once stopped at preflight on a draft committed hours earlier."""
+        path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
+        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text()
+        # The Dev top-level punch: the second line of the third fenced body.
+        punch = draft.split("```")[5].strip("\n").splitlines()[2]
+        self.write(path, draft)
+        self.commit()
+        self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("scripts/example.py", "# unrelated lane\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no release-notes draft change",
+                      (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
+        self.refused_at_park("release-notes-draft",
+                             {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
+                             "dev-top-level top-level punch exceeds 25 words")
 
 
 class Budget(unittest.TestCase):

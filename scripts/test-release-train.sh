@@ -26,6 +26,11 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 # Every fixture keeps its artifacts under the test's own temp dir: this suite
 # must never write to the operator's ~/.cas.
 export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
+# cas-9f61: keep scripts/release_env.py off this host's `cas config`
+# staging.scratch_root, and let fixtures under /tmp stand in for durable
+# scratch (test-release-env.py covers the temporary-root refusal).
+export CAS_RELEASE_ENV_SCRATCH_ROOT=""
+export CAS_RELEASE_ENV_TEMP_ROOTS=""
 export COMPLETION_FIXTURE="$script_dir/tests/release_completion_fixture.py"
 export CAS_RELEASE_TRAIN_GH="$tmp/completion-gh"
 
@@ -222,32 +227,29 @@ else
     bad "gap 2: merge queue query still contains escaped quotes: $(cat "$preflight_query_log")"
 fi
 
-# Gap 4: preflight consumes the configured scratch base from the release env
-# file and applies the same filesystem-boundary rule as the gate.
-preflight_env="$tmp/preflight-release.env"
+# Gap 4: an exported scratch base is honored, created and mount-checked by
+# preflight under the same filesystem-boundary rule as the gate.
 preflight_scratch="$tmp/preflight-scratch"
-printf 'CAS_RELEASE_GATE_HOME_DIR=%s\n' "$preflight_scratch" >"$preflight_env"
 if (
     source "$repo_root/scripts/release-train.d/preflight.sh"
     version=9.99.0
     worktree="$wt_a"
     run_dir="$tmp/preflight-scratch-run"
     artifacts_root="$tmp/artifacts"
-    CAS_RELEASE_ENV_FILE="$preflight_env"
     CAS_RELEASE_TRAIN_CHECKOUT_DEVICE=41
     CAS_RELEASE_TRAIN_SCRATCH_DEVICE=41
         cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
-    unset CAS_RELEASE_GATE_HOME_DIR
+    CAS_RELEASE_GATE_HOME_DIR="$preflight_scratch"
     cut_preflight_check_scratch
 ) && [[ -d "$preflight_scratch" ]]; then
-    ok 'gap 4: preflight reads CAS_RELEASE_GATE_HOME_DIR and checks the scratch mount'
+    ok 'gap 4: preflight honors an exported CAS_RELEASE_GATE_HOME_DIR and checks the scratch mount'
 else
-    bad 'gap 4: preflight did not honor the configured scratch base and mount check'
+    bad 'gap 4: preflight did not honor the exported scratch base and mount check'
 fi
 
-# cas-be3a: with no configured scratch base, a release checkout on another
-# filesystem than the platform default gets a base beside it, on its own
-# mount, instead of a filesystem-boundary blocker. A fake stat puts
+# cas-be3a/cas-9f61: with no configured scratch base, a release checkout on
+# another filesystem than the platform default gets a base beside it, on its
+# own mount, instead of a filesystem-boundary blocker. A fake stat puts
 # everything under $be3a_mount on device 66307 and the rest on 66310.
 be3a_mount="$tmp/be3a-mnt"
 be3a_checkout="$be3a_mount/scratch/release-9.99.0"
@@ -274,7 +276,7 @@ be3a_output="$( (
     CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
     unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
     cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
-    cut_preflight_check_scratch && printf 'scratch=%s\n' "$(release_portable_checkout_scratch_base "$worktree")"
+    cut_preflight_check_scratch && printf 'scratch=%s\n' "$CAS_RELEASE_GATE_HOME_DIR"
 ) 2>&1 )"
 if [[ "$be3a_output" == *"scratch=$be3a_mount/scratch/cas-release-gate"* ]] \
     && [[ -d "$be3a_mount/scratch/cas-release-gate" ]]; then
@@ -283,8 +285,10 @@ else
     bad "cas-be3a: the default scratch base stayed across a filesystem boundary: $be3a_output"
 fi
 
-# cas-be3a: an explicitly configured base on another filesystem still blocks,
-# and the blocker prints the exact assignment that fixes it.
+# cas-9f61: a CAS_RELEASE_GATE_HOME_DIR line in the release env file is no
+# longer an input (resolution is derived every time), so one naming another
+# filesystem cannot block the cut that needed hand exports on 3.51.0.
+mkdir -p "$tmp/be3a-elsewhere"
 printf 'CAS_RELEASE_GATE_HOME_DIR=%s\n' "$tmp/be3a-elsewhere/gate" >"$be3a_env"
 be3a_output="$( (
     source "$repo_root/scripts/release-train.d/preflight.sh"
@@ -296,11 +300,33 @@ be3a_output="$( (
     CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
     unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
     cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_scratch && printf 'scratch=%s\n' "$CAS_RELEASE_GATE_HOME_DIR"
+) 2>&1 )"
+if [[ "$be3a_output" == *"scratch=$be3a_mount/scratch/cas-release-gate"* ]]; then
+    ok 'cas-9f61: a release env file naming another filesystem does not block the cut'
+else
+    bad "cas-9f61: a cross-filesystem env-file base blocked or leaked through: $be3a_output"
+fi
+
+# cas-be3a: an exported base on another filesystem is operator intent, so it
+# still blocks, and the blocker says how to let the resolver derive one.
+be3a_output="$( (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$be3a_checkout"
+    run_dir="$tmp/be3a-run"
+    artifacts_root="$tmp/artifacts"
+    : >"$be3a_env"
+    CAS_RELEASE_ENV_FILE="$be3a_env"
+    CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
+    CAS_RELEASE_GATE_HOME_DIR="$tmp/be3a-elsewhere/gate"
+    unset CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
     cut_preflight_check_scratch
-) 2>&1 )" && bad 'cas-be3a: a cross-filesystem configured base passed preflight'
+) 2>&1 )" && bad 'cas-be3a: a cross-filesystem exported base passed preflight'
 if [[ "$be3a_output" == *"filesystem boundary"* ]] \
-    && [[ "$be3a_output" == *"CAS_RELEASE_GATE_HOME_DIR=$be3a_mount/scratch/cas-release-gate"* ]]; then
-    ok 'cas-be3a: the scratch blocker prints the CAS_RELEASE_GATE_HOME_DIR fix'
+    && [[ "$be3a_output" == *"unset CAS_RELEASE_GATE_HOME_DIR"* ]]; then
+    ok 'cas-be3a: the scratch blocker names the unset fix for an exported cross-filesystem base'
 else
     bad "cas-be3a: the scratch blocker did not print the fix: $be3a_output"
 fi
@@ -321,7 +347,8 @@ be3a_output="$( (
     artifacts_root="$tmp/artifacts"
     CAS_RELEASE_ENV_FILE="$be3a_env"
     CAS_RELEASE_PORTABLE_STAT="$be3a_stat"
-    unset CAS_RELEASE_GATE_HOME_DIR CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
+    CAS_RELEASE_GATE_HOME_DIR="$tmp/be3a-elsewhere/gate"
+    unset CAS_RELEASE_TRAIN_CHECKOUT_DEVICE CAS_RELEASE_TRAIN_SCRATCH_DEVICE
     cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
     cut_preflight_check_scratch
 ) 2>&1 )" && bad 'cas-52de: a cross-filesystem release worktree passed preflight'

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import types
 
 
 def git(repo, *args, **kwargs):
@@ -28,6 +29,24 @@ def common_dir(repo):
     return Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
 
 
+def load_release_env(repo, tree):
+    """scripts/release_env.py beside this file, else from the candidate tree.
+
+    The printed remedy pipes this script through stdin from `git show`, so it
+    may have no sibling files on disk.
+    """
+    sibling = Path(__file__).resolve().parent / "release_env.py" if "__file__" in globals() else None
+    if sibling is not None and sibling.is_file():
+        source = sibling.read_text()
+    else:
+        source = git(repo, "show", f"{tree}:scripts/release_env.py")
+    module = types.ModuleType("release_env")
+    module.__file__ = str(sibling or "release_env.py")
+    sys.modules["release_env"] = module  # dataclasses resolve their module
+    exec(compile(source, module.__file__, "exec"), module.__dict__)
+    return module
+
+
 def resolve_zig(repo, tree):
     # Ignore unrelated Rust projects. The preview may introduce Ghostty, so
     # inspect the candidate tree rather than only the source checkout.
@@ -35,18 +54,14 @@ def resolve_zig(repo, tree):
                        f"{tree}:crates/ghostty_vt_sys/build.rs"],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         return None
-    candidates = []
-    configured = os.environ.get("ZIG", "")
-    if configured:
-        candidates.append(Path(configured))
-    if "PATH" in os.environ:
-        candidates.extend(Path(directory) / "zig" for directory in os.environ["PATH"].split(os.pathsep))
-    candidates.extend((repo / ".context/zig/zig", common_dir(repo).parent / ".context/zig/zig"))
-    for candidate in candidates:
-        candidate = candidate if candidate.is_absolute() else repo / candidate
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate.resolve()
-    raise ValueError("missing Zig compiler in ZIG, PATH or source/main checkout .context.\n"
+    # cas-9f61: the order every release tool shares (scripts/release_env.py):
+    # ZIG, the source checkout's .context, the main checkout's, the release
+    # profile's pin, then PATH. The preview gets the absolute path.
+    zig = load_release_env(repo, tree).resolve_zig(repo, os.environ)
+    if zig.path:
+        return Path(zig.path)
+    raise ValueError("missing Zig compiler in ZIG, source/main checkout .context, release profile or PATH ("
+                     + "; ".join(zig.tried) + ").\n"
                      "Run ./scripts/bootstrap-zig.sh in the source repo, or set an absolute ZIG.")
 
 

@@ -43,8 +43,10 @@ version and worktree, never a version-keyed path.
    Zig, the `x86_64-unknown-linux-gnu` Rust target); a `report-renderer`
    whose headless Chromium launches (its blocker names the pinned
    `playwright install chromium-headless-shell` command); and a passing
-   integration receipt. With no configured scratch base, a checkout on another
-   filesystem than the platform default gets `cas-release-gate` beside it. A macOS host needs only
+   integration receipt. Run `python3 scripts/release_env.py doctor` first (seconds,
+   one fix per gap): Zig and the per-filesystem scratch base come from that
+   resolver, which assembly-proof, the gate and the train share, so nothing is
+   exported by hand. A macOS host needs only
    Homebrew `jq binutils`, those Cargo tools and that target: the train
    supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself,
    and defaults its scratch base to `/Users/Shared/cas-release-gate` there
@@ -104,6 +106,8 @@ version and worktree, never a version-keyed path.
    `Violet` hub (never a personal Slack route), report HTML/PDF evidence,
    `cas --version`, and host JSON with `refresh_binary_version`.
    The report's green-to-published latency is named only from verified receipts.
+   A stage over `scripts/release-stage-budgets.json` fails the report's Pipeline
+   latency section, and post-publication files a P0 task in the budget's epic.
 7. Add one epic note per gate run with tip, failed rows, cause class, and
    blocking step. Close only after merge and stranded-branch inspection;
    `stranded_branch_override` requires supervisor proof. Preserve the draft and

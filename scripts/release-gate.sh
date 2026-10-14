@@ -22,13 +22,33 @@ readonly -a gate_check_ids=(
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
-    fixture-paths-src builtin-projections-src call-shapes
+    fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
 usage() {
     printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
     printf '       %s --fast-rows [--base <ref>]\n' "$0"
     printf '       %s --learn "<symptom>" "<cause>" "<check-id>" [--rung default|preflight|gate|prose] [--task <open P0/P1 task>] [--run-dir <dir> --evidence <file:line> ...]\n' "$0"
+    printf '       %s --learn-task <open-task-id> --run-dir <dir> --evidence <file:line> ...\n' "$0"
+}
+
+# cas-297d: map a release blocker to the open task that owns its fix, as
+# `task=<id>` on the evidence row. The run directory sits outside the factory
+# write roots, so this command, not a hand edit, is how a supervisor records it.
+learn_task() {
+    local task_id="${1:-}" run_dir=''
+    local -a rows=()
+    shift || true
+    while (($#)); do
+        case "$1" in
+            --run-dir) [[ $# -ge 2 ]] || return 2; run_dir="$2"; shift 2 ;;
+            --evidence) [[ $# -ge 2 ]] || return 2; rows+=("$2"); shift 2 ;;
+            *) printf 'error: unknown --learn-task option %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$task_id" && -n "$run_dir" && ${#rows[@]} -gt 0 ]] || { usage >&2; return 2; }
+    python3 "$repo_root/scripts/release-learning.py" --map-task "$repo_root" "$run_dir" "$task_id" "${rows[@]}" \
+        && printf 'Mapped %s to open task %s in %s\n' "${rows[*]}" "$task_id" "$run_dir"
 }
 
 learn() {
@@ -112,6 +132,11 @@ learn() {
     printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release,operation:release-cut before retrying (the next cut surfaces it).\n' "$check_id"
 }
 
+if [[ "${1:-}" == '--learn-task' ]]; then
+    shift
+    learn_task "$@"
+    exit $?
+fi
 if [[ "${1:-}" == '--learn' ]]; then
     [[ "$#" -ge 4 ]] || {
         usage >&2
@@ -244,14 +269,30 @@ reference_history_script="${RELEASE_GATE_GEN_REFERENCE_HISTORY:-$repo_root/scrip
 # variable becomes an override rather than a prerequisite. /var/tmp mirrors the
 # merge-queue runner: outside every checkout and outside $HOME.
 # cas-fed5: /Users/Shared on macOS, where /var/tmp is a Cassy disposable root.
+# cas-9f61: unset, the base comes from scripts/release_env.py, the resolver the
+# release train and assembly-proof share: a provisioned base on the checkout's
+# filesystem, else the platform default when it is on that filesystem, else
+# cas-release-gate beside the checkout. It is exported so every child
+# (release_scratch.py registration included) agrees on the same base.
 scratch_base_default="$(release_portable_default_scratch_base)"
 readonly scratch_base_default
 if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
     scratch_base="$CAS_RELEASE_GATE_HOME_DIR"
-    scratch_base_origin='CAS_RELEASE_GATE_HOME_DIR'
+    scratch_base_origin="${CAS_RELEASE_GATE_SCRATCH_ORIGIN:-CAS_RELEASE_GATE_HOME_DIR}"
 else
     scratch_base="$scratch_base_default"
     scratch_base_origin='default'
+    if [[ -f "$repo_root/scripts/release_env.py" ]] \
+        && release_env_assignments="$(python3 "$repo_root/scripts/release_env.py" resolve \
+            --worktree "$repo_root")"; then
+        eval "$release_env_assignments"
+        if [[ -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
+            scratch_base="$RELEASE_ENV_SCRATCH"
+            scratch_base_origin="release_env.py: $RELEASE_ENV_SCRATCH_SOURCE"
+        fi
+    fi
+    export CAS_RELEASE_GATE_HOME_DIR="$scratch_base"
+    export CAS_RELEASE_GATE_SCRATCH_ORIGIN="$scratch_base_origin"
 fi
 readonly scratch_base scratch_base_origin
 scratch_archive_history_file="$(dirname "$scratch_base")/.cas-release-gate-last-archive-size-bytes"
@@ -738,38 +779,23 @@ check_epic_worktree_fresh() {
 # compiler even though the main checkout does. Resolve it before Cargo-backed
 # rows run and export the absolute path for every child of this gate.
 check_epic_worktree_zig() {
-    local configured common_dir main_checkout candidate resolved
-    configured="${ZIG:-}"
-    if [[ -n "$configured" ]]; then
-        [[ "$configured" = /* ]] || configured="$repo_root/$configured"
-        if [[ -x "$configured" ]]; then
-            resolved="$(cd "$(dirname "$configured")" && pwd -P)/$(basename "$configured")"
-            export ZIG="$resolved"
-            printf 'epic-worktree-zig: using executable ZIG=%s (environment)\n' "$ZIG"
-            return 0
-        fi
+    local assignments
+    # cas-9f61: the same order as every release tool (scripts/release_env.py):
+    # ZIG, this worktree's .context/zig, the main checkout's, the release
+    # profile's pin, then PATH.
+    if ! assignments="$(python3 "$repo_root/scripts/release_env.py" resolve \
+        --worktree "$repo_root")"; then
+        printf 'epic-worktree-zig: scripts/release_env.py failed\n'
+        return 1
     fi
-
-    candidate="$repo_root/.context/zig/zig"
-    if [[ -x "$candidate" ]]; then
-        export ZIG="$candidate"
-        printf 'epic-worktree-zig: using executable ZIG=%s (epic worktree)\n' "$ZIG"
+    eval "$assignments"
+    if [[ -n "$RELEASE_ENV_ZIG" ]]; then
+        export ZIG="$RELEASE_ENV_ZIG"
+        printf 'epic-worktree-zig: using executable ZIG=%s (%s)\n' "$ZIG" "$RELEASE_ENV_ZIG_SOURCE"
         return 0
     fi
-
-    common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-    main_checkout="${common_dir%/.git}"
-    [[ -n "$main_checkout" ]] || main_checkout="$repo_root"
-    candidate="$main_checkout/.context/zig/zig"
-    if [[ -x "$candidate" ]]; then
-        export ZIG="$candidate"
-        printf 'epic-worktree-zig: using executable ZIG=%s (main checkout)\n' "$ZIG"
-        return 0
-    fi
-
-    printf 'epic-worktree-zig: no executable Zig compiler found in ZIG, %s, or %s\n' \
-        "$repo_root/.context/zig/zig" "$main_checkout/.context/zig/zig"
-    printf 'epic-worktree-zig: refusing the release; run ./scripts/bootstrap-zig.sh\n'
+    printf 'epic-worktree-zig: no executable Zig compiler found: %s\n' "$RELEASE_ENV_ZIG_TRIED"
+    printf 'epic-worktree-zig: refusing the release; run ./scripts/bootstrap-zig.sh (%s)\n' "$RELEASE_ENV_ZIG_FIX"
     return 1
 }
 
@@ -1785,6 +1811,34 @@ check_fixture_paths_src() {
 # and Codex carries no .md agents. The init-generated settings and the
 # reference-history ledger need the binary or release prep, so they stay in
 # the full gate's builtin-projections row.
+# cas-e7d4: a cut once stopped at preflight on a Slack draft committed
+# hours earlier (a 26-word Dev punch). Lint the drafts a lane changes at park,
+# with the announce stage's own implementation.
+check_release_notes_draft() {
+    local -a drafts=()
+    local path
+    if [[ "$fast_rows" != true ]]; then
+        printf 'release-notes-draft: the cut preflight lints this release draft\n'
+        return 0
+    fi
+    while IFS= read -r path; do
+        [[ -f "$path" ]] && drafts+=("$path")
+    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- ':(glob)docs/release-notes/*-slack.md')
+    if [[ "${#drafts[@]}" -eq 0 ]]; then
+        printf 'release-notes-draft: no release-notes draft change\n'
+        return 0
+    fi
+    local output
+    output="$(python3 scripts/release-train-announce.py --lint "${drafts[@]}" 2>&1)" && {
+        printf '%s\n' "$output"
+        return 0
+    }
+    printf '%s\n' "$output"
+    printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
+        "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
+    return 1
+}
+
 check_builtin_projections_src() {
     local body='cas-cli/src/builtins/agents/task-verifier.body.md'
     local projection='.claude/agents/task-verifier.md' stray
@@ -2244,6 +2298,8 @@ gate_row builtin-projections-src 'task-verifier root projection equals its embed
     check_builtin_projections_src
 gate_row call-shapes 'python3 scripts/check-call-shapes.py (builtin and runtime MCP calls match scripts/mcp-call-surface.json)' \
     check_call_shapes
+gate_row release-notes-draft 'python3 scripts/release-train-announce.py --lint <changed docs/release-notes/*-slack.md> (fast mode; the cut preflight lints the release draft)' \
+    check_release_notes_draft
 run_gate_rows
 # After an abort no row after it reports, including the final tree check.
 if [[ -z "$gate_abort" ]]; then

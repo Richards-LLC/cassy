@@ -842,15 +842,22 @@ An unset or blank key reports `NOT CONFIGURED`, names the key, and skips
 the suite and failure attribution. Other projects and configured sweep commands
 retain their detected or configured runner without requiring this key.
 
-For manual assembly commands, set `CAS_RELEASE_GATE_HOME_DIR` to a scratch
-base on the checkout filesystem
-outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
-`TMPDIR`, and every `.cas` ancestor (for example,
-`CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or
-`/Users/Shared/cas-release-gate/base` on macOS). The plain clone must be outside
-Cassy's disposable roots so discovery and update tests exercise durable
-projects. Assembly refuses an unsafe base before tool probing or either suite;
-its legacy `/var/tmp` default requires this explicit override.
+Manual assembly commands need no exported scratch base or Zig (cas-9f61).
+`scripts/release_env.py` resolves both for every release tool (assembly-proof,
+lane compile, the release gate and the release train). Its scratch base is on
+the checkout filesystem, outside `/tmp`, `/var/tmp`, `/private/tmp`,
+`/private/var/tmp`, the configured `TMPDIR`, and every `.cas` ancestor. Candidates
+in order: an exported `CAS_RELEASE_GATE_HOME_DIR`; `<staging.scratch_root>/cas-release-gate`;
+`<mount>/cas/scratch/cas-release-gate`; `<mount>/cas-release-gate/base`
+(for example `/home/cas-release-gate/base`); the platform default; and
+`cas-release-gate` beside the checkout. The plain clone must be outside Cassy's
+disposable roots so discovery and update tests exercise durable projects.
+Assembly refuses an unsafe or missing base before tool probing or either suite
+and names the provisioning command. Zig resolves from `ZIG`, then the
+checkout's `.context/zig`, the main checkout's, then `PATH`. Both resolve
+every time; nothing is persisted. `python3 scripts/release_env.py doctor`
+checks Zig, scratch per filesystem, the toolchain, the env file, `gh auth` and
+the merge-queue query in seconds, with one fix command per gap.
 
 The script tier must pass, and both Rust contexts must report nonzero passed
 tests, before an atomic PASS is written
@@ -942,6 +949,24 @@ sequential execution. `scripts/test-release-gate.sh --replay-timing
 <timing.tsv> [scale]` replays a real gate's row durations through the fixture
 at the given speed-up, and reports the gate's wall time against its longest
 row.
+
+Every train stage has a time budget in `scripts/release-stage-budgets.json`.
+Loosening a budget is a reviewed change. `release-metrics.py` compares each
+completed stage in `stage-events.tsv` with its budget, and writes the results
+to `release-latency.receipt` as `STAGE_SECS`, `STAGE_BUDGETS` and
+`BUDGET_BREACHES`. The first measured stage, `commit-to-main`, covers the
+tasks merged since the previous release tag. Each task is timed from its last
+park (`Task awaiting merge` in `.cas/cas.db`) before its epic merge, to the
+main commit that landed that merge. The receipt's `COMMIT_TO_MAIN` holds the
+task count, the median and the worst task, and the worst task is the value
+budgeted. When a stage is over budget:
+
+- `cas release report` marks its Pipeline latency subsection (under Evidence and scope) FAILED and names the
+  stage. The section also shows each stage's times from the previous five
+  release receipts.
+- post-publication files one P0 task in the budget file's epic, through
+  `cas serve`. A marker in the run directory keeps a resumed stage from filing
+  it twice.
 
 ### Release delivery completion
 

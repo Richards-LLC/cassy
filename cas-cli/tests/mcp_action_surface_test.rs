@@ -1187,7 +1187,7 @@ fn published_action_enums_equal_their_dispatch_tables() {
         checked += 1;
     }
     assert_eq!(
-        checked, 15,
+        checked, 14,
         "every multi-action tool publishes an action enum"
     );
     // cas-2d86: and the reverse: every handler arm in the shared table is

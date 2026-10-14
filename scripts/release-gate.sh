@@ -1832,13 +1832,15 @@ check_working_tree() {
 #   writes-tree  rewrites hub-web/dist or the reference ledger, both embedded
 #                in cas at compile time, so it runs alone. Every other row's
 #                reuse lookup and receipt write therefore sees a stable tree.
+#   after=<row>  starts only once that row passed; if it failed, this row
+#                fails without running. An unselected row imposes nothing.
 #   abort=<why>  failure stops the gate: running rows after it are cancelled
 #                and nothing after it starts; earlier rows still report.
 # Output and timing keep canonical row order; events go to schedule.tsv.
 # CAS_RELEASE_GATE_PARALLEL=1 restores sequential rows.
 declare -a gate_rows=()
 declare -A row_command=() row_function=() row_index=() row_cpu=() row_mem=() row_excl=()
-declare -A row_abort=() row_writer=() row_state=() row_pid=() group_owner=()
+declare -A row_abort=() row_writer=() row_state=() row_pid=() group_owner=() row_after=()
 
 gate_row() {
     local name="$1" spec
@@ -1853,6 +1855,7 @@ gate_row() {
             mem=*) row_mem[$name]=$(( ${spec#mem=} * 1024 )) ;;
             excl=*) row_excl[$name]="${spec#excl=}" ;;
             abort=*) row_abort[$name]="${spec#abort=}" ;;
+            after=*) row_after[$name]="${spec#after=}" ;;
             writes-tree) row_writer[$name]=1 ;;
             *) printf 'error: row %s declares unknown resource %s\n' "$name" "$spec" >&2; exit 2 ;;
         esac
@@ -1972,7 +1975,7 @@ gate_emit() {
 
 gate_abort=''
 run_gate_rows() {
-    local name total="${#gate_rows[@]}" emitted=0 abort_index abort_row='' timing_lines progress
+    local name total="${#gate_rows[@]}" emitted=0 abort_index abort_row='' timing_lines progress after
     cancelled_rows=()
     [[ "$total" -gt 0 ]] || return 0
     abort_index="$total"
@@ -2014,7 +2017,22 @@ run_gate_rows() {
             emitted=$(( emitted + 1 ))
         done
         for name in "${gate_rows[@]:0:abort_index}"; do
-            if [[ "${row_state[$name]}" == pending ]] && gate_admissible "$name"; then
+            [[ "${row_state[$name]}" == pending ]] || continue
+            after="${row_after[$name]:-}"
+            if [[ -n "$after" && -n "${row_index[$after]:-}" ]]; then
+                [[ "${row_state[$after]}" == done ]] || continue
+                if [[ "$(cat "$sched_dir/$after.status")" != 0 ]]; then
+                    {
+                        print_result FAIL "$name" "${row_command[$name]}"
+                        printf '  | not run: %s did not pass\n' "$after"
+                    } >"$sched_dir/$name.out"
+                    printf '1\n' >"$sched_dir/$name.status"
+                    row_state[$name]=done progress=true
+                    gate_event "$name" "end:1"
+                    continue
+                fi
+            fi
+            if gate_admissible "$name"; then
                 gate_launch "$name"
                 progress=true
             fi

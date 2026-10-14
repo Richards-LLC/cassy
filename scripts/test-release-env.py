@@ -330,6 +330,13 @@ esac
         self.assertEqual(checks["merge-queue"]["status"], "ok")
         self.assertIn('mergeQueue(branch: "main")', log.read_text())
 
+    def test_worktrees_in_temporary_roots_are_not_release_hosts(self):
+        other = self.root / "other-worktree"
+        git(self.repo, "worktree", "add", "-q", "--detach", str(other))
+        self.assertIn(other, release_env.worktrees(self.repo, self.env))
+        self.env["CAS_RELEASE_ENV_TEMP_ROOTS"] = str(self.root)
+        self.assertEqual(release_env.worktrees(self.repo, self.env), [])
+
     def test_missing_release_env_file_is_a_gap_with_a_fix(self):
         Path(self.env["CAS_RELEASE_ENV_FILE"]).unlink()
         checks = release_env.check_env_file(self.env)

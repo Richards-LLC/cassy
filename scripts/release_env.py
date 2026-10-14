@@ -205,12 +205,13 @@ def main_checkout(checkout: Path) -> Path | None:
     return common_path.parent if common_path.name == ".git" else None
 
 
-def worktrees(checkout: Path) -> list[Path]:
+def worktrees(checkout: Path, env=os.environ) -> list[Path]:
+    """Sibling checkouts that could host a release; temporary ones never do."""
     paths = []
     for line in git(checkout, "worktree", "list", "--porcelain").splitlines():
         if line.startswith("worktree "):
             path = Path(line[len("worktree "):])
-            if path.is_dir():
+            if path.is_dir() and under_temp_root(path, env) is None:
                 paths.append(path)
     return paths
 
@@ -624,7 +625,7 @@ def check_gh(env) -> list[Check]:
 
 def doctor(checkout: Path, env=os.environ, host: Host = HOST) -> list[Check]:
     profile = read_profile(env_file(env))
-    checkouts = [checkout] + [path for path in worktrees(checkout) if path != checkout]
+    checkouts = [checkout] + [path for path in worktrees(checkout, env) if path != checkout]
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(check_gh, env), pool.submit(check_toolchain, env),
                    pool.submit(check_zig, checkout, env, profile)]
@@ -669,7 +670,7 @@ def command_setup(args, env=os.environ) -> int:
         failures.append(f"zig: {'; '.join(zig.tried)}; fix: {zig.fix}")
     # Pin every filesystem a release checkout lives on, not only this one.
     scratch_env = {key: value for key, value in env.items() if key != GATE_VAR}
-    for group in by_filesystem([checkout] + worktrees(checkout)):
+    for group in by_filesystem([checkout] + worktrees(checkout, env)):
         _, scratch = resolve_filesystem(group, scratch_env, profile, create=True)
         mount = scratch.checkout_mount
         if scratch.base and not scratch.problem:

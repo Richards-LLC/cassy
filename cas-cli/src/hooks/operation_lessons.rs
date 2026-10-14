@@ -137,7 +137,7 @@ pub(crate) fn checklist(entries: &[Entry], operation: Operation) -> Option<Strin
     let mut lessons: Vec<&Entry> = entries
         .iter()
         .filter(|entry| !entry.archived)
-        .filter(|entry| entry.tags.iter().any(|candidate| candidate.eq_ignore_ascii_case(&tag)))
+        .filter(|entry| entry.tags.iter().any(|candidate| tags_operation(candidate, operation)))
         .filter(|entry| {
             entry
                 .valid_until
@@ -169,6 +169,14 @@ pub(crate) fn checklist(entries: &[Entry], operation: Operation) -> Option<Strin
         ));
     }
     Some(out)
+}
+
+/// `op:<name>`, or the long `operation:<name>` spelling some lessons already use.
+fn tags_operation(tag: &str, operation: Operation) -> bool {
+    let tag = tag.to_ascii_lowercase();
+    tag.strip_prefix("op:")
+        .or_else(|| tag.strip_prefix("operation:"))
+        .is_some_and(|name| name == operation.name())
 }
 
 fn summary(entry: &Entry) -> String {
@@ -387,5 +395,12 @@ mod tests {
         assert!(list.contains("(3 more: memory action=list tags=op:merge)"));
         assert!(list.lines().all(|line| line.chars().count() < 220), "{list}");
         assert_eq!(checklist(&entries, Operation::Spawn), None);
+        let long = Entry {
+            id: "long-tag".to_string(),
+            content: "Never run assembly-proof concurrently with journey-eval".to_string(),
+            tags: vec!["release".to_string(), "operation:release-cut".to_string()],
+            ..Default::default()
+        };
+        assert!(checklist(&[long], Operation::ReleaseCut).unwrap().contains("[long-tag]"));
     }
 }

@@ -526,11 +526,17 @@ fn inbox(machine: &TestMachine) -> Vec<QueuedPrompt> {
     rows
 }
 
+/// The label `machine` shows people: unlike its registered machine id
+/// (`machine-beta`) and the test host's hostname, e.g. `beta-host`.
+fn label_of(machine: &TestMachine) -> String {
+    format!("{}-host", machine.name.trim_start_matches("machine-"))
+}
+
 /// Give `machine`'s project its own machine label (`[cloud] machine_label`).
 fn label_machine(machine: &TestMachine) {
     let path = machine.cas_dir.join("config.toml");
     let mut config = std::fs::read_to_string(&path).unwrap_or_default();
-    config.push_str(&format!("\n[cloud]\nmachine_label = \"{}\"\n", machine.name));
+    config.push_str(&format!("\n[cloud]\nmachine_label = \"{}\"\n", label_of(machine)));
     std::fs::write(path, config).unwrap();
 }
 
@@ -613,9 +619,10 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     let rows_a = inbox(&alpha);
     assert_eq!(rows_a.len(), 1);
     let envelope = parse_envelope(&rows_a[0].prompt).unwrap();
+    // cas-c7c7: the sender's label, not its registered machine id.
     assert_eq!(
         (envelope.sender_name.as_str(), envelope.machine.as_str()),
-        ("sup-b", "machine-beta")
+        ("sup-b", "beta-host")
     );
     assert_eq!(rows_a[0].target, "sup-a");
     assert_eq!(rows_a[0].origin, Some(QueueOrigin::Daemon));
@@ -634,7 +641,7 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
     )
     .unwrap()
     .expect("a peer message row");
-    assert_eq!(reply.to, "sup-b@machine-beta");
+    assert_eq!(reply.to, "sup-b@beta-host");
     assert_eq!(tick(&beta, "b").delivered, 1);
     let rows_b = inbox(&beta);
     assert_eq!(rows_b.len(), 1);
@@ -802,6 +809,7 @@ async fn one_machine_label_names_a_peer_in_discovery_claims_and_messages() {
 
     let peers_a = peers_of(&alpha.cas_dir, "a");
     let discovered = peers_a[0].machine.clone();
+    assert_eq!(discovered, label_of(&beta), "discovery shows beta's own label");
 
     // A claim refusal names the holder's machine.
     let claims_a = PeerClaims::for_project(&alpha.cas_dir).unwrap();

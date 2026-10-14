@@ -53,7 +53,7 @@ fn side(cloud: &FakeCloud, machine_name: &str, id: &'static str, name: &str) -> 
         format!(
             "[project]\ncanonical_id = {WIDGETS:?}\n[verification]\nenabled = false\n\
              [cloud]\nmachine_label = {:?}\n",
-            machine_name.trim_start_matches("machine-")
+            format!("{}-host", machine_name.trim_start_matches("machine-"))
         ),
     )
     .unwrap();
@@ -495,6 +495,6 @@ async fn a_received_split_names_the_proposer_by_its_machine_label() {
         }
         other => panic!("{other:?}"),
     };
-    assert_eq!(discovered, "soundwave", "discovery shows soundwave's own label");
+    assert_eq!(discovered, "soundwave-host", "discovery shows soundwave's own label");
     assert_eq!(received.peer_machine, discovered, "the split names soundwave by the same label");
 }

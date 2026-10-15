@@ -439,9 +439,10 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
 /// The one line typed into a Claude+teams recipient's pane to WAKE it — never
 /// the message body (cas-cdf9).
 ///
-/// The body is written once, to the teams inbox, and the recipient's harness
-/// renders that copy. Before this, the idle nudge typed the very same body into
-/// the pane as well, so every factory message arrived twice: once wrapped in
+/// The body reaches the recipient once, through the CAS hook (cas-1f0c; see
+/// [`claude_teams_inbox_text`]). Before cas-cdf9, the idle nudge typed the
+/// very same body into the pane as well, so every factory message arrived
+/// twice: once wrapped in
 /// the harness's `<teammate-message>` envelope and once as a bare turn. Both
 /// copies carried the identical `CAS provenance:` header, because that header
 /// is composed once at `queue_and_events.rs` and handed to both writes — so the
@@ -456,18 +457,48 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
 /// all, so it cannot type it.
 ///
 /// The line still NAMES the notification id rather than being an empty wake, so
-/// the wake degrades safely: if the harness ever fails to render the inbox copy,
-/// the recipient still learns a message exists and can `inbox_poll` it, instead
-/// of being woken to silence.
+/// the wake degrades safely: if the body never reaches the recipient, it still
+/// learns a message exists and can `inbox_poll` it, instead of being woken to
+/// silence.
+///
+/// cas-1f0c (contract v2 P1.4): the wording is what actually happens. The
+/// turn-start hook expands the named id into the turn's `[incoming messages]`
+/// block, once; the Teams inbox carries only this pointer
+/// ([`claude_teams_inbox_text`]). The old "(body not repeated here)" was false:
+/// the hook expanded the body and the Teams copy then rendered it again.
 pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
     match notification_id {
         Some(id) => format!(
-            "CAS wake: message {id} from {source} is in your inbox — see inbox: \
-             inbox_poll notification_id={id} (body not repeated here)."
+            "CAS wake: message {id} from {source}. CAS shows its body once, in this turn's \
+             [incoming messages] block, unless it was already shown to you; if you have not \
+             seen it, run inbox_poll notification_id={id}."
         ),
         None => format!(
-            "CAS wake: a message from {source} is in your inbox — see inbox (body not repeated here)."
+            "CAS wake: a message from {source} is in your inbox; read it with inbox_poll."
         ),
+    }
+}
+
+/// cas-1f0c (contract v2 P1.4): what the daemon writes to a Claude Teams inbox
+/// for queued message `notification_id`. A pointer, never the body.
+///
+/// Claude Code takes an inbox row into its own pending store as soon as it is
+/// written and renders it as a `<teammate-message>` at the recipient's next
+/// turn boundary; a written body cannot be withdrawn. Meanwhile the CAS hooks
+/// surface the same row: the turn-start hook expands a pointer wake, and the
+/// tool-boundary hook shows a row handed off mid-turn (cas-b5ad). With the body
+/// in both places every pointer-woken message reached the recipient three
+/// times. The hook is now the one body path: this pointer names the id, so the
+/// turn the Teams copy starts expands it (or says it was already shown), and
+/// `inbox_poll notification_id=<id>` reads it if no hook ran.
+///
+/// The `[cas #N …]` provenance line, when present, is kept so the teammate
+/// block still shows the message's id, age and first-delivery stamp.
+pub(crate) fn claude_teams_inbox_text(text: &str, source: &str, notification_id: i64) -> String {
+    let pointer = pointer_wake_payload(source, Some(notification_id));
+    match text.lines().next().filter(|line| line.starts_with("[cas #")) {
+        Some(provenance) => format!("{provenance}\n\n{pointer}"),
+        None => pointer,
     }
 }
 
@@ -922,6 +953,33 @@ impl FactoryDaemon {
             retract_worker,
             retract_task,
             retract_epic,
+            None,
+        )
+        .await
+        .map(|(outcome, _)| outcome)
+    }
+
+    /// [`Self::deliver_to_worker`] for queued row `notification_id`: a Claude
+    /// Teams recipient's inbox gets a pointer to the row, and the CAS hook
+    /// shows the body (cas-1f0c). Every other channel carries `text` as before.
+    pub(crate) async fn deliver_queued_to_worker(
+        &self,
+        target: &str,
+        source: &str,
+        text: &str,
+        summary: Option<&str>,
+        notification_id: i64,
+    ) -> anyhow::Result<InjectOutcome> {
+        self.deliver_to_worker_via_channel(
+            target,
+            source,
+            text,
+            summary,
+            None,
+            None,
+            None,
+            None,
+            Some(notification_id),
         )
         .await
         .map(|(outcome, _)| outcome)
@@ -952,6 +1010,7 @@ impl FactoryDaemon {
         retract_worker: Option<&str>,
         retract_task: Option<&str>,
         retract_epic: Option<&str>,
+        queued_id: Option<i64>,
     ) -> anyhow::Result<(InjectOutcome, DeliveryChannel)> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
@@ -987,11 +1046,15 @@ impl FactoryDaemon {
                 if teams.team_tree_missing() {
                     self.alert_missing_team_tree(teams);
                 }
+                // cas-1f0c: a queued row's body reaches a Claude Teams
+                // recipient through the CAS hook only; its inbox gets a pointer.
+                let inbox_text = queued_id.map(|id| claude_teams_inbox_text(text, source, id));
+                let inbox_text = inbox_text.as_deref().unwrap_or(text);
                 let write = match (retract_worker, retract_task, retract_epic) {
                     (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
                         source,
-                        text,
+                        inbox_text,
                         summary,
                         color,
                         worker,
@@ -999,7 +1062,7 @@ impl FactoryDaemon {
                     (None, Some(task_id), _) => teams.write_to_inbox_for_merge_alert(
                         inbox_target,
                         source,
-                        text,
+                        inbox_text,
                         summary,
                         color,
                         task_id,
@@ -1007,13 +1070,13 @@ impl FactoryDaemon {
                     (None, None, Some(epic_id)) => teams.write_to_inbox_for_epic_completion(
                         inbox_target,
                         source,
-                        text,
+                        inbox_text,
                         summary,
                         color,
                         epic_id,
                     ),
                     (None, None, None) => {
-                        teams.write_to_inbox(inbox_target, source, text, summary, color)
+                        teams.write_to_inbox(inbox_target, source, inbox_text, summary, color)
                     }
                 };
                 match write {
@@ -1121,6 +1184,7 @@ impl FactoryDaemon {
                 None,
                 retract_task,
                 None,
+                notification_id,
             )
             .await?;
 
@@ -1984,12 +2048,14 @@ mod tests {
     }
 
     /// The wake names the id so it degrades safely: a recipient woken without
-    /// a rendered inbox copy can still `inbox_poll` the exact message.
+    /// a rendered body can still `inbox_poll` the exact message. cas-1f0c: it
+    /// says where the body is shown and no longer claims it is not repeated.
     #[test]
     fn pointer_wake_names_the_notification_id_and_the_inbox() {
         let wake = pointer_wake_payload("supervisor", Some(24535));
-        assert!(wake.contains("24535"), "{wake}");
-        assert!(wake.contains("see inbox"), "{wake}");
+        assert!(wake.starts_with("CAS wake: message 24535 from supervisor."), "{wake}");
+        assert!(wake.contains("[incoming messages]"), "{wake}");
+        assert!(!wake.contains("not repeated"), "{wake}");
         // cas-ad92: the named poll returns the row even while the transport
         // still holds it claimed, so the wake says exactly how to read it.
         assert!(wake.contains("inbox_poll notification_id=24535"), "{wake}");
@@ -1997,8 +2063,24 @@ mod tests {
 
         // An id-less wake still points at the inbox rather than claiming an id.
         let anonymous = pointer_wake_payload("supervisor", None);
-        assert!(anonymous.contains("see inbox"), "{anonymous}");
+        assert!(anonymous.contains("inbox_poll"), "{anonymous}");
         assert!(!anonymous.contains("message  "), "{anonymous}");
+    }
+
+    /// cas-1f0c (contract v2 P1.4): the Claude Teams inbox copy of a queued
+    /// row is a pointer. It keeps the `[cas #N …]` provenance line and names
+    /// the id the hook expands, and carries no part of the body.
+    #[test]
+    fn claude_teams_inbox_text_is_a_pointer_not_the_body() {
+        let body = "Take (B), but make verification.enabled operator-only.";
+        let text = format!("[cas #24508 supervisor-authored 0s first]\n\n{body}");
+        let inbox = claude_teams_inbox_text(&text, "supervisor", 24508);
+        assert!(!inbox.contains(body), "{inbox}");
+        assert!(inbox.starts_with("[cas #24508 supervisor-authored 0s first]\n\n"), "{inbox}");
+        assert!(inbox.ends_with(&pointer_wake_payload("supervisor", Some(24508))), "{inbox}");
+
+        let bare = claude_teams_inbox_text(body, "warm-lark-16", 7);
+        assert_eq!(bare, pointer_wake_payload("warm-lark-16", Some(7)));
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

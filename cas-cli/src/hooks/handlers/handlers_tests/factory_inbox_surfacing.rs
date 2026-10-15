@@ -773,6 +773,24 @@ impl ClaudeTeamsWorkerDouble<'_> {
     }
 }
 
+/// The daemon's claim and Teams write for row `id`. cas-1f0c: the inbox gets
+/// a pointer to the row, never its body.
+fn claim_for_claude_teams(
+    store: &SqlitePromptQueueStore,
+    worker: &mut ClaudeTeamsWorkerDouble<'_>,
+    id: i64,
+    body: &str,
+) {
+    assert!(store.claim_recipient_transport(id, WORKER).unwrap());
+    worker.teams_inbox.push_back(
+        crate::ui::factory::daemon::runtime::delivery::claude_teams_inbox_text(
+            &format!("[cas #{id} supervisor-authored 0s first]\n\n{body}"),
+            "supervisor",
+            id,
+        ),
+    );
+}
+
 /// The daemon's successful Claude+teams handoff, in its real order: claim the
 /// row (cas-27ad), write the teams copy, record the post-handoff receipt and
 /// the delivered stage, then type the pointer wake (never the body, cas-cdf9).
@@ -782,8 +800,7 @@ fn deliver_to_claude_worker(
     id: i64,
     body: &str,
 ) -> String {
-    assert!(store.claim_recipient_transport(id, WORKER).unwrap());
-    worker.teams_inbox.push_back(body.to_string());
+    claim_for_claude_teams(store, worker, id, body);
     store
         .record_recipient_surfaced(id, WORKER, cas_store::SurfacingSource::TransportClaimed)
         .unwrap();
@@ -817,10 +834,98 @@ fn a_pointer_wake_turn_carries_the_body_it_names() {
     assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
     assert_eq!(report.wake, cas_store::ObservationStatus::Observed);
 
-    // The teams copy still renders at the next boundary; the hook must not
-    // add a second copy to it.
+    // The teams copy still renders at the next boundary. cas-1f0c: it is a
+    // pointer, and the hook marks it as already shown instead of repeating.
     let teammate_turn = worker.next_teammate_turn().unwrap();
-    assert_eq!(teammate_turn.matches(body).count(), 1, "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(body).count(), 0, "{teammate_turn}");
+    assert!(teammate_turn.contains("already shown"), "{teammate_turn}");
+}
+
+/// cas-1f0c, contract v2 `ct2_p1_one_body_per_message_teams` (P1.4). One
+/// message reaches a Claude Teams recipient as exactly one body, whichever
+/// path shows it. Measured on the zen-viper-42 supervisor: 37 of 47 repeated
+/// ids arrived three times (pointer wake, hook body, teammate block).
+#[test]
+fn ct2_p1_one_body_per_message_teams() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+
+    // 1. Idle recipient: the pointer wake starts a turn, then Claude Code
+    // renders its held Teams copy, then the agent works on.
+    let woken = "Rebase onto the epic tip and re-run the named tests.";
+    let id = store.enqueue_with_session("supervisor", WORKER, woken, SESSION).unwrap();
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, woken);
+    let mut context = worker.take_turn(&wake);
+    context.push_str(&worker.next_teammate_turn().unwrap());
+    context.push_str(&worker.take_turn("continuing my work"));
+    assert_eq!(context.matches(woken).count(), 1, "{context}");
+
+    // 2. Busy recipient: the wake is declined, a tool boundary shows the
+    // claimed row mid-turn (cas-b5ad), then the Teams copy renders.
+    let busy = "Take (B), but keep the flag operator-only.";
+    let id = store.enqueue_with_session("supervisor", WORKER, busy, SESSION).unwrap();
+    claim_for_claude_teams(&store, &mut worker, id, busy);
+    store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
+    let mid_turn = store
+        .surface_unseen_for_recipient_delivered_after(
+            WORKER,
+            Some(SESSION),
+            10,
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+        )
+        .unwrap();
+    let mut context: String = mid_turn.iter().map(|row| row.prompt.clone()).collect();
+    context.push_str(&worker.next_teammate_turn().unwrap());
+    assert_eq!(context.matches(busy).count(), 1, "{context}");
+
+    // 3. No wake and no tool boundary: the Teams pointer is the first notice,
+    // and the turn it starts carries the body once.
+    let quiet = "Park the branch; QA is next.";
+    let id = store.enqueue_with_session("supervisor", WORKER, quiet, SESSION).unwrap();
+    deliver_to_claude_worker(&store, &mut worker, id, quiet);
+    let mut context = worker.next_teammate_turn().unwrap();
+    context.push_str(&worker.take_turn("continuing my work"));
+    assert_eq!(context.matches(quiet).count(), 1, "{context}");
+    assert_eq!(
+        store.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+}
+
+/// cas-1f0c, contract v2 `ct2_p1_wake_text_truthful` (P1.4). The wake says
+/// the body is shown once in the turn's `[incoming messages]` block unless it
+/// was already shown, and both halves hold; it never claims the body is not
+/// repeated.
+#[test]
+fn ct2_p1_wake_text_truthful() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let body = "Ship the dedupe and close GH #1208.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
+    assert!(!wake.contains("not repeated"), "{wake}");
+    assert!(wake.contains("[incoming messages]"), "{wake}");
+    assert!(wake.contains(&format!("inbox_poll notification_id={id}")), "{wake}");
+
+    // "shows its body once, in this turn's [incoming messages] block"
+    let wake_turn = worker.take_turn(&wake);
+    let block = wake_turn.split_once("[incoming messages]").map(|(_, block)| block).unwrap_or("");
+    assert!(block.contains(body), "{wake_turn}");
+    assert_eq!(wake_turn.matches(body).count(), 1, "{wake_turn}");
+
+    // "unless it was already shown to you": the Teams pointer renders later,
+    // carries no body, and the hook says it was already shown.
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert!(teammate_turn.contains(&format!("CAS wake: message {id}")), "{teammate_turn}");
+    assert!(!teammate_turn.contains(body), "{teammate_turn}");
+    assert!(teammate_turn.contains(&format!("[already shown] Message #{id}")), "{teammate_turn}");
 }
 
 /// cas-ad92 boundaries: an ordinary turn still leaves a claimed row to its

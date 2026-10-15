@@ -60,7 +60,9 @@
         "remind_message",
         "remind_ttl_secs",
         "session_id",
+        "sticky",
         "summary",
+        "supersede_key",
         "target",
         "task_id",
         "urgent"
@@ -150,6 +152,7 @@
         "reason",
         "session_id",
         "shared",
+        "spawn_brief",
         "stale_threshold_secs",
         "status",
         "summary_mode",

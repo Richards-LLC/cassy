@@ -55,6 +55,7 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
+pub(crate) use app::provisioning::installed_provisioner_build_hash;
 pub use app::provisioning::run_internal_provisioner;
 mod boot;
 mod buffer_backend;

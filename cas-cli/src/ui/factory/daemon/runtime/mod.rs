@@ -1,15 +1,17 @@
 pub(crate) mod ci_watch;
+pub(crate) mod external_wake;
 pub(crate) mod merge_queue_ejection;
 mod client_input;
 mod cloud;
 mod commander_mirror;
+pub(crate) use commander_mirror::MirrorScanState;
 pub(crate) mod delivery;
 pub(crate) mod director_refresh;
 #[cfg(test)]
 mod delivery_matrix_tests;
 mod gui_client;
 mod injection_events;
-mod lifecycle;
+pub(crate) mod lifecycle;
 #[cfg(test)]
 mod loop_latency_tests;
 #[cfg(test)]
@@ -22,6 +24,8 @@ mod provisioning_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod send_dedupe;
+#[cfg(test)]
+mod shutdown_tests;
 pub(super) mod session_summarizer;
 pub(crate) mod store_worker;
 pub(crate) mod teams;

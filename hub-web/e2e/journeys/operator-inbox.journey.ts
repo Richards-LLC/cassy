@@ -196,3 +196,53 @@ test("HUB-J19 a message that can't be verified is named, never shown (cas-9b7d Q
     expect([...(cloud.acks.get(phone.id) ?? [])].map((value) => String(Array.isArray(value) ? value[0] : value))).not.toContain(tampered.eventId);
   });
 });
+
+test("HUB-J19 terminal question and supervisor answer survive cloud replay on two devices (cas-5c89)", journeyPart, async ({ page, journey, browser }) => {
+  const cloud = operatorCloudDouble();
+  const commandKey = (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"])) as CryptoKeyPair;
+  await cloud.enrollMachine(HUB, [PROJECT], new Uint8Array(await crypto.subtle.exportKey("raw", commandKey.publicKey)), "soundwave");
+  await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId, plaintext: {
+    type: "cas.operator.turn", v: 1, session_name: SESSION,
+    snapshot: { prompt_id: 301, source: "terminal", target: "terminal-history", prompt: "What changed in Violet today?", operator: null, factory_session: SESSION, created_at: journeyDay(1, 12) },
+  } });
+  await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId, plaintext: supervisorTurn(302, JSON.stringify({
+    schema_version: 2, reply_to: 301, message: "**Two fixes landed.**", summary: "Two fixes", device_id: "*", kind: "answer", attachments: [],
+  }), journeyDay(1, 13)) });
+  await routeOperatorCloud(page.context(), cloud);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const readThread = async (reader: typeof page, label?: string) => {
+    await reader.getByRole("button", { name: "Operator inbox", exact: true }).click();
+    const inbox = reader.getByRole("dialog", { name: "Operator inbox" });
+    if (label) {
+      await inbox.getByLabel("Name this browser").fill(label);
+      await inbox.getByRole("button", { name: "Sign in" }).click();
+      const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
+      await cloud.approve(code);
+    }
+    await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click({ timeout: 15_000 });
+    await expect(inbox.locator(".operator-inbox-bubble")).toHaveText(["What changed in Violet today?", "Two fixes landed."]);
+    await expect(inbox.locator(".operator-inbox-author")).toHaveText(["You", "Supervisor"]);
+    await expect(inbox.locator("strong")).toHaveText("Two fixes landed.");
+  };
+
+  await journey.stage("Read both terminal turns on the phone, then revisit without duplicates", async () => {
+    await journey.open();
+    await readThread(page, "Terminal phone");
+    await page.reload();
+    await readThread(page);
+  });
+  await journey.stage("Read the same question and answer from a fresh desktop profile", async () => {
+    const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 }, timezoneId: "UTC" });
+    try {
+      await routeOperatorCloud(desktop, cloud);
+      const reader = await desktop.newPage();
+      await reader.clock.install({ time: journeyNow() });
+      await reader.goto(page.url());
+      await readThread(reader, "Terminal desk");
+    } finally {
+      await desktop.close();
+    }
+    expect(cloud.enrollments.size).toBe(2);
+  });
+});

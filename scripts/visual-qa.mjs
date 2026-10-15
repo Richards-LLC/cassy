@@ -315,6 +315,28 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       return overflow === 'auto' || overflow === 'scroll';
     });
     const ariaHidden = (element) => ancestors(element).some((current) => current.getAttribute('aria-hidden') === 'true');
+    // WCAG 2.2 SC 1.4.3 exempts inactive UI components. A disabled fieldset
+    // disables its descendants except the contents of its first legend; the
+    // browser's :disabled pseudo-class only covers form controls, so inspect
+    // fieldset ancestry separately to include explanatory text too.
+    const inactiveComponent = (element) => {
+      for (const current of ancestors(element).reverse()) {
+        if (current.getAttribute('aria-disabled')?.toLowerCase() === 'true') {
+          return { reason: 'aria-disabled', source: current };
+        }
+        if (current.localName === 'fieldset' && current.disabled) {
+          const firstLegend = [...current.children].find((child) => child.localName === 'legend');
+          if (!firstLegend?.contains(element)) return { reason: 'disabled-fieldset', source: current };
+        } else if (current.localName !== 'fieldset' && current.matches(':disabled')) {
+          return { reason: 'native-disabled', source: current };
+        }
+      }
+      // A label for a disabled control remains part of that inactive
+      // component even when it is placed outside the control's subtree.
+      const control = element.closest('label')?.control;
+      if (control && control !== element) return inactiveComponent(control);
+      return null;
+    };
     // GH #1081: a visually-hidden helper keeps a positioned box of at most one
     // pixel and clips what it holds, so screen readers still read it. Its text
     // can never fit that box by design, whatever class names it carries.
@@ -573,7 +595,9 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
       const threshold = large ? largeTextLimit : contrastLimit;
       if (contrast < threshold) {
         const details = { foreground: foreground.slice(0, 3).map(Math.round), background: item.background, ratio: round(contrast), threshold, largeText: large };
-        if (item.statusLike) addInfo('off-token-contrast', item, { ...details, reason: 'status-label-pair-is-not-a-sanctioned-token' });
+        const inactive = inactiveComponent(item.element);
+        if (inactive) addInfo('exempt-inactive', item, { ...details, reason: `wcag-1.4.3-inactive-${inactive.reason}`, inactiveBy: selectorFor(inactive.source) });
+        else if (item.statusLike) addInfo('off-token-contrast', item, { ...details, reason: 'status-label-pair-is-not-a-sanctioned-token' });
         else add('contrast', item, details);
       }
     }
@@ -922,10 +946,11 @@ function rgbContrast(first, second) {
 }
 
 function markdownReport(result) {
+  const inactiveContrastExemptions = result.infoCounts?.['exempt-inactive'] || 0;
   const lines = [
     `# Visual QA — ${result.status}`,
     '',
-    `**Summary:** ${result.status} · ${result.findings.length} finding(s) · ${result.infoFindings.length} informational · ${result.suppressed.length} allowlisted · ${result.screenshots.length} screenshot(s)`,
+    `**Summary:** ${result.status} · ${result.findings.length} finding(s) · ${result.infoFindings.length} informational · ${inactiveContrastExemptions} inactive contrast exemption(s) · ${result.suppressed.length} allowlisted · ${result.screenshots.length} screenshot(s)`,
     '',
     `Playwright: ${result.playwrightVersion}  `,
     `Schemes: ${result.schemes.join(', ')}  `,
@@ -949,6 +974,7 @@ function markdownReport(result) {
     if (finding.ratio !== undefined) lines.push(`  - Contrast: ${finding.ratio}:1 (required ${finding.threshold}:1); foreground ${finding.foreground?.join(', ')}; background ${finding.background?.join(', ')}`);
   }
   lines.push('', '## Informational checks', '');
+  if (inactiveContrastExemptions) lines.push(`Inactive contrast exemptions: ${inactiveContrastExemptions}.`, '');
   if (!result.infoFindings.length) lines.push('None.');
   for (const finding of result.infoFindings) {
     const location = `${finding.url} · ${finding.scheme} · ${finding.viewport.name}`;

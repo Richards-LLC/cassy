@@ -59,9 +59,13 @@ condition, use the durable external triggers below instead of a finite timer.
 
 ### Durable external checkpoint: branch or tag
 
-External conditions survive daemon/session restart and do not expire when
-`remind_ttl_secs` is omitted (`0` means no expiry). They require
-`cross_session=true` and a JSON filter:
+External conditions survive daemon/session restart. When `remind_ttl_secs` is
+omitted they expire after seven days (`0` means no expiry), and they also
+expire once both their owner and target have had no heartbeat or live process
+for 24 hours. They require `cross_session=true` and a JSON filter.
+`target_branch` is the bare origin branch; `origin/main` is stored as `main`.
+`branch_contained_in` also accepts `sha` for `commit`; other filter keys are
+refused, and one refusal lists every missing requirement:
 
 ```text
 coordination action=remind remind_event=branch_contained_in \
@@ -86,9 +90,11 @@ workflow) has completed, carrying each run's conclusion and URL and an
 overall `outcome`. Without `workflow`, scheduled runs are ignored. For a
 merge-queue landing, use `branch_contained_in` with `"target_branch":"main"`.
 
-The daemon checks origin on a bounded one-minute cadence. A local-only tag
-cannot satisfy `tag_exists`; the tag must be published to origin. A failed
-remote check leaves the reminder pending. The fired description includes the
+The daemon checks origin on a bounded one-minute cadence, off its input loop,
+fetching each target branch once per check. A local-only tag cannot satisfy
+`tag_exists`; the tag must be published to origin. A failed remote check
+leaves the reminder pending and backs that ref off, up to 30 minutes between
+checks. The fired description includes the
 remote ref and SHA, and the reminder fires once when the condition becomes
 true, delivering the existing supervisor notification and prompt-queue wake.
 

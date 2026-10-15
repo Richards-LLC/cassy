@@ -377,6 +377,17 @@ pub(crate) struct ExternalWakeObservation {
 }
 
 impl ExternalWakeCondition {
+    /// The remote read this condition depends on. Conditions sharing a key
+    /// share one fetch or `ls-remote` per scan (GH #1208).
+    pub(crate) fn probe_key(&self) -> ExternalProbeKey {
+        match self {
+            Self::BranchContained { target_branch, .. } => {
+                ExternalProbeKey::Branch(target_branch.clone())
+            }
+            Self::TagExists { tag } => ExternalProbeKey::Tag(tag.clone()),
+        }
+    }
+
     pub(crate) fn event_type(&self) -> &'static str {
         match self {
             Self::BranchContained { .. } => EXTERNAL_BRANCH_CONTAINED_EVENT,
@@ -428,6 +439,20 @@ impl ExternalWakeCondition {
     }
 }
 
+/// GH #1208: `target_branch` names a branch on origin. A remote-tracking
+/// spelling (`origin/staging`, `refs/remotes/origin/staging`) or a full branch
+/// ref (`refs/heads/staging`) becomes the bare branch name. Unnormalised, it
+/// fetched `+refs/heads/origin/staging`, which fails on every probe, so the
+/// reminder could never fire. One prefix is stripped; an empty result is the
+/// caller's to reject.
+pub(crate) fn normalize_external_target_branch(target: &str) -> &str {
+    let target = target.trim();
+    ["refs/remotes/origin/", "refs/heads/", "origin/"]
+        .iter()
+        .find_map(|prefix| target.strip_prefix(prefix))
+        .unwrap_or(target)
+}
+
 /// Parse the stable JSON contract accepted by `coordination.remind` for an
 /// external condition. Keep this strict so a typo remains pending and visible
 /// rather than silently becoming an always-true wake.
@@ -454,12 +479,14 @@ pub(crate) fn parse_external_wake_condition(
                 .get("commit")
                 .or_else(|| object.get("branch_tip"))
                 .or_else(|| object.get("branch"))
+                // GH #1207: `sha`, the key ci_completed uses for the same commit.
+                .or_else(|| object.get("sha"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
                 .map(str::to_string)
                 .ok_or_else(|| {
-                    "branch_contained_in remind_filter requires string field `commit` (or `branch_tip`/`branch`)".to_string()
+                    "branch_contained_in remind_filter requires string field `commit` (or `branch_tip`/`branch`/`sha`)".to_string()
                 })?;
             let target_branch = object
                 .get("target_branch")
@@ -471,6 +498,12 @@ pub(crate) fn parse_external_wake_condition(
                 .ok_or_else(|| {
                     "branch_contained_in remind_filter requires string field `target_branch`".to_string()
                 })?;
+            let target_branch = normalize_external_target_branch(&target_branch).to_string();
+            if target_branch.is_empty() {
+                return Err(
+                    "branch_contained_in target_branch must name a branch on origin".to_string(),
+                );
+            }
             if commit.starts_with('-') || target_branch.starts_with('-') {
                 return Err("external git refs may not start with '-'".to_string());
             }
@@ -497,6 +530,7 @@ pub(crate) fn parse_external_wake_condition(
 /// target branch or tag is not present yet); process failures/timeouts are
 /// surfaced so the daemon can retain the pending row and retry on a later
 /// cadence.
+#[cfg(test)]
 pub(crate) fn external_wake_condition_satisfied(
     project: &Path,
     condition: &ExternalWakeCondition,
@@ -508,121 +542,196 @@ pub(crate) fn external_wake_condition_satisfied(
 /// compared when it is satisfied. For branch conditions, the fetch is forced
 /// into `refs/remotes/origin/<target>`; for tags, the remote is queried without
 /// updating local refs. Failures return false without consulting local state.
+#[cfg(test)]
 pub(crate) fn external_wake_condition_observation(
     project: &Path,
     condition: &ExternalWakeCondition,
 ) -> Result<Option<ExternalWakeObservation>, CiWatchError> {
-    match condition {
-        ExternalWakeCondition::BranchContained {
-            commit,
-            target_branch,
-        } => {
-            let check_args = vec![
-                "check-ref-format".to_string(),
-                "--branch".to_string(),
-                target_branch.clone(),
-            ];
-            if !run_external_git_command(project, &check_args)?
-                .status
-                .success()
-            {
-                return Ok(None);
-            }
+    ExternalWakeProbe::new(|args: &[String]| run_external_git_command(project, args))
+        .observe(condition)
+}
 
-            let target_ref = format!("refs/remotes/origin/{target_branch}");
-            let fetch_args = vec![
-                "fetch".to_string(),
-                "--no-tags".to_string(),
-                "origin".to_string(),
-                format!("+refs/heads/{target_branch}:{target_ref}"),
-            ];
-            // Never fall back to an existing remote-tracking ref if the
-            // refresh fails: that ref may be exactly the stale state that
-            // caused a false positive such as reminder #1179.
-            if !run_external_git_command(project, &fetch_args)?
-                .status
-                .success()
-            {
-                return Ok(None);
-            }
+/// The remote read an external condition depends on: one origin branch or one
+/// origin tag.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ExternalProbeKey {
+    Branch(String),
+    Tag(String),
+}
 
-            let Some(target_sha) = resolve_external_git_commit(project, &target_ref)? else {
-                return Ok(None);
-            };
-            let Some(commit_sha) = resolve_external_git_commit(project, commit)? else {
-                return Ok(None);
-            };
-            let merge_args = vec![
-                "merge-base".to_string(),
-                "--is-ancestor".to_string(),
-                commit_sha,
-                target_sha.clone(),
-            ];
-            if !run_external_git_command(project, &merge_args)?
-                .status
-                .success()
-            {
-                return Ok(None);
-            }
-            Ok(Some(ExternalWakeObservation {
-                compared_ref: target_ref,
-                compared_sha: target_sha,
-            }))
-        }
-        ExternalWakeCondition::TagExists { tag } => {
-            let tag_ref = format!("refs/tags/{tag}");
-            let args = vec![
-                "ls-remote".to_string(),
-                "--tags".to_string(),
-                "--refs".to_string(),
-                "origin".to_string(),
-                tag_ref.clone(),
-            ];
-            let output = run_external_git_command(project, &args)?;
-            if !output.status.success() {
-                return Ok(None);
-            }
-            // ls-remote patterns can match suffixes and globs. Accept only
-            // the exact ref requested, including for annotated tags.
-            let tag_sha = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| line.split_once('\t'))
-                .find_map(|(sha, remote_ref)| {
-                    (remote_ref == tag_ref && !sha.is_empty()).then(|| sha.to_string())
-                });
-            let Some(tag_sha) = tag_sha else {
-                return Ok(None);
-            };
-            Ok(Some(ExternalWakeObservation {
-                compared_ref: tag_ref,
-                compared_sha: tag_sha,
-            }))
+impl std::fmt::Display for ExternalProbeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Branch(branch) => write!(f, "origin branch {branch}"),
+            Self::Tag(tag) => write!(f, "origin tag {tag}"),
         }
     }
 }
 
-fn resolve_external_git_commit(
-    project: &Path,
-    revision: &str,
-) -> Result<Option<String>, CiWatchError> {
-    let args = vec![
-        "rev-parse".to_string(),
-        "--verify".to_string(),
-        "--quiet".to_string(),
-        format!("{revision}^{{commit}}"),
-    ];
-    let output = run_external_git_command(project, &args)?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!sha.is_empty()).then_some(sha))
+/// The parts of one bounded git invocation an external probe reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalGitOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
 }
 
-fn run_external_git_command(
+/// What one scan learned about a remote ref.
+#[derive(Debug, Clone)]
+enum RemoteRead {
+    /// The ref exists on origin at this commit or tag object.
+    Tip(String),
+    /// Origin answered and the ref is absent, or its name is invalid.
+    Absent,
+    /// The fetch or `ls-remote` exited non-zero, for example a missing
+    /// remote branch or an unreachable origin.
+    Unreachable,
+    /// git timed out or could not run.
+    Unavailable(CiWatchError),
+}
+
+impl RemoteRead {
+    fn failed(&self) -> bool {
+        matches!(self, Self::Unreachable | Self::Unavailable(_))
+    }
+}
+
+/// One scan's view of origin (GH #1208). Each remote branch is fetched, and
+/// each tag listed, at most once per probe however many reminders name it;
+/// the per-reminder work after that is local (`rev-parse`, `merge-base`).
+/// `run` executes one bounded git command in the project, so tests can count
+/// and fail the network calls.
+pub(crate) struct ExternalWakeProbe<R> {
+    run: R,
+    reads: BTreeMap<ExternalProbeKey, RemoteRead>,
+}
+
+impl<R> ExternalWakeProbe<R>
+where
+    R: FnMut(&[String]) -> Result<ExternalGitOutput, CiWatchError>,
+{
+    pub(crate) fn new(run: R) -> Self {
+        Self {
+            run,
+            reads: BTreeMap::new(),
+        }
+    }
+
+    fn git(&mut self, args: &[&str]) -> Result<ExternalGitOutput, CiWatchError> {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+        (self.run)(&args)
+    }
+
+    fn resolve_commit(&mut self, revision: &str) -> Result<Option<String>, CiWatchError> {
+        let output = self.git(&["rev-parse", "--verify", "--quiet", &format!("{revision}^{{commit}}")])?;
+        let sha = output.stdout.trim();
+        Ok((output.success && !sha.is_empty()).then(|| sha.to_string()))
+    }
+
+    fn read_branch(&mut self, target_branch: &str) -> RemoteRead {
+        match self.git(&["check-ref-format", "--branch", target_branch]) {
+            Err(error) => return RemoteRead::Unavailable(error),
+            Ok(output) if !output.success => return RemoteRead::Absent,
+            Ok(_) => {}
+        }
+        let target_ref = format!("refs/remotes/origin/{target_branch}");
+        // Never fall back to an existing remote-tracking ref if the refresh
+        // fails: that ref may be exactly the stale state that caused a false
+        // positive such as reminder #1179.
+        let refspec = format!("+refs/heads/{target_branch}:{target_ref}");
+        match self.git(&["fetch", "--no-tags", "origin", &refspec]) {
+            Err(error) => return RemoteRead::Unavailable(error),
+            Ok(output) if !output.success => return RemoteRead::Unreachable,
+            Ok(_) => {}
+        }
+        match self.resolve_commit(&target_ref) {
+            Err(error) => RemoteRead::Unavailable(error),
+            Ok(None) => RemoteRead::Absent,
+            Ok(Some(sha)) => RemoteRead::Tip(sha),
+        }
+    }
+
+    fn read_tag(&mut self, tag: &str) -> RemoteRead {
+        let tag_ref = format!("refs/tags/{tag}");
+        let output = match self.git(&["ls-remote", "--tags", "--refs", "origin", &tag_ref]) {
+            Err(error) => return RemoteRead::Unavailable(error),
+            Ok(output) if !output.success => return RemoteRead::Unreachable,
+            Ok(output) => output,
+        };
+        // ls-remote patterns can match suffixes and globs. Accept only the
+        // exact ref requested, including for annotated tags.
+        output
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .find_map(|(sha, remote_ref)| {
+                (remote_ref == tag_ref && !sha.is_empty()).then(|| sha.to_string())
+            })
+            .map_or(RemoteRead::Absent, RemoteRead::Tip)
+    }
+
+    fn remote_read(&mut self, key: &ExternalProbeKey) -> RemoteRead {
+        if let Some(read) = self.reads.get(key) {
+            return read.clone();
+        }
+        let read = match key {
+            ExternalProbeKey::Branch(branch) => self.read_branch(branch),
+            ExternalProbeKey::Tag(tag) => self.read_tag(tag),
+        };
+        self.reads.insert(key.clone(), read.clone());
+        read
+    }
+
+    /// Evaluate one condition against this scan's view of origin. A normal
+    /// non-zero git status means the condition is false (for example the
+    /// target branch or tag is not present yet); timeouts and spawn failures
+    /// are returned so the caller retains the pending row.
+    pub(crate) fn observe(
+        &mut self,
+        condition: &ExternalWakeCondition,
+    ) -> Result<Option<ExternalWakeObservation>, CiWatchError> {
+        let compared_sha = match self.remote_read(&condition.probe_key()) {
+            RemoteRead::Tip(sha) => sha,
+            RemoteRead::Absent | RemoteRead::Unreachable => return Ok(None),
+            RemoteRead::Unavailable(error) => return Err(error),
+        };
+        match condition {
+            ExternalWakeCondition::BranchContained {
+                commit,
+                target_branch,
+            } => {
+                let Some(commit_sha) = self.resolve_commit(commit)? else {
+                    return Ok(None);
+                };
+                let contained = self
+                    .git(&["merge-base", "--is-ancestor", &commit_sha, &compared_sha])?
+                    .success;
+                Ok(contained.then(|| ExternalWakeObservation {
+                    compared_ref: format!("refs/remotes/origin/{target_branch}"),
+                    compared_sha,
+                }))
+            }
+            ExternalWakeCondition::TagExists { tag } => Ok(Some(ExternalWakeObservation {
+                compared_ref: format!("refs/tags/{tag}"),
+                compared_sha,
+            })),
+        }
+    }
+
+    /// Each remote read this probe made, and whether it failed (a fetch or
+    /// `ls-remote` that exited non-zero, timed out or could not run).
+    pub(crate) fn read_outcomes(&self) -> Vec<(ExternalProbeKey, bool)> {
+        self.reads
+            .iter()
+            .map(|(key, read)| (key.clone(), read.failed()))
+            .collect()
+    }
+}
+
+/// Run one bounded git command for an external reminder probe.
+pub(crate) fn run_external_git_command(
     project: &Path,
     args: &[String],
-) -> Result<std::process::Output, CiWatchError> {
+) -> Result<ExternalGitOutput, CiWatchError> {
     let mut command = Command::new("git");
     command.args(args).current_dir(project);
     run_command(
@@ -630,6 +739,10 @@ fn run_external_git_command(
         Deadline::after(EXTERNAL_GIT_TIMEOUT),
         EXTERNAL_GIT_TIMEOUT,
     )
+    .map(|output| ExternalGitOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+    })
     .map_err(|error| {
         CiWatchError::Unavailable(match error {
             crate::bounded_process::BoundedCommandError::TimedOut => {
@@ -1228,7 +1341,8 @@ pub(crate) fn mark_merged_failures(project: &Path, mut failures: Vec<CiFailure>)
         let Ok(output) = run_external_git_command(project, &args.map(str::to_string)) else {
             continue;
         };
-        failure.merged_into = String::from_utf8_lossy(&output.stdout)
+        failure.merged_into = output
+            .stdout
             .lines()
             .map(|name| name.trim().trim_start_matches("origin/"))
             .find(|name| !name.is_empty() && !name.starts_with("factory/") && *name != "HEAD")
@@ -2315,6 +2429,39 @@ mod tests {
                 tag: "v3.6.0".to_string()
             }
         );
+    }
+
+    /// GH #1208: `origin/staging` used to fetch `refs/heads/origin/staging`,
+    /// which never exists, so the reminder could never fire.
+    #[test]
+    fn external_target_branch_drops_remote_tracking_prefix() {
+        for (raw, bare) in [
+            ("staging", "staging"),
+            ("origin/staging", "staging"),
+            ("refs/remotes/origin/epic/v41", "epic/v41"),
+            ("refs/heads/main", "main"),
+            (" origin/main ", "main"),
+            ("origin/", ""),
+        ] {
+            assert_eq!(normalize_external_target_branch(raw), bare, "{raw:?}");
+        }
+        let legacy = parse_external_wake_condition(
+            EXTERNAL_BRANCH_CONTAINED_EVENT,
+            &serde_json::json!({"branch": "factory/x", "target": "origin/staging"}),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy,
+            ExternalWakeCondition::BranchContained {
+                commit: "factory/x".to_string(),
+                target_branch: "staging".to_string(),
+            }
+        );
+        assert!(parse_external_wake_condition(
+            EXTERNAL_BRANCH_CONTAINED_EVENT,
+            &serde_json::json!({"commit": "abc", "target_branch": "origin/"}),
+        )
+        .is_err());
     }
 
     #[test]

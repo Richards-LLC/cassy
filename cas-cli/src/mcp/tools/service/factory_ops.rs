@@ -347,6 +347,8 @@ pub(crate) const WORKER_DEAD_SECS: i64 = 75;
 const WORKER_ACTIVITY_WINDOW_SECS: i64 = 600;
 const WORKER_FILE_WRITE_SCAN_LIMIT: usize = 2_000;
 pub(crate) const SPAWN_BOOT_VERIFICATION_WINDOW_SECS: i64 = 60;
+/// cas-ee68: a spawn brief is a short orientation, not a design document.
+pub(crate) const SPAWN_BRIEF_MAX_CHARS: usize = 2_000;
 
 /// Mark a just-registered spawn as failed when its harness PID has already
 /// disappeared and the daemon missed the pane-exit event. The state-at age
@@ -2066,6 +2068,45 @@ fn no_active_epic_guidance(why: &str) -> String {
     )
 }
 
+enum FactoryProvisionBuildCheck {
+    Compatible,
+    Mismatch(String),
+    Skipped(&'static str),
+}
+
+fn known_factory_build_id(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+}
+
+fn factory_provision_build_compatibility(
+    session: &str,
+    provisioner_build: Option<&str>,
+) -> FactoryProvisionBuildCheck {
+    let metadata_path = crate::ui::factory::metadata_path(session);
+    let raw = match std::fs::read_to_string(&metadata_path) {
+        Ok(raw) => raw,
+        Err(_) => return FactoryProvisionBuildCheck::Skipped("session build metadata unavailable"),
+    };
+    let metadata = match serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw) {
+        Ok(metadata) => metadata,
+        Err(_) => return FactoryProvisionBuildCheck::Skipped("session build metadata invalid"),
+    };
+    let Some(daemon_build) = known_factory_build_id(metadata.daemon_build_hash.as_deref()) else {
+        return FactoryProvisionBuildCheck::Skipped("daemon build ID unavailable");
+    };
+    let Some(provisioner_build) = known_factory_build_id(provisioner_build) else {
+        return FactoryProvisionBuildCheck::Skipped("provisioner build ID unavailable");
+    };
+    if daemon_build != provisioner_build {
+        return FactoryProvisionBuildCheck::Mismatch(format!(
+            "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from installed provisioner build {provisioner_build}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+        ));
+    }
+    FactoryProvisionBuildCheck::Compatible
+}
+
 impl CasService {
 
     pub(super) async fn factory_spawn_workers(
@@ -2083,10 +2124,42 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let provisioner_build = ctx
+            .factory_session
+            .as_ref()
+            .and_then(|_| crate::ui::factory::installed_provisioner_build_hash().ok());
+        self.factory_spawn_workers_in_with_provisioner_build(
+            ctx,
+            req,
+            provisioner_build.as_deref(),
+        )
+        .await
+    }
+
+    async fn factory_spawn_workers_in_with_provisioner_build(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        provisioner_build: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
+
+        let build_check_notice = if let Some(session) = ctx.factory_session.as_deref() {
+            match factory_provision_build_compatibility(session, provisioner_build) {
+                FactoryProvisionBuildCheck::Compatible => String::new(),
+                FactoryProvisionBuildCheck::Mismatch(message) => {
+                    return Err(Self::error(ErrorCode::INVALID_REQUEST, message));
+                }
+                FactoryProvisionBuildCheck::Skipped(reason) => format!(
+                    "\nBuild check: skipped ({reason}); the provisioner still checks at spawn time"
+                ),
+            }
+        } else {
+            String::new()
+        };
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -2106,6 +2179,33 @@ impl CasService {
             .as_deref()
             .map(parse_worker_name_list)
             .unwrap_or_default();
+        // cas-ee68 (communication contract v2, P3.7): a spawn brief rides on
+        // the pre-assigned task, so the worker reads it before task start.
+        let spawn_brief = req
+            .spawn_brief
+            .as_deref()
+            .map(str::trim)
+            .filter(|brief| !brief.is_empty())
+            .map(str::to_string);
+        if let Some(brief) = spawn_brief.as_deref() {
+            if req.task_id.is_none() {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "spawn_brief needs task_id: the brief is stored on the pre-assigned task. \
+                     For workers without a task, send a sticky all_workers broadcast instead.",
+                ));
+            }
+            if brief.chars().count() > SPAWN_BRIEF_MAX_CHARS {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "spawn_brief is {} characters; the limit is {SPAWN_BRIEF_MAX_CHARS}. \
+                         Put longer material in the task description or an artifact.",
+                        brief.chars().count()
+                    ),
+                ));
+            }
+        }
 
         // cas-6913: task_id pre-assigns a task to the (single) spawned
         // worker. Reject anything that would make "the spawned worker"
@@ -2677,6 +2777,33 @@ impl CasService {
         let requester_secure_storage_dir = (specs.len() == 1)
             .then(|| specs[0].requester_secure_storage_dir.as_deref())
             .flatten();
+        // cas-ee68: store the brief on the task before the worker exists, so
+        // the spawn message can quote it and task show/start list it.
+        let brief_delivery_note = match (spawn_brief.as_deref(), req.task_id.as_deref()) {
+            (Some(brief), Some(task_id)) => {
+                let note = crate::ui::factory::daemon::runtime::queue_and_events::spawn_brief_note(
+                    brief,
+                    chrono::Utc::now(),
+                );
+                task_store.append_note(task_id, &note).map_err(|e| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "spawn_brief could not be stored on {task_id}; no worker was queued: {e}"
+                        ),
+                    )
+                })?;
+                format!(
+                    "\nSupervisor brief: stored on {task_id} and quoted in the worker's spawn \
+                     message, so it is read before task start."
+                )
+            }
+            _ => "\nSupervisor brief: none supplied or delivered. Pass spawn_brief with task_id \
+                  so the worker reads it before task start; a message sent after registration can \
+                  arrive after the worker has started."
+                .to_string(),
+        };
+
         let request_id = queue
             .enqueue_spawn_with_requester_account_dirs(
                 count,
@@ -2715,7 +2842,6 @@ impl CasService {
             .unwrap_or_default();
         // cas-0078: peer findings, measured before the queue row existed.
         let task_id_note = format!("{task_id_note}{peer_notice}");
-        let brief_delivery_note = "\nSupervisor brief: none supplied or delivered. To send a brief, use coordination action=message after the worker registers.";
         let request_id_text = request_id.to_string();
         let count_text = count.to_string();
         let worker_names_text = worker_names.join(",");
@@ -2789,11 +2915,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -11373,6 +11499,69 @@ mod spawn_lifecycle_tests {
         );
     }
 
+    /// Communication contract v2, P3.7 (cas-ee68): a spawn brief is stored on
+    /// the pre-assigned task before the worker is queued, and the receipt
+    /// says so. A brief without a task is refused, since nothing would carry
+    /// it to the worker before task start.
+    #[tokio::test]
+    async fn ct2_p3_spawn_brief_is_stored_on_the_preassigned_task() {
+        use cas_types::Task;
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let temp = tempfile::tempdir().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("open task store");
+        task_store.init().expect("init task store");
+        task_store
+            .add(&Task::new("cas-brief1".to_string(), "Fix the sweep".to_string()))
+            .expect("add task");
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let orphan: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude",
+            "spawn_brief": "Rebase onto the epic first."
+        }))
+        .expect("valid request");
+        let refused = service
+            .factory_spawn_workers(orphan)
+            .await
+            .expect_err("a brief needs a task to ride on");
+        assert!(refused.message.contains("spawn_brief needs task_id"), "{}", refused.message);
+
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude",
+            "task_id": "cas-brief1",
+            "spawn_brief": "Rebase onto the epic first; tests are part of the task."
+        }))
+        .expect("valid spawn request");
+        let response = service
+            .factory_spawn_workers(request)
+            .await
+            .expect("queue worker spawn");
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
+        let notes = task_store.get("cas-brief1").expect("task").notes;
+        assert!(
+            notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),
+            "{notes}"
+        );
+    }
+
     /// GH #257: spawning is another planning write moment. Its ordinary queue
     /// receipt must carry a matching project memory, not require a separate
     /// pull/search after the worker request was already made.
@@ -11452,6 +11641,167 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn spawn_build_check_case(
+        session: &str,
+        daemon_build_hash: Option<&str>,
+        provisioner_build: Option<&str>,
+    ) -> (String, Vec<cas_store::SpawnRequest>) {
+        use cas_store::SpawnQueueStore;
+        use cas_types::TaskType;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
+        tasks.init().expect("initialize task store");
+        let mut epic = cas_types::Task::new("cas-1174-epic".into(), "worker build check".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).expect("add active epic");
+
+        if let Some(daemon_build_hash) = daemon_build_hash {
+            let sessions = crate::ui::factory::SessionManager::new();
+            sessions.ensure_dir().expect("create session directory");
+            let mut metadata = crate::ui::factory::create_metadata(
+                session,
+                std::process::id(),
+                "supervisor",
+                &[],
+                None,
+                Some(cas_root.to_string_lossy().as_ref()),
+                None,
+            );
+            metadata.daemon_build_hash = Some(daemon_build_hash.to_string());
+            std::fs::write(
+                crate::ui::factory::metadata_path(session),
+                serde_json::to_vec(&metadata).expect("encode session metadata"),
+            )
+            .expect("write session metadata");
+        }
+
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "grok"
+        }))
+        .expect("valid spawn request");
+        let response = service
+            .factory_spawn_workers_in_with_provisioner_build(
+                &crate::ops::fleet::FleetContext::operator(session),
+                req,
+                provisioner_build,
+            )
+            .await
+            .expect("spawn is queued when build identity is inconclusive");
+        let receipt = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
+        (receipt, queue.peek(10).expect("read spawn queue"))
+    }
+
+    #[tokio::test]
+    async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
+        let (receipt, queue) =
+            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"))
+                .await;
+
+        assert!(
+            receipt.contains(
+                "Build check: skipped (session build metadata unavailable); the provisioner still checks at spawn time"
+            ),
+            "receipt should explain why the early check was skipped: {receipt}"
+        );
+        assert_eq!(queue.len(), 1, "an unknown daemon build must not refuse spawn");
+    }
+
+    #[tokio::test]
+    async fn unprobeable_provisioner_identity_skips_build_check_and_queues_spawn() {
+        let (receipt, queue) =
+            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None).await;
+
+        assert!(
+            receipt.contains(
+                "Build check: skipped (provisioner build ID unavailable); the provisioner still checks at spawn time"
+            ),
+            "receipt should explain why the early check was skipped: {receipt}"
+        );
+        assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+    }
+
+    #[tokio::test]
+    async fn older_factory_daemon_build_is_reported_before_spawn_is_queued_gh_1174() {
+        use cas_store::SpawnQueueStore;
+        use cas_types::TaskType;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
+        tasks.init().expect("initialize task store");
+        let mut epic = cas_types::Task::new("cas-1174-epic".into(), "worker build check".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).expect("add active epic");
+        let session = "older-daemon-1174";
+        let metadata = crate::ui::factory::create_metadata(
+            session,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some(cas_root.to_string_lossy().as_ref()),
+            None,
+        );
+        let mut metadata = serde_json::to_value(metadata).expect("serialize metadata");
+        assert!(metadata["daemon_build_hash"].is_string());
+        metadata["daemon_build_hash"] = serde_json::json!("older-daemon-build");
+        let provisioner_build = crate::ui::factory::installed_provisioner_build_hash()
+            .expect("read the provisioner build id");
+        let sessions = crate::ui::factory::SessionManager::new();
+        sessions.ensure_dir().expect("create session directory");
+        std::fs::write(
+            crate::ui::factory::metadata_path(session),
+            serde_json::to_vec(&metadata).expect("encode metadata"),
+        )
+        .expect("write old daemon identity");
+
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "grok"
+        }))
+        .expect("valid spawn request");
+
+        let error = service
+            .factory_spawn_workers_in(&crate::ops::fleet::FleetContext::operator(session), req)
+            .await
+            .expect_err("stale daemon must be rejected before queueing a worker");
+        let message = error.to_string();
+        assert!(message.contains("provision_build_mismatch"), "{message}");
+        assert!(message.contains("older-daemon-build"), "{message}");
+        assert!(message.contains(&provisioner_build), "{message}");
+        assert!(message.contains("cas factory kill"), "{message}");
+        assert!(message.contains(session), "{message}");
+
+        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
+        assert!(queue.peek(10).expect("read spawn queue").is_empty());
+    }
 
     #[test]
     fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {

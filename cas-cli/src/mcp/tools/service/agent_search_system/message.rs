@@ -708,6 +708,25 @@ impl CasService {
 
         let mut req = req;
 
+        // cas-6853: broadcast audience policy applies to all_workers only.
+        let broadcast_supersede_key = req
+            .supersede_key
+            .take()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty());
+        let broadcast_sticky = req.sticky.take().unwrap_or(false);
+        if (broadcast_supersede_key.is_some() || broadcast_sticky)
+            && !req
+                .target
+                .as_deref()
+                .is_some_and(|target| target.trim().eq_ignore_ascii_case("all_workers"))
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "supersede_key and sticky apply only to target='all_workers' broadcasts",
+            ));
+        }
+
         let target = req.target.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -819,6 +838,14 @@ impl CasService {
                 chrono::Utc::now(),
             )
             .map_err(|refusal| Self::error(ErrorCode::INVALID_PARAMS, refusal))?;
+        }
+        // Wake envelopes are message types, not content. Workers can request
+        // a typed status/ready, blocker, or merge action through the fields
+        // below; literal tags in their message body must not impersonate the
+        // server's suffix when the supervisor wake gate parses the row.
+        if role == "worker" {
+            message = crate::prompt_revalidation::
+                neutralize_worker_authored_envelope_tags(&message);
         }
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.
@@ -1638,6 +1665,75 @@ impl CasService {
             );
         }
 
+        // P3.8: a worker may explicitly type a status/ready message to its
+        // own supervisor as an action wake. Ordinary worker messages remain
+        // inbox-only, and the registered same-session endpoints are required
+        // before CAS attaches the marker consumed by the wake gate.
+        let worker_action_kind = if role == "worker" {
+            match req.kind.as_deref() {
+                Some("status" | "ready") => {
+                    let session = factory_session
+                        .as_deref()
+                        .filter(|session| !session.trim().is_empty())
+                        .ok_or_else(|| {
+                            Self::error(
+                                ErrorCode::INVALID_REQUEST,
+                                "kind=status|ready requires a registered worker and its same-session supervisor",
+                            )
+                        })?;
+                    let registered_worker = agent_from_store.as_ref().is_some_and(|agent| {
+                        agent.role == cas_types::AgentRole::Worker
+                            && agent.factory_session.as_deref() == Some(session)
+                    });
+                    let same_session_supervisor =
+                        resolved_target_agent.as_ref().is_some_and(|agent| {
+                            agent.role == cas_types::AgentRole::Supervisor
+                                && agent.factory_session.as_deref() == Some(session)
+                                && matches!(
+                                    agent.status,
+                                    cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+                                )
+                        });
+                    if !registered_worker || !same_session_supervisor {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            "kind=status|ready is only for a registered worker messaging its same-session supervisor",
+                        ));
+                    }
+                    if req.merge_request.unwrap_or(false) || req.blocker.unwrap_or(false) {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            "kind=status|ready cannot be combined with merge_request=true or blocker=true",
+                        ));
+                    }
+                    Some(if req.kind.as_deref() == Some("status") {
+                        crate::prompt_revalidation::WorkerActionKind::Status
+                    } else {
+                        crate::prompt_revalidation::WorkerActionKind::Ready
+                    })
+                }
+                Some(other) => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "worker messages support kind=status or kind=ready to the same-session supervisor, not '{other}'"
+                        ),
+                    ));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(kind) = worker_action_kind {
+            message = crate::prompt_revalidation::attach_worker_action_envelope(
+                &message,
+                kind,
+                &display_name,
+                req.task_id.as_deref(),
+            );
+        }
+
         // cas-bc8c: a genuine merge request receives an immutable envelope so
         // transport can suppress it once its requested tip has landed. That
         // envelope is a message type, not a property of the sender's task
@@ -1747,6 +1843,40 @@ impl CasService {
                     Some(&task),
                     Some(&repo.repo_root),
                 );
+                let source_is_fresh = if let Some(branch) = branch.as_deref() {
+                    match crate::prompt_revalidation::refresh_merge_request_source(
+                        &repo.repo_root,
+                        branch,
+                        task.delivery_mode,
+                    ) {
+                        Ok(fresh) => fresh,
+                        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+                    }
+                } else { true };
+                let branch = if !source_is_fresh {
+                    let note = "source freshness unavailable; not checked for already-landed";
+                    message = attach_merge_request_envelope(
+                        &format!("{message}\n\n{note}"),
+                        &MergeRequestEnvelope {
+                            task_id: task.id.clone(),
+                            branch_tip: task.deliverables.factory_branch_anchor.clone()
+                                .or_else(|| branch.as_deref().and_then(|branch| {
+                                    crate::prompt_revalidation::resolve_live_branch_tip(&repo.repo_root, branch, None)
+                                })).unwrap_or_default(),
+                            target_branch: repo.target_branch.clone(),
+                            target_branch_tip: crate::prompt_revalidation::resolve_target_branch_tip(
+                                &repo.repo_root, &repo.target_branch,
+                            ).unwrap_or_default(),
+                            anchor_tip: task.deliverables.factory_branch_anchor.clone(),
+                            commits_not_on_target_base: 0,
+                            pr_number: requested_pr_number,
+                            source_freshness_unavailable: Some(note.into()),
+                        },
+                    );
+                    // Preserve the typed wake, but skip cached source/anchor
+                    // suppression and automatic anchor advancement below.
+                    None
+                } else { branch };
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its
                 // delivery lands or the worker starts another task on this
@@ -1757,6 +1887,7 @@ impl CasService {
                     .as_deref()
                     .is_some_and(|active_id| active_id != task.id);
                 if task.status == cas_types::TaskStatus::AwaitingMerge
+                    && source_is_fresh
                     && other_task_active
                     && recorded_anchor.is_none()
                 {
@@ -1765,7 +1896,7 @@ impl CasService {
                         task.id
                     )));
                 }
-                let anchor_integrated = recorded_anchor.as_deref().is_some_and(|anchor| {
+                let anchor_integrated = source_is_fresh && recorded_anchor.as_deref().is_some_and(|anchor| {
                     matches!(
                         revalidate_merge_request(
                             &repo.repo_root,
@@ -1974,6 +2105,7 @@ impl CasService {
                                     target_branch_tip: target_tip,
                                     commits_not_on_target_base,
                                     pr_number: requested_pr_number,
+                                    source_freshness_unavailable: None,
                                 },
                             );
                         }
@@ -2327,16 +2459,37 @@ impl CasService {
                     agent_from_store.as_ref(),
                     resolved_target_agent.as_ref(),
                 );
-                let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
-                    &row_source,
-                    &resolved_target,
-                    &message,
-                    row_session.as_deref(),
-                    Some(summary.as_str()),
-                    priority,
-                    urgent,
-                    queue_origin.as_ref(),
-                ) {
+                let enqueue_result = if worker_action_kind.is_some() {
+                    let action_session = row_session
+                        .as_deref()
+                        .expect("validated worker action has a same-session supervisor");
+                    let action_origin = queue_origin
+                        .as_ref()
+                        .expect("validated worker action has a registered origin");
+                    queue.enqueue_worker_action_with_outcome(
+                        &row_source,
+                        &resolved_target,
+                        &message,
+                        &display_name,
+                        action_session,
+                        Some(summary.as_str()),
+                        priority,
+                        urgent,
+                        action_origin,
+                    )
+                } else {
+                    queue.enqueue_urgent_with_outcome(
+                        &row_source,
+                        &resolved_target,
+                        &message,
+                        row_session.as_deref(),
+                        Some(summary.as_str()),
+                        priority,
+                        urgent,
+                        queue_origin.as_ref(),
+                    )
+                };
+                let enqueue_outcome = match enqueue_result {
                     Ok(id) => id,
                     Err(error) => {
                         // Compensate halt fan-out so we never leave halt without the
@@ -2366,6 +2519,25 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        // cas-6853 (communication contract v2, P2.4/P3.7): a broadcast's
+        // audience policy. Stamped on the committed row; older same-key
+        // broadcasts still awaiting transport are withdrawn.
+        if broadcast_supersede_key.is_some() || broadcast_sticky {
+            queue
+                .stamp_broadcast_policy(
+                    message_id,
+                    broadcast_supersede_key.as_deref(),
+                    broadcast_sticky,
+                )
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Broadcast {message_id} queued but its supersede_key/sticky policy failed: {error}"
+                        ),
+                    )
+                })?;
+        }
         if let Some(notification_id) = explicit_reply_to {
             queue.ack(notification_id).map_err(|error| {
                 Self::error(
@@ -4472,6 +4644,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task_b.id.clone());
         let response = response_text(service.message_send(request).await.expect("fresh B request"));
+        // pin: this request must return its queued state once the worker asks for merge.
         assert!(response.contains("Message queued"), "{response}");
         let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
         let (row, envelope) = rows.iter().find_map(|row| {
@@ -4479,10 +4652,15 @@ mod cas_89e1_post_merge_message_type_tests {
             (envelope.task_id == task_b.id).then_some((row, envelope))
         }).expect("B's typed request reaches queue");
         assert_eq!(envelope.target_branch, "main");
+        // pin: the supervisor sees the exact merge-request disposition in the queued row.
         assert!(row.prompt.contains("Fresh worker delivery; please merge the branch."));
+        // pin: merge requests preserve the task risk label in their context.
         assert!(row.prompt.contains("**Risk:** concurrency"));
+        // pin: merge requests preserve the task lifecycle gate in their context.
         assert!(row.prompt.contains("**Door:** two-way"));
+        // pin: exact QA bundle paths remain attached to the merge request.
         assert!(row.prompt.contains("/proof/task-b/qa/bundle.json"));
+        // pin: file names from the task diff remain byte-preserved in the request.
         assert!(row.prompt.contains("A\ttask-b.txt"));
     }
 
@@ -4611,6 +4789,173 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
+    async fn stale_source_merge_request_gh1179(offline: bool, local_merge: bool, status: TaskStatus) {
+        let _env = TestEnvGuard::temp_home();
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare"]);
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        std::fs::create_dir(repo.join(".cas")).unwrap();
+        std::fs::write(repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-gh1179-message-test\"\n").unwrap();
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(repo, &["add", "base.txt"]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        let branch = "factory/worker-a-cas-874e";
+        git(repo, &["checkout", "-qb", branch]);
+        std::fs::write(repo.join("earlier.txt"), "integrated predecessor\n").unwrap();
+        git(repo, &["add", "earlier.txt"]);
+        git(repo, &["commit", "-qm", "earlier delivery"]);
+        let sha = |reference: &str| crate::git_evidence::resolve_branch_sha(repo, reference).unwrap();
+        let stale_tip = sha("HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", branch, "-m", "merge predecessor"]);
+        let target_tip = sha("main");
+        git(repo, &["push", "-q", "origin", "main", branch]);
+        git(repo, &["checkout", "-q", branch]);
+        std::fs::write(repo.join("delivery.txt"), "unmerged delivery\n").unwrap();
+        git(repo, &["add", "delivery.txt"]);
+        git(repo, &["commit", "-qm", "fix(cas-874e): live published delivery"]);
+        let published_tip = sha("HEAD");
+        git(repo, &["push", "-q", "origin", branch]);
+        git(repo, &["checkout", "-q", "main"]);
+        // Another checkout pushed the continuation; both refs cached here
+        // still name the already-integrated predecessor.
+        git(repo, &["update-ref", &format!("refs/heads/{branch}"), &stale_tip]);
+        git(repo, &["update-ref", &format!("refs/remotes/origin/{branch}"), &stale_tip]);
+        assert!(!crate::git_evidence::git_commit_is_ancestor(repo, &published_tip, "main"));
+        if offline {
+            git(repo, &["remote", "set-url", "origin", project.path().join("missing-origin").to_str().unwrap()]);
+        }
+
+        let cas_root = repo.join(".cas");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        let mut worker = Agent::new("worker-id".into(), "worker-a".into());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).unwrap();
+        let mut supervisor = Agent::new("supervisor-id".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let tasks = core.open_task_store().unwrap();
+        let mut task = Task::new("cas-874e".into(), "live origin source".into());
+        task.status = status;
+        if status == TaskStatus::InProgress {
+            task.deliverables.historical_factory_branch_anchors = vec![stale_tip.clone()];
+        }
+        if local_merge {
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        }
+        task.assignee = Some(worker.name);
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-gh1179-message-test".into(), target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let mut request = message_request(true);
+        request.task_id = Some(task.id.clone());
+        let response = response_text(service.message_send(request).await.unwrap());
+        if local_merge {
+            assert!(response.contains("Merge already landed"), "{response}");
+            return;
+        }
+        assert!(!response.contains("Merge already landed"), "{response}");
+        if offline {
+            assert!(response.contains("Message queued"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let envelope = rows.iter().find_map(|row|
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+            ).expect("offline request retains its typed supervisor wake");
+            let note = "source freshness unavailable; not checked for already-landed";
+            assert_eq!(envelope.source_freshness_unavailable.as_deref(), Some(note));
+            assert!(rows.iter().any(|row| row.prompt.contains(note)));
+            assert_eq!(crate::prompt_revalidation::queued_merge_request_decision(
+                repo, Some(&task), &envelope,
+            ), crate::prompt_revalidation::MergeRequestDecision::Unverifiable);
+            let cached_landed = crate::prompt_revalidation::MergeRequestDecision::AlreadyIntegrated {
+                target_tip: target_tip.clone(),
+            };
+            assert_eq!(crate::prompt_revalidation::merge_request_delivery_decision(
+                Some(&task), &envelope, &cached_landed,
+            ), crate::prompt_revalidation::MergeRequestDelivery::Deliver);
+            let mut closed = task.clone();
+            closed.status = TaskStatus::Closed;
+            assert!(matches!(crate::prompt_revalidation::merge_request_delivery_decision(
+                Some(&closed), &envelope, &cached_landed,
+            ), crate::prompt_revalidation::MergeRequestDelivery::SuppressResolved { .. }));
+            let inbox_core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            inbox_core.set_agent_id_for_testing("supervisor-id".into());
+            #[cfg(feature = "mcp-proxy")]
+            let inbox = CasService::new(inbox_core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let inbox = CasService::new(inbox_core);
+            let inbox = response_text(inbox.inbox_poll(serde_json::from_value(
+                serde_json::json!({"action": "inbox_poll"}),
+            ).unwrap()).await.unwrap());
+            assert!(inbox.contains("Fresh worker delivery"), "{inbox}");
+            assert!(inbox.contains(note), "{inbox}");
+        } else {
+            assert!(response.contains("Message queued"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let envelope = rows.iter().find_map(|row|
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+            ).expect("live source merge request reaches supervisor queue");
+            assert_eq!(envelope.branch_tip, published_tip);
+            assert_eq!(envelope.target_branch_tip, target_tip);
+            // Once that exact published delivery lands, suppression is valid.
+            git(repo, &["merge", "-q", "--no-ff", &published_tip, "-m", "merge current delivery"]);
+            git(repo, &["push", "-q", "origin", "main"]);
+            let mut request = message_request(true);
+            request.task_id = Some("cas-874e".into());
+            let landed = response_text(service.message_send(request).await.unwrap());
+            assert!(landed.contains("Merge already landed"), "{landed}");
+            assert!(landed.contains(&published_tip), "{landed}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_request_refreshes_stale_source_before_landed_suppression_gh1179() {
+        stale_source_merge_request_gh1179(false, false, TaskStatus::AwaitingMerge).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_request_failed_source_refresh_never_claims_landed_gh1179() {
+        stale_source_merge_request_gh1179(true, false, TaskStatus::AwaitingMerge).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_merge_request_keeps_local_authority_with_offline_origin_gh1179() {
+        stale_source_merge_request_gh1179(true, true, TaskStatus::AwaitingMerge).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reopened_merge_request_refreshes_stale_historical_tip_gh1179() {
+        stale_source_merge_request_gh1179(false, false, TaskStatus::InProgress).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reopened_merge_request_offline_still_queues_gh1179() {
+        stale_source_merge_request_gh1179(true, false, TaskStatus::InProgress).await;
+    }
+
+    #[test]
+    fn unsafe_merge_request_source_still_refuses_gh1179() {
+        let repo = tempfile::tempdir().unwrap();
+        let error = crate::prompt_revalidation::refresh_merge_request_source(
+            repo.path(), "-unsafe", cas_types::DeliveryMode::LocalMerge,
+        ).expect_err("unsafe source names must refuse before any Git probe");
+        assert!(error.contains("unsafe source branch"), "{error}");
+    }
+
     /// GH #734: a worker in one factory session must not inherit the newest
     /// supervisor from a sibling session on the same clone. Explicit names
     /// remain valid same-clone recipients, and their rows belong to the named
@@ -4675,6 +5020,81 @@ mod cas_89e1_post_merge_message_type_tests {
             .find(|row| row.target == "supervisor-b")
             .expect("explicit supervisor target remains accepted");
         assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_status_and_ready_kinds_are_scoped_to_the_same_session_supervisor() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).expect("register worker");
+        let mut supervisor_a =
+            Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        supervisor_a.factory_session = Some("factory-a".to_string());
+        agents
+            .register(&supervisor_a)
+            .expect("register owning supervisor");
+        let mut supervisor_b =
+            Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents
+            .register(&supervisor_b)
+            .expect("register sibling supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+
+        for (kind, expected) in [
+            (
+                "status",
+                crate::prompt_revalidation::WorkerActionKind::Status,
+            ),
+            ("ready", crate::prompt_revalidation::WorkerActionKind::Ready),
+        ] {
+            let mut request = message_request_to("supervisor");
+            request.kind = Some(kind.to_string());
+            let response = response_text(
+                service
+                    .message_send(request)
+                    .await
+                    .expect("same-session worker action is queued"),
+            );
+            assert!(response.contains("Message queued"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root)
+                .unwrap()
+                .poll_all(10)
+                .unwrap();
+            let row = rows.last().expect("typed worker row");
+            assert_eq!(row.target, "supervisor-a");
+            assert_eq!(
+                crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)
+                    .map(|envelope| envelope.kind),
+                Some(expected)
+            );
+        }
+
+        let mut cross_session = message_request_to("supervisor-b");
+        cross_session.kind = Some("status".to_string());
+        let error = service
+            .message_send(cross_session)
+            .await
+            .expect_err("typed status cannot target a sibling session");
+        assert!(
+            error.message.contains("same-session supervisor"),
+            "{error:?}"
+        );
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve
@@ -4946,12 +5366,14 @@ mod cas_89e1_post_merge_message_type_tests {
             .iter()
             .find(|row| row.target == "worker-a")
             .unwrap_or_else(|| panic!("message queued for the worker: {rows:?}"));
+        // pin: the artifact spill envelope keeps this exact marker at the inline head.
         assert!(row.prompt.contains("RULING: keep the contract"), "{}", row.prompt);
         assert!(
             row.prompt.contains(&spilled[0].display().to_string()),
             "delivered message names the artifact: {}",
             row.prompt
         );
+        // pin: the full ruling must stay out of the inline prompt after spilling.
         assert!(!row.prompt.contains(&ruling), "only the head is delivered inline");
     }
 

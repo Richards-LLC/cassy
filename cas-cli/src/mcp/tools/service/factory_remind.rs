@@ -4,6 +4,39 @@ const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
 use crate::ui::factory::daemon::runtime::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
 
+/// GH #1208: default lifetime of an external (`branch_contained_in`,
+/// `tag_exists`, `ci_completed`) reminder when `remind_ttl_secs` is omitted.
+/// Long enough for a merge queue or release; an explicit `0` still opts into
+/// no expiry. Before this, the default `0` left dead sessions' wakes probing
+/// origin forever.
+pub(crate) const EXTERNAL_REMINDER_DEFAULT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Default `remind_ttl_secs` for an event (or time) reminder.
+fn default_reminder_ttl_secs(remind_event: Option<&str>) -> i64 {
+    if remind_event.is_some_and(is_external_reminder_event) {
+        EXTERNAL_REMINDER_DEFAULT_TTL_SECS
+    } else {
+        3600
+    }
+}
+
+/// GH #1208: store a `branch_contained_in` target as the bare origin branch,
+/// so `origin/staging` cannot become a reminder that never fires.
+fn normalize_external_filter(event_type: &str, filter: &mut serde_json::Value) {
+    if event_type != EXTERNAL_BRANCH_CONTAINED_EVENT {
+        return;
+    }
+    let Some(object) = filter.as_object_mut() else {
+        return;
+    };
+    for key in ["target_branch", "target"] {
+        if let Some(serde_json::Value::String(value)) = object.get_mut(key) {
+            *value = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(value)
+                .to_string();
+        }
+    }
+}
+
 fn is_external_reminder_event(event_type: &str) -> bool {
     matches!(
         event_type,
@@ -26,73 +59,167 @@ fn external_filter_string(
     })
 }
 
+/// GH #1207: the `remind_filter` contract of one external event. `required`
+/// names each field with the JSON keys that supply it, preferred key first.
+struct ExternalFilterSpec {
+    required: &'static [(&'static str, &'static [&'static str])],
+    optional: &'static [&'static str],
+    example: &'static str,
+}
+
+fn external_filter_spec(event_type: &str) -> Option<ExternalFilterSpec> {
+    match event_type {
+        EXTERNAL_BRANCH_CONTAINED_EVENT => Some(ExternalFilterSpec {
+            required: &[
+                ("commit", &["commit", "branch_tip", "branch", "sha"]),
+                ("target_branch", &["target_branch", "target"]),
+            ],
+            optional: &[],
+            example: r#"{"commit":"<sha-or-ref>","target_branch":"main"}"#,
+        }),
+        EXTERNAL_TAG_EXISTS_EVENT => Some(ExternalFilterSpec {
+            required: &[("tag", &["tag"])],
+            optional: &[],
+            example: r#"{"tag":"<tag>"}"#,
+        }),
+        EXTERNAL_CI_COMPLETED_EVENT => Some(ExternalFilterSpec {
+            required: &[("sha", &["sha"])],
+            optional: &["workflow"],
+            example: r#"{"sha":"<full 40-character sha>","workflow":"CI"}"#,
+        }),
+        _ => None,
+    }
+}
+
+/// Validate an external reminder and report every problem in one refusal
+/// (GH #1207). Callers used to learn the contract one rejection at a time:
+/// first cross_session, then a missing key, while an unknown key such as
+/// `branch` on `ci_completed` was silently ignored.
 fn validate_external_reminder(
     event_type: &str,
     filter: Option<&serde_json::Value>,
     cross_session: bool,
     ttl_secs: i64,
 ) -> std::result::Result<(), String> {
-    if !is_external_reminder_event(event_type) {
+    let Some(spec) = external_filter_spec(event_type) else {
         return Ok(());
-    }
+    };
+    let mut problems = Vec::new();
     if !cross_session {
-        return Err(
-            "external reminders require cross_session=true so a daemon/session restart cannot lose the wake"
+        problems.push(
+            "cross_session=true is required, so a daemon or session restart cannot lose the wake"
                 .to_string(),
         );
     }
     if ttl_secs < 0 {
-        return Err("remind_ttl_secs must be zero (no expiry) or positive".to_string());
+        problems.push("remind_ttl_secs must be zero (no expiry) or positive".to_string());
     }
-    let filter = filter.ok_or_else(|| {
-        format!(
-            "{event_type} reminders require remind_filter JSON: {}",
-            match event_type {
-                EXTERNAL_BRANCH_CONTAINED_EVENT => {
-                    "{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}"
-                }
-                EXTERNAL_CI_COMPLETED_EVENT => "{\"sha\":\"<full sha>\",\"workflow\":\"CI\"}",
-                _ => "{\"tag\":\"<tag>\"}",
+    let describe = |keys: &[&str]| match keys {
+        [only] => format!("`{only}`"),
+        [first, aliases @ ..] => format!(
+            "`{first}` (or {})",
+            aliases.iter().map(|alias| format!("`{alias}`")).collect::<Vec<_>>().join("/")
+        ),
+        [] => String::new(),
+    };
+    match filter.and_then(serde_json::Value::as_object) {
+        None => problems.push(format!(
+            "remind_filter must be a JSON object with {}",
+            spec.required
+                .iter()
+                .map(|(_, keys)| describe(keys))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )),
+        Some(object) => {
+            let accepted: Vec<&str> = spec
+                .required
+                .iter()
+                .flat_map(|(_, keys)| keys.iter().copied())
+                .chain(spec.optional.iter().copied())
+                .collect();
+            let unknown: Vec<String> = object
+                .keys()
+                .filter(|key| !accepted.contains(&key.as_str()))
+                .map(|key| format!("`{key}`"))
+                .collect();
+            if !unknown.is_empty() {
+                problems.push(format!(
+                    "unknown remind_filter key(s) {}; {event_type} accepts {}",
+                    unknown.join(", "),
+                    accepted.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", ")
+                ));
             }
-        )
-    })?;
-    let object = filter
-        .as_object()
-        .ok_or_else(|| "external remind_filter must be a JSON object".to_string())?;
-    if object.keys().any(|key| key.starts_with('-')) {
-        return Err("external git refs must be supplied as JSON string fields".to_string());
+            let filter = filter.expect("object implies a filter");
+            for (_, keys) in spec.required {
+                if external_filter_string(filter, keys).is_none() {
+                    problems.push(format!(
+                        "remind_filter requires string field {}",
+                        describe(keys)
+                    ));
+                }
+            }
+            problems.extend(external_filter_value_problems(event_type, filter));
+        }
     }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{event_type} reminder refused ({} problem{}):\n{}\nExample: cross_session=true remind_filter='{}'",
+        problems.len(),
+        if problems.len() == 1 { "" } else { "s" },
+        problems
+            .iter()
+            .map(|problem| format!("- {problem}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        spec.example
+    ))
+}
+
+/// Value checks for the fields that are present; missing fields are reported
+/// by the caller.
+fn external_filter_value_problems(event_type: &str, filter: &serde_json::Value) -> Vec<String> {
+    let mut problems = Vec::new();
     match event_type {
         EXTERNAL_BRANCH_CONTAINED_EVENT => {
-            let commit = external_filter_string(filter, &["commit", "branch_tip", "branch"]);
-            let target = external_filter_string(filter, &["target_branch", "target"]);
-            if commit.is_none() || target.is_none() {
-                return Err(
-                    "branch_contained_in remind_filter requires string fields `commit` and `target_branch`"
-                        .to_string(),
-                );
+            let commit = external_filter_string(filter, &["commit", "branch_tip", "branch", "sha"]);
+            if let Some(target) = external_filter_string(filter, &["target_branch", "target"]) {
+                let target =
+                    crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(
+                        &target,
+                    );
+                if target.is_empty() {
+                    problems.push(
+                        "target_branch must name a branch on origin, e.g. \"main\"".to_string(),
+                    );
+                } else if target.starts_with('-') {
+                    problems.push("target_branch may not start with '-'".to_string());
+                }
             }
-            if commit.is_some_and(|value| value.starts_with('-'))
-                || target.is_some_and(|value| value.starts_with('-'))
-            {
-                return Err("external git refs may not start with '-'".to_string());
+            if commit.is_some_and(|value| value.starts_with('-')) {
+                problems.push("commit may not start with '-'".to_string());
             }
         }
         EXTERNAL_TAG_EXISTS_EVENT => {
-            let tag = external_filter_string(filter, &["tag"]);
-            if tag.is_none() {
-                return Err("tag_exists remind_filter requires string field `tag`".to_string());
-            }
-            if tag.is_some_and(|value| value.starts_with('-') || value.ends_with('/')) {
-                return Err("external tag must be a valid git ref name".to_string());
+            if external_filter_string(filter, &["tag"])
+                .is_some_and(|value| value.starts_with('-') || value.ends_with('/'))
+            {
+                problems.push("tag must be a valid git ref name".to_string());
             }
         }
         EXTERNAL_CI_COMPLETED_EVENT => {
-            crate::ui::factory::daemon::runtime::ci_watch::parse_ci_completed(filter)?;
+            if external_filter_string(filter, &["sha"]).is_some()
+                && crate::ui::factory::daemon::runtime::ci_watch::parse_ci_completed(filter)
+                    .is_err()
+            {
+                problems.push("`sha` must be the full 40-character commit SHA".to_string());
+            }
         }
-        _ => unreachable!("checked by is_external_reminder_event"),
+        _ => {}
     }
-    Ok(())
+    problems
 }
 
 impl CasService {
@@ -189,17 +316,9 @@ impl CasService {
             (None, None)
         };
 
-        let ttl_secs = req.remind_ttl_secs.unwrap_or_else(|| {
-            if req
-                .remind_event
-                .as_deref()
-                .is_some_and(is_external_reminder_event)
-            {
-                0
-            } else {
-                3600
-            }
-        });
+        let ttl_secs = req
+            .remind_ttl_secs
+            .unwrap_or_else(|| default_reminder_ttl_secs(req.remind_event.as_deref()));
         if ttl_secs < 0 {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -392,6 +511,10 @@ impl CasService {
                 ttl_secs,
             ) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, error));
+            }
+            let mut filter = filter;
+            if let Some(filter) = filter.as_mut() {
+                normalize_external_filter(&event_type, filter);
             }
 
             let id = store
@@ -760,11 +883,17 @@ mod tests {
             validate_external_reminder("branch_contained_in", Some(&filter), false, 0).is_err()
         );
         assert!(validate_external_reminder("branch_contained_in", None, true, 0).is_err());
+        // GH #1207: `sha` names the commit for branch_contained_in too.
+        let sha = serde_json::json!({"sha": "abc123", "target_branch": "main"});
+        assert!(validate_external_reminder("branch_contained_in", Some(&sha), true, 0).is_ok());
+        // Director events keep free-form subset filters.
+        let task = serde_json::json!({"task_id": "cas-a1b2", "anything": 1});
+        assert!(validate_external_reminder("task_completed", Some(&task), false, 0).is_ok());
     }
 
     #[test]
     fn external_reminder_validation_accepts_tag_and_rejects_invalid_refs() {
-        let tag = serde_json::json!({"tag": "v3.6.0"});
+        let tag = serde_json::json!({"tag": "v9.99.0"});
         assert!(validate_external_reminder("tag_exists", Some(&tag), true, 0).is_ok());
         assert!(validate_external_reminder(
             "tag_exists",
@@ -774,5 +903,48 @@ mod tests {
         )
         .is_err());
         assert!(validate_external_reminder("tag_exists", Some(&tag), true, -1).is_err());
+    }
+
+    /// GH #1207 reproduction: `ci_completed` with `{"run_id":…,"branch":…}`
+    /// and no cross_session was refused for cross_session alone; the retry
+    /// was refused for the missing `sha`, and the unknown keys were never
+    /// named. One refusal now lists all of it, with a working example.
+    #[test]
+    fn one_refusal_lists_every_missing_requirement() {
+        let filter = serde_json::json!({"run_id": 18234, "branch": "main"});
+        let error =
+            validate_external_reminder("ci_completed", Some(&filter), false, 0).unwrap_err();
+        assert!(error.starts_with("ci_completed reminder refused (3 problems):"), "{error}");
+        assert!(error.contains("cross_session=true is required"), "{error}");
+        assert!(error.contains("unknown remind_filter key(s) `branch`, `run_id`"), "{error}");
+        assert!(error.contains("accepts `sha`, `workflow`"), "{error}");
+        assert!(error.contains("requires string field `sha`"), "{error}");
+        assert!(error.contains(r#"Example: cross_session=true remind_filter='{"sha":"#), "{error}");
+
+        // branch_contained_in names both missing fields and their aliases.
+        let error = validate_external_reminder(
+            "branch_contained_in",
+            Some(&serde_json::json!({})),
+            true,
+            0,
+        )
+        .unwrap_err();
+        assert!(error.contains("(2 problems)"), "{error}");
+        assert!(
+            error.contains("`commit` (or `branch_tip`/`branch`/`sha`)")
+                && error.contains("`target_branch` (or `target`)"),
+            "{error}"
+        );
+
+        // A malformed value is reported with the other problems.
+        let error = validate_external_reminder(
+            "ci_completed",
+            Some(&serde_json::json!({"sha": "abc"})),
+            false,
+            0,
+        )
+        .unwrap_err();
+        assert!(error.contains("(2 problems)"), "{error}");
+        assert!(error.contains("`sha` must be the full 40-character commit SHA"), "{error}");
     }
 }

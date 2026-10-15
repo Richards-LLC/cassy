@@ -46,6 +46,12 @@ impl Config {
         };
 
         match key {
+            "factory.commander_mirror_enabled" => {
+                self.factory.get_or_insert_with(Default::default).commander_mirror_enabled =
+                    value.parse().map_err(|_| MemError::Parse(
+                        "Invalid boolean for factory.commander_mirror_enabled".into()
+                    ))?;
+            }
             "hub.tailscale_serve" => {
                 self.hub
                     .get_or_insert_with(Default::default)

@@ -1832,10 +1832,12 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
     )
     .expect("expire dispatch before malformed request");
     drop(conn);
-    let malformed_issues = format!(
-        r#"[{{"file":"src/lib.rs","severity":"{}","category":"security""#,
-        issued.token
-    );
+    let malformed_issues = serde_json::json!([{
+        "id": 1,
+        "file": "src/lib.rs",
+        "fix": "add a security check",
+    }])
+    .to_string();
     let malformed = child_service
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: task_id.clone(),
@@ -1852,12 +1854,50 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         .await
         .expect_err("malformed issues must reject before capability consumption");
     assert_eq!(malformed.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-    assert_eq!(
-        malformed.message,
-        "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted."
+    assert!(
+        malformed.message.contains("category") && malformed.message.contains("problem"),
+        "invalid issues should name missing required fields: {}",
+        malformed.message
     );
     assert!(!malformed.message.contains(&issued.token));
     assert!(!malformed.message.contains(&malformed_issues));
+    for issues in [
+        serde_json::json!([{
+            "severity": "high",
+            "file": "index.md",
+            "line": 160,
+            "description": "describe the issue",
+        }]),
+        serde_json::json!([{
+            "severity": "high",
+            "file": "index.md",
+            "line": 160,
+            "message": "describe the issue",
+        }]),
+    ] {
+        let issues = issues.to_string();
+        let error = child_service
+            .cas_verification_add(Parameters(VerificationAddRequest {
+                task_id: task_id.clone(),
+                status: "rejected".to_string(),
+                summary: "missing category field".to_string(),
+                confidence: None,
+                issues: Some(issues.clone()),
+                files_reviewed: None,
+                duration_ms: None,
+                verification_type: None,
+                verifier_capability: None,
+                dispatch_id: None,
+            }))
+            .await
+            .expect_err("reported issue shapes must explain missing category");
+        assert!(
+            error.message.contains("category"),
+            "issue-shape error should identify category: {}",
+            error.message
+        );
+        assert!(!error.message.contains(&issues));
+    }
     assert!(
         verification_store
             .get_latest_for_task(&task_id)
@@ -1902,6 +1942,16 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         "code": raw_pat,
         "problem": raw_control,
         "suggestion": raw_password,
+    }, {
+        "file": "src/description.rs",
+        "category": "clarity",
+        "severity": "high",
+        "description": "description alias is accepted",
+        "fix": "replace with a concise explanation",
+    }, {
+        "file": "src/message.rs",
+        "category": "documentation",
+        "message": "message alias is accepted",
     }])
     .to_string();
     let result = child_service
@@ -1943,6 +1993,13 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         row.issues[0].suggestion.as_deref(),
         Some("[REDACTED_SECRET]")
     );
+    assert_eq!(row.issues.len(), 3);
+    assert_eq!(row.issues[1].problem, "description alias is accepted");
+    assert_eq!(
+        row.issues[1].suggestion.as_deref(),
+        Some("replace with a concise explanation")
+    );
+    assert_eq!(row.issues[2].problem, "message alias is accepted");
     assert_eq!(
         row.files_reviewed,
         vec!["[REDACTED_PATH]".to_string(), "src/lib.rs".to_string()]

@@ -15,6 +15,8 @@
 //!   [`lock_file_exclusive_within_budget`]. Past the deadline they fail fast
 //!   with a `SQLITE_BUSY`-shaped error, so callers' existing busy handling
 //!   applies and the work is retried on a later pass.
+//! - [`grant_waits_for`] gives one deliberate action (a worker shutdown) its
+//!   own bounded deadline in place of a spent pass budget (cas-00d5).
 //! - [`forbid_store_access`] marks a region that must not touch the store at
 //!   all. A store access inside it is counted (see
 //!   [`store_access_violations`]) and logged, so a test can prove a code path
@@ -70,6 +72,24 @@ pub fn bound_waits_until(deadline: Instant) -> WaitBudgetGuard {
 /// [`bound_waits_until`] `now + budget`.
 pub fn bound_waits_for(budget: Duration) -> WaitBudgetGuard {
     bound_waits_until(Instant::now() + budget)
+}
+
+/// Give a deliberate, rare action its own budget of `budget` from now,
+/// replacing whatever is left of the deadline in force (cas-00d5).
+///
+/// A factory shutdown runs inside a loop pass whose budget earlier work may
+/// already have spent; under [`bound_waits_until`] it could never wait at
+/// all. The grant stays bounded, so contention still cannot freeze the
+/// thread for long. An unbounded thread stays unbounded. The previous
+/// deadline is restored when the guard drops.
+pub fn grant_waits_for(budget: Duration) -> WaitBudgetGuard {
+    let previous = DEADLINE.with(Cell::get);
+    let granted = previous.map(|_| Instant::now() + budget);
+    DEADLINE.with(|cell| cell.set(granted));
+    WaitBudgetGuard {
+        previous,
+        _not_send: std::marker::PhantomData,
+    }
 }
 
 /// The deadline in force on this thread, if any.
@@ -294,6 +314,25 @@ mod tests {
         }
         assert_eq!(wait_deadline(), Some(outer_deadline));
         drop(outer);
+        assert!(wait_deadline().is_none());
+    }
+
+    #[test]
+    fn a_grant_replaces_a_spent_pass_budget_and_restores_it_cas_00d5() {
+        let spent = Instant::now();
+        let _pass = bound_waits_until(spent);
+        assert!(wait_budget_exhausted());
+        {
+            let _grant = grant_waits_for(Duration::from_secs(2));
+            assert!(!wait_budget_exhausted(), "the granted action may wait");
+            assert!(remaining_wait().unwrap() <= Duration::from_secs(2));
+        }
+        assert_eq!(wait_deadline(), Some(spent), "the pass deadline returns");
+    }
+
+    #[test]
+    fn a_grant_never_bounds_an_unbounded_thread_cas_00d5() {
+        let _grant = grant_waits_for(Duration::from_millis(1));
         assert!(wait_deadline().is_none());
     }
 

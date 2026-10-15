@@ -753,6 +753,16 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub isolate: Option<bool>,
 
+    /// cas-ee68 (communication contract v2, P3.7): a supervisor brief for
+    /// the pre-assigned task. It is written to the task notes at spawn time
+    /// and quoted in the worker's spawn message, so the worker has it before
+    /// it starts the task.
+    #[schemars(
+        description = "spawn_workers with task_id: your brief for the worker. Stored on the task and shown in its spawn message, so it is read before task start."
+    )]
+    #[serde(default)]
+    pub spawn_brief: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -767,17 +777,17 @@ pub struct FactoryRequest {
     /// durable conditions are `branch_contained_in` with filter
     /// `{"commit":"<sha-or-ref>","target_branch":"main"}` and
     /// `tag_exists` with filter `{"tag":"<tag>"}`; external conditions
-    /// require `cross_session=true` and default to no expiry.
+    /// require `cross_session=true` and default to a seven-day TTL.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. External conditions require cross_session=true; use JSON filters {commit,target_branch}, {tag} or {sha,workflow?}."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
 
-    /// JSON filter for event matching. External branch/tag conditions use the
-    /// schemas documented on `remind_event`.
+    /// JSON filter for event matching. GH #1207: each external event's
+    /// required keys are published here, not learnt from rejections.
     #[schemars(
-        description = "JSON filter for event matching, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'"
+        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
     )]
     #[serde(default)]
     pub remind_filter: Option<String>,
@@ -787,9 +797,9 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// TTL in seconds for the reminder (default: 3600; zero means no expiry)
+    /// TTL in seconds for the reminder (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -997,8 +1007,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
-    /// Typed Commander turn kind for supervisor messages to `target=operator`.
-    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    /// Typed Commander turn kind for `target=operator`, or a worker action sent
+    /// to its same-session supervisor.
+    #[schemars(
+        description = "message: target=operator Commander kind: answer, status, receipt, ask, or blocker. Worker to same-session supervisor: kind=status or kind=ready requests a typed action wake."
+    )]
     #[serde(default)]
     pub kind: Option<String>,
 
@@ -1006,6 +1019,22 @@ pub struct CoordinationRequest {
     #[schemars(description = "Published artifact id to attach to a Commander turn")]
     #[serde(default)]
     pub attachment: Option<String>,
+
+    /// cas-6853: a newer `all_workers` broadcast with the same key replaces
+    /// this one for every worker that has not read it yet.
+    #[schemars(
+        description = "message target=all_workers only: supersede key. A later broadcast with the same key replaces this one for every worker that has not read it yet (e.g. 'epic-tip')."
+    )]
+    #[serde(default)]
+    pub supersede_key: Option<String>,
+
+    /// cas-6853: standing policy that also reaches workers registered after
+    /// the broadcast. Other broadcasts reach only workers already registered.
+    #[schemars(
+        description = "message target=all_workers only: standing policy that workers spawned later still receive. Omit for ordinary broadcasts, which reach only workers registered when sent."
+    )]
+    #[serde(default)]
+    pub sticky: Option<bool>,
 
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
@@ -1122,9 +1151,9 @@ pub struct CoordinationRequest {
     pub session_id: Option<String>,
 
     /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
-    /// worker briefs must be sent with coordination message after registration.
+    /// a worker brief goes in spawn_brief with task_id (cas-ee68).
     #[schemars(
-        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration."
+        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; pass a worker brief as spawn_brief with task_id."
     )]
     #[serde(default)]
     pub prompt: Option<String>,
@@ -1265,6 +1294,16 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub workers: Option<String>,
 
+    /// cas-ee68 (communication contract v2, P3.7): a supervisor brief for
+    /// the pre-assigned task. It is written to the task notes at spawn time
+    /// and quoted in the worker's spawn message, so the worker has it before
+    /// it starts the task.
+    #[schemars(
+        description = "spawn_workers with task_id: your brief for the worker. Stored on the task and shown in its spawn message, so it is read before task start."
+    )]
+    #[serde(default)]
+    pub spawn_brief: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -1278,17 +1317,17 @@ pub struct CoordinationRequest {
     /// Event type that triggers reminder. External durable conditions are
     /// `branch_contained_in` with `{\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"}`
     /// and `tag_exists` with `{\"tag\":\"<tag>\"}`; both require
-    /// `cross_session=true` and default to no expiry.
+    /// `cross_session=true` and default to a seven-day TTL.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. External conditions require cross_session=true; use JSON filters {commit,target_branch}, {tag} or {sha,workflow?}."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
 
-    /// JSON filter for event matching. External branch/tag conditions use the
-    /// schemas documented on `remind_event`.
+    /// JSON filter for event matching. GH #1207: each external event's
+    /// required keys are published here, not learnt from rejections.
     #[schemars(
-        description = "JSON filter for event matching, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'"
+        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
     )]
     #[serde(default)]
     pub remind_filter: Option<String>,
@@ -1298,9 +1337,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// Time-to-live in seconds for the reminder (default: 3600; zero means no expiry)
+    /// Time-to-live in seconds for the reminder (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -1443,6 +1482,8 @@ impl CoordinationRequest {
             in_reply_to: self.in_reply_to,
             kind: self.kind.clone(),
             attachment: self.attachment.clone(),
+            supersede_key: self.supersede_key.clone(),
+            sticky: self.sticky,
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,
             completion_promise: self.completion_promise.clone(),
@@ -1493,6 +1534,7 @@ impl CoordinationRequest {
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,
             isolate: self.isolate,
+            spawn_brief: self.spawn_brief.clone(),
             remind_message: self.remind_message.clone(),
             remind_delay_secs: self.remind_delay_secs,
             remind_event: self.remind_event.clone(),

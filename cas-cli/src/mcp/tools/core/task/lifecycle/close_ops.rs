@@ -5940,7 +5940,9 @@ impl CasCore {
             // the stamp the store persisted, not from the pre-write value.
             Ok(persisted_at) => {
                 self.retire_delivered_worker_cache(&parked);
-                // cas-062d / cas-17e4: durable outbox for AwaitingMerge + close-rejected.
+                // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
+                // relay. A refused close stays a tool error for the worker.
+                // CloseRejected remains readable for legacy outbox records.
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
                 let actor_name = self
                     .open_agent_store()
@@ -5964,23 +5966,6 @@ impl CasCore {
                         task_id = %task.id,
                         error = %e,
                         "supervisor lifecycle push failed after AwaitingMerge park (task remains AwaitingMerge; replay outbox)"
-                    );
-                }
-                if let Err(e) = self.push_task_lifecycle_with_branch_tip(
-                    &task.id,
-                    &task.title,
-                    task.status,
-                    TaskStatus::AwaitingMerge,
-                    &actor_name,
-                    Some(reason),
-                    super::supervisor_push::LifecycleTransition::CloseRejected,
-                    &occurrence,
-                    parked.deliverables.factory_branch_anchor.as_deref(),
-                ) {
-                    tracing::error!(
-                        task_id = %task.id,
-                        error = %e,
-                        "supervisor lifecycle push failed after close rejection (task remains AwaitingMerge; replay outbox)"
                     );
                 }
             }
@@ -7532,6 +7517,16 @@ impl CasCore {
         let parked_head = if close_disposition.requires_delivery_gates()
             && !supervisor_closing_merged_anchor
             && req.commit_receipt.is_none()
+            // GH #1177: a false park on another task's work must not become
+            // an implicit receipt that reintroduces that code during review.
+            // The ownership check retains real, unclaimed, and unreadable
+            // delivery anchors; explicit caller receipts also remain binding.
+            && !no_code_task_without_own_commits(
+                worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                &task,
+                &resolved_parent_branch,
+                req.commit_receipt.as_deref(),
+            )
         {
             let parked_repo = worker_worktree_path
                 .as_deref()
@@ -13547,6 +13542,31 @@ pub(crate) fn resolve_close_delivery_branch(
             return Ok(branch.to_string());
         }
     }
+    // GH #1180: a transferred task retains its original delivery even when
+    // the recipient already has a lane for another task. Recover the recorded
+    // parked/handoff branches here as well as when the recipient has no lane.
+    // A recycled source that now belongs only to another task is not evidence.
+    if task_changed_hands(task) {
+        let own_task = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+        for candidate in task_delivery_branch_candidates(task)
+            .into_iter()
+            .filter(|branch| branch != &own && branch != &own_task)
+        {
+            for branch in [candidate.clone(), format!("origin/{candidate}")] {
+                if !git_ref_exists(repo_path, &branch) {
+                    continue;
+                }
+                let holds_anchor = task.deliverables.factory_branch_anchor.as_deref()
+                    .is_some_and(|anchor| git_commit_is_ancestor(repo_path, anchor, &branch));
+                if holds_anchor || matches!(
+                    task_attribution::branch_task_claims(repo_path, &branch, &identity),
+                    Some((Some(_), _)) | Some((None, None))
+                ) {
+                    return Ok(branch);
+                }
+            }
+        }
+    }
     let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
     Err(format!(
         "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
@@ -13565,10 +13585,11 @@ pub(crate) fn resolve_close_delivery_branch(
 /// delivery branch for it. The worker's lane may end in another task's
 /// delivery, and an anchor recorded for that delivery by an earlier park is
 /// not this task's either. Own commits are explicit: a commit receipt, a
-/// per-task branch, a recorded code delivery, an anchor not claimed by another
+/// recorded code delivery, an anchor not claimed by another
 /// task, a commit on the lane naming this task, or an unmerged lane commit
 /// that does not claim another task (unnamed work may be this task's, see
-/// cas-2387). Any of those keeps every ordinary delivery gate.
+/// cas-2387). Any of those keeps every ordinary delivery gate. An allocated
+/// per-task branch is judged by the same history rules as the worker's lane.
 ///
 /// GH #1167: once a supervisor has cleared a no-code task's work target
 /// (proof_scope_fix target_repo=""), nothing can be merged on its behalf, so
@@ -13644,10 +13665,13 @@ pub(crate) fn task_without_own_commits_judged(
     let Some(assignee) = task.assignee.as_deref() else {
         return true;
     };
-    if worker_task_branch_ref(repo_path, assignee, &task.id).is_some() {
-        return false;
-    }
-    let lanes = std::iter::once(format!("factory/{assignee}"))
+    // GH #1177: allocating a per-task branch does not create a delivery.
+    // It may still contain only inherited foreign work, including the commit
+    // an earlier false park recorded as this no-code task's anchor. Judge its
+    // history by the same ownership rules as the plain and handoff lanes.
+    let lanes = worker_task_branch_ref(repo_path, assignee, &task.id)
+        .into_iter()
+        .chain(std::iter::once(format!("factory/{assignee}")))
         .chain(delivery.parked_branch.clone())
         .chain(delivery.handoff_branches.iter().cloned());
     for lane in lanes {
@@ -13784,20 +13808,26 @@ fn run_factory_branch_merge_gate_for_delivery(
     // holds the task's commits.
     // cas-93db: never measure another task's delivery as this one. A valid
     // receipt still proves an integrated delivery after its branch is gone.
+    // GH #1202: retain the receipt's actual refusal. An unresolved delivery
+    // is missing evidence, not a measured branch that can be parked for merge.
+    let receipt_validation = attribution.receipt.map(|receipt| {
+        attribution
+            .window
+            .ok_or_else(|| "task attribution window is unavailable".to_string())
+            .and_then(|window| validate_task_commit_receipt(repo_path, receipt, parent_branch, window))
+    });
     let factory_branch = match validated_recovery_branch.map(str::to_string)
         .map(Ok).unwrap_or_else(|| resolve_close_delivery_branch(repo_path, task, assignee)) {
         Ok(branch) => branch,
-        Err(reason)
-            if !attribution.receipt.is_some_and(|receipt| {
-                attribution.window.is_some_and(|window| {
-                    validate_task_commit_receipt(repo_path, receipt, parent_branch, window)
-                        .is_ok()
-                })
-            }) =>
-        {
-            return MergeStateGateOutcome::Reject(reason);
-        }
-        Err(_) => crate::factory_isolation::worker_task_branch(assignee, &task.id),
+        Err(reason) => match (attribution.receipt, receipt_validation.as_ref()) {
+            (Some(receipt), Some(Err(receipt_reason))) => {
+                return MergeStateGateOutcome::Unresolved(commit_receipt_rejection(
+                    repo_path, &task.id, receipt, parent_branch, receipt_reason,
+                ));
+            }
+            (_, Some(Ok(_))) => crate::factory_isolation::worker_task_branch(assignee, &task.id),
+            _ => return MergeStateGateOutcome::Unresolved(reason),
+        },
     };
     let fallback_content_identity = TaskCommitIdentity {
         task_id: Some(task.id.clone()),
@@ -13811,11 +13841,8 @@ fn run_factory_branch_merge_gate_for_delivery(
     // after the ordinary receipt validator has established its repository,
     // target, timestamp, diff, and content predicates. A merge-tip receipt
     // is intentionally excluded later because it is not task content.
-    let validated_content_receipt = attribution.receipt.filter(|receipt| {
-        attribution.window.is_some_and(|window| {
-            validate_task_commit_receipt(repo_path, receipt, parent_branch, window).is_ok()
-        })
-    });
+    let validated_content_receipt = attribution.receipt
+        .filter(|_| receipt_validation.as_ref().is_some_and(Result::is_ok));
     // A missing local ref can still be measured through origin. Resolve
     // both before count helpers: Unknown must never become a fictitious 1.
     let origin_factory_branch = if factory_branch.starts_with("origin/") {
@@ -13928,6 +13955,11 @@ fn run_factory_branch_merge_gate_for_delivery(
             && task.execution_note.as_deref() != Some("no-code")
         {
             return MergeStateGateOutcome::Proceed;
+        }
+        if let (Some(receipt), Some(Err(reason))) = (attribution.receipt, receipt_validation.as_ref()) {
+            return MergeStateGateOutcome::Unresolved(commit_receipt_rejection(
+                repo_path, &task.id, receipt, parent_branch, reason,
+            ));
         }
         return MergeStateGateOutcome::Unresolved(format!(
             "⚠️ FACTORY BRANCH MISSING\n\nTask {} cannot be measured: `{factory_branch}` is missing locally and on origin, and no usable delivery anchor or validated commit_receipt resolves. No branch commit count was obtained.\n\nAsk the supervisor to restore the recorded delivery evidence, or retry with commit_receipt=<integrated-delivery-sha>. If this task delivers only external work, a live registered supervisor can clear the stale code scope with `{supervisor}task action=update id={} proof_scope_fix=true target_repo=\"\" reason=\"reviewed external-only delivery\"` after recording execution_note=no-code, then close with external_ref=<portable-proof-reference>.",
@@ -23891,6 +23923,81 @@ mod merge_state_gate_tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    fn close_relay_fixture_cas_3a82(
+        root: &std::path::Path,
+    ) -> (CasCore, cas_store::SqliteTaskStore, cas_store::SqliteSupervisorQueueStore, Task) {
+        use cas_store::{AgentStore, PromptQueueStore, SupervisorQueueStore, TaskStore};
+        use cas_types::{Agent, AgentRole};
+
+        let agents = cas_store::SqliteAgentStore::open(root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("relay-supervisor-id", "relay-supervisor", AgentRole::Supervisor),
+            ("relay-worker-id", "relay-worker", AgentRole::Worker),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("relay-fixture-session".into());
+            agents.register(&agent).unwrap();
+        }
+        let queue = cas_store::SqliteSupervisorQueueStore::open(root).unwrap();
+        queue.init().unwrap();
+        cas_store::SqlitePromptQueueStore::open(root).unwrap().init().unwrap();
+        let tasks = cas_store::SqliteTaskStore::open(root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-3a82-fixture".into(), "Single park relay".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("relay-worker".into());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        core.set_agent_id_for_testing("relay-worker-id".into());
+        (core, tasks, queue, task)
+    }
+
+    #[test]
+    fn ct2_p1_park_sends_one_relay() {
+        use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
+
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let (core, tasks, queue, task) = close_relay_fixture_cas_3a82(dir.path());
+        core.park_task_awaiting_merge(
+            &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
+            Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+        );
+        let parked = tasks.get(&task.id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        let relays = queue.peek("relay-supervisor-id", 10).unwrap();
+        assert_eq!(relays.len(), 1, "one park must produce one supervisor relay: {relays:?}");
+        let payload: serde_json::Value = serde_json::from_str(&relays[0].payload).unwrap();
+        assert_eq!(payload["transition"], "task_awaiting_merge");
+        assert_eq!(payload["task_id"], task.id);
+        assert_eq!(payload["branch_tip"], "delivery-tip");
+        let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].prompt.contains("task_awaiting_merge"));
+    }
+
+    #[tokio::test]
+    async fn ct2_p1_real_close_refusal_has_no_lifecycle_relay() {
+        use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
+
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let (core, tasks, queue, task) = close_relay_fixture_cas_3a82(dir.path());
+        let mut request = base_req(&task.id);
+        request.supervisor_override = Some(true);
+        request.reason = Some("worker cannot grant its own override".into());
+        let response = core.cas_task_close(Parameters(request)).await.unwrap();
+        assert_eq!(response.is_error, Some(true));
+        assert!(response.content.iter().any(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => text.text.contains("supervisor"),
+            _ => false,
+        }), "the worker must receive the actual refusal: {response:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert!(queue.peek("relay-supervisor-id", 10).unwrap().is_empty());
+        assert!(cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap().is_empty());
+    }
+
     fn git_command(dir: &std::path::Path, args: &[&str]) -> Command {
         let mut command = Command::new("git");
         command
@@ -26668,11 +26775,127 @@ mod merge_state_gate_tests {
         let task = worker_task("worker");
         assert_ne!(close_measured_factory_branch(p, &task, "worker"), "factory/worker");
         match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
-            MergeStateGateOutcome::Reject(message) => {
+            MergeStateGateOutcome::Unresolved(message) => {
                 assert!(message.contains("DELIVERY BRANCH UNRESOLVED"), "{message}");
                 assert!(message.contains("cas-0906"), "{message}");
             }
             other => panic!("another task's merged delivery must not close this task: {other:?}"),
+        }
+    }
+
+    fn transferred_delivery_gh1180() -> (TempDir, Task, String) {
+        let dir = init_factory_repo("original");
+        let p = dir.path();
+        std::fs::write(p.join("delivered.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "finished delivery"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "-b", "factory/receiver", "main"]);
+        std::fs::write(p.join("other.rs"), "fn other() {}\n").unwrap();
+        git(p, &["add", "other.rs"]);
+        git(p, &["commit", "-q", "-m", "other work (cas-0906)"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/original", "-m", "merge delivery"]);
+        let mut task = worker_task("receiver");
+        task.deliverables.parked_branch = Some("factory/original".into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        (dir, task, anchor)
+    }
+
+    #[test]
+    fn transferred_merged_delivery_resolves_parked_branch_gh1180() {
+        let (dir, task, anchor) = transferred_delivery_gh1180();
+        let p = dir.path();
+        assert_eq!(
+            resolve_close_delivery_branch(p, &task, "receiver").unwrap(),
+            "factory/original",
+        );
+        let mut req = base_req(&task.id);
+        let merge_receipt = head_sha(p);
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+        for receipt in [&anchor, &merge_receipt] {
+            req.commit_receipt = Some(receipt.clone());
+            let out = run_factory_branch_merge_gate_with_attribution(
+                &task, &req, "main", p,
+                TaskCommitAttribution { receipt: Some(receipt), window: Some(&window) },
+            );
+            assert!(matches!(out, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn transferred_merged_delivery_resolves_remote_handoff_branch_gh1180() {
+        let (dir, mut task, anchor) = transferred_delivery_gh1180();
+        let p = dir.path();
+        git(p, &["update-ref", "refs/remotes/origin/factory/original", &anchor]);
+        git(p, &["branch", "-D", "factory/original"]);
+        task.deliverables.parked_branch = None;
+        task.deliverables.record_handoff_branch("factory/original");
+        assert_eq!(
+            resolve_close_delivery_branch(p, &task, "receiver").unwrap(),
+            "origin/factory/original",
+        );
+        let out = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        assert!(matches!(out, MergeStateGateOutcome::Proceed), "{out:?}");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_identity_survives_new_lease_gh1180() {
+        let (dir, mut task, receipt) = transferred_delivery_gh1180();
+        // Legacy handoffs may retain the branch without a parked SHA. Its
+        // exact tip still links a prior-cycle receipt to this task.
+        task.deliverables.factory_branch_anchor = None;
+        let known = current_factory_branch_receipt_for_identity(dir.path(), &task, &receipt);
+        assert_eq!(known.as_deref(), Some(receipt.as_str()));
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            supervisor_override_reason: None,
+            identity: task_commit_identity(&task, known),
+        };
+        validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect("transfer must preserve attribution of the merged delivery");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_rejects_foreign_handoff_gh1180() {
+        let (dir, mut task, _) = transferred_delivery_gh1180();
+        task.deliverables.factory_branch_anchor = None;
+        git(dir.path(), &["branch", "-f", "factory/original", "factory/receiver"]);
+        let error = resolve_close_delivery_branch(dir.path(), &task, "receiver")
+            .expect_err("a handoff branch recycled for another task is not this delivery");
+        assert!(error.contains("DELIVERY BRANCH UNRESOLVED"), "{error}");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_missing_branch_validates_receipt_gh1180() {
+        let (dir, mut task, receipt) = transferred_delivery_gh1180();
+        let p = dir.path();
+        git(p, &["branch", "-D", "factory/original"]);
+        task.deliverables.factory_branch_anchor = None;
+        let mut req = base_req(&task.id);
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+        let unmerged = rev_parse_local(p, "factory/receiver");
+        for (supplied, refusal) in [
+            ("not-a-commit", Some("hexadecimal")),
+            (unmerged.as_str(), Some("not an ancestor")),
+            (receipt.as_str(), None),
+        ] {
+            req.commit_receipt = Some(supplied.into());
+            let out = run_factory_branch_merge_gate_with_attribution(
+                &task, &req, "main", p,
+                TaskCommitAttribution { receipt: Some(supplied), window: Some(&window) },
+            );
+            match (refusal, out) {
+                (Some(reason), MergeStateGateOutcome::Unresolved(message)) => {
+                    assert!(message.contains(reason), "{message}");
+                }
+                (None, MergeStateGateOutcome::ProceedWithNote(note)) => {
+                    assert!(note.contains(&receipt), "{note}");
+                }
+                (expected, other) => panic!("expected {expected:?}, got {other:?}"),
+            }
         }
     }
 

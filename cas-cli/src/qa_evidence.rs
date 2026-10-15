@@ -329,10 +329,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
 
     // 2. Required files.
     let files = &manifest.files;
-    let singles: [(&str, &Option<String>); 9] = [
+    let singles: [(&str, &Option<String>); 8] = [
         ("trace", &files.trace),
         ("trace_actions", &files.trace_actions),
-        ("receipt", &files.receipt),
         ("aria_yaml", &files.aria_yaml),
         ("aria_json", &files.aria_json),
         ("visual_qa", &files.visual_qa),
@@ -349,6 +348,19 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             key.to_string(),
             resolve_bundle_file(&bundle_dir, key, relative)?,
         ));
+    }
+    // Use the same visual classification as the media-mode captures below.
+    // Optional recordings still undergo containment, content and freshness checks.
+    match files.receipt.as_deref().filter(|value| !value.trim().is_empty()) {
+        Some(relative) => listed.push((
+            "receipt".to_string(),
+            resolve_bundle_file(&bundle_dir, "receipt", relative)?,
+        )),
+        None if manifest.visual_change => return Err(EvidenceRefusal::new(
+            "incomplete: bundle.json lists no files.receipt for a visual change (visual_change is true)",
+            producing_command("receipt", &bundle_dir),
+        )),
+        None => {}
     }
     if files.cells.is_empty() {
         return Err(missing_key("cells"));
@@ -2056,11 +2068,27 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 
 /// The commit range a delivery contributes: `merge-base(target, head)..head`
 /// before it merges; after it merges, the first merge on the ancestry path
-/// from `head` to `target` (`M^1..M`). `None` when neither can be computed
+/// from `head` to `target` (`M^1..M`). A merge on the target's first-parent
+/// chain is the integration receipt itself and contributes `head^1..head`;
+/// later target merges cannot replace its diff.
+/// `None` when neither can be computed
 /// (for example a fast-forward merge, which leaves no merge commit).
 pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, String)> {
     let merged = git(repo, &["merge-base", "--is-ancestor", head, target]).is_some();
     if merged {
+        // GH #1181: a merge on the target's first-parent chain is already
+        // the integration receipt. A worker-tip sync merge is not: its
+        // first-parent diff contains the incoming epic, so retain the
+        // ancestry-path search for that tip's later integration merge.
+        if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_some() {
+            let full_head = git(repo, &["rev-parse", "--verify", head])?;
+            if git(repo, &["rev-list", "--first-parent", target])?
+                .lines()
+                .any(|commit| commit == full_head)
+            {
+                return Some((format!("{head}^1"), head.to_string()));
+            }
+        }
         let merges = git(
             repo,
             &[

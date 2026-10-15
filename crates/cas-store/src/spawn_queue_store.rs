@@ -68,6 +68,9 @@ pub enum SpawnLifecycleState {
     Registered,
     /// Terminal failure at some stage; `detail` carries the reason.
     Failed,
+    /// Terminal for a shutdown request: the daemon stopped every targeted
+    /// worker. `detail` names them (cas-00d5).
+    Stopped,
 }
 
 impl SpawnLifecycleState {
@@ -78,6 +81,7 @@ impl SpawnLifecycleState {
             Self::Launched => "launched",
             Self::Registered => "registered",
             Self::Failed => "failed",
+            Self::Stopped => "stopped",
         }
     }
 
@@ -89,6 +93,7 @@ impl SpawnLifecycleState {
             "launched" => Some(Self::Launched),
             "registered" => Some(Self::Registered),
             "failed" => Some(Self::Failed),
+            "stopped" => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -102,13 +107,13 @@ impl SpawnLifecycleState {
             Self::Provisioning => 1,
             Self::Launched => 2,
             Self::Registered => 3,
-            Self::Failed => 4,
+            Self::Failed | Self::Stopped => 4,
         }
     }
 
     /// Whether this state is terminal (no further transition expected).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Registered | Self::Failed)
+        matches!(self, Self::Registered | Self::Failed | Self::Stopped)
     }
 
     /// Classify a daemon audit `(stage, outcome)` pair into a lifecycle state.
@@ -131,6 +136,9 @@ impl SpawnLifecycleState {
             "launch" => Some(Self::Launched),
             "register" if failed => Some(Self::Failed),
             "register" => Some(Self::Registered),
+            // cas-00d5: a shutdown request ends here, never at `provisioning`.
+            "shutdown" if failed => Some(Self::Failed),
+            "shutdown" => Some(Self::Stopped),
             _ if failed => Some(Self::Failed),
             _ => None,
         }
@@ -744,6 +752,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
                          WHEN 'launched' THEN 2
                          WHEN 'registered' THEN 3
                          WHEN 'failed' THEN 4
+                         WHEN 'stopped' THEN 4
                          ELSE 0
                        END < ?)",
             params![

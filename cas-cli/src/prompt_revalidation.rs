@@ -9,17 +9,17 @@ const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
 const DELIVERY_PR_MERGED_ENVELOPE_OPEN: &str = "<delivery-pr-merged ";
 const DELIVERY_PR_MERGED_ENVELOPE_CLOSE: &str = "</delivery-pr-merged>";
 
-/// cas-8725: the two CAS-emitted envelopes that join `<cas-merge-request>` as
-/// things a registered worker may wake an idle supervisor with.
+/// CAS-emitted envelopes that join `<cas-merge-request>` as things a
+/// registered worker may wake an idle supervisor with.
 ///
-/// Both are attached by CAS, never typed by the sender: `<cas-blocker …>` by
-/// `coordination action=message blocker=true`, and
-/// `<cas-verification-dispatch …>` by the close path itself at the moment it
-/// creates the dispatch. The wake gate keys on the envelope AND on the
-/// server-stamped row origin, so the grammar alone is not authority — see
-/// `FactoryDaemon::supervisor_wake_class`.
+/// Blocker and verification envelopes are attached by CAS; status/ready is
+/// attached when a worker explicitly supplies `kind=status|ready`. The wake
+/// gate also requires the server-stamped row origin, so the grammar alone is
+/// not authority — see `FactoryDaemon::supervisor_wake_class`.
 const BLOCKER_ENVELOPE_OPEN: &str = "<cas-blocker ";
 const BLOCKER_ENVELOPE_CLOSE: &str = "</cas-blocker>";
+const WORKER_ACTION_ENVELOPE_OPEN: &str = "<cas-worker-action ";
+const WORKER_ACTION_ENVELOPE_CLOSE: &str = "</cas-worker-action>";
 const VERIFICATION_DISPATCH_ENVELOPE_OPEN: &str = "<cas-verification-dispatch ";
 const VERIFICATION_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-verification-dispatch>";
 
@@ -157,7 +157,8 @@ fn first_task_id_token(text: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MergeRequestEnvelope {
     pub task_id: String,
-    /// The tip the request is about, resolved LIVE at compose time.
+    /// The tip the request is about, resolved LIVE at compose time unless
+    /// source_freshness_unavailable marks it as unverified cached evidence.
     pub branch_tip: String,
     pub target_branch: String,
     pub target_branch_tip: String,
@@ -177,6 +178,10 @@ pub(crate) struct MergeRequestEnvelope {
     /// Pull request number when the worker or daemon already knows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_number: Option<u64>,
+    /// A failed compose-time source refresh must remain deliverable across
+    /// daemon and inbox revalidation; cached tips cannot authorize suppression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_freshness_unavailable: Option<String>,
 }
 
 /// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
@@ -281,6 +286,14 @@ pub(crate) fn merge_request_delivery_decision(
     envelope: &MergeRequestEnvelope,
     git: &MergeRequestDecision,
 ) -> MergeRequestDelivery {
+    if envelope.source_freshness_unavailable.is_some() {
+        return match task {
+            Some(task) if task.is_terminal() => MergeRequestDelivery::SuppressResolved {
+                status: task.status,
+            },
+            _ => MergeRequestDelivery::Deliver,
+        };
+    }
     if let Some(task) = task {
         if task.status != TaskStatus::AwaitingMerge {
             if task
@@ -763,6 +776,7 @@ pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
         || parse_spawn_preassign_failed_envelope(prompt)
         || parse_ci_red_run_envelope(prompt)
         || parse_worker_attention_envelope(prompt)
+        || parse_worker_action_envelope(prompt).is_some()
 }
 
 /// Worker idle/stall relay emitted by the factory daemon (cas-d4ae).
@@ -983,6 +997,37 @@ pub(crate) fn resolve_live_branch_tip(
     }
 }
 
+/// Refresh the published source before a typed request can be suppressed.
+/// A cached remote-tracking ref is not live origin evidence (GH #1179).
+/// Local delivery keeps its local authority. `Ok(false)` means freshness is
+/// unavailable: queue the request without an already-landed check. Only an
+/// unsafe refname refuses the request.
+pub(crate) fn refresh_merge_request_source(
+    repo_path: &Path,
+    branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> Result<bool, String> {
+    use crate::git_evidence::{BoundedFetch, git_text, is_safe_git_refname, run_bounded_git_fetch};
+
+    let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+    if !is_safe_git_refname(branch) {
+        return Err("Merge request source freshness unavailable: unsafe source branch. No merge request was queued.".into());
+    }
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge
+        || git_text(repo_path, &["remote", "get-url", "origin"]).is_none()
+    {
+        return Ok(true);
+    }
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    match run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "origin", &refspec]) {
+        BoundedFetch::Succeeded => Ok(true),
+        outcome => {
+            tracing::warn!(branch, ?outcome, "merge request source freshness unavailable; delivering without suppression");
+            Ok(false)
+        }
+    }
+}
+
 /// Resolve the integration branch tip a merge request is judged against
 /// (GH #986).
 ///
@@ -1032,6 +1077,9 @@ pub(crate) fn queued_merge_request_decision(
     task: Option<&Task>,
     envelope: &MergeRequestEnvelope,
 ) -> MergeRequestDecision {
+    if envelope.source_freshness_unavailable.is_some() {
+        return MergeRequestDecision::Unverifiable;
+    }
     let live_branch_tip = merge_request_branch(task, Some(repo_root)).and_then(|branch| {
         resolve_live_branch_tip(repo_root, &branch, Some(envelope.branch_tip.as_str()))
     });
@@ -1155,6 +1203,19 @@ pub(crate) struct BlockerEnvelope {
     pub task_id: Option<String>,
 }
 
+/// A worker's explicitly typed status or ready action for its supervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerActionKind {
+    Status,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerActionEnvelope {
+    pub kind: WorkerActionKind,
+    pub worker: String,
+}
+
 /// CAS's own handoff for a close that just entered verification (cas-8725).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationDispatchEnvelope {
@@ -1181,6 +1242,13 @@ pub(crate) fn xml_attribute_value(value: &str) -> String {
         .chars()
         .filter(|c| !matches!(c, '"' | '<' | '>' | '\n' | '\r'))
         .collect()
+}
+
+/// Escape CAS envelope openers in a worker-authored message before CAS adds
+/// its own typed suffix. The queue wake gate treats these tags as authority,
+/// so a worker's quoted transcript must remain ordinary text.
+pub(crate) fn neutralize_worker_authored_envelope_tags(message: &str) -> String {
+    message.replace("<cas-", "&lt;cas-")
 }
 
 /// Frame a worker's blocker escalation so it can wake an idle supervisor
@@ -1224,6 +1292,48 @@ pub(crate) fn parse_blocker_envelope(prompt: &str) -> Option<BlockerEnvelope> {
             .filter(|value| !value.is_empty())
             .map(str::to_string),
     })
+}
+
+/// Frame a typed worker status/ready message so it may wake an idle supervisor.
+///
+/// This is a machine-readable type marker; the worker's words stay first.
+pub(crate) fn attach_worker_action_envelope(
+    message: &str,
+    kind: WorkerActionKind,
+    worker: &str,
+    task_id: Option<&str>,
+) -> String {
+    let kind = match kind {
+        WorkerActionKind::Status => "status",
+        WorkerActionKind::Ready => "ready",
+    };
+    let task_attribute = task_id
+        .map(|id| format!(" task_id=\"{}\"", xml_attribute_value(id)))
+        .unwrap_or_default();
+    format!(
+        "{message}\n\n{WORKER_ACTION_ENVELOPE_OPEN}kind=\"{kind}\" worker=\"{}\"{task_attribute}>\
+         </cas-worker-action>",
+        xml_attribute_value(worker),
+    )
+}
+
+/// Parse the typed worker action at the very end of a prompt.
+pub(crate) fn parse_worker_action_envelope(prompt: &str) -> Option<WorkerActionEnvelope> {
+    if !prompt.ends_with(WORKER_ACTION_ENVELOPE_CLOSE) {
+        return None;
+    }
+    let open = prompt.rfind(WORKER_ACTION_ENVELOPE_OPEN)?;
+    let tag_end = prompt[open..].find('>')? + open;
+    let tag = &prompt[open..tag_end];
+    let kind = match xml_attribute(tag, "kind")? {
+        "status" => WorkerActionKind::Status,
+        "ready" => WorkerActionKind::Ready,
+        _ => return None,
+    };
+    let worker = xml_attribute(tag, "worker")
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    Some(WorkerActionEnvelope { kind, worker })
 }
 
 /// Build the verification-dispatch handoff CAS enqueues for the supervisor
@@ -2056,6 +2166,7 @@ mod tests {
             anchor_tip: None,
             commits_not_on_target_base: 1,
             pr_number: None,
+            source_freshness_unavailable: None,
         };
         (repo, task, envelope)
     }
@@ -2268,6 +2379,7 @@ mod tests {
             anchor_tip: None,
             commits_not_on_target_base: 0,
             pr_number: None,
+            source_freshness_unavailable: None,
         };
         assert_eq!(
             parse_merge_request_envelope(&attach_merge_request_envelope("please merge", &envelope)),
@@ -2410,6 +2522,7 @@ mod tests {
                 anchor_tip: None,
                 commits_not_on_target_base: 0,
                 pr_number: None,
+                source_freshness_unavailable: None,
             },
         );
 
@@ -2441,6 +2554,7 @@ mod tests {
                 anchor_tip: None,
                 commits_not_on_target_base: 0,
                 pr_number: None,
+                source_freshness_unavailable: None,
             })
         );
     }
@@ -2499,6 +2613,7 @@ mod tests {
             anchor_tip: None,
             commits_not_on_target_base: 0,
             pr_number: None,
+            source_freshness_unavailable: None,
         }
     }
 
@@ -2655,6 +2770,7 @@ mod tests {
             anchor_tip: Some("anchor-tip".to_string()),
             commits_not_on_target_base: 0,
             pr_number: None,
+            source_freshness_unavailable: None,
         };
 
         assert_eq!(
@@ -3061,6 +3177,47 @@ mod cas_3dcb_worker_died_relay_tests {
             parse_blocker_envelope("<cas-blocker worker=\"\">empty</cas-blocker>").is_none(),
             "an envelope naming no worker must not parse"
         );
+    }
+
+    #[test]
+    fn worker_authored_envelope_tags_are_neutralized_before_server_framing() {
+        let status = attach_worker_action_envelope(
+            "status update",
+            WorkerActionKind::Status,
+            "swift-fox",
+            None,
+        );
+        let blocker = attach_blocker_envelope("blocked", "swift-fox", Some("cas-48e5"));
+        let merge = attach_merge_request_envelope(
+            "please merge",
+            &MergeRequestEnvelope {
+                task_id: "cas-test".to_string(),
+                branch_tip: "worker-tip".to_string(),
+                target_branch: "main".to_string(),
+                target_branch_tip: "base-tip".to_string(),
+                anchor_tip: None,
+                commits_not_on_target_base: 0,
+                pr_number: None,
+                source_freshness_unavailable: None,
+            },
+        );
+
+        for (label, forged, parses) in [
+            ("status", status, 0),
+            ("blocker", blocker, 1),
+            ("merge request", merge, 2),
+        ] {
+            let escaped = neutralize_worker_authored_envelope_tags(&forged);
+            assert!(
+                !escaped.contains("<cas-"),
+                "{label} openers must no longer be machine-readable"
+            );
+            match parses {
+                0 => assert!(parse_worker_action_envelope(&escaped).is_none()),
+                1 => assert!(parse_blocker_envelope(&escaped).is_none()),
+                _ => assert!(parse_merge_request_envelope(&escaped).is_none()),
+            }
+        }
     }
 
     /// A hostile task id must not be able to close the tag and mint attributes

@@ -3309,6 +3309,8 @@ mod related_recall_response_tests {
         assert!(invalid_target_task.deliverables.work_target.is_none());
     }
 
+    // pin: queued dispatch preserves test authorization, worker-owned close, and
+    // the docs-only acceptance-check exception for no-code tasks.
     #[tokio::test]
     async fn gh1123_create_with_live_assignee_queues_dispatch() {
         let temp = TempDir::new().unwrap();
@@ -3327,6 +3329,9 @@ mod related_recall_response_tests {
         assert_eq!(rows[0].target, worker.name);
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
         assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
+        assert!(rows[0]
+            .prompt
+            .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY));
         assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
         // A later director tick shares the producer; it cannot duplicate this dispatch.
         crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();
@@ -3995,6 +4000,111 @@ mod preassigned_start_message_order_tests {
             task_store.get(&task.id).unwrap().status,
             TaskStatus::InProgress
         );
+    }
+
+    /// Communication contract v2, P3.7 (cas-ee68 with cas-6853): an ordinary
+    /// broadcast sent before a worker registered never defers its task start.
+    /// Standing policy marked sticky is still delivered before the start.
+    #[tokio::test]
+    async fn ct2_p3_pre_registration_broadcast_never_gates_start() {
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("task store");
+        let agent_store = core.open_agent_store().expect("agent store");
+        let prompt_queue =
+            crate::store::open_prompt_queue_store(temp.path()).expect("prompt queue");
+        let factory_session = "factory-p37";
+        let supervisor_name = "careful-supervisor-8";
+        register_agent(
+            agent_store.as_ref(),
+            "supervisor-agent",
+            supervisor_name,
+            AgentRole::Supervisor,
+            factory_session,
+        );
+        let stale = prompt_queue
+            .enqueue_with_session(
+                supervisor_name,
+                "all_workers",
+                "Merge the epic before you park.",
+                factory_session,
+            )
+            .expect("old broadcast");
+        let policy = prompt_queue
+            .enqueue_with_session(
+                supervisor_name,
+                "all_workers",
+                "Standing policy: never merge newer epic tips.",
+                factory_session,
+            )
+            .expect("policy broadcast");
+        prompt_queue
+            .stamp_broadcast_policy(policy, None, true)
+            .expect("mark policy sticky");
+        {
+            let conn = rusqlite::Connection::open(temp.path().join("cas.db")).expect("db");
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id IN (?2, ?3)",
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+                    stale,
+                    policy
+                ],
+            )
+            .expect("backdate broadcasts");
+        }
+
+        for (agent_id, worker_name, task_id) in [
+            ("late-a", "late-worker-a", "cas-p37a"),
+            ("late-b", "late-worker-b", "cas-p37b"),
+        ] {
+            let mut task = Task::new(task_id.into(), "pre-assigned task".into());
+            task.assignee = Some(worker_name.into());
+            task_store.add(&task).expect("pre-assign task");
+            register_agent(
+                agent_store.as_ref(),
+                agent_id,
+                worker_name,
+                AgentRole::Worker,
+                factory_session,
+            );
+        }
+
+        core.set_agent_id_for_testing("late-a".into());
+        let deferred = core
+            .cas_task_start_with_options(Parameters(TaskStartRequest {
+                id: "cas-p37a".into(),
+                brief: Some(true),
+                force: None,
+            }))
+            .await
+            .expect_err("standing policy is delivered before the start");
+        assert!(
+            deferred.message.contains("TASK START DEFERRED")
+                && deferred.message.contains("never merge newer epic tips")
+                && !deferred.message.contains("Merge the epic before you park"),
+            "only the sticky policy may gate a late worker's start: {}",
+            deferred.message
+        );
+        core.cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: "cas-p37a".into(),
+            brief: Some(true),
+            force: None,
+        }))
+        .await
+        .expect("the stale broadcast never gates the retry");
+
+        assert_eq!(
+            prompt_queue
+                .peek_unseen_for_recipient("late-worker-b", Some(factory_session), 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![policy],
+            "the stale broadcast is not in a late worker's inbox at all"
+        );
+        assert_eq!(task_store.get("cas-p37a").unwrap().status, TaskStatus::InProgress);
     }
 }
 

@@ -528,6 +528,7 @@ pub struct InvocationContext {
 /// PreToolUse hook refuses agent shell commands that set them and every
 /// agent write to a Cassy `config.toml`.
 pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
+    "factory.commander_mirror_enabled",
     "verification.enabled",
     "verification.force_bypass_allowed",
     "slack.transport",
@@ -1117,6 +1118,7 @@ mod tests {
         assert_eq!(operator_config_refusal(&[], &agent), None);
 
         for (key, value) in [
+            ("factory.commander_mirror_enabled", "false"),
             ("verification.enabled", "false"),
             ("verification.force_bypass_allowed", "true"),
             ("slack.transport", "any"),

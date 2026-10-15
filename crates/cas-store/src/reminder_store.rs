@@ -360,6 +360,11 @@ pub trait ReminderStore: Send + Sync {
     /// Expire reminders past their TTL, returns count expired
     fn expire_stale(&self) -> Result<usize>;
 
+    /// Expire one pending reminder regardless of its TTL, e.g. a durable
+    /// cross-session wake whose owning and target sessions are gone (GH #1208).
+    /// Returns whether a pending row changed.
+    fn expire(&self, id: i64) -> Result<bool>;
+
     /// Delete non-pending reminders older than the given number of days
     fn prune(&self, older_than_days: i64) -> Result<usize>;
 
@@ -868,6 +873,15 @@ impl ReminderStore for SqliteReminderStore {
         expire_stale_with_conn(&conn)
     }
 
+    fn expire(&self, id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let rows = conn.execute(
+            "UPDATE reminders SET status = 'expired' WHERE id = ? AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(rows > 0)
+    }
+
     fn prune(&self, older_than_days: i64) -> Result<usize> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
@@ -926,6 +940,38 @@ mod tests {
         // Self-reminder: target defaults to owner
         assert_eq!(pending[0].owner_id, "supervisor-1");
         assert_eq!(pending[0].target_id, "supervisor-1");
+    }
+
+    /// GH #1208: a durable (TTL 0) event reminder can be expired by id; an
+    /// already-ended row is left alone.
+    #[test]
+    fn expire_by_id_ends_only_the_pending_row() {
+        let (_temp, store) = create_test_store();
+        let create = |message: &str| {
+            store
+                .create(
+                    "supervisor-1",
+                    None,
+                    message,
+                    ReminderTriggerType::Event,
+                    None,
+                    Some("branch_contained_in"),
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap()
+        };
+        let stale = create("stale wake");
+        let kept = create("kept wake");
+
+        assert!(store.expire(stale).unwrap());
+        assert!(!store.expire(stale).unwrap(), "an ended row stays ended");
+        let pending = store.get_event_reminders("branch_contained_in").unwrap();
+        assert_eq!(pending.iter().map(|r| r.id).collect::<Vec<_>>(), vec![kept]);
+        let ended = store.list_recently_ended("supervisor-1", 60).unwrap();
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].status, ReminderStatus::Expired);
     }
 
     /// cas-f08d (GH #147): the delivery wire format is a contract between the

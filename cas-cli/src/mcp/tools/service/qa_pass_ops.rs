@@ -217,35 +217,7 @@ impl CasService {
             .open_task_store()?
             .get(task_id)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Task not found: {error}")))?;
-        let implementer = task
-            .assignee
-            .clone()
-            .map(|assigned| {
-                self.inner
-                    .open_agent_store()
-                    .ok()
-                    .and_then(|store| {
-                        crate::mcp::tools::core::task::resolve_agent_identity(
-                            store.as_ref(),
-                            &assigned,
-                        )
-                    })
-                    .map(|agent| agent.name)
-                    .unwrap_or(assigned)
-            })
-            .or_else(|| {
-                task.deliverables
-                    .parked_branch
-                    .as_deref()
-                    .and_then(|branch| branch.strip_prefix("factory/"))
-                    .map(ToOwned::to_owned)
-            })
-            .unwrap_or_default();
-        let branch = task
-            .deliverables
-            .parked_branch
-            .clone()
-            .unwrap_or_else(|| format!("factory/{implementer}"));
+        let implementer = crate::qa_pass::delivery_implementer(&self.inner.cas_root, &task);
         // cas-5c38 (GH #999): a no-code task delivers no tip; any round an
         // earlier close opened for it is withdrawn rather than waived.
         if crate::qa_pass::is_no_code(&task) && task.deliverables.factory_branch_anchor.is_none() {
@@ -259,13 +231,17 @@ impl CasService {
         // open round is bound to it or it is a rebased copy of the recorded
         // one, not to the stale pre-rebase anchor no merge can accept.
         let passes = cas_store::list_qa_passes(&self.inner.cas_root, task_id).unwrap_or_default();
-        let repo = self
-            .inner
-            .cas_root
-            .parent()
-            .unwrap_or(&self.inner.cas_root)
-            .to_path_buf();
-        let current_tip = crate::qa_pass::branch_tip(&repo, &branch);
+        let repo = crate::qa_pass::github_gate::task_repo(&self.inner.cas_root, &task);
+        let branch = crate::qa_pass::delivery_branch(&task, &passes, &implementer, |candidate| {
+            crate::qa_pass::branch_tip(&repo, candidate).is_some()
+                || crate::qa_pass::pushed_branch_tip(&repo, candidate).is_some()
+        });
+        // Read origin once for validation, selection and the receipt. Local refs
+        // can lag a push from another checkout (GH #1200).
+        let pushed_tip = crate::qa_pass::pushed_branch_tip(&repo, &branch);
+        let current_tip = pushed_tip
+            .clone()
+            .or_else(|| crate::qa_pass::branch_tip(&repo, &branch));
         let target = task
             .deliverables
             .work_target
@@ -274,7 +250,7 @@ impl CasService {
             .filter(|target| !target.trim().is_empty())
             .unwrap_or_else(|| "main".to_string());
         let chosen = if let Some(requested) = req.head_sha.as_deref() {
-            let pushed = crate::qa_pass::pushed_branch_tip(&repo, &branch).ok_or_else(|| {
+            let pushed = pushed_tip.ok_or_else(|| {
                 Self::error(ErrorCode::INVALID_PARAMS, format!(
                     "qa_waive: cannot validate head_sha: {branch} has no readable pushed tip on origin; push the delivery branch and retry"
                 ))

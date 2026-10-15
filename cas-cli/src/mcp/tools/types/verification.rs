@@ -22,7 +22,7 @@ pub struct VerificationAddRequest {
 
     /// Issues found during verification (JSON array of issue objects)
     #[schemars(
-        description = "JSON array of issues: [{\"file\": \"src/main.rs\", \"line\": 42, \"severity\": \"blocking\", \"category\": \"todo_comment\", \"code\": \"// TODO\", \"problem\": \"Found TODO\", \"suggestion\": \"Implement it\"}]"
+        description = "JSON-encoded array (maximum 512 KiB) of issue objects. Required string fields: `file`, `category`, and `problem`. Optional fields: `line` (non-negative 32-bit integer), `severity` (`blocking` or `warning`, default `blocking`; `high` aliases `blocking`), `code` (string, default empty), and `suggestion` (string or null). `description` and `message` alias `problem`; `fix` aliases `suggestion`. Example: [{\"file\": \"src/main.rs\", \"line\": 42, \"severity\": \"blocking\", \"category\": \"todo_comment\", \"code\": \"// TODO\", \"problem\": \"Found TODO\", \"suggestion\": \"Implement it\"}]"
     )]
     #[serde(default)]
     pub issues: Option<String>,

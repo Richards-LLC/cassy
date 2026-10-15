@@ -4,12 +4,32 @@ use crate::ui::factory::daemon::imports::*;
 /// handled at this cadence.
 pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Stable identity for one alarm episode, independent of delivery retries.
+/// Session scope belongs to the caller's outer key. Tuple encoding prevents
+/// separators inside a kind or subject from aliasing a different episode.
+pub(crate) fn attention_episode_key(
+    kind: &str,
+    subject: &str,
+    episode_start: chrono::DateTime<chrono::Utc>,
+) -> String {
+    serde_json::json!([kind, subject, episode_start.to_rfc3339()]).to_string()
+}
+
 /// Persist one worker-health incident and hand it to the supervisor's durable
 /// prompt queue. The detector has already debounced the episode and the event
 /// has already been delivery-revalidated when this runs.
+#[cfg(test)]
 fn enqueue_worker_attention_relay(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
+) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_for_episode(cas_dir, event, Some(chrono::DateTime::UNIX_EPOCH))
+}
+
+fn enqueue_worker_attention_relay_for_episode(
+    cas_dir: &std::path::Path,
+    event: &crate::ui::factory::director::DirectorEvent,
+    episode_start: Option<chrono::DateTime<chrono::Utc>>,
 ) -> WorkerAttentionRelayOutcome {
     if let crate::ui::factory::director::DirectorEvent::SupervisorStalled {
         next_step,
@@ -115,6 +135,14 @@ fn enqueue_worker_attention_relay(
         ),
         _ => format!("Worker {worker} is idle with no active task and needs supervisor attention."),
     };
+    let Some(episode_start) = episode_start else {
+        // No timestamp evidence is not a new occurrence. Never substitute
+        // delivery time, which would manufacture a fresh alarm on every retry.
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let subject = task_id
+        .map(|task| serde_json::json!([worker, task]).to_string())
+        .unwrap_or_else(|| worker.to_string());
     enqueue_worker_attention_relay_detail(
         cas_dir,
         kind,
@@ -122,7 +150,7 @@ fn enqueue_worker_attention_relay(
         task_id,
         elapsed_secs,
         &detail,
-        &format!("{kind}:{worker}:{}", task_id.unwrap_or("")),
+        &attention_episode_key(kind, &subject, episode_start),
     )
 }
 
@@ -991,6 +1019,130 @@ mod worker_attention_tests {
         supervisor.status = AgentStatus::Active;
         supervisor.factory_session = Some(session.to_string());
         agents.register(&supervisor).unwrap();
+    }
+
+    #[test]
+    fn ct2_p2_second_idle_episode_relays() {
+        use crate::ui::factory::director::{
+            AgentSummary, DirectorData, DirectorEvent, DirectorEventDetector,
+        };
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "ct2-idle")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "ct2-idle");
+        let now = chrono::Utc::now();
+        let tick = std::time::Instant::now();
+        let mut data = DirectorData {
+            ready_tasks: vec![],
+            in_progress_tasks: vec![],
+            epic_tasks: vec![],
+            agents: vec![AgentSummary {
+                id: "worker-id".into(),
+                name: "gold-fox".into(),
+                status: AgentStatus::Active,
+                registered_at: now - chrono::Duration::minutes(10),
+                current_task: Some("cas-work".into()),
+                latest_activity: None,
+                last_heartbeat: None,
+                pending_messages: 0,
+                pending_supervisor_messages: 0,
+                latest_supervisor_message_at: None,
+                active_lease: None,
+                effort: None,
+            }],
+            activity: vec![],
+            agent_id_to_name: [("worker-id".into(), "gold-fox".into())]
+                .into_iter()
+                .collect(),
+            changes: vec![],
+            git_loaded: true,
+            reminders: vec![],
+            epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
+        };
+        let mut detector = DirectorEventDetector::new(vec!["gold-fox".into()], "supervisor".into());
+        detector.initialize(&data);
+        let mut starts = vec![];
+        for episode in 0..2 {
+            data.agents[0].current_task = None;
+            let mut idle = None;
+            for offset in 0..2 {
+                let seconds = episode * 600 + offset;
+                let events = detector.detect_changes_at(
+                    &data,
+                    None,
+                    tick + Duration::from_secs(seconds),
+                    now + chrono::Duration::seconds(seconds as i64),
+                );
+                idle = events
+                    .into_iter()
+                    .find(|event| matches!(event, DirectorEvent::WorkerIdle { .. }))
+                    .or(idle);
+            }
+            let event = idle.expect("sustained idle emits after debounce");
+            let start = detector
+                .worker_attention_episode_start(&event)
+                .expect("idle episode start");
+            starts.push(start);
+            let first = enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(start));
+            let duplicate =
+                enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(start));
+            assert!(matches!(
+                first,
+                WorkerAttentionRelayOutcome::Persisted { .. }
+            ));
+            assert_eq!(first, duplicate, "same episode must dedupe");
+            data.agents[0].current_task = Some("cas-work".into());
+            detector.detect_changes_at(
+                &data,
+                None,
+                tick + Duration::from_secs(episode * 600 + 10),
+                now + chrono::Duration::seconds((episode * 600 + 10) as i64),
+            );
+        }
+        assert_ne!(starts[0], starts[1]);
+        let notifications = crate::store::open_supervisor_queue_store(&cas_dir)
+            .unwrap()
+            .peek("supervisor-id", 10)
+            .unwrap();
+        assert_eq!(
+            notifications.len(),
+            2,
+            "the second idle episode must produce a second durable relay"
+        );
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(
+            prompts.len(),
+            2,
+            "each episode reaches the real supervisor lane once"
+        );
+    }
+
+    #[test]
+    fn ct2_p2_second_stall_episode_relays() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "ct2-stall")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "ct2-stall");
+        let start = chrono::Utc::now();
+        let event = crate::ui::factory::director::DirectorEvent::WorkerStalled {
+            worker: "gold-fox".into(), task_id: "cas-same-task".into(), elapsed_secs: 600, escalate: true,
+        };
+        for epoch in [start, start + chrono::Duration::minutes(10)] {
+            let sent = enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(epoch));
+            let retry = enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(epoch));
+            assert!(matches!(sent, WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert_eq!(sent, retry);
+        }
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        assert_eq!(queue.peek("supervisor-id", 10).unwrap().len(), 2);
+        assert_eq!(enqueue_worker_attention_relay_for_episode(&cas_dir, &event, None), WorkerAttentionRelayOutcome::Pending);
+        assert_eq!(queue.peek("supervisor-id", 10).unwrap().len(), 2);
+        assert_ne!(attention_episode_key("a:b", "c", start), attention_episode_key("a", "b:c", start));
     }
 
     fn assert_recovery_wake_requires_daemon(row: &cas_store::QueuedPrompt) {
@@ -2008,6 +2160,7 @@ impl FactoryDaemon {
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
+            commander_mirror_state: Default::default(),
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
@@ -2025,7 +2178,7 @@ impl FactoryDaemon {
             spawn_started_at: None,
             spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
-            last_external_wake_scan: None,
+            external_wake: Default::default(),
             pending_ci_wakes: Vec::new(),
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
         })
@@ -3064,10 +3217,13 @@ impl FactoryDaemon {
         // GH #1165: on the store worker, in event order.
         if !delivery_events.is_empty() {
             let cas_dir = self.app.cas_dir().to_path_buf();
-            let events = delivery_events.clone();
+            let events = delivery_events
+                .iter()
+                .map(|event| (event.clone(), self.app.worker_attention_episode_start(event)))
+                .collect::<Vec<_>>();
             store_worker.submit("worker attention relays", move || {
-                for event in &events {
-                    enqueue_worker_attention_relay(&cas_dir, event);
+                for (event, episode_start) in &events {
+                    enqueue_worker_attention_relay_for_episode(&cas_dir, event, *episode_start);
                 }
             });
         }

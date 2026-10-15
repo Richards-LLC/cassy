@@ -1,5 +1,17 @@
 # Contributing to Cassy
 
+## Automatic supervisor replies
+
+Completed supervisor replies are mirrored to local operator conversation history
+by default, including before the operator sends a first message and after the
+supervisor becomes idle. This local recording is independent of cloud enrollment.
+To opt out, run `cas config set factory.commander_mirror_enabled false`.
+Setting it back to `true` starts a new capture window; replies from the disabled
+period are not replayed, even if the daemon was stopped during the toggle.
+This key is operator-only and defaults to `true`. It controls automatic
+supervisor reply capture; terminal questions and explicit messages addressed
+to the operator continue to be recorded. Existing conversation history is retained.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
@@ -1364,9 +1376,34 @@ inputs remain hexadecimal commit IDs, including unambiguous abbreviations.
 
 The close gate resolves the recorded factory branch locally or on origin before
 counting commits. An unavailable branch produces a missing-evidence error and
-is not parked for merge. A no-code task whose stale code target and delivery
+is not parked for merge. A valid integrated `commit_receipt` proves delivery
+even after a suffixed promotion branch was deleted and the canonical task
+branch never existed. If that receipt is invalid, close reports its validation
+reason before parking; `merged_into` does not override the declared work target.
+A transferred delivery also resolves its recorded parked or handoff branch
+when the receiving worker's lane belongs to another task, including a branch
+available only on origin. Already integrated work needs no branch adoption or
+alias ref under the receiving worker. A source branch recycled for another
+task still needs evidence linking it to this delivery.
+A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
+A read-only no-code task also closes on portable PR or artifact evidence when
+its allocated task branch contains only foreign commits. An earlier false park
+on those commits is retired; allocating a branch does not establish ownership.
+Named task commits and unclaimed unmerged changes still require delivery proof.
+QA classification of an integrated merge receipt uses that merge's own
+first-parent diff. Later PR merges cannot add their UI paths to the receipt's
+evidence requirements or hide UI that the receipt itself delivered.
+A worker tip that merged the epic into its lane uses its later integration
+merge's diff; only a merge on the target's first-parent chain is the receipt.
+
+Typed merge requests refresh the published source before deciding it already
+landed. If that bounded fetch fails, the typed request is still queued with a
+short freshness-unavailable note. Its uncertainty survives daemon and inbox
+revalidation, so cached source refs cannot suppress it as already landed.
+Unsafe source refnames still refuse. Local-merge tasks and repositories without
+origin retain their local source authority.
 
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`

@@ -70,7 +70,27 @@ pub(crate) fn is_scrubbed_ambient_env_key(key: &str) -> bool {
     key.starts_with("CAS_")
         || matches!(
             key,
-            "CLAUDE_CONFIG_DIR" | "CLAUDE_SECURESTORAGE_CONFIG_DIR" | "CODEX_HOME" | "GROK_HOME"
+            "CLAUDE_CONFIG_DIR"
+                | "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+                | "CODEX_HOME"
+                | "GROK_HOME"
+                // Repository-local variables exported by Git hooks (cas-ea62).
+                // The regression compares this list with --local-env-vars.
+                | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                | "GIT_CONFIG"
+                | "GIT_CONFIG_PARAMETERS"
+                | "GIT_CONFIG_COUNT"
+                | "GIT_OBJECT_DIRECTORY"
+                | "GIT_DIR"
+                | "GIT_WORK_TREE"
+                | "GIT_IMPLICIT_WORK_TREE"
+                | "GIT_GRAFT_FILE"
+                | "GIT_INDEX_FILE"
+                | "GIT_NO_REPLACE_OBJECTS"
+                | "GIT_REPLACE_REF_BASE"
+                | "GIT_PREFIX"
+                | "GIT_SHALLOW_FILE"
+                | "GIT_COMMON_DIR"
         )
 }
 
@@ -146,7 +166,7 @@ impl TestEnvGuard {
             temp_home_path: None,
             saved_cwd: None,
         };
-        guard.scrub_ambient_cas_environment();
+        guard.scrub_ambient_environment();
         // Factory spawn tests must not inherit the runner's live load. The
         // production probe remains enabled unless an explicit test fixture
         // opts into this override; guard unit tests use evaluate() with
@@ -253,10 +273,11 @@ impl TestEnvGuard {
     /// Keep test fixtures independent from the factory process that launched
     /// the test binary. `CAS_*` variables other than the watchdog budget and
     /// protected-store tripwires are ambient Cassy state; account-home
-    /// variables are the non-CAS part of the factory contract.
+    /// variables are the non-CAS part of the factory contract. Repository-local
+    /// Git variables would redirect fixture writes into the caller's checkout.
     /// Tests that need one of these values set it explicitly after constructing
     /// the guard; Drop restores the caller's environment.
-    fn scrub_ambient_cas_environment(&mut self) {
+    fn scrub_ambient_environment(&mut self) {
         let keys = std::env::vars_os()
             .map(|(key, _)| key)
             .filter(|key| key.to_str().is_some_and(is_scrubbed_ambient_env_key))
@@ -288,6 +309,106 @@ impl Drop for TestEnvGuard {
 mod ambient_scrub_tests {
     use super::*;
     #[test]
+    fn repository_local_git_environment_is_scrubbed_cas_ea62() {
+        // Keep the in-process guard in sync with the shell suite boundary's
+        // `git rev-parse --local-env-vars`, without spawning Git per guard.
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let names = String::from_utf8(output.stdout).unwrap();
+        assert!(names.lines().any(|key| key == "GIT_DIR"));
+        for key in names.lines() {
+            assert!(
+                is_scrubbed_ambient_env_key(key),
+                "{key} must not redirect a fixture"
+            );
+        }
+        // User/tool configuration is not repository-local hook state.
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_AUTHOR_NAME"] {
+            assert!(!is_scrubbed_ambient_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn bare_fixture_under_hook_environment_preserves_parent_config_cas_ea62() {
+        let _guard = TestEnvGuard::new();
+        let parent = TempDir::new().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(parent.path())
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        let config = parent.path().join(".git/config");
+        let before = std::fs::read(&config).unwrap();
+        let fixture = TempDir::new().unwrap();
+        // Inject hook state into a separate test process, avoiding global
+        // environment mutations in this parallel test runner.
+        // This shared file is also compiled below integration-test modules.
+        // libtest names omit the crate segment but retain those module names.
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, module)| module);
+        let child_test = format!("{module}::hook_environment_bare_fixture_child_cas_ea62");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", &child_test])
+            .env("GIT_DIR", parent.path().join(".git"))
+            .env("GIT_COMMON_DIR", parent.path().join(".git"))
+            .env("GIT_WORK_TREE", parent.path())
+            .env("GIT_INDEX_FILE", parent.path().join(".git/index"))
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(config).unwrap(),
+            before,
+            "parent config changed"
+        );
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+            "child filter must run its test: {}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(fixture.path().join("HEAD").is_file());
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the hook environment regression"]
+    fn hook_environment_bare_fixture_child_cas_ea62() {
+        let guard = TestEnvGuard::new();
+        for key in [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+        ] {
+            assert!(std::env::var_os(key).is_none(), "leaked {key}");
+        }
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .output()
+            .unwrap();
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        drop(guard);
+        assert!(
+            std::env::var_os("GIT_DIR").is_some(),
+            "guard must restore hook state"
+        );
+    }
+
+    #[test]
     fn ambient_cas_and_factory_state_is_scrubbed() {
         for key in [
             "CAS_ROOT",
@@ -318,7 +439,11 @@ mod ambient_scrub_tests {
             assert!(!is_scrubbed_ambient_env_key(key), "{key}");
         }
         // The product's own cloud selectors stay scrubbed.
-        for key in ["CAS_CLOUD_ENDPOINT", "CAS_CLOUD_TOKEN", "CAS_CLOUD_TOKEN_FILE"] {
+        for key in [
+            "CAS_CLOUD_ENDPOINT",
+            "CAS_CLOUD_TOKEN",
+            "CAS_CLOUD_TOKEN_FILE",
+        ] {
             assert!(is_scrubbed_ambient_env_key(key), "{key}");
         }
     }

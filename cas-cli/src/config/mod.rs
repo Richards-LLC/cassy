@@ -249,7 +249,9 @@ pub use access::{
     save_global_config, set_telemetry_consent,
 };
 
-pub(crate) use access::io::{atomic_replace_project_config, lock_project_config};
+pub(crate) use access::io::{
+    atomic_replace_project_config, commander_mirror_resume_floor, lock_project_config,
+};
 
 #[cfg(test)]
 pub(crate) use access::io::{

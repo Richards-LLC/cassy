@@ -27,6 +27,14 @@ use std::time::{Duration, Instant};
 /// flock, all together. Past it, waits fail fast.
 pub(crate) const PASS_STORE_WAIT_BUDGET: Duration = Duration::from_millis(50);
 
+/// Store-wait budget one worker shutdown gets on the loop thread, in place of
+/// whatever is left of the pass budget (cas-00d5). A shutdown is a rare,
+/// deliberate action: retiring the identity and deciding whether the worktree
+/// is reclaimable must not fail just because earlier work in the same pass
+/// spent [`PASS_STORE_WAIT_BUDGET`]. Bounded so contention still cannot
+/// freeze the terminal for long (GH #1165).
+pub(crate) const SHUTDOWN_STORE_WAIT_BUDGET: Duration = Duration::from_secs(2);
+
 /// How often the background thread runs the pending task-sync repair.
 pub(crate) const TASK_SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 

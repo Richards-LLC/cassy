@@ -2,6 +2,7 @@ use super::*;
 use cas_types::{
     Agent, AgentRole, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus,
 };
+use std::path::PathBuf;
 
 const SESSION: &str = "provision-test";
 
@@ -103,6 +104,10 @@ fn cas_07ee_terminated_recipient_never_raises_unread_or_stalled() {
             let mut worker = store.get("worker-id").unwrap();
             worker.status = AgentStatus::Shutdown;
             store.register(&worker).unwrap();
+            assert_eq!(
+                store.get("worker-id").unwrap().status,
+                AgentStatus::Shutdown
+            );
         } else {
             f.daemon.dead_workers.insert("worker".into());
         }
@@ -203,6 +208,81 @@ fn cas_07ee_attributed_task_note_suppresses_stalled_attention() {
     assert!(
         f.scan().is_empty(),
         "the recipient's task note proves it acted"
+    );
+}
+
+#[test]
+fn cas_07ee_later_codex_turn_suppresses_stalled_attention() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "Please apply the scope boundary");
+    assert!(f.queue.claim_recipient_transport(id, "worker").unwrap());
+    let account = f.root.path().join("codex");
+    let sessions = account.join("sessions/2026/10/15");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session_id = "019f84af-3121-7950-ba14-b01db2da1153";
+    let path = sessions.join(format!("rollout-2026-10-15T12-00-00-{session_id}.jsonl"));
+    let now = chrono::Utc::now();
+    let lines = [
+        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":session_id,"session_id":session_id,"cwd":f.root.path(),"originator":"codex-tui","source":"cli","thread_source":"user"}}),
+        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"acted"}}),
+        serde_json::json!({"timestamp":(now+chrono::Duration::seconds(1)).to_rfc3339(),"type":"event_msg","payload":{"type":"task_complete","turn_id":"acted"}}),
+    ];
+    std::fs::write(
+        &path,
+        lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let store = open_agent_store(&f.cas_dir).unwrap();
+    let mut worker = store.get("worker-id").unwrap();
+    worker.cc_session_id = Some(session_id.into());
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    worker.metadata.insert(
+        "worker_account_dir".into(),
+        account.to_string_lossy().into(),
+    );
+    worker
+        .metadata
+        .insert("clone_path".into(), f.root.path().to_string_lossy().into());
+    store.register(&worker).unwrap();
+    let created = f.queue.queued_prompt(id).unwrap().unwrap().created_at;
+    assert!(
+        f.daemon
+            .recipient_turn_completion_after("worker", created)
+            .is_some(),
+        "fixture must resolve the real Codex turn"
+    );
+    assert!(
+        f.scan().is_empty(),
+        "a later turn makes unread/stalled attention obsolete"
+    );
+}
+
+#[test]
+fn cas_07ee_merge_envelope_never_claims_it_is_ordinary_unread_traffic() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let envelope = crate::prompt_revalidation::MergeRequestEnvelope {
+        task_id: "cas-07ee".into(),
+        branch_tip: "delivery-tip".into(),
+        target_branch: "main".into(),
+        target_branch_tip: "old-target".into(),
+        anchor_tip: None,
+        commits_not_on_target_base: 1,
+        pr_number: None,
+        source_freshness_unavailable: None,
+    };
+    let body =
+        crate::prompt_revalidation::attach_merge_request_envelope("status: ready", &envelope);
+    f.aged("worker", "supervisor", &body);
+    assert!(
+        !f.scan()
+            .iter()
+            .any(|row| row.prompt.contains("kind=\"supervisor_unread\"")),
+        "a typed merge request must not be described as carrying no merge envelope"
     );
 }
 

@@ -210,7 +210,7 @@ fn cas_07ee_merged_delivery_no_longer_needs_attention() {
 }
 
 #[test]
-fn cas_07ee_later_recipient_reply_suppresses_both_alarm_lanes() {
+fn cas_07ee_same_recipient_unbound_reply_still_alarms() {
     let _env = env();
     for (sender, recipient) in [("supervisor", "worker"), ("worker", "supervisor")] {
         let mut f = Fixture::new();
@@ -218,7 +218,10 @@ fn cas_07ee_later_recipient_reply_suppresses_both_alarm_lanes() {
         f.queue
             .enqueue_with_session(recipient, sender, "Your request 2574 is complete", SESSION)
             .unwrap();
-        assert!(f.scan().is_empty(), "recipient acted on #{id}");
+        assert!(
+            !f.scan().is_empty(),
+            "an unbound reply is not evidence for #{id}"
+        );
         assert!(
             f.queue
                 .message_delivery_report(id)
@@ -232,7 +235,7 @@ fn cas_07ee_later_recipient_reply_suppresses_both_alarm_lanes() {
 }
 
 #[test]
-fn cas_07ee_attributed_task_note_suppresses_stalled_attention() {
+fn cas_07ee_same_recipient_unrelated_note_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
     f.aged(
@@ -252,13 +255,13 @@ fn cas_07ee_attributed_task_note_suppresses_stalled_attention() {
         .record(&event)
         .unwrap();
     assert!(
-        f.scan().is_empty(),
-        "the recipient's task note proves it acted"
+        !f.scan().is_empty(),
+        "an unrelated note must not hide this message"
     );
 }
 
 #[test]
-fn cas_07ee_later_codex_turn_suppresses_stalled_attention() {
+fn cas_07ee_same_recipient_unrelated_codex_turn_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
     let id = f.aged("supervisor", "worker", "Please apply the scope boundary");
@@ -268,7 +271,7 @@ fn cas_07ee_later_codex_turn_suppresses_stalled_attention() {
     std::fs::create_dir_all(&sessions).unwrap();
     let session_id = "019f84af-3121-7950-ba14-b01db2da1153";
     let path = sessions.join(format!("rollout-2026-10-15T12-00-00-{session_id}.jsonl"));
-    let now = chrono::Utc::now();
+    let now = chrono::Utc::now() - chrono::Duration::seconds(400);
     let lines = [
         serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":session_id,"session_id":session_id,"cwd":f.root.path(),"originator":"codex-tui","source":"cli","thread_source":"user"}}),
         serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"acted"}}),
@@ -302,13 +305,13 @@ fn cas_07ee_later_codex_turn_suppresses_stalled_attention() {
         "fixture must resolve the real Codex turn"
     );
     assert!(
-        f.scan().is_empty(),
-        "a later turn makes unread/stalled attention obsolete"
+        !f.scan().is_empty(),
+        "an unrelated completed turn must not hide this message"
     );
 }
 
 #[test]
-fn cas_07ee_merge_envelope_never_claims_it_is_ordinary_unread_traffic() {
+fn cas_07ee_unsurfaced_merge_envelope_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
     let envelope = crate::prompt_revalidation::MergeRequestEnvelope {
@@ -325,15 +328,15 @@ fn cas_07ee_merge_envelope_never_claims_it_is_ordinary_unread_traffic() {
         crate::prompt_revalidation::attach_merge_request_envelope("status: ready", &envelope);
     f.aged("worker", "supervisor", &body);
     assert!(
-        !f.scan()
+        f.scan()
             .iter()
             .any(|row| row.prompt.contains("kind=\"supervisor_unread\"")),
-        "a typed merge request must not be described as carrying no merge envelope"
+        "an envelope without a confirmed wake still needs attention"
     );
 }
 
 #[test]
-fn cas_07ee_informational_approval_does_not_raise_idle_unread() {
+fn cas_07ee_untyped_approvals_still_raise_idle_unread() {
     let _env = env();
     for body in [
         "Review PASS. Holding the approved branch until CI is green.",
@@ -346,11 +349,11 @@ fn cas_07ee_informational_approval_does_not_raise_idle_unread() {
             .insert("worker".into(), Instant::now() - Duration::from_secs(900));
         f.daemon.relay_idle_unacked_messages(f.queue.as_ref());
         assert!(
-            !f.queue.peek_all(20).unwrap().iter().any(|row| row
+            f.queue.peek_all(20).unwrap().iter().any(|row| row
                 .summary
                 .as_deref()
                 .is_some_and(|s| s.starts_with("Unread on idle worker"))),
-            "informational message needs no idle-unread alarm: {body}"
+            "untyped text cannot establish informational intent: {body}"
         );
     }
 }
@@ -469,5 +472,100 @@ fn cas_07ee_guard_closed_task_mention_is_not_a_satisfied_instruction() {
     assert!(
         !f.scan().is_empty(),
         "a closed-task mention can still ask new work"
+    );
+}
+
+#[test]
+fn cas_07ee_missing_recipient_evidence_still_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "Please fix the red CI");
+    rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+        .unwrap()
+        .execute("DELETE FROM agents WHERE id = 'worker-id'", [])
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "missing registry evidence must not hide #{id}"
+    );
+}
+
+#[test]
+fn cas_07ee_unreadable_recipient_registry_still_needs_attention() {
+    let _env = env();
+    let f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "Please fix the red CI");
+    let row = f.queue.queued_prompt(id).unwrap().unwrap();
+    rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+        .unwrap()
+        .execute("DROP TABLE agents", [])
+        .unwrap();
+    assert_eq!(
+        f.daemon
+            .message_attention_decisions(f.queue.as_ref(), &[row])
+            .get(&id),
+        Some(&MessageAttention::Needed)
+    );
+}
+
+#[test]
+fn cas_07ee_respawned_worker_name_still_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    f.aged(
+        "supervisor",
+        "worker",
+        "Please handle this course correction",
+    );
+    f.daemon.dead_workers.insert("worker".into());
+    let pty = cas_mux::Pty::spawn(
+        "worker",
+        cas_mux::PtyConfig {
+            command: "sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+            cwd: Some(f.root.path().into()),
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        },
+    )
+    .unwrap();
+    let pane = cas_mux::Pane::with_pty(
+        "worker",
+        cas_mux::PaneKind::Worker,
+        pty,
+        24,
+        80,
+        cas_mux::SupervisorCli::Codex,
+    )
+    .unwrap();
+    f.daemon.app.adopt_worker_pane_for_test(pane);
+    assert!(
+        !f.scan().is_empty(),
+        "a name in dead_workers can belong to a live respawn"
+    );
+}
+
+#[test]
+fn cas_07ee_closed_before_a_new_instruction_still_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let mut task = Task::new("cas-07ee".into(), "delivery".into());
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+    task.updated_at = task.closed_at.unwrap();
+    crate::store::open_task_store_local(&f.cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    f.aged(
+        "supervisor",
+        "worker",
+        "cas-07ee needs investigation; re-close after repair",
+    );
+    assert!(
+        !f.scan().is_empty(),
+        "closure before the instruction cannot satisfy it"
     );
 }

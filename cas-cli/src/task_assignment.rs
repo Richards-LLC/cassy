@@ -3,6 +3,17 @@
 use cas_types::{AgentRole, Task, TaskStatus, TaskType};
 use std::path::Path;
 
+pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
+    "Assignment authorizes and requires adding or updating tests for the change and running its affected targeted tests (",
+    "`node --test`, `vitest`, `tsc`, or capped Cargo tests per CONTRIBUTING). ",
+    "Factory workers run the targeted tests for their change themselves. ",
+    "For Rust, use one package, a named-test `-E` filter, and the capped runner; ",
+    "JS, TS, and Python tests run directly in the worker. ",
+    "The merge queue runs the full suite once; never run it locally. ",
+    "Only `--full` Playwright and the Rust full suite are reserved for the merge queue. ",
+    "Workers close their own tasks; never ask the supervisor to close your task on their behalf."
+);
+
 /// Queue the assignment once for the current live worker registration. This
 /// does not depend on the task appearing in the director's focused snapshot.
 pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>> {
@@ -58,9 +69,14 @@ pub(crate) fn enqueue(cas_dir: &Path, task: &Task) -> crate::Result<Option<i64>>
          View full details: {prefix}task action=show id={}\n\
          Start working: {prefix}task action=start id={} brief=true\n\
          Successful task action=start is authoritative assignment acceptance; no prose ACK is required.\n\
+         {}\n\
          While working, post progress notes with {prefix}task action=notes.\n\
          If blocked, set status=blocked and send {prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\".",
-        task.id, task.title, task.id, task.id,
+        task.id,
+        task.title,
+        task.id,
+        task.id,
+        WORKER_ASSIGNMENT_TEST_POLICY,
     );
     let key = format!("task-assignment:{}:{}", task.id, worker.id);
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;

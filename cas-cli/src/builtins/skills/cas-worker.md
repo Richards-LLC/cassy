@@ -7,6 +7,12 @@ metadata:
 
 # Factory Worker
 
+Factory workers run the targeted tests for their change themselves. Every task
+assignment authorizes and requires adding or updating tests for the change and
+running its affected targeted tests. Workers close their own tasks; never ask
+the supervisor to close your task on their behalf. Follow `cas-tdd` and
+`CONTRIBUTING` for scoped test commands.
+
 Execute one assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.
 
@@ -32,8 +38,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
    and read [close-gate.md](references/close-gate.md). Close with
    `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain
-   is empty and HEAD is the claimed commit. Hand verification-required guidance
-   to the supervisor; quote it in `need:`.
+   is empty and HEAD is the claimed commit. For verification-required closes,
+   quote the required evidence in `need:` and close the task yourself after
+   verification is complete.
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and request merge with `merge_request=true`;
    re-close after it lands; don't poll for it. Read [recovery.md](references/recovery.md)

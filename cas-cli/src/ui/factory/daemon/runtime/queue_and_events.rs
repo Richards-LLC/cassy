@@ -518,7 +518,9 @@ fn deliver_worker_task_brief(
         "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
          you now.\n\
          Start with `{worker_prefix}task action=show id={task_id}`, then \
-         `{worker_prefix}task action=start id={task_id}` before you change any code."
+         `{worker_prefix}task action=start id={task_id}` before you change any code.\n\n\
+         {test_policy}",
+        test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
     );
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)

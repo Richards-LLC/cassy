@@ -164,6 +164,8 @@ impl Config {
             ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),
             ("factory.supervisor_only_env".to_string(), factory.worker_policy.supervisor_only_env.join(",")),
             ("factory.worker_credential_env".to_string(), factory.worker_policy.worker_credential_env.join(",")),
+            ("factory.worker_denied_clis".to_string(), factory.worker_policy.worker_denied_clis.join(",")),
+            ("factory.worker_denied_mcp_tools".to_string(), factory.worker_policy.worker_denied_mcp_tools.join(",")),
             (
                 "factory.artifacts_root".to_string(),
                 factory

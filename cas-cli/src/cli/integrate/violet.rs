@@ -1188,18 +1188,20 @@ fn write_credentials(
     bypass_name: &str,
     bypass: &str,
 ) -> Result<bool> {
-    anyhow::ensure!(
-        valid_env_name(token_name),
-        "invalid token environment variable name"
-    );
-    anyhow::ensure!(
-        valid_env_name(bypass_name),
-        "invalid bypass environment variable name"
-    );
-    anyhow::ensure!(
-        !token.contains(['\r', '\n']) && !bypass.contains(['\r', '\n']),
-        "credential values cannot contain newlines"
-    );
+    write_credential_exports(path, &[(token_name, token), (bypass_name, bypass)])
+}
+
+fn write_credential_exports(path: &Path, exports: &[(&str, &str)]) -> Result<bool> {
+    for (name, value) in exports {
+        anyhow::ensure!(
+            valid_env_name(name),
+            "invalid credential environment variable name"
+        );
+        anyhow::ensure!(
+            !value.contains(['\r', '\n']),
+            "credential values cannot contain newlines"
+        );
+    }
     let existing = if ifs::is_regular_file(path) {
         ifs::read_capped(path)?
     } else if path.exists() {
@@ -1212,7 +1214,7 @@ fn write_credentials(
         .filter(|line| {
             !matches!(
                 assignment_name(line),
-                Some(name) if name == token_name || name == bypass_name
+                Some(name) if exports.iter().any(|(export, _)| *export == name)
             )
         })
         .collect();
@@ -1220,12 +1222,10 @@ fn write_credentials(
         lines.pop();
     }
     lines.push("");
-    let rendered = format!(
-        "{}export {token_name}='{}'\nexport {bypass_name}='{}'\n",
-        lines.join("\n"),
-        shell_quote(token),
-        shell_quote(bypass),
-    );
+    let mut rendered = lines.join("\n");
+    for (name, value) in exports {
+        rendered.push_str(&format!("export {name}='{}'\n", shell_quote(value)));
+    }
     let changed = rendered != existing;
     if changed {
         write_private_file(path, &rendered)?;
@@ -1316,10 +1316,36 @@ pub(super) fn update_machine_credentials() -> Result<std::collections::BTreeMap<
         load_shell_assignments(profile, &mut values, &mut visited, 0);
     }
     load_shell_assignments(&paths.credentials_file, &mut values, &mut visited, 0);
-    for (name, value) in std::env::vars() {
+    for (name, value) in std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+    {
         if !value.trim().is_empty() || !values.contains_key(&name) {
             values.insert(name, value);
         }
+    }
+    // Older installations may have only shell exports, with no managed file.
+    // Preserve those working values before renaming their direct-harness refs.
+    let imports: Vec<_> = values
+        .iter()
+        .filter_map(|(name, value)| {
+            let canonical = canonical_violet_credential_name(name);
+            (canonical != *name
+                && canonical != "VIOLET_SLACK_TOKEN_ENV"
+                && !value.trim().is_empty()
+                && !values.get(&canonical).is_some_and(|v| !v.trim().is_empty()))
+            .then(|| (canonical, value.clone()))
+        })
+        .collect();
+    if !imports.is_empty() {
+        let exports: Vec<_> = imports
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        write_credential_exports(&paths.credentials_file, &exports)?;
+        if let Some(profile) = paths.login_profile.as_deref() {
+            ensure_profile_line(profile, &paths.credentials_file)?;
+        }
+        values.extend(imports);
     }
     Ok(values)
 }
@@ -1425,7 +1451,8 @@ fn load_shell_assignments(
 
 /// Load private machine credentials for a proxy child whose parent harness
 /// does not forward arbitrary environment variables (notably Codex MCP
-/// subprocesses). Existing process values win, and shell code is never
+/// subprocesses). Usable process values win; empty canonical Violet exports
+/// are repaired from the private file. Shell code is never
 /// executed while reading the credentials/profile files.
 #[cfg(feature = "mcp-proxy")]
 pub fn load_machine_credentials_into_process_env() -> Result<usize> {
@@ -1460,8 +1487,14 @@ fn load_machine_credentials_with_installer(
     }
     let mut loaded = 0;
     for (name, value) in values {
-        if excluded.contains(&name) || value.trim().is_empty() || std::env::var_os(&name).is_some()
-        {
+        let canonical_violet = name == VIOLET_DEFAULT_BYPASS_ENV
+            || (name.starts_with("VIOLET_SLACK_TOKEN_") && name != "VIOLET_SLACK_TOKEN_ENV")
+            || name == "VIOLET_SLACK_TOKEN";
+        let existing = std::env::var_os(&name);
+        let preserve_existing = existing
+            .as_ref()
+            .is_some_and(|value| !canonical_violet || !value.to_string_lossy().trim().is_empty());
+        if excluded.contains(&name) || value.trim().is_empty() || preserve_existing {
             continue;
         }
         install(&name, &value);
@@ -3327,6 +3360,26 @@ mod tests {
                 .unwrap()
                 .contains(&profile_source_line(&credentials))
         );
+        env.set("VIOLET_SLACK_TOKEN_LAPTOP", "");
+        assert_eq!(
+            load_machine_credentials_with_installer(&[], |name, value| env.set(name, value))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            std::env::var("VIOLET_SLACK_TOKEN_LAPTOP").unwrap(),
+            FAKE_TOKEN
+        );
+        env.set("VIOLET_SLACK_TOKEN_LAPTOP", "");
+        assert_eq!(
+            load_machine_credentials_with_installer(
+                &["VIOLET_SLACK_TOKEN_LAPTOP".into()],
+                |name, value| env.set(name, value)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(std::env::var("VIOLET_SLACK_TOKEN_LAPTOP").unwrap(), "");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

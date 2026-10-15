@@ -3309,6 +3309,8 @@ mod related_recall_response_tests {
         assert!(invalid_target_task.deliverables.work_target.is_none());
     }
 
+    // pin: queued dispatch preserves test authorization, worker-owned close, and
+    // the docs-only acceptance-check exception for no-code tasks.
     #[tokio::test]
     async fn gh1123_create_with_live_assignee_queues_dispatch() {
         let temp = TempDir::new().unwrap();
@@ -3327,6 +3329,9 @@ mod related_recall_response_tests {
         assert_eq!(rows[0].target, worker.name);
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
         assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
+        assert!(rows[0]
+            .prompt
+            .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY));
         assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
         // A later director tick shares the producer; it cannot duplicate this dispatch.
         crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();

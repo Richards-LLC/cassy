@@ -518,7 +518,9 @@ fn deliver_worker_task_brief(
         "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
          you now.\n\
          Start with `{worker_prefix}task action=show id={task_id}`, then \
-         `{worker_prefix}task action=start id={task_id}` before you change any code."
+         `{worker_prefix}task action=start id={task_id}` before you change any code.\n\n\
+         {test_policy}",
+        test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
     );
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
@@ -14425,6 +14427,57 @@ mod tests {
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
         );
+    }
+
+    // pin: this rendered spawn envelope is the required test-authorization contract across harnesses.
+    #[test]
+    fn spawn_assignment_brief_authorizes_targeted_tests_for_every_harness() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let harnesses = [
+            cas_mux::SupervisorCli::Claude,
+            cas_mux::SupervisorCli::Codex,
+            cas_mux::SupervisorCli::Grok,
+            cas_mux::SupervisorCli::OpenCode,
+        ];
+
+        for (index, worker_cli) in harnesses.into_iter().enumerate() {
+            let worker = format!("worker-{index}");
+            let task_id = format!("cas-test-{index}");
+            deliver_worker_task_brief(
+                &cas_dir,
+                "factory-session",
+                &worker,
+                &task_id,
+                "add targeted regression coverage",
+                worker_cli,
+            )
+            .unwrap();
+        }
+
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(prompts.len(), harnesses.len());
+        for prompt in prompts {
+            // pin: preserve the docs-only acceptance-check exception in every spawned brief.
+            assert!(
+                prompt
+                    .prompt
+                    .contains("Docs-only and no-code tasks prove their acceptance check instead"),
+                "missing docs-only exception: {}",
+                prompt.prompt
+            );
+            assert!(
+                prompt
+                    .prompt
+                    .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY),
+                "{}: {}",
+                crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
+                prompt.prompt
+            );
+        }
     }
 
     #[test]

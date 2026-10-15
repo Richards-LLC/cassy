@@ -432,6 +432,44 @@ mod tests {
     }
 
     #[test]
+    fn opaque_cargo_lock_holder_is_indeterminate_with_path_cas_cd3e_review() {
+        let (_temp, root, worker, target) = fixture();
+        let proc = opaque_proc(&root);
+        let lock_path = target.join("debug/.cargo-lock");
+        let held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.try_lock_exclusive().unwrap();
+        let (disposition, reason) = linux_cache_admission(&root, &worker, &target, &proc)
+            .err()
+            .unwrap();
+        assert_eq!(disposition, CacheDisposition::Indeterminate);
+        assert!(
+            reason.contains(&lock_path.display().to_string()),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn preview_never_acquires_or_creates_build_locks_cas_cd3e_review() {
+        let (_temp, root, _worker, _target) = fixture();
+        let policy = TargetCachePolicy {
+            high_watermark_percent: 1,
+            low_watermark_percent: 0,
+            min_idle_secs: 0,
+            retention_count: 0,
+        };
+        let report = inspect(&root, policy, &[], &[], true).unwrap();
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected);
+        assert!(
+            !root.join("worker-check-slots").exists(),
+            "preview must not create lane locks"
+        );
+    }
+
+    #[test]
     fn owned_target_keeps_lifetime_lease_and_provenance_gate_cas_cd3e() {
         let (_temp, root, worker, target) = fixture();
         fs::remove_dir_all(&target).unwrap();

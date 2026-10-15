@@ -11811,6 +11811,21 @@ mod tests {
     }
 
     #[test]
+    fn non_lane_target_keeps_stale_heartbeat_live_pid_protection_cas_cd3e_review() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join(".cas");
+        let integration = root.join("epic-integration-fixture");
+        std::fs::create_dir_all(integration.join("target")).unwrap();
+        let store = crate::store::open_agent_store(&root).unwrap();
+        let mut owner = cas_types::Agent::new("owner".into(), "supervisor".into());
+        owner.pid = Some(std::process::id());
+        owner.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(3);
+        owner.metadata.insert("clone_path".into(), integration.display().to_string());
+        store.register(&owner).unwrap();
+        assert!(live_target_cache_worktrees(store.as_ref()).contains(&integration));
+    }
+
+    #[test]
     fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {
         let repo = tempfile::tempdir().expect("test repo");
         assert!(std::process::Command::new("git")

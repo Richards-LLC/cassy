@@ -374,9 +374,11 @@ fn surface_factory_inbox_with_transport_delivery(
             Surfacing::TurnStart => vec![
                 cas_store::HookDrain::WakeNamed(&wake_ids),
                 cas_store::HookDrain::Unseen,
+                cas_store::HookDrain::PolledBefore(turn_started),
             ],
             Surfacing::ToolBoundary(Some(turn)) => vec![
                 cas_store::HookDrain::DeliveredAfter(turn.started_at),
+                cas_store::HookDrain::PolledBefore(turn.started_at),
             ],
             Surfacing::ToolBoundary(None) => vec![cas_store::HookDrain::WithoutTransport],
             Surfacing::TurnPrompt { .. } => vec![cas_store::HookDrain::WakeNamed(&wake_ids)],

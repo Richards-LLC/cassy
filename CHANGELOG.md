@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.55.0] - 2026-10-15
+
 ### Changed — code merges wait for CI and late failures raise a blocker (cas-6c13)
 
 - `worktree_merge` refuses a code delivery while its lane CI is still

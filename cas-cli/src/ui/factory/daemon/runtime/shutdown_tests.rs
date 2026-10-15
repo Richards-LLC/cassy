@@ -462,6 +462,46 @@ async fn long_transcript_recycle_registers_fresh_session_cas_c1a2() {
     long_transcript_recycle(true).await;
 }
 
+/// Reproduce the lane environment inside the capped test runner: no login
+/// profile, local bin directory, inherited CAS identity, or installed harness.
+#[test]
+fn shutdown_module_and_env_policy_pass_without_local_harnesses_cas_c1a2() {
+    if std::env::var_os("CAS_C1A2_CLEAN_SUITE").is_some() {
+        return; // The child runs this same module; do not recursively spawn it.
+    }
+    let home = tempfile::tempdir().unwrap();
+    for filter in [
+        "ui::factory::daemon::runtime::shutdown_tests::",
+        "test_support::lib_test_process_env_mutation_is_isolated",
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("CAS_C1A2_CLEAN_SUITE", "1")
+            .arg(filter)
+            .arg("--test-threads=1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "scrubbed {filter}:\n{stdout}\n{stderr}"
+        );
+        let summary = stdout
+            .lines()
+            .find(|line| line.starts_with("test result:"))
+            .unwrap();
+        assert!(
+            !summary.contains("0 passed"),
+            "no tests executed: {summary}"
+        );
+        eprintln!("scrubbed {filter}: {summary}");
+    }
+}
+
 async fn long_transcript_recycle(register_replacement: bool) {
     use std::os::unix::fs::PermissionsExt;
 

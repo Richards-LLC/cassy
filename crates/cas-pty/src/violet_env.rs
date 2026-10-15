@@ -204,6 +204,33 @@ pub fn configure_command(command: &mut Command, harness: &str) {
 mod tests {
     use super::*;
     use crate::test_env_guard::TestEnvGuard;
+    #[test]
+    fn cas_678d_round3_hydration_injects_only_registered_account() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut guard = TestEnvGuard::temp_home();
+        let home = guard.home().to_path_buf();
+        guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+        guard.set("VIOLET_SLACK_TOKEN_REGISTERED", "");
+        guard.set("VIOLET_SLACK_TOKEN_UNRELATED", "");
+        std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_REGISTERED='registered'\nVIOLET_SLACK_TOKEN_UNRELATED='unrelated'\n").unwrap();
+        std::fs::set_permissions(home.join("credentials.env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(home.join(".claude.json"), r#"{"mcpServers":{"violet":{"headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_REGISTERED}"}}}}"#).unwrap();
+        let mut pane = vec![];
+        hydrate("claude", &mut pane, &[]);
+        assert!(pane.iter().any(|(k,v)| k == "VIOLET_SLACK_TOKEN_REGISTERED" && v == "registered"));
+        assert!(!pane.iter().any(|(k,_)| k == "VIOLET_SLACK_TOKEN_UNRELATED"));
+    }
+
+    #[test]
+    fn cas_678d_round3_refuses_public_credentials_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let guard = TestEnvGuard::temp_home();
+        let path = guard.home().join("credentials.env");
+        std::fs::write(&path, "VIOLET_SLACK_TOKEN_FIXTURE='private'\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(literal_file_values(&path).is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn violet_env_actual_pty_spawn_and_respawn_load_fresh_private_values() {

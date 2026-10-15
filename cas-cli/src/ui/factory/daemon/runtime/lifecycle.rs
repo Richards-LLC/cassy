@@ -3393,7 +3393,7 @@ impl FactoryDaemon {
                 .parent()
                 .unwrap_or(self.app.cas_dir())
                 .to_path_buf();
-            let request = self.app.delivery_request();
+            let request = self.app.delivery_request(&[]);
             self.queue_jobs.submit_inbox_retraction(
                 "supervisor",
                 teams.inbox_pruner(),

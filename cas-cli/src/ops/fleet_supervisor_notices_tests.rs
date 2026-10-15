@@ -19,7 +19,16 @@ fn ct2_p3_integration_conflict_notifies_both() {
         agents.register(&agent).unwrap();
         let metadata = crate::ui::factory::metadata_path(session);
         std::fs::create_dir_all(metadata.parent().unwrap()).unwrap();
-        std::fs::write(metadata, serde_json::json!({"name":session,"project_dir":temp.path(),"supervisor":{"name":name}}).to_string()).unwrap();
+        let data = crate::ui::factory::create_metadata(
+            session,
+            12345,
+            name,
+            &[],
+            None,
+            temp.path().to_str(),
+            None,
+        );
+        std::fs::write(metadata, serde_json::to_string(&data).unwrap()).unwrap();
         let mut task = Task::new(epic.into(), epic.into());
         task.task_type = TaskType::Epic;
         task.status = TaskStatus::InProgress;

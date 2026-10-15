@@ -25,7 +25,7 @@ fn ct2_p3_dead_owner_notice_rerouted() {
     // A heartbeat-expired Active row is as unusable as Shutdown.
     let mut expired =
         Agent::new_with_role("expired-id".into(), "expired".into(), AgentRole::Supervisor);
-    expired.factory_session = Some("ended-session".into());
+    expired.factory_session = Some("expired-session".into());
     expired.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(10);
     agents.register(&expired).unwrap();
     for (stage, target, session) in [

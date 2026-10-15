@@ -1303,6 +1303,27 @@ fn rename_legacy_credentials(path: &Path, dry_run: bool) -> Result<Vec<String>> 
     Ok(renamed.into_iter().collect())
 }
 
+/// Upgrade-owned credential migration. Keep secrets in memory for verification,
+/// rather than mutating a multithreaded updater's process environment. Empty
+/// inherited exports must not shadow a usable private-file value.
+pub(super) fn update_machine_credentials() -> Result<std::collections::BTreeMap<String, String>> {
+    let paths = MachinePaths::from_env(&ProcessEnv)?;
+    rename_legacy_credentials(&paths.credentials_file, false)
+        .with_context(|| format!("renaming keys in {}", paths.credentials_file.display()))?;
+    let mut values = std::collections::BTreeMap::new();
+    let mut visited = std::collections::BTreeSet::new();
+    if let Some(profile) = paths.login_profile.as_deref() {
+        load_shell_assignments(profile, &mut values, &mut visited, 0);
+    }
+    load_shell_assignments(&paths.credentials_file, &mut values, &mut visited, 0);
+    for (name, value) in std::env::vars() {
+        if !value.trim().is_empty() || !values.contains_key(&name) {
+            values.insert(name, value);
+        }
+    }
+    Ok(values)
+}
+
 fn profile_source_line(credentials: &Path) -> String {
     let path = shell_quote(&credentials.to_string_lossy());
     format!("[ -f '{path}' ] && . '{path}'")

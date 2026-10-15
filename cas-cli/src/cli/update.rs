@@ -2489,7 +2489,7 @@ fn sync_claude_files_into(
 /// It never writes project-scoped settings, CLAUDE.md, or db-backed rules/skills.
 fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
     #[cfg(feature = "mcp-proxy")]
-    crate::cli::integrate::violet_retirement::retire_installed_hub(None)?;
+    crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update()?;
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")
     })?;

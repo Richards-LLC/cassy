@@ -17,6 +17,9 @@ use crate::ui::factory::protocol::DaemonMessage;
 #[derive(Default)]
 pub(in crate::ui::factory::daemon) struct TerminalExchange {
     requests: VecDeque<(usize, String)>,
+    /// Panes that produced output since the last [`Self::take_output_panes`],
+    /// for the render scheduler (cas-77f39).
+    output_panes: Vec<String>,
 }
 
 /// The daemon's terminal resources. Draining updates the panes' real terminal
@@ -34,10 +37,21 @@ impl TerminalExchange {
         self.requests.push_back((client_id, pane_id));
     }
 
+    /// The panes that produced output since the last call, each once.
+    pub(super) fn take_output_panes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output_panes)
+    }
+
     async fn advance(&mut self, session: &mut impl TerminalSession) -> usize {
         self.capture_pending(session);
         let (bytes_processed, events) = session.drain();
         for event in events {
+            if let MuxEvent::PaneOutput { pane_id, data } = &event
+                && !data.is_empty()
+                && !self.output_panes.contains(pane_id)
+            {
+                self.output_panes.push(pane_id.clone());
+            }
             let output = match &event {
                 MuxEvent::PaneOutput { pane_id, data }
                     if !data.is_empty() && !session.clients().is_empty() =>

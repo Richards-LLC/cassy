@@ -538,6 +538,10 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
 }
 
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
+    execute_at_with_scope(cas_root, args, cwd, cargo, None)
+}
+
+fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, _scope_runner: Option<&Path>) -> Result<()> {
     let test = targeted_test(args);
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
@@ -714,6 +718,33 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_memory_scope_runs_cargo_with_limit_and_preserves_context() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker with spaces");
+        fixture_commit(&repo);
+        std::fs::write(root.join("config.toml"), "[factory]\nworker_memory_high_gib = 3\n").unwrap();
+        let scope = dir.path().join("scope runner");
+        fake_cargo(&scope, r#"printf '%s\n' "$@" > target/scope-args
+while [ "$1" != -- ]; do shift; done
+shift
+exec "$@""#);
+        let cargo = dir.path().join("cargo stand-in");
+        fake_cargo(&cargo, r#"[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 4
+[ -z "$RUSTC_WRAPPER" ] || exit 5
+printf '%s\n' "$@" > target/cargo-args"#);
+        execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap();
+        let scope_args = std::fs::read_to_string(repo.join("target/scope-args")).expect("build must enter a memory-limited scope");
+        assert!(scope_args.contains("--user\n--scope\n"), "{scope_args}");
+        assert!(scope_args.contains("MemoryHigh=3221225472\n"), "{scope_args}");
+        assert_eq!(std::fs::read_to_string(repo.join("target/cargo-args")).unwrap(), "check\n-p\ncas\n--lib\n");
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

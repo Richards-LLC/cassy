@@ -213,17 +213,29 @@ pub(crate) fn target_is_reserved_source(target: &str) -> bool {
 
 /// GH #1196: why an operator turn cannot be delivered right now, or `None`
 /// when it can or the state is unknown. Delivery needs a Commander client
-/// connected to the session's daemon (it reports the count in `loop.json`,
-/// written every few seconds) or an enrolled cloud operator feed. An absent
-/// or stale `loop.json` is unknown: the daemon delivers once it is back.
+/// connected to the session's daemon or an enrolled cloud operator feed.
+///
+/// The daemon records its client count in `loop.json` at the end of each loop
+/// pass. The watchdog rewrites the file every 5 s even while the loop is
+/// wedged, so the count is current only when the file is fresh
+/// ([`STATUS_STALE_SECS`](crate::factory_daemon_health::STATUS_STALE_SECS))
+/// and the last pass is recent
+/// ([`LOOP_WEDGED_SECS`](crate::factory_daemon_health::LOOP_WEDGED_SECS)).
+/// Anything else is unknown, and the turn queues so the daemon can deliver it
+/// once it is back. An unreadable cloud binding is unknown too.
+///
+/// Known limits: a device that attached within the last loop pass (about
+/// 5 s) can still be refused; retrying reaches it. A refused send records
+/// nothing, so an `in_reply_to` it carried stays unacknowledged.
 pub(crate) fn operator_turn_undeliverable(
     cas_root: &std::path::Path,
     factory_session: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<String> {
+    use crate::factory_daemon_health::{LOOP_WEDGED_SECS, STATUS_STALE_SECS};
     let status = crate::factory_daemon_health::read_status(cas_root, factory_session)?;
-    let fresh = now.signed_duration_since(status.written_at).num_seconds()
-        <= crate::factory_daemon_health::STATUS_STALE_SECS;
+    let fresh = now.signed_duration_since(status.written_at).num_seconds() <= STATUS_STALE_SECS
+        && now.signed_duration_since(status.last_pass_at).num_seconds() <= LOOP_WEDGED_SECS;
     if !fresh || status.commander_clients != Some(0) {
         return None;
     }
@@ -6216,6 +6228,65 @@ mod cas_89e1_post_merge_message_type_tests {
         .expect("remove loop.json");
         let response = response_text(service.message_send(request()).await.expect("queued"));
         assert!(response.contains("Commander status queued"), "unknown state still queues: {response}");
+    }
+
+    /// GH #1196 review M4/L8: each branch where the Commander state is not
+    /// known to be "no device" lets the turn queue.
+    #[test]
+    fn gh_1196_operator_refusal_needs_a_known_live_state() {
+        use crate::factory_daemon_health::{LOOP_WEDGED_SECS, STATUS_STALE_SECS};
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let store = cas_store::SqlitePromptQueueStore::open(&cas_root).expect("prompt queue");
+        store.init().expect("init prompt queue");
+        let session = "factory-refusal";
+        let written = chrono::Utc::now();
+        let write = |cas_root: &std::path::Path, last_pass_at: chrono::DateTime<chrono::Utc>| {
+            let mut status: crate::factory_daemon_health::DaemonLoopStatus =
+                serde_json::from_value(serde_json::json!({
+                    "pid": 1,
+                    "session": session,
+                    "written_at": written,
+                    "last_pass_at": last_pass_at,
+                    "phase": "idle",
+                    "passes": 1,
+                    "pending_spawns": 0,
+                }))
+                .expect("loop status");
+            status.commander_clients = Some(0);
+            crate::factory_daemon_health::write_status(cas_root, &status).expect("write loop.json");
+        };
+        let check = |now| operator_turn_undeliverable(&cas_root, session, now);
+
+        write(&cas_root, written);
+        assert!(check(written).is_some(), "fresh, live, no device, no feed: refused");
+        let stale = written + chrono::Duration::seconds(STATUS_STALE_SECS + 1);
+        assert!(check(stale).is_none(), "stale loop.json is unknown");
+
+        write(&cas_root, written - chrono::Duration::seconds(LOOP_WEDGED_SECS + 1));
+        assert!(check(written).is_none(), "a wedged loop's client count is unknown");
+
+        write(&cas_root, written);
+        store
+            .bind_operator_feed(&cas_store::OperatorFeedBinding {
+                account_id: "acct-1".into(),
+                machine_id: "mch-1".into(),
+                hub_id: "hub-1".into(),
+                project_id: "proj-1".into(),
+                bound_at: "2026-10-15T19:00:00Z".into(),
+            })
+            .expect("bind feed");
+        assert!(check(written).is_none(), "a cloud-bound project always queues");
+
+        let bad_root = temp.path().join("unreadable").join(".cas");
+        std::fs::create_dir_all(&bad_root).expect("second Cassy root");
+        std::fs::write(bad_root.join("cas.db"), b"not a sqlite database").expect("corrupt db");
+        write(&bad_root, written);
+        assert!(
+            operator_turn_undeliverable(&bad_root, session, written).is_none(),
+            "an unreadable binding is unknown, not absent"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

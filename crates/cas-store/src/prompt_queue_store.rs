@@ -3449,7 +3449,7 @@ impl SqlitePromptQueueStore {
         // GH #1196: the operator never belongs to a factory session, so a
         // session-membership reason misleads. What failed is that no
         // Commander device took the message.
-        if target.eq_ignore_ascii_case("operator") || target.starts_with("commander:") {
+        if is_operator_target(&target) {
             reason = "no Commander device received it before it expired".to_string();
         }
         if origin_kind.as_deref() == Some("registered_agent") {
@@ -3560,17 +3560,22 @@ impl SqlitePromptQueueStore {
     fn notify_bulk_abandoned_senders_in_tx(tx: &Connection, prompt_ids: &[i64]) -> Result<()> {
         use std::collections::{BTreeMap, BTreeSet};
 
-        let mut groups: BTreeMap<(String, Option<String>), Vec<AbandonedSenderNotice>> =
+        // GH #1196: Commander and agent abandonments are separate episodes.
+        let mut groups: BTreeMap<(String, Option<String>, bool), Vec<AbandonedSenderNotice>> =
             BTreeMap::new();
         for id in prompt_ids {
             if let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, *id)? {
                 groups
-                    .entry((notice.sender.clone(), notice.session.clone()))
+                    .entry((
+                        notice.sender.clone(),
+                        notice.session.clone(),
+                        is_operator_target(&notice.target),
+                    ))
                     .or_default()
                     .push(notice);
             }
         }
-        for ((sender, session), mut notices) in groups {
+        for ((sender, session, operator), mut notices) in groups {
             notices.sort_by_key(|notice| notice.prompt_id);
             // Keep the established single-message wording when a sender has
             // only one expired message in this sweep.
@@ -3615,6 +3620,7 @@ impl SqlitePromptQueueStore {
                 ),
                 &format!("{} messages to {targets} abandoned", notices.len()),
                 &format!("delivery-abandoned:batch:{ids}"),
+                operator,
             )?;
         }
         Ok(())
@@ -3682,19 +3688,28 @@ impl SqlitePromptQueueStore {
             &notice,
             &format!("Message {message_id} to {recipient} abandoned"),
             &format!("delivery-abandoned:{message_id}"),
+            is_operator_target(recipient),
         )
     }
 
     /// Record an abandonment notice as part of the recipient's episode (GH
-    /// #1196, communication contract v2 P3.3). Within
-    /// [`ABANDONMENT_EPISODE_SECS`] a recipient gets one notice, then at most
-    /// one update:
+    /// #1196, communication contract v2 P3.3).
+    ///
+    /// Episodes are keyed on the notice's recipient, session and target
+    /// class. Operator and Commander targets form one class; every other
+    /// target forms the other. Each episode lives in a fixed clock hour
+    /// ([`ABANDONMENT_EPISODE_SECS`]):
     ///
     /// - no notice in the window: insert it;
-    /// - the latest notice is still unread: fold this abandonment into it;
-    /// - it was read and no update exists yet: insert the update;
-    /// - the update was read too: count it, and say nothing until the window
-    ///   ends. Each message's own `message_status` still reports it.
+    /// - the latest notice is still unread (no recipient-side receipt, so no
+    ///   transport claim, Teams body copy, hook surfacing, poll or ack): fold
+    ///   this abandonment into it as an `Also:` line, then as a `+N more`
+    ///   count once another line would break the hook budget;
+    /// - Commander class, notice read, no update yet: insert one update;
+    /// - Commander class, update read too: count it on the row
+    ///   (`message_status`) and say nothing more this hour;
+    /// - agent class, notice read: insert a fresh notice. Undelivered work for
+    ///   an agent always needs action, so it is never silenced.
     fn insert_abandonment_body_in_tx(
         tx: &Connection,
         sender: &str,
@@ -3702,59 +3717,77 @@ impl SqlitePromptQueueStore {
         notice: &str,
         summary: &str,
         dedupe_key: &str,
+        operator: bool,
     ) -> Result<()> {
         let now = Utc::now();
-        let window_start =
-            (now - chrono::Duration::seconds(ABANDONMENT_EPISODE_SECS)).to_rfc3339();
-        let episode: Vec<(i64, String, bool)> = {
+        let window_start = abandonment_window_start(now).to_rfc3339();
+        let (class_key, update_prefix) = if operator {
+            (
+                dedupe_key.replacen("delivery-abandoned:", "delivery-abandoned-operator:", 1),
+                "delivery-abandoned-operator-update:",
+            )
+        } else {
+            (dedupe_key.to_string(), "")
+        };
+        let class_pattern = if operator {
+            "delivery-abandoned-operator%"
+        } else {
+            "delivery-abandoned:%"
+        };
+        let episode: Vec<(i64, String, String, bool)> = {
             let mut statement = tx.prepare(
-                "SELECT id, COALESCE(dedupe_key, ''),
-                        processed_at IS NULL AND transport_delivered_at IS NULL
-                           AND assumed_seen_at IS NULL AND acked_at IS NULL
-                   FROM prompt_queue
-                  WHERE source = 'delivery-watchdog' AND target = ?1
-                    AND factory_session IS ?2 AND created_at >= ?3
-                    AND dedupe_key LIKE 'delivery-abandoned%'
-                  ORDER BY id DESC",
+                "SELECT q.id, COALESCE(q.dedupe_key, ''), q.prompt,
+                        q.processed_at IS NULL AND q.transport_delivered_at IS NULL
+                           AND q.assumed_seen_at IS NULL AND q.acked_at IS NULL
+                           AND NOT EXISTS (
+                               SELECT 1 FROM prompt_queue_recipient_seen seen
+                                WHERE seen.prompt_id = q.id)
+                   FROM prompt_queue q
+                  WHERE q.source = 'delivery-watchdog' AND q.target = ?1
+                    AND q.factory_session IS ?2 AND q.created_at >= ?3
+                    AND q.dedupe_key LIKE ?4
+                  ORDER BY q.id DESC",
             )?;
             statement
-                .query_map(params![sender, session, window_start], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?
+                .query_map(
+                    params![sender, session, window_start, class_pattern],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?
                 .collect::<std::result::Result<_, _>>()?
         };
-        if let Some((id, _, true)) = episode.first() {
+        if let Some((id, _, prompt, true)) = episode.first() {
             tx.execute(
                 "UPDATE prompt_queue
-                    SET prompt = prompt || char(10) || 'Also: ' || ?2,
-                        summary = 'Messages abandoned (episode continues)'
+                    SET prompt = ?2, summary = 'Messages abandoned (episode continues)'
                   WHERE id = ?1",
-                params![id, notice],
+                params![id, fold_abandonment_line(prompt, notice)],
             )?;
             return Ok(());
         }
-        let has_update = episode
+        let (notice, summary, dedupe_key) = if !operator || episode.is_empty() {
+            (notice.to_string(), summary.to_string(), class_key)
+        } else if episode
             .iter()
-            .any(|(_, key, _)| key.starts_with("delivery-abandoned-update:"));
-        if has_update {
+            .any(|(_, key, _, _)| key.starts_with(update_prefix))
+        {
             tracing::info!(
                 recipient = sender,
                 notice,
-                "GH #1196: abandonment folded into an already-reported episode"
+                "GH #1196: Commander abandonment folded into an already-reported episode"
             );
             return Ok(());
-        }
-        let (notice, summary, dedupe_key) = if episode.is_empty() {
-            (notice.to_string(), summary.to_string(), dedupe_key.to_string())
         } else {
             (
                 format!(
-                    "Update since the last abandonment notice in this hour: {notice}\n\
-                     Further abandonments this hour are recorded on each message \
+                    "Update since the last Commander abandonment notice this hour: {notice}\n\
+                     Further Commander abandonments this hour are recorded on each message \
                      (`message_status`) without another notice."
                 ),
                 format!("Update: {summary}"),
-                format!("delivery-abandoned-update:{dedupe_key}"),
+                format!(
+                    "{update_prefix}{}",
+                    class_key.trim_start_matches("delivery-abandoned-operator:")
+                ),
             )
         };
         tx.execute(
@@ -3767,9 +3800,46 @@ impl SqlitePromptQueueStore {
     }
 }
 
-/// One recipient's abandonment notices fold into one episode per hour
-/// (GH #1196): a notice, then at most one update.
+/// One recipient's abandonment notices fold into one episode per fixed clock
+/// hour and target class (GH #1196).
 pub const ABANDONMENT_EPISODE_SECS: i64 = 3600;
+
+/// GH #1196: the trailer counting abandonments past the folded notice's
+/// size cap.
+const ABANDONMENT_MORE_SUFFIX: &str = " more abandoned this hour; see `message_status` for each.";
+
+/// GH #1196: whether an abandoned message was addressed to the operator's
+/// Commander lane rather than an agent.
+fn is_operator_target(target: &str) -> bool {
+    target.eq_ignore_ascii_case("operator") || target.starts_with("commander:")
+}
+
+/// GH #1196: the start of the fixed episode window containing `now`.
+fn abandonment_window_start(now: DateTime<Utc>) -> DateTime<Utc> {
+    let start = now.timestamp() - now.timestamp().rem_euclid(ABANDONMENT_EPISODE_SECS);
+    DateTime::from_timestamp(start, 0).unwrap_or(now)
+}
+
+/// GH #1196: fold `notice` into an unread episode `prompt`. Lines are added
+/// while the result, with room for the trailer, still fits a hook surface
+/// ([`fits_hook_surface`]); after that a `+N more` trailer counts the rest.
+fn fold_abandonment_line(prompt: &str, notice: &str) -> String {
+    let (body, more) = match prompt.rsplit_once('\n') {
+        Some((head, last)) if last.starts_with('+') && last.ends_with(ABANDONMENT_MORE_SUFFIX) => (
+            head,
+            last[1..last.len() - ABANDONMENT_MORE_SUFFIX.len()]
+                .parse::<u64>()
+                .unwrap_or(0),
+        ),
+        _ => (prompt, 0),
+    };
+    let with_line = format!("{body}\nAlso: {notice}");
+    if more == 0 && fits_hook_surface(&format!("{with_line}\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX)) {
+        with_line
+    } else {
+        format!("{body}\n+{}{ABANDONMENT_MORE_SUFFIX}", more + 1)
+    }
+}
 
 struct AbandonedSenderNotice {
     sender: String,
@@ -12721,54 +12791,153 @@ mod tests {
         );
     }
 
-    /// GH #1196: one recipient's abandonment notices fold into one episode
-    /// per hour: a notice, abandonments folded into it while it is unread,
-    /// then at most one update after it was read, then silence.
+    /// GH #1196: Commander abandonments to one recipient fold into one
+    /// episode per hour: the unread notice absorbs the next abandonment, a
+    /// read notice gets one update, and after that nothing more.
     #[test]
     fn gh_1196_abandonment_notices_fold_into_one_episode_per_recipient() {
         let (_temp, store) = create_test_store();
-        let notices = |store: &SqlitePromptQueueStore| -> Vec<(i64, String)> {
-            let conn = store.conn.lock().unwrap();
-            let mut statement = conn
-                .prepare(
-                    "SELECT id, prompt FROM prompt_queue
-                      WHERE source = 'delivery-watchdog' AND target = 'supervisor'
-                      ORDER BY id",
-                )
-                .unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .map(|row| row.unwrap())
-                .collect()
-        };
-        let abandon_one = |store: &SqlitePromptQueueStore, target: &str| -> i64 {
-            let id = store
-                .enqueue_with_session("supervisor", target, "old work", "sess")
-                .unwrap();
-            backdate(store, id, 30 * 24 * 60 * 60);
-            assert_eq!(store.abandon_pending_older_than(900).unwrap(), 1);
-            id
-        };
-
-        let first = abandon_one(&store, "worker-1");
-        assert_eq!(notices(&store).len(), 1);
-        let folded = abandon_one(&store, "worker-2");
-        let rows = notices(&store);
+        let first = gh_1196_abandon_one(&store, "operator");
+        assert_eq!(gh_1196_notices(&store).len(), 1);
+        let folded = gh_1196_abandon_one(&store, "commander:phone");
+        let rows = gh_1196_notices(&store);
         assert_eq!(rows.len(), 1, "an unread notice absorbs the next abandonment");
         assert!(rows[0].1.contains(&first.to_string()), "{}", rows[0].1);
-        assert!(rows[0].1.contains(&format!("Also: Message {folded} to worker-2")), "{}", rows[0].1);
+        assert!(
+            rows[0].1.contains(&format!("Also: Message {folded} to commander:phone")),
+            "{}",
+            rows[0].1
+        );
 
         store.mark_transport_delivered(rows[0].0).unwrap();
-        let updated = abandon_one(&store, "worker-3");
-        let rows = notices(&store);
+        let updated = gh_1196_abandon_one(&store, "operator");
+        let rows = gh_1196_notices(&store);
         assert_eq!(rows.len(), 2, "one update after the notice was read");
-        assert!(rows[1].1.starts_with("Update since the last abandonment notice"), "{}", rows[1].1);
+        assert!(
+            rows[1].1.starts_with("Update since the last Commander abandonment notice"),
+            "{}",
+            rows[1].1
+        );
         assert!(rows[1].1.contains(&updated.to_string()), "{}", rows[1].1);
 
         store.mark_transport_delivered(rows[1].0).unwrap();
-        abandon_one(&store, "worker-4");
-        assert_eq!(notices(&store).len(), 2, "no repeat after the update was read");
+        gh_1196_abandon_one(&store, "operator");
+        assert_eq!(gh_1196_notices(&store).len(), 2, "no repeat after the update was read");
+    }
+
+    /// GH #1196 review H1: an exhausted Commander episode never silences an
+    /// agent's abandoned work, and a read agent notice is followed by a new
+    /// one rather than going quiet.
+    #[test]
+    fn gh_1196_commander_noise_never_silences_agent_abandonments() {
+        let (_temp, store) = create_test_store();
+        for _ in 0..2 {
+            gh_1196_abandon_one(&store, "operator");
+            let rows = gh_1196_notices(&store);
+            store.mark_transport_delivered(rows.last().unwrap().0).unwrap();
+        }
+        gh_1196_abandon_one(&store, "operator");
+        assert_eq!(gh_1196_notices(&store).len(), 2, "Commander episode is exhausted");
+
+        let merge = gh_1196_abandon_one(&store, "worker-3");
+        let rows = gh_1196_notices(&store);
+        assert_eq!(rows.len(), 3, "the agent abandonment raises its own notice");
+        assert!(rows[2].1.starts_with(&format!("Message {merge} to worker-3")), "{}", rows[2].1);
+        assert!(!rows[2].1.contains("operator"), "{}", rows[2].1);
+
+        store.mark_transport_delivered(rows[2].0).unwrap();
+        let next = gh_1196_abandon_one(&store, "worker-4");
+        let rows = gh_1196_notices(&store);
+        assert_eq!(rows.len(), 4, "agent abandonments are never suppressed");
+        assert!(rows[3].1.starts_with(&format!("Message {next} to worker-4")), "{}", rows[3].1);
+    }
+
+    /// GH #1196 review M2: a notice a transport claimed, or that a hook
+    /// surfaced, counts as read, so later lines are not hidden in it.
+    #[test]
+    fn gh_1196_claimed_or_surfaced_notice_counts_as_read() {
+        for source in ["transport_claimed", "hook_surfaced"] {
+            let (_temp, store) = create_test_store();
+            gh_1196_abandon_one(&store, "worker-1");
+            let first = gh_1196_notices(&store)[0].0;
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
+                     VALUES (?1, 'supervisor', ?2, ?3)",
+                    params![first, Utc::now().to_rfc3339(), source],
+                )
+                .unwrap();
+            let next = gh_1196_abandon_one(&store, "worker-2");
+            let rows = gh_1196_notices(&store);
+            assert_eq!(rows.len(), 2, "{source}: {rows:?}");
+            assert!(!rows[0].1.contains("Also:"), "{source}: {}", rows[0].1);
+            assert!(rows[1].1.contains(&next.to_string()), "{source}: {}", rows[1].1);
+        }
+    }
+
+    /// GH #1196 review M3: the folded notice stays within the hook budget and
+    /// counts the overflow instead.
+    #[test]
+    fn gh_1196_folded_notice_stays_within_the_hook_budget() {
+        let (_temp, store) = create_test_store();
+        for index in 0..60 {
+            gh_1196_abandon_one(&store, &format!("worker-{index}"));
+        }
+        let rows = gh_1196_notices(&store);
+        assert_eq!(rows.len(), 1);
+        assert!(fits_hook_surface(&rows[0].1), "{} chars", rows[0].1.len());
+        let also = rows[0].1.matches("\nAlso: ").count();
+        let trailer = rows[0].1.lines().last().unwrap();
+        assert_eq!(
+            trailer,
+            format!("+{}{ABANDONMENT_MORE_SUFFIX}", 59 - also),
+            "{}",
+            rows[0].1
+        );
+        assert!(also > 0 && also < 59, "{also}");
+    }
+
+    /// GH #1196 review L5: episodes use fixed clock hours, not a window
+    /// sliding on each notice's creation time.
+    #[test]
+    fn gh_1196_episode_window_is_a_fixed_clock_hour() {
+        let at = |text: &str| DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc);
+        assert_eq!(
+            abandonment_window_start(at("2026-10-15T23:59:59Z")),
+            at("2026-10-15T23:00:00Z")
+        );
+        assert_eq!(
+            abandonment_window_start(at("2026-10-16T00:00:00Z")),
+            at("2026-10-16T00:00:00Z")
+        );
+    }
+
+    fn gh_1196_notices(store: &SqlitePromptQueueStore) -> Vec<(i64, String)> {
+        let conn = store.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT id, prompt FROM prompt_queue
+                  WHERE source = 'delivery-watchdog' AND target = 'supervisor'
+                  ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    fn gh_1196_abandon_one(store: &SqlitePromptQueueStore, target: &str) -> i64 {
+        let id = store
+            .enqueue_with_session("supervisor", target, "old work", "sess")
+            .unwrap();
+        backdate(store, id, 30 * 24 * 60 * 60);
+        assert_eq!(store.abandon_pending_older_than(900).unwrap(), 1);
+        id
     }
 
     /// GH #1196: an abandoned automatic Commander mirror was never sent by
@@ -12955,7 +13124,7 @@ mod tests {
     }
 
     #[test]
-    fn cas_a19b_single_abandonments_keep_individual_notices() {
+    fn cas_a19b_single_abandonments_fold_into_the_unread_notice() {
         let (_temp, store) = create_test_store();
         let manual = store.enqueue("sender", "worker-a", "first").unwrap();
         let deadline = store.enqueue("sender", "worker-b", "second").unwrap();

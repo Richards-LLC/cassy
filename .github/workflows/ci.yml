@@ -999,9 +999,12 @@ jobs:
           FONTS
           fc-cache -f >/dev/null
           echo "sans-serif: $(fc-match sans-serif)"
-          echo "IBM Plex Mono: $(fc-match 'IBM Plex Mono')"
+          echo "IBM Plex Mono faces installed: $(fc-list 'IBM Plex Mono' family | wc -l)"
           fc-match sans-serif | grep -q 'Noto Sans'
-          fc-match 'IBM Plex Mono' | grep -q 'IBM Plex Mono'
+          # cas-482b: an installation check. fc-match appends sans-serif to
+          # every pattern, so the strong rule above answers Noto Sans for any
+          # family, 'IBM Plex Mono' included (merge_group run 38681851830).
+          test -n "$(fc-list 'IBM Plex Mono' family)"
 
       - name: Run Commander journeys shard ${{ matrix.shard }}/6
         working-directory: hub-web

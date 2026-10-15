@@ -46,8 +46,9 @@ macOS: compile-checked and launch-tested; suite runs on Linux.
    release notes then print the one timer: PR opened to installed. Confirm
    with `cas --version`.
 6. Off the clock: fill the draft checksums with
-   `release-published-receipt.sh --write-draft`, post through Violet
-   (`cas-release-notes`), and publish the report (`cas-release-report`).
+   `release-published-receipt.sh --write-draft`, post through the Violet hub
+   (`cas-release-notes`; never a personal Slack route), and publish the report
+   (`cas-release-report`).
 7. Recovery: if `release.yml` fails after landing, fix the cause on `main`,
    then `gh workflow run release.yml -f dry_run=false`; it never replaces an
    existing release. A dry run of the whole path for any branch:

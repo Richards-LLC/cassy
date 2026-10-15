@@ -99,8 +99,8 @@ must state the measured time and whether it exceeded the recorded budget.
    reply, Dev top-level, Dev reply. Save every returned message ID and permalink,
    including the two parent IDs needed for report delivery.
 3. After the four messages, set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
-   `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and
-   deliver the report as the `cas-release-report` skill directs. Attach the PDF
+   `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and run
+   `scripts/release-train.sh <version> <epic-worktree> --report`. Attach the PDF
    to the existing User thread through Violet `violet_post` with `kind: file`
    and link the HTML from the existing Dev thread. Require uploaded-PDF
    download, decode, page-count and source-hash checks before accepting delivery.

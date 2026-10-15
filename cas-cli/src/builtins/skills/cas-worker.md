@@ -61,15 +61,16 @@ use assigned work; `ready` and `available` are backlog
   visibility, not authorization.
 
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries.
-- Worker peer lane: `coordination action=message target=<worker-name>` reaches
-  only a registered worker in the same factory session. Cassy also sends a copy
-  to that session's supervisor. Use this narrow lane for collision warnings, not
-  general chat or cross-session contact; send task status, blockers and handoffs
-  to `target=supervisor`.
-- A worker can send `coordination action=message target=supervisor kind=status`
-  or `kind=ready` for a typed action wake when the supervisor must review an
-  update or continue coordination. Ordinary messages remain inbox-only; never
-  set `merge_request=true` to wake the supervisor for a status update.
+- Worker peer lane: `coordination action=message target=<worker-name> summary="collision warning" message="Task cas-123 touches the same files."`
+  reaches only a registered worker in the same factory session. Cassy also sends
+  a copy to that session's supervisor. Use this narrow lane for collision
+  warnings, not general chat or cross-session contact; send task status, blockers
+  and handoffs to `target=supervisor`.
+- A worker can send `coordination action=message target=supervisor kind=status summary="status" message="Please review the current task update."`
+  or `kind=ready` with `summary` and `message` for a typed action wake when the
+  supervisor must review an update or continue coordination. Ordinary messages
+  remain inbox-only; never set `merge_request=true` to wake the supervisor for a
+  status update.
 - Never block the pane: run long commands in the background with a log.
 - Checkpoint, never compact: commit, push and note, then request a respawn when
   context runs low.

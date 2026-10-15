@@ -2129,20 +2129,32 @@ pub fn claude_supports_chrome_flag() -> bool {
     })
 }
 
-/// Returns `true` when an executable named `cas` is resolvable on `PATH`.
-///
-/// Used by the Codex spawn preflight (cas-bbc2). The CAS MCP server is now
-/// spawn-injected as `mcp_servers.cs.command=cas`, but Codex still needs the
-/// `cas` binary on `PATH` to actually launch it. If `PATH` is unset we return
-/// `true` (skip the check) rather than risk a false refusal — the spawn will
-/// surface its own error in that pathological case.
-fn cas_binary_on_path() -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
+/// Resolve `cas` using the child's PATH, with the same last-override and
+/// removal ordering as CommandBuilder. An unset PATH retains the existing
+/// skip policy; the eventual spawn surfaces lookup failure in that case.
+fn cas_binary_on_path(config: &PtyConfig) -> bool {
+    let path = if config.env_remove.iter().any(|key| key == "PATH") {
+        None
+    } else {
+        config
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| std::ffi::OsString::from(value))
+            .or_else(|| std::env::var_os("PATH"))
+    };
+    let Some(path) = path else {
         return true;
     };
+    let cwd = config.cwd.clone().or_else(|| std::env::current_dir().ok());
     std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join("cas");
-        candidate.is_file()
+        let dir = if dir.is_relative() {
+            cwd.as_ref().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
+        } else {
+            dir
+        };
+        dir.join("cas").is_file()
     })
 }
 
@@ -2470,7 +2482,7 @@ impl Pty {
         // with remediation rather than spawning a worker that comes up with zero
         // CAS tools and flails.
         let codex_spawn = is_codex;
-        if codex_spawn && !cas_binary_on_path() {
+        if codex_spawn && !cas_binary_on_path(&config) {
             return Err(Error::pty(
                 "Codex agent cannot start: the `cas` MCP server binary is not on PATH. \
                  CAS is spawn-injected as mcp_servers.cs (command=cas), but Codex needs \
@@ -4539,19 +4551,35 @@ mod tests {
         let home = guard.home().to_path_buf();
         let daemon = home.join("daemon-bin");
         let child = home.join("child-bin");
-        for dir in [&daemon, &child] { std::fs::create_dir_all(dir).unwrap(); }
-        for (dir, name) in [(&child, "codex"), (if daemon_has_cas { &daemon } else { &child }, "cas")] {
+        for dir in [&daemon, &child] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for (dir, name) in [
+            (&child, "codex"),
+            (if daemon_has_cas { &daemon } else { &child }, "cas"),
+        ] {
             let path = dir.join(name);
             std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        if !child_has_cas { let _ = std::fs::remove_file(child.join("cas")); }
+        if !child_has_cas {
+            let _ = std::fs::remove_file(child.join("cas"));
+        }
         guard.set("PATH", &daemon);
-        let result = Pty::spawn("child-path-fixture", PtyConfig {
-            command: "codex".into(), cwd: Some(home),
-            env: vec![("PATH".into(), child.to_string_lossy().into_owned())], ..Default::default()
-        });
-        assert_eq!(result.is_ok(), child_has_cas, "daemon_has_cas={daemon_has_cas}; child_has_cas={child_has_cas}");
+        let result = Pty::spawn(
+            "child-path-fixture",
+            PtyConfig {
+                command: "codex".into(),
+                cwd: Some(home),
+                env: vec![("PATH".into(), child.to_string_lossy().into_owned())],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.is_ok(),
+            child_has_cas,
+            "daemon_has_cas={daemon_has_cas}; child_has_cas={child_has_cas}"
+        );
     }
 
     #[cfg(unix)]
@@ -4565,7 +4593,6 @@ mod tests {
     async fn cas_678d_round5_child_path_refuses_missing_cas_despite_daemon_cas() {
         child_path_preflight_fixture(true, false);
     }
-
     /// cas-bbc2: `cas_binary_on_path()` returns true when an executable named
     /// `cas` lives in a PATH entry. Builds a temp dir with a fake `cas` file and
     /// points PATH at it, under TestEnvGuard to avoid racing other env-mutating tests.
@@ -4576,7 +4603,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cas"), b"#!/bin/sh\n").unwrap();
         env.set("PATH", &dir);
-        let found = cas_binary_on_path();
+        let found = cas_binary_on_path(&PtyConfig::default());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(found, "cas_binary_on_path must find a `cas` file on PATH");
     }
@@ -4589,7 +4616,7 @@ mod tests {
         let dir = std::env::temp_dir().join("cas-bbc2-preflight-absent");
         std::fs::create_dir_all(&dir).unwrap();
         env.set("PATH", &dir);
-        let found = cas_binary_on_path();
+        let found = cas_binary_on_path(&PtyConfig::default());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
             !found,

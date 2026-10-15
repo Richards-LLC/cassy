@@ -185,6 +185,11 @@ pub(crate) fn cleanup_agent_leases(
         return Some(Vec::new());
     }
 
+    if let Err(error) = crate::supervisor_notices::orphan_epics(cas_root, &agent) {
+        tracing::error!(agent_id = %agent.id, %error, "SessionEnd epic orphan notice failed; preserving identity for recovery");
+        return None;
+    }
+
     // Gracefully shutdown the agent and get list of released task IDs
     let released_task_ids = agent_store.graceful_shutdown(&agent.id).unwrap_or_default();
 

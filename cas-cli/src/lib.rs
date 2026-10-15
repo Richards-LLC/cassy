@@ -29,9 +29,9 @@ pub mod async_runtime;
 mod bounded_process;
 pub mod bridge;
 pub mod builtins;
+pub mod capability;
 pub mod cli;
 pub mod cloud;
-pub mod capability;
 pub mod config;
 pub mod consolidation;
 pub mod daemon;
@@ -41,28 +41,28 @@ pub mod extraction;
 mod light_lane;
 #[doc(hidden)]
 pub use light_lane::run_detached_worker;
+pub mod db_branch;
 pub mod factory_auth_health;
-pub mod factory_hook_canary;
 pub(crate) mod factory_build_guard;
 pub(crate) mod factory_build_memory;
-pub(crate) mod factory_worker_check;
 pub mod factory_context_reset;
+pub mod factory_daemon_health;
+pub mod factory_hook_canary;
 pub mod factory_isolation;
 pub mod factory_permission_relay;
 pub mod factory_preflight;
-pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub mod factory_target_cache;
+pub(crate) mod factory_worker_check;
 pub mod fs_space;
 pub mod gh_graphql;
-pub mod github_issue_attach;
-pub(crate) mod github_repo;
 pub(crate) mod git_evidence;
 pub mod git_log;
+pub mod github_issue_attach;
+pub(crate) mod github_repo;
 pub mod harness_policy;
 pub mod history;
-pub mod db_branch;
 pub mod hooks;
 pub mod hub;
 pub mod hybrid_search;
@@ -73,22 +73,23 @@ pub mod maintenance_jobs;
 pub mod memory_migration;
 pub mod migration;
 pub mod notifications;
+pub mod opencode_preflight;
+pub(crate) mod ops;
 pub mod orchestration;
 pub mod otel;
-pub(crate) mod ops;
-pub mod qa_evidence;
-pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
-pub(crate) mod task_assignment;
+pub mod qa_evidence;
 pub mod qa_pass;
-pub(crate) mod review_body;
 pub mod retrieval_eval;
 pub mod retrieval_parity;
+pub(crate) mod review_body;
 pub mod sentry;
 pub(crate) mod server_signals;
 mod skill_validation;
 pub mod store;
+pub(crate) mod supervisor_notices;
 pub mod sync;
+pub(crate) mod task_assignment;
 pub mod telemetry;
 pub mod temp_hygiene;
 pub mod test_paths;
@@ -158,7 +159,9 @@ pub(crate) mod test_support {
             status.success(),
             "nested TestEnvGuard did not panic with the expected diagnostic"
         );
-        let output = child.wait_with_output().expect("capture nested guard child");
+        let output = child
+            .wait_with_output()
+            .expect("capture nested guard child");
         crate::test_child::assert_passed(
             &String::from_utf8_lossy(&output.stdout),
             "test_support::nested_test_env_guard_panics_with_clear_message",

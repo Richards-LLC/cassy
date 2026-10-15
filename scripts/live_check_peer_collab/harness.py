@@ -552,13 +552,22 @@ def cmd_queue_find(args):
     `--token` (the peer mailbox enqueues delivered peer messages here)."""
     db = _db(args.run_dir)
     columns = [row[1] for row in db.execute("PRAGMA table_info(prompt_queue)")]
-    wanted = [c for c in ("id", "source", "target", "summary", "created_at", "factory_session",
+    wanted = [c for c in ("id", "source", "target", "prompt", "summary", "created_at", "factory_session",
                           "highest_stage", "processed_at", "dedupe_key") if c in columns]
     rows = db.execute(
         f"SELECT {', '.join(wanted)} FROM prompt_queue WHERE prompt LIKE ? OR summary LIKE ? ORDER BY id",
         (f"%{args.token}%", f"%{args.token}%"),
     ).fetchall()
-    print(json.dumps({"ok": True, "rows": [dict(zip(wanted, row)) for row in rows]}))
+    import hashlib
+    result = []
+    for row in rows:
+        record = dict(zip(wanted, row))
+        prompt = record.pop("prompt", "")
+        body = prompt.split("\n\n", 1)[-1].encode()
+        record["peer_body_sha256"] = hashlib.sha256(body).hexdigest()
+        record["peer_body_bytes"] = len(body)
+        result.append(record)
+    print(json.dumps({"ok": True, "rows": result}))
 
 
 def cmd_spawn_count(args):

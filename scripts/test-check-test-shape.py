@@ -179,6 +179,67 @@ def test_workflow_command():
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(clean.returncode, 0, clean.stdout)
 
+    def test_cli_changed_since_checks_only_added_or_modified_pin_lines(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            path = root/'tests/test_prompt.rs'
+            path.parent.mkdir(parents=True)
+            old_pin = '''#[test]
+fn old_contract() {
+    assert_eq!(prompt, "When a test fails, name the responsible boundary and preserve its first result.");
+}
+'''
+            path.write_text(old_pin)
+            git('add', '.')
+            git('commit', '-qm', 'legacy prose pin')
+            base = git('rev-parse', 'HEAD')
+            command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
+
+            # An unchanged legacy pin must not fail just because this file has
+            # a newly added, reasoned pin.
+            reasoned_pin = '''
+#[test]
+fn added_reasoned_contract() {
+    // pin: this wording is part of the source compatibility contract.
+    assert_eq!(prompt, "When a new test is added, name the behavior it verifies with useful context.");
+}
+'''
+            path.write_text(old_pin + reasoned_pin)
+            clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(clean.returncode, 0, clean.stdout)
+
+            # A changed legacy line is in scope, including when only one part
+            # of the string literal's text changes.
+            modified = old_pin.replace('first result', 'original result') + reasoned_pin
+            path.write_text(modified)
+            changed = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(changed.returncode, 1, changed.stdout)
+            self.assertIn('tests/test_prompt.rs:3: exact-text pin', changed.stdout)
+
+            # The pin rule still rejects a new unreasoned exact-text pin.
+            new_unreasoned = '''
+#[test]
+fn added_unreasoned_contract() {
+    assert_eq!(prompt, "When workers complete a task, record the exact evidence and the branch tip they delivered.");
+}
+'''
+            path.write_text(modified + new_unreasoned)
+            added = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(added.returncode, 1, added.stdout)
+            self.assertIn('tests/test_prompt.rs:14: exact-text pin', added.stdout)
+
+            # Without --changed-since, changed test files retain full-file
+            # scanning, so the unchanged legacy pin remains visible.
+            full = subprocess.run(['python3', str(Path(shape.__file__).resolve())],
+                                 cwd=root, capture_output=True, text=True)
+            self.assertEqual(full.returncode, 1, full.stdout)
+            self.assertIn('tests/test_prompt.rs:3: exact-text pin', full.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

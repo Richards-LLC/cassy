@@ -8,7 +8,9 @@ the escape. Vendor code is excluded. Integration tests under cas-cli/tests and
 crates/*/tests must resolve Cargo binaries at runtime rather than through
 env!("CARGO_BIN_EXE_<name>"); this archive-portability rule cannot be exempted.
 Text-pin checks cover changed test files, so legacy pins do not block unrelated
-work. --changed-since uses merge-base(ref, HEAD), including working changes.
+work. With --changed-since, only added or modified lines are checked for text
+pins; without it, changed test files are scanned in full. --changed-since uses
+merge-base(ref, HEAD), including working changes.
 """
 import argparse
 from pathlib import Path
@@ -128,7 +130,7 @@ def is_exact_text_pin(body, context):
     return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
 
 
-def lint_text_pins(source, path, ranges=None):
+def lint_text_pins(source, path, ranges=None, changed_lines=None):
     """Find brittle prose pins in a conventional test file, independent of language."""
     if not is_test_file(path) and not ranges:
         return []
@@ -136,6 +138,14 @@ def lint_text_pins(source, path, ranges=None):
     literals = list(text_literals(source, path))
     for start, end, body in literals:
         if ranges and not any(left <= start < right for left, right in ranges):
+            continue
+        start_line = source.count('\n', 0, start) + 1
+        end_line = source.count('\n', 0, end) + 1
+        changed_literal_lines = (
+            sorted(line for line in changed_lines if start_line <= line <= end_line)
+            if changed_lines is not None else []
+        )
+        if changed_lines is not None and not changed_literal_lines:
             continue
         if has_text_pin_reason(source, start):
             continue
@@ -152,7 +162,7 @@ def lint_text_pins(source, path, ranges=None):
             context_chars[left:right] = ' ' * (right - left)
         context = ''.join(context_chars)
         if is_exact_text_pin(body, context):
-            hits.append((source.count('\n', 0, start) + 1, 'exact-text pin'))
+            hits.append((changed_literal_lines[0] if changed_literal_lines else start_line, 'exact-text pin'))
     return sorted(set(hits))
 
 
@@ -169,7 +179,7 @@ def pinned(source, start):
     return False
 
 
-def lint(source, path, check_text_pins=True):
+def lint(source, path, check_text_pins=True, changed_text_lines=None):
     comments = []
     ts = tokens(source, comments)
     pin_lines = {source.count("\n", 0, a) + 1 for a, b in comments if re.match(r"//\s*pin:\s*\S", source[a:b])}
@@ -288,7 +298,7 @@ def lint(source, path, check_text_pins=True):
             elif end < len(ts):
                 text_ranges.append((ts[first].start, ts[end].end))
     if check_text_pins:
-        hits.extend(lint_text_pins(source, path, text_ranges))
+        hits.extend(lint_text_pins(source, path, text_ranges, changed_text_lines))
     return sorted(hits)
 
 
@@ -300,7 +310,21 @@ def main():
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()
             paths = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', base], text=True).split('\0')
-            text_pin_paths = set(paths)
+            text_pin_paths = {path for path in paths if path}
+            changed_text_lines = {}
+            for path in text_pin_paths:
+                diff = subprocess.check_output(
+                    ['git', 'diff', '--unified=0', '--no-ext-diff', '--no-color', base, '--', path],
+                    text=True,
+                )
+                lines = set()
+                for diff_line in diff.splitlines():
+                    hunk = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', diff_line)
+                    if hunk:
+                        first = int(hunk.group(1))
+                        count = int(hunk.group(2) or '1')
+                        lines.update(range(first, first + count))
+                changed_text_lines[path] = lines
         else:
             paths = subprocess.check_output(['git', 'ls-files', '-z', '--', '*.rs'], text=True).split('\0')
             parents = subprocess.check_output(['git', 'rev-list', '--parents', '-n', '1', 'HEAD'], text=True).split()
@@ -311,6 +335,7 @@ def main():
             else:
                 changed = subprocess.check_output(['git', 'ls-files', '-z'], text=True).split('\0')
             text_pin_paths = set(changed)
+            changed_text_lines = None
             paths = [*paths, *changed]
         hits = []
         for path in sorted(set(paths)):
@@ -322,7 +347,14 @@ def main():
                 source = Path(path).read_text()
             except UnicodeDecodeError:
                 continue
-            file_hits = lint(source, path, path in text_pin_paths) if path.endswith('.rs') else lint_text_pins(source, path)
+            if path.endswith('.rs'):
+                file_hits = lint(source, path, path in text_pin_paths,
+                                 changed_text_lines.get(path) if changed_text_lines is not None else None)
+            else:
+                file_hits = lint_text_pins(
+                    source, path,
+                    changed_lines=changed_text_lines.get(path) if changed_text_lines is not None else None,
+                )
             for line, kind in file_hits:
                 if kind == 'archive-unsafe Cargo binary path':
                     remedy = 'use cas::test_paths::cas_binary() for archive runners'

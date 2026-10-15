@@ -1059,6 +1059,8 @@ class HalfOpenSocket extends TransportSocket {
 describe("a session's attach chain always has its next attempt (cas-5dbc)", () => {
   const timers = { toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] as ("setTimeout" | "clearTimeout" | "setInterval" | "clearInterval")[] };
 
+  // Advancing deadlines starts the retry, but its ticket still awaits native
+  // WebCrypto. Wait for the socket as well as draining the browser timers.
   it("replaces a dial stuck on a half-open socket on the backoff, without waiting for its close", async () => {
     transport();
     HalfOpenSocket.instances = [];
@@ -1070,7 +1072,7 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     await connection.attach("session-a");
     expect(HalfOpenSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.dialing + MACHINE_RETRY_CEILING_MS);
-    expect(HalfOpenSocket.instances.length, "a new attempt after the dial timed out").toBeGreaterThan(1);
+    await vi.waitFor(() => expect(HalfOpenSocket.instances.length, "a new attempt after the dial timed out").toBeGreaterThan(1));
   });
 
   it("replaces an opened socket that sends no session state and never finishes closing", async () => {
@@ -1084,7 +1086,7 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     await connection.attach("session-a");
     HalfOpenSocket.instances[0]!.open();
     await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.attaching + MACHINE_RETRY_CEILING_MS);
-    expect(HalfOpenSocket.instances.length, "a new attempt after the ready deadline").toBeGreaterThan(1);
+    await vi.waitFor(() => expect(HalfOpenSocket.instances.length, "a new attempt after the ready deadline").toBeGreaterThan(1));
   });
 
   it("finishes replacing the timed-out socket after slow retry signing (cas-ec55)", async () => {
@@ -1114,7 +1116,7 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     expect(connection.attachSnapshot("session-a")?.phase).toBe("auth");
     expect(HalfOpenSocket.instances).toHaveLength(1);
     releaseSigning();
-    expect(HalfOpenSocket.instances.length, "a replacement after retry signing completes").toBeGreaterThan(1);
+    await vi.waitFor(() => expect(HalfOpenSocket.instances.length, "a replacement after retry signing completes").toBeGreaterThan(1));
   });
 
   it("reattaches a session whose attempt was abandoned while its ticket was in flight", async () => {

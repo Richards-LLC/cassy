@@ -1,0 +1,25 @@
+{
+  "channel": {
+    "id": "C0B44GUKDK2",
+    "name": "cas-internal"
+  },
+  "file": {
+    "file_id": "F0C9K8S5F0S",
+    "image_validated": null,
+    "name": "v3.55.0.html",
+    "permalink": "https://petra-stella.slack.com/files/U0BUKC4FB60/F0C9K8S5F0S/v3.55.0.html",
+    "sha256": "ef4841715fc036cd299f1ec8f48b5141bc13cf5acd7cee42c1405e7cc7f86378",
+    "sha256_verified": true,
+    "size_bytes": 25976,
+    "state": "attached"
+  },
+  "kind": "file",
+  "message": {
+    "message_id": "1792080772.152179",
+    "permalink": "https://petra-stella.slack.com/files/U0BUKC4FB60/F0C9K8S5F0S/v3.55.0.html",
+    "thread_id": "1792080738.826099"
+  },
+  "ok": true,
+  "schema_version": 1,
+  "warning": null
+}

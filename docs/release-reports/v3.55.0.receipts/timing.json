@@ -1,0 +1,11 @@
+{
+  "pr_opened_at": "2026-10-15T15:30:26Z",
+  "merged_at": "2026-10-15T15:47:18Z",
+  "published_at": "2026-10-15T15:57:34Z",
+  "installed_at": "2026-10-15T15:58:26Z",
+  "pr_to_main_seconds": 1012,
+  "main_to_published_seconds": 616,
+  "published_to_installed_seconds": 52,
+  "pr_to_installed_seconds": 1680,
+  "retrieved_at": "2026-10-15T16:01:14.452801+00:00"
+}

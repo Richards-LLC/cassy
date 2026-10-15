@@ -1075,6 +1075,38 @@ mod tests {
         assert!(spent.elapsed() < Duration::from_millis(50));
     }
 
+    #[tokio::test]
+    async fn cas_50713_stale_recovery_bounds_reads_by_remaining_budget() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+        let server = MockServer::start().await;
+        let key = claim_key("repo", "cas-slow");
+        let mut lock = TaskLease::new(key.clone(), "old".into(), 600);
+        lock.renewed_at = Utc::now() - chrono::Duration::seconds(301);
+        Mock::given(method("GET")).and(path(format!("/api/agents/tasks/{key}/lock")))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"lock": lock}))
+                .set_delay(Duration::from_millis(400)))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": []})))
+            .mount(&server).await;
+        let claims = PeerClaims {
+            config: CloudConfig { endpoint: server.uri(), token: Some("test-token".into()), ..Default::default() },
+            project: "repo".into(), label: "here".into(), retired_local: HashMap::new(),
+        };
+        let started = Instant::now();
+        let answer = tokio::task::spawn_blocking(move || {
+            let observed = PeerHold { agent_id: "old".into(), holder: None, expires_at: None, live: Some(false) };
+            claims.take_stale_peer("cas-slow", ClaimKind::Task, &observed, "new", "new", 600,
+                Instant::now() + Duration::from_millis(80))
+        }).await.unwrap();
+        assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
+        assert!(started.elapsed() < Duration::from_millis(300), "{:?}", started.elapsed());
+        assert!(server.received_requests().await.unwrap().iter()
+            .all(|request| !request.url.path().ends_with("/release")));
+    }
+
     #[test]
     fn claim_keys_are_scoped_to_the_repository() {
         let widget = claim_key("github.com/acme/widget", "cas-1234");

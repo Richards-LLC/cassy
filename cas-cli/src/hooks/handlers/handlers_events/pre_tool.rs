@@ -3968,10 +3968,24 @@ fn factory_write_decision(
         if let Some(violation) = protected_violation(&raw_path, false) {
             return FactoryWriteDecision::Denied(violation);
         }
-        // A variable that survived the finite expansion above may resolve to
-        // an absolute path only when Bash runs it. Treating the literal
-        // `$NAME` as relative to the worktree would create an escape hatch.
+        // cas-6ada: a dynamic suffix does not make a known creation root
+        // unknown. Check both the static prefix and its containing directory:
+        // `/scratch/run-$$` is rooted, but `/scratch$ROOT_SUFFIX` is not.
+        // Keep root variables, literal parent traversal and symlink escapes
+        // fail-closed. Deletions were checked separately above.
         if raw_path.contains('$') {
+            let prefix = raw_path.split('$').next().unwrap_or_default();
+            let parent = prefix.rsplit_once('/').map(|(parent, _)| {
+                if parent.is_empty() { "/" } else { parent }
+            }).unwrap_or(".");
+            let traverses_parent = std::path::Path::new(&raw_path).components()
+                .any(|component| component == std::path::Component::ParentDir);
+            if !prefix.is_empty() && !traverses_parent && [prefix, parent].iter().all(|path| {
+                unsanctioned_factory_path_with_worktree(input, configured_artifacts_root,
+                    configured_scratch_root, is_supervisor, path, registered_worktree_root).is_none()
+            }) {
+                continue;
+            }
             return FactoryWriteDecision::Denied(FactoryWriteViolation {
                 evaluated_path: raw_path.clone(),
                 resolved_path: std::path::PathBuf::from(&raw_path),
@@ -4935,6 +4949,20 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if violation.matched_rule == "unresolved shell variable" {
+        let suffix = violation.evaluated_path.split_once('$').map(|(_, rest)| rest).unwrap_or("");
+        let variable = if suffix.starts_with('$') {
+            "$$".to_string()
+        } else {
+            let name: String = suffix.trim_start_matches('{').chars()
+                .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric()).collect();
+            format!("${name}")
+        };
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
+            violation.evaluated_path, worktree.display(),
+        );
+    }
     if violation.matched_rule.starts_with("deletion") {
         return format!(
             "🚫 FACTORY WORKSPACE CONTRACT: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
@@ -6742,6 +6770,30 @@ mod workspace_contract_tests {
         let violation = factory_write_violation(&input, &None, None, false, Some(worktree.path())).unwrap();
         let reason = factory_workspace_contract_denial(&input, &violation, None, None, Some(worktree.path()));
         assert!(reason.contains("unexpanded shell variable `$UNKNOWN_ROOT`"), "{reason}");
+    }
+
+    #[test]
+    fn dynamic_creation_prefix_keeps_boundary_traversal_and_delete_guards_cas_6ada() {
+        use std::os::unix::fs::symlink;
+        let _env = TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let scratch = root.path().join("scratch");
+        let outside = root.path().join("outside");
+        for path in [&worktree, &scratch, &outside] { std::fs::create_dir_all(path).unwrap(); }
+        symlink(&outside, scratch.join("escape")).unwrap();
+        let scratch_root = scratch.display().to_string();
+        for command in [
+            format!("printf proof > {}$ROOT_SUFFIX/file", scratch.display()),
+            format!("printf proof > {}-lookalike/$RUN/file", scratch.display()),
+            format!("printf proof > {}/run-$RUN/../../outside/file", scratch.display()),
+            format!("printf proof > {}/escape/run-$RUN/file", scratch.display()),
+            format!("rm -rf {}/run-$$", scratch.display()),
+            "printf proof > ${UNKNOWN_ROOT}/file".to_string(),
+        ] {
+            assert!(factory_write_violation(&bash_input(&command, &worktree), &None,
+                Some(&scratch_root), false, Some(&worktree)).is_some(), "must retain guard: {command}");
+        }
     }
 
     #[test]

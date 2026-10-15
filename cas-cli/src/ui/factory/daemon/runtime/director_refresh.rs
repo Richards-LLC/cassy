@@ -637,13 +637,13 @@ impl DirectorRefresh {
                 ))
             }) {
                 Submitted::Queued => {}
-                Submitted::QueuedDroppedOldest { dropped_key } => {
+                Submitted::QueuedDroppedOldest { dropped_key, .. } => {
                     if let Some(dropped) = self.health_in_flight.remove(&dropped_key) {
                         refused.push(dropped.probe);
                     }
                 }
                 // The key is already running: its report covers this ask.
-                Submitted::Coalesced | Submitted::QueuedBehindKey => {
+                Submitted::Coalesced { .. } | Submitted::QueuedBehindKey => {
                     if let Some(previous) = previous {
                         self.health_in_flight.insert(key, previous);
                     }

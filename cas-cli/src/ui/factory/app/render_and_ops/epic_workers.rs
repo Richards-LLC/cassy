@@ -1482,10 +1482,21 @@ fn reset_stale_preassign_holder(
     // that wins between persistence and this cloud call must keep its claim.
     let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
         .filter(|agent| agent.name == holder).map(|agent| agent.id.clone()).collect();
-    if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(cas_dir)
-        && let Err(error) = claims.release_reset_holder(&task.id, holder, &retired_ids)
-    {
-        tracing::debug!(task = %task.id, %error, "stale assignee cloud release failed; start will retry");
+    if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(cas_dir) {
+        let task_id = task.id.clone();
+        let holder = holder.to_string();
+        let release = move || {
+            if let Err(error) = claims.release_reset_holder(&task_id, &holder, &retired_ids) {
+                tracing::debug!(task = %task_id, %error, "stale assignee cloud release failed; start will retry");
+            }
+        };
+        // Never hold the factory loop on the network. The exact retired owner
+        // remains fenced if task start wins before this best-effort release.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn_blocking(release));
+        } else {
+            std::thread::spawn(release);
+        }
     }
     Ok(())
 }
@@ -5610,6 +5621,13 @@ mod tests {
                 .await
                 .unwrap()
             );
+            if initial_owner == "old-session" {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while holder.lock().unwrap().is_some() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }).await.expect("background cloud release must settle the retired owner");
+            }
             assert_eq!(
                 holder.lock().unwrap().as_deref(),
                 if initial_owner == "old-session" {

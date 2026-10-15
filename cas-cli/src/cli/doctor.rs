@@ -1622,8 +1622,8 @@ fn lesson_recurrence_check(runs: &[crate::cli::release_report::LessonRecurrence]
 /// Render the resolved issue destinations as one healthy Config row. The
 /// project destination can be unset, but component destinations are always
 /// available from compiled defaults; neither condition is a doctor warning.
-fn issue_repositories_check(config: &Config) -> Check {
-    let repos = config.issue_repo_registry();
+fn issue_repositories_check(config: &Config, cas_root: &Path) -> Check {
+    let repos = config.issue_repo_registry_for_project(cas_root);
     Check::new(
         "issue repositories",
         CheckStatus::Ok,
@@ -2562,7 +2562,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     }
                 ),
             });
-            checks.push(issue_repositories_check(&config));
+            checks.push(issue_repositories_check(&config, &cas_root));
         }
         Err(error) => {
             checks.push(Check {
@@ -2572,7 +2572,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     "{error}; run `cas doctor --fix --yes` to preserve and repair config.toml, or restore a known-good backup"
                 ),
             });
-            checks.push(issue_repositories_check(&Config::default()));
+            checks.push(issue_repositories_check(&Config::default(), &cas_root));
         }
     }
 
@@ -6342,8 +6342,24 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_unset_issue_repo_and_local_origin_cas_f398() {
+        let _env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        fs::create_dir(&root).unwrap();
+        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", "https://github.com/Richards-LLC/violet_ps.git"]] {
+            assert!(std::process::Command::new("git").current_dir(temp.path()).args(args).status().unwrap().success());
+        }
+        let check = issue_repositories_check(&Config::default(), &root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("issues.repo unset; resolved from origin Richards-LLC/violet_ps"), "{}", check.message);
+        assert!(!root.join("config.toml").exists());
+    }
+
+    #[test]
     fn issue_repository_doctor_row_resolves_defaults_without_warning() {
-        let check = issue_repositories_check(&Config::default());
+        let temp = tempfile::tempdir().unwrap();
+        let check = issue_repositories_check(&Config::default(), temp.path());
         assert_eq!(check.name, "issue repositories");
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("project=<unset>"));

@@ -1301,3 +1301,22 @@ fn retired_merge_sweep_keys_load_and_are_dropped_on_save_cas_fd0a() {
     assert!(!saved.contains("release_gate_home_dir"), "{saved}");
     assert!(Config::load(temp.path()).unwrap().factory().retired_keys().is_empty());
 }
+
+#[test]
+fn unset_issue_repo_resolves_local_origin_without_persisting_cas_f398() {
+    let _env = TestEnvGuard::new();
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", "git@github.com:Richards-LLC/violet_ps.git"]] {
+        assert!(std::process::Command::new("git").current_dir(temp.path()).args(args).status().unwrap().success());
+    }
+    let before = "[issues.components]\nviolet = \"Richards-LLC/violet_ps\"\n";
+    std::fs::write(root.join("config.toml"), before).unwrap();
+    let config = Config::load(&root).unwrap();
+    assert_eq!(config.get_resolved("issues.repo", &root).as_deref(), Some("Richards-LLC/violet_ps"));
+    assert_eq!(config.issue_repo_registry_for_project(&root).project.as_deref(), Some("Richards-LLC/violet_ps"));
+    assert!(config.issues.as_ref().unwrap().repo.is_none());
+    assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), before);
+    assert!(!toml::to_string(&config).unwrap().contains("repo ="));
+}

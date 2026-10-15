@@ -16,11 +16,11 @@ use crate::config::operator_policy::InvocationContext;
 
 pub(crate) fn execute_get(args: &ConfigGetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = Config::load(cas_root)?;
-    execute_get_internal(&config, &args.key, cli)
+    execute_get_internal(&config, &args.key, cli, cas_root)
 }
 
-fn execute_get_internal(config: &Config, key: &str, cli: &Cli) -> anyhow::Result<()> {
-    if let Some(value) = config.get(key) {
+fn execute_get_internal(config: &Config, key: &str, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    if let Some(value) = config.get_resolved(key, cas_root) {
         if cli.json {
             let meta = registry().get(key);
             let json = serde_json::json!({
@@ -115,7 +115,8 @@ pub(crate) fn execute_list(
     let reg = registry();
 
     // Get all current values
-    let items: HashMap<String, String> = config.list().into_iter().collect();
+    let mut items: HashMap<String, String> = config.list().into_iter().collect();
+    items.insert("issues.repo".into(), config.get_resolved("issues.repo", cas_root).unwrap_or_default());
 
     if cli.json {
         let mut result = serde_json::Map::new();

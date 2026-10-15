@@ -13,6 +13,13 @@
 //!   past it and are retried on a later pass; panels show the last snapshot.
 //! - [`spawn_task_sync_reconcile`]: the pending task-sync repair that every
 //!   uncached `open_task_store` used to run, on a background schedule.
+//!
+//! Factory loop v2 (spec-4c5b §4) generalises this into the job framework in
+//! [`super::jobs`]: per-lane threads (reader, single writer, blocking), a
+//! completion queue, single-flight keys, generations and bounded queues that
+//! never drop critical writes. New off-loop work should use that API;
+//! [`StoreWorker`] stays for the existing ordered write jobs until children C2
+//! and C3 move them (cas-1240 adds the API only).
 
 use std::collections::HashSet;
 use std::path::PathBuf;

@@ -124,45 +124,252 @@ impl GenerationGate {
     /// Accept `result` if its generation is at least the newest applied for
     /// its key, and record it as applied. Returns false for a stale result.
     pub(crate) fn accept<T>(&mut self, result: &JobResult<T>) -> bool {
-        let _ = result;
-        unimplemented!("cas-1240: generation gate")
+        let applied = self.applied.entry(result.key.clone()).or_insert(0);
+        if result.generation < *applied {
+            return false;
+        }
+        *applied = result.generation;
+        true
     }
 }
 
 type Work<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 
+struct Queued<T> {
+    spec: JobSpec,
+    work: Work<T>,
+    enqueued_at: Instant,
+}
+
+struct LaneState<T> {
+    queue: VecDeque<Queued<T>>,
+    closed: bool,
+    dropped_refresh: u64,
+}
+
+struct LaneSlot<T> {
+    state: Mutex<LaneState<T>>,
+    ready: Condvar,
+}
+
+struct Shared<T> {
+    lanes: HashMap<Lane, LaneSlot<T>>,
+    /// Keys queued or running (single-flight).
+    in_flight: Mutex<std::collections::HashSet<String>>,
+    capacity: usize,
+}
+
+fn lock<M>(mutex: &Mutex<M>) -> std::sync::MutexGuard<'_, M> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs [`JobSpec`]s on per-lane threads and collects their results.
 pub(crate) struct JobRuntime<T: Send + 'static> {
-    _marker: std::marker::PhantomData<T>,
+    shared: Arc<Shared<T>>,
+    completions: Mutex<mpsc::Receiver<JobResult<T>>>,
+    _threads: Vec<JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> JobRuntime<T> {
     /// Start one thread per [`Lane`]. `lane_capacity` bounds each lane's
-    /// queue of refresh work.
+    /// queue: past it, refresh work replaces older refresh work, and critical
+    /// work is still queued.
     pub(crate) fn start(lane_capacity: usize) -> Self {
-        let _ = lane_capacity;
-        unimplemented!("cas-1240: job runtime")
+        let lanes = Lane::ALL
+            .into_iter()
+            .map(|lane| {
+                (
+                    lane,
+                    LaneSlot {
+                        state: Mutex::new(LaneState {
+                            queue: VecDeque::new(),
+                            closed: false,
+                            dropped_refresh: 0,
+                        }),
+                        ready: Condvar::new(),
+                    },
+                )
+            })
+            .collect();
+        let shared = Arc::new(Shared {
+            lanes,
+            in_flight: Mutex::new(std::collections::HashSet::new()),
+            capacity: lane_capacity.max(1),
+        });
+        let (sender, receiver) = mpsc::channel();
+        let threads = Lane::ALL
+            .into_iter()
+            .filter_map(|lane| {
+                let shared = Arc::clone(&shared);
+                let sender = sender.clone();
+                std::thread::Builder::new()
+                    .name(lane.thread_name().into())
+                    .spawn(move || run_lane(&shared, lane, &sender))
+                    .map_err(|error| {
+                        tracing::error!(?lane, %error, "could not start a factory job lane");
+                    })
+                    .ok()
+            })
+            .collect();
+        Self {
+            shared,
+            completions: Mutex::new(receiver),
+            _threads: threads,
+        }
     }
 
-    /// Queue `work` under `spec`. Never blocks the caller.
+    /// Queue `work` under `spec`. Never blocks the caller beyond two short
+    /// in-process mutexes.
     pub(crate) fn submit(
         &self,
         spec: JobSpec,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Submitted {
-        let _ = (spec, Box::new(work) as Work<T>);
-        unimplemented!("cas-1240: submit")
+        let Some(slot) = self.shared.lanes.get(&spec.lane) else {
+            return Submitted::Closed;
+        };
+        if !lock(&self.shared.in_flight).insert(spec.key.clone()) {
+            return Submitted::Coalesced;
+        }
+        let mut state = lock(&slot.state);
+        if state.closed {
+            drop(state);
+            lock(&self.shared.in_flight).remove(&spec.key);
+            return Submitted::Closed;
+        }
+        let mut outcome = Submitted::Queued;
+        if state.queue.len() >= self.shared.capacity && spec.criticality == Criticality::Refresh {
+            match state
+                .queue
+                .iter()
+                .position(|queued| queued.spec.criticality == Criticality::Refresh)
+            {
+                Some(index) => {
+                    let dropped = state.queue.remove(index).expect("index from position");
+                    state.dropped_refresh += 1;
+                    lock(&self.shared.in_flight).remove(&dropped.spec.key);
+                    outcome = Submitted::QueuedDroppedOldest {
+                        dropped_key: dropped.spec.key,
+                    };
+                }
+                None => {
+                    state.dropped_refresh += 1;
+                    drop(state);
+                    lock(&self.shared.in_flight).remove(&spec.key);
+                    return Submitted::DroppedRefresh;
+                }
+            }
+        }
+        state.queue.push_back(Queued {
+            spec,
+            work: Box::new(work),
+            enqueued_at: Instant::now(),
+        });
+        drop(state);
+        slot.ready.notify_one();
+        outcome
     }
 
     /// Every finished result, without waiting.
     pub(crate) fn drain_completions(&self) -> Vec<JobResult<T>> {
-        unimplemented!("cas-1240: drain")
+        let receiver = lock(&self.completions);
+        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
     }
 
-    /// Occupancy of one lane.
+    /// Occupancy of one lane: queued jobs (not counting the one running), the
+    /// age of the oldest, and refresh jobs dropped so far.
     pub(crate) fn lane_stats(&self, lane: Lane) -> LaneStats {
-        let _ = lane;
-        unimplemented!("cas-1240: stats")
+        let Some(slot) = self.shared.lanes.get(&lane) else {
+            return LaneStats::default();
+        };
+        let state = lock(&slot.state);
+        LaneStats {
+            queued: state.queue.len(),
+            oldest_queued_age: state
+                .queue
+                .front()
+                .map(|queued| queued.enqueued_at.elapsed()),
+            dropped_refresh: state.dropped_refresh,
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for JobRuntime<T> {
+    /// Stop taking work. Lane threads finish what is queued and exit; the
+    /// caller is not blocked waiting for them.
+    fn drop(&mut self) {
+        for slot in self.shared.lanes.values() {
+            lock(&slot.state).closed = true;
+            slot.ready.notify_all();
+        }
+    }
+}
+
+fn run_lane<T: Send + 'static>(
+    shared: &Shared<T>,
+    lane: Lane,
+    completions: &mpsc::Sender<JobResult<T>>,
+) {
+    let slot = &shared.lanes[&lane];
+    loop {
+        let next = {
+            let mut state = lock(&slot.state);
+            loop {
+                if let Some(queued) = state.queue.pop_front() {
+                    break Some(queued);
+                }
+                if state.closed {
+                    break None;
+                }
+                state = slot
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        };
+        let Some(Queued { spec, work, .. }) = next else {
+            return;
+        };
+        let started = Instant::now();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        let elapsed = started.elapsed();
+        // Free the key before posting, so a caller that drains this result
+        // can submit the key again at once.
+        lock(&shared.in_flight).remove(&spec.key);
+        match outcome {
+            Ok(outcome) => {
+                let over_budget = elapsed > spec.budget;
+                if over_budget {
+                    tracing::warn!(
+                        target: "cas::loop_watchdog",
+                        lane = ?lane,
+                        kind = spec.kind,
+                        key = %spec.key,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        budget_ms = spec.budget.as_millis() as u64,
+                        "factory job over budget"
+                    );
+                }
+                if completions
+                    .send(JobResult {
+                        kind: spec.kind,
+                        key: spec.key,
+                        generation: spec.generation,
+                        outcome,
+                        elapsed,
+                        over_budget,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(panic) => {
+                tracing::error!(lane = ?lane, kind = spec.kind, key = %spec.key, ?panic, "factory job panicked");
+            }
+        }
     }
 }
 
@@ -183,10 +390,7 @@ mod tests {
         }
     }
 
-    fn wait_for<T: Send + 'static>(
-        runtime: &JobRuntime<T>,
-        count: usize,
-    ) -> Vec<JobResult<T>> {
+    fn wait_for<T: Send + 'static>(runtime: &JobRuntime<T>, count: usize) -> Vec<JobResult<T>> {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut results = Vec::new();
         while results.len() < count && Instant::now() < deadline {
@@ -207,19 +411,25 @@ mod tests {
 
         let (r, n) = (Arc::clone(&release), Arc::clone(&runs));
         assert_eq!(
-            runtime.submit(spec("snapshot", Lane::Read, Criticality::Refresh, 1), move || {
-                n.fetch_add(1, Ordering::SeqCst);
-                r.wait();
-                1
-            }),
+            runtime.submit(
+                spec("snapshot", Lane::Read, Criticality::Refresh, 1),
+                move || {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    r.wait();
+                    1
+                }
+            ),
             Submitted::Queued
         );
         let n = Arc::clone(&runs);
         assert_eq!(
-            runtime.submit(spec("snapshot", Lane::Read, Criticality::Refresh, 2), move || {
-                n.fetch_add(1, Ordering::SeqCst);
-                2
-            }),
+            runtime.submit(
+                spec("snapshot", Lane::Read, Criticality::Refresh, 2),
+                move || {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    2
+                }
+            ),
             Submitted::Coalesced,
             "a key in flight is not run twice"
         );
@@ -240,7 +450,10 @@ mod tests {
         let mut gate = GenerationGate::default();
         assert!(gate.accept(&newer[0]), "the newest generation is applied");
         assert!(!gate.accept(&results[0]), "an older generation is dropped");
-        assert!(gate.accept(&newer[0]), "re-applying the same generation is allowed");
+        assert!(
+            gate.accept(&newer[0]),
+            "re-applying the same generation is allowed"
+        );
     }
 
     /// spec-4c5b §7 gate test (C0): with its lane blocked, submits return at
@@ -252,10 +465,13 @@ mod tests {
         let release = Arc::new(Barrier::new(2));
         let r = Arc::clone(&release);
         assert_eq!(
-            runtime.submit(spec("blocker", Lane::Write, Criticality::Critical, 1), move || {
-                r.wait();
-                "blocker"
-            }),
+            runtime.submit(
+                spec("blocker", Lane::Write, Criticality::Critical, 1),
+                move || {
+                    r.wait();
+                    "blocker"
+                }
+            ),
             Submitted::Queued
         );
         // Wait until the blocker is running, so the queue below is the backlog.
@@ -263,15 +479,24 @@ mod tests {
 
         let started = Instant::now();
         assert_eq!(
-            runtime.submit(spec("refresh-a", Lane::Write, Criticality::Refresh, 1), || "a"),
+            runtime.submit(
+                spec("refresh-a", Lane::Write, Criticality::Refresh, 1),
+                || "a"
+            ),
             Submitted::Queued
         );
         assert_eq!(
-            runtime.submit(spec("refresh-b", Lane::Write, Criticality::Refresh, 1), || "b"),
+            runtime.submit(
+                spec("refresh-b", Lane::Write, Criticality::Refresh, 1),
+                || "b"
+            ),
             Submitted::Queued
         );
         assert_eq!(
-            runtime.submit(spec("refresh-c", Lane::Write, Criticality::Refresh, 1), || "c"),
+            runtime.submit(
+                spec("refresh-c", Lane::Write, Criticality::Refresh, 1),
+                || "c"
+            ),
             Submitted::QueuedDroppedOldest {
                 dropped_key: "refresh-a".to_string()
             }
@@ -279,7 +504,12 @@ mod tests {
         for i in 0..5 {
             assert_eq!(
                 runtime.submit(
-                    spec(&format!("receipt-{i}"), Lane::Write, Criticality::Critical, 1),
+                    spec(
+                        &format!("receipt-{i}"),
+                        Lane::Write,
+                        Criticality::Critical,
+                        1
+                    ),
                     || "receipt"
                 ),
                 Submitted::Queued,

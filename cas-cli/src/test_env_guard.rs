@@ -496,3 +496,23 @@ mod ambient_scrub_tests {
         }
     }
 }
+
+/// Private no-op `cas` for harness tests that need only the PTY preflight or
+/// a harmless hook command. Keep the returned directory alive with the child.
+/// Tests of Cassy behavior must use the built binary instead of this stand-in.
+#[cfg(unix)]
+pub(crate) fn fake_cas_on_path(env: &mut TestEnvGuard) -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir().expect("private cas stand-in directory");
+    let cas = bin.path().join("cas");
+    std::fs::write(&cas, "#!/bin/sh\nexit 0\n").expect("write private cas stand-in");
+    std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o700))
+        .expect("make private cas stand-in executable");
+    let previous = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&previous)),
+    )
+    .expect("join fixture PATH");
+    env.set("PATH", path);
+    bin
+}

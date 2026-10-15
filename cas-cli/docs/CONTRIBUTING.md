@@ -583,6 +583,24 @@ environment prefixes, compound commands, repeated packages and broader flags.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+On Unix, named tests and their guard processes run with a private PATH containing
+only resolved `cargo`, `rustc`, `rustdoc`, `rustup`, `cargo-nextest` executables
+through private symlinks, then `/usr/bin:/bin`. Host
+`cas`, `codex` and `claude` installations are absent even when they share a
+directory with Cargo. Compile-only checks retain their ordinary PATH. The
+runner prints the PATH setup cost for measurement.
+
+Harness fixtures must supply their own fake executables. The shared
+`test_env_guard::fake_cas_on_path(&mut guard)` returns a private no-op Cassy
+stand-in and prepends it through `TestEnvGuard`; retain the returned directory
+until all children exit. This is for the PTY preflight and harmless hook calls;
+tests of Cassy behavior must use the built binary. The same guard source is
+compiled by cas, cas-pty and cas-mux. To deliberately test an installed host
+harness, set `CAS_WORKER_TEST_ALLOW_HOST_PATH` to a nonempty, single-line reason
+for that invocation. The runner prints the reason and stores it in the test
+receipt (`host_path_opt_out`); an empty reason refuses instead of silently
+relaxing the rule. Do not use this opt-out to repair an incomplete fixture.
+
 In the Cassy source repository, every named run first executes the fixed cheap
 guards: `test_support::lib_test_process_env_mutation_is_isolated`,
 `config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9`,

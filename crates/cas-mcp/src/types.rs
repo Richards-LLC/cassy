@@ -105,7 +105,7 @@ pub struct MemoryRequest {
     #[schemars(
         description = "Skip overlap detection on remember (bulk imports / tests only — defaults to false)"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub bypass_overlap: Option<bool>,
 
     /// Overlap handling mode for `remember`. `interactive` is the default;
@@ -159,7 +159,7 @@ pub struct MemoryRequest {
     #[schemars(
         description = "Set true to keep the note personal (skip team auto-promote) even in a team-linked project"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub personal: Option<bool>,
 }
 
@@ -1018,7 +1018,7 @@ pub struct AgentRequest {
     #[schemars(
         description = "message action only: mark this worker-to-supervisor message as a merge request. CAS then attaches its immutable cas-merge-request envelope and may suppress it only when the requested branch tip has already landed. Omit or false for blockers, questions, close failures, and every other ordinary message."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub merge_request: Option<bool>,
 
     /// Marks a message as a blocker escalation (cas-8725).
@@ -1030,7 +1030,7 @@ pub struct AgentRequest {
     #[schemars(
         description = "message action only: mark this message as a blocker escalation. CAS attaches its cas-blocker envelope so an idle supervisor is woken instead of finding the row at its next turn. Omit or false for status updates, questions and ordinary traffic."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub blocker: Option<bool>,
 
     /// Explicit notification this message acknowledges or answers.
@@ -1067,7 +1067,7 @@ pub struct AgentRequest {
     #[schemars(
         description = "message target=all_workers only: standing policy that workers spawned later still receive. Omit for ordinary broadcasts, which reach only workers registered when sent."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub sticky: Option<bool>,
 
     /// cas-207e: a Commander ask's deadline in seconds (from `remind_delay_secs`).
@@ -1166,7 +1166,7 @@ pub struct AgentRequest {
     #[schemars(
         description = "When true, deliver the message URGENTLY: interrupt the target worker's in-flight turn (Esc) and inject the correction as its next prompt, bypassing the Claude Code inbox. Discards the worker's in-flight reasoning/partial work — use only when the worker is demonstrably off the rails. Default false = normal inbox/queue delivery."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub urgent: Option<bool>,
 }
 

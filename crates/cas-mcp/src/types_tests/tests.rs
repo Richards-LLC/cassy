@@ -1,6 +1,167 @@
 use crate::types::*;
 
 #[test]
+fn cas_8405_peers_accepts_string_booleans() {
+    for (value, expected) in [("true", true), ("false", false)] {
+        let request: CoordinationRequest = serde_json::from_value(serde_json::json!({
+            "action": "peers", "peer": "happy-owl-25", "detail": value, "json": value
+        }))
+        .expect("Claude Code string booleans must decode at the MCP boundary");
+        assert_eq!(request.detail, Some(expected));
+        assert_eq!(request.json, Some(expected));
+        assert_eq!(request.peer.as_deref(), Some("happy-owl-25"));
+    }
+}
+
+#[test]
+fn cas_8405_hidden_legacy_bool_alias_keeps_string_coercion() {
+    for (wire, expected) in [("true", true), ("false", false)] {
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "bypass_code_review": wire
+        }))
+        .unwrap();
+        assert_eq!(request.legacy_bypass_code_review, Some(expected));
+        assert_eq!(request.effective_supervisor_override(), Some(expected));
+    }
+}
+
+#[test]
+fn cas_8405_bool_coercion_does_not_grow_the_schema() {
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[schemars(title = "BooleanParameter")]
+    struct Strict {
+        #[serde(default)]
+        flag: Option<bool>,
+    }
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[schemars(title = "BooleanParameter")]
+    struct Coerced {
+        #[serde(default, deserialize_with = "crate::types::deser::option_bool")]
+        flag: Option<bool>,
+    }
+    assert!(
+        serde_json::from_str::<Strict>(r#"{"flag":true}"#)
+            .unwrap()
+            .flag
+            .unwrap()
+    );
+    assert!(
+        serde_json::from_str::<Coerced>(r#"{"flag":"true"}"#)
+            .unwrap()
+            .flag
+            .unwrap()
+    );
+    // Changing only this attribute must leave even the serialized bytes unchanged.
+    assert_eq!(
+        serde_json::to_string(&schemars::schema_for!(Strict)).unwrap(),
+        serde_json::to_string(&schemars::schema_for!(Coerced)).unwrap()
+    );
+}
+
+#[test]
+fn cas_8405_all_mcp_boolean_parameters_accept_string_forms() {
+    use serde_json::{Value, json};
+
+    fn audit<T>(base: Value, failures: &mut Vec<String>) -> usize
+    where
+        T: serde::de::DeserializeOwned + serde::Serialize + schemars::JsonSchema,
+    {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        let mut count = 0;
+        for (field, property) in schema["properties"].as_object().unwrap() {
+            let kind = &property["type"];
+            let boolean = kind == "boolean"
+                || kind
+                    .as_array()
+                    .is_some_and(|types| types.contains(&json!("boolean")));
+            if !boolean {
+                continue;
+            }
+            count += 1;
+            // Leniency belongs to decoding; keep the published boolean schema small.
+            assert_eq!(
+                kind,
+                &json!(["boolean", "null"]),
+                "{}.{field}",
+                T::schema_name()
+            );
+            for (wire, expected) in [
+                (json!("true"), json!(true)),
+                (json!("false"), json!(false)),
+                (json!(" TRUE "), json!(true)),
+                (json!(true), json!(true)),
+                (json!(false), json!(false)),
+                (json!(1), json!(true)),
+                (json!(0), json!(false)),
+                (Value::Null, Value::Null),
+            ] {
+                let mut input = base.clone();
+                input[field] = wire.clone();
+                match serde_json::from_value::<T>(input) {
+                    Ok(request) => assert_eq!(
+                        serde_json::to_value(request).unwrap()[field],
+                        expected,
+                        "{}.{field} decoded {wire} incorrectly",
+                        T::schema_name()
+                    ),
+                    Err(error) => {
+                        failures.push(format!("{}.{field} {wire}: {error}", T::schema_name()))
+                    }
+                }
+            }
+            let omitted: T = serde_json::from_value(base.clone()).unwrap();
+            assert!(serde_json::to_value(omitted).unwrap()[field].is_null());
+            for invalid in [json!("maybe"), json!(2), json!(-1), json!({}), json!([])] {
+                let mut input = base.clone();
+                input[field] = invalid.clone();
+                assert!(
+                    serde_json::from_value::<T>(input).is_err(),
+                    "{}.{field} must reject {invalid}",
+                    T::schema_name()
+                );
+            }
+        }
+        count
+    }
+
+    let mut failures = Vec::new();
+    let mut fields = 0;
+    // Include legacy/internal request types as well as every published tool.
+    macro_rules! requests {
+        ($($request:ty),+ $(,)?) => {
+            $(fields += audit::<$request>(json!({"action": "list"}), &mut failures);)+
+        };
+    }
+    requests!(
+        MemoryRequest,
+        TaskRequest,
+        RuleRequest,
+        SkillRequest,
+        SpecRequest,
+        AgentRequest,
+        PatternRequest,
+        SearchContextRequest,
+        SystemRequest,
+        VerificationRequest,
+        ArtifactRequest,
+        KnowledgeRequest,
+        TeamRequest,
+        FactoryRequest,
+        CoordinationRequest
+    );
+    fields += audit::<ExecuteRequest>(json!({"code": "query"}), &mut failures);
+    assert!(
+        fields > 0,
+        "the schema audit must exercise boolean parameters"
+    );
+    assert!(
+        failures.is_empty(),
+        "MCP boolean audit ({fields} fields):\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
 fn coordination_request_rejects_unknown_fields() {
     let error = serde_json::from_str::<CoordinationRequest>(
         r#"{"action":"shutdown_workers","worker_namse":"alice"}"#,

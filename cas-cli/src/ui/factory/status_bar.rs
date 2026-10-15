@@ -227,6 +227,18 @@ impl StatusBar {
             left_spans.push(Span::styled(error_display, styles.text_error));
         }
 
+        // cas-6931 (factory loop v2 §6): the daemon watchdog names a slow
+        // or wedged lane step. Left side, so it is never trimmed.
+        if let Some(health) = &app.loop_health {
+            let style = if health.starts_with("wedged:") {
+                styles.text_error.add_modifier(Modifier::BOLD)
+            } else {
+                styles.text_warning
+            };
+            left_spans.push(Span::raw(" │ "));
+            left_spans.push(Span::styled(health.clone(), style));
+        }
+
         // Right side: Keyboard shortcuts (context-sensitive, compact)
         let has_workers = app.worker_count() > 0;
         let sidecar_focused = app.sidecar_is_focused();
@@ -1015,6 +1027,35 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    /// cas-6931: the watchdog badge is on the status line.
+    #[test]
+    fn flv2_status_line_shows_the_watchdog_badge() {
+        for badge in [
+            "slow: control/prompt queue: transport 245 ms",
+            "wedged: control/refresh: director data for 3 s",
+        ] {
+            let mut app = crate::ui::factory::app::FactoryApp::for_test();
+            assert!(app.set_loop_health(Some(badge.to_string())));
+            assert!(
+                !app.set_loop_health(Some(badge.to_string())),
+                "unchanged is not dirty"
+            );
+            let backend = TestBackend::new(160, 1);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| StatusBar::render_with_update_badge(frame, frame.area(), &app, None))
+                .unwrap();
+            let line: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(line.contains(badge), "{line}");
+        }
     }
 
     fn running_version_label() -> String {

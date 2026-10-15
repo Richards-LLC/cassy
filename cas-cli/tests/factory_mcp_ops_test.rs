@@ -865,6 +865,16 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
             window_passes: 0,
             passes_over_100ms: 0,
             phase_latency: Default::default(),
+            slow_steps: Vec::new(),
+            wedge: None,
+            job_lanes: Default::default(),
+            lane_violations: 0,
+            lane_violation_sites: Vec::new(),
+            frames: Default::default(),
+            frames_coalesced: 0,
+            frame_bytes_p50: None,
+            frame_window_ms: 0,
+            frames_per_s: None,
         },
     )
     .unwrap();

@@ -5905,6 +5905,7 @@ impl FactoryDaemon {
         use cas_store::{EventStore, SqliteEventStore};
         use cas_types::{Event, EventEntityType, EventType};
 
+        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: roster"));
         let queue = open_prompt_queue_store(self.app.cas_dir())?;
 
         // Revalidate before watchdogs and roster selection: an old assignee
@@ -5928,6 +5929,7 @@ impl FactoryDaemon {
 
         // cas-45c4 (GH #102): advance every pane's quiet streak once per poll,
         // before any delivery decision reads it.
+        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: probes"));
         self.refresh_pane_quiet_samples();
 
         // cas-ac7e (GH #130): settle urgent wake probes before anything else
@@ -5935,6 +5937,7 @@ impl FactoryDaemon {
         // proves it took the turn — and never before.
         self.resolve_urgent_wake_probes(queue.as_ref());
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
+        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: commander mirror"));
         if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
             self.last_commander_mirror_scan = Some(std::time::Instant::now());
             super::commander_mirror::scan_supervisor_replies(
@@ -5946,6 +5949,7 @@ impl FactoryDaemon {
                 &mut self.commander_mirror_state,
             );
         }
+        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: operator replies"));
         self.process_operator_replies(queue.as_ref())?;
 
         // Native-extension agents consume their own queue rows. Excluding them
@@ -5987,6 +5991,7 @@ impl FactoryDaemon {
         // seed the timer so a restarted daemon cannot sweep before its first
         // worker roster has had a full interval to populate.
         let now = Instant::now();
+        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: poison sweep"));
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
             self.enqueue_delivery_stalled_bounces(queue.as_ref());
@@ -6057,6 +6062,7 @@ impl FactoryDaemon {
         // ten-row delivery batch is selected, otherwise each UUID steals a
         // supervisor turn even though none carries work. The bounded scan is
         // session/target isolated by the same store predicate as delivery.
+        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: select"));
         let death_candidates = queue.peek_for_targets(
             &targets,
             Some(&self.session_name),
@@ -6129,6 +6135,7 @@ impl FactoryDaemon {
         let mut nudge_tasks: Option<crate::Result<Arc<dyn cas_store::TaskStore>>> = None;
         self.stall_nudge_gate_checks.retain(|_, (next, _, _)| next.elapsed().as_secs() < 300);
         for selected in prompts {
+            super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: row"));
             // The assignee may have changed while earlier rows were delivered.
             for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
                 self.forget_row_delivery_state(id);
@@ -6654,6 +6661,7 @@ impl FactoryDaemon {
             // pending row wait for the full re-nudge interval once that turn
             // has ended. The timestamp is durable, so this also works after a
             // daemon restart and remains bounded by each redelivery budget.
+            super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: wake gate"));
             let retry_at_turn_end = queue
                 .wake_gate_state(queued.id)
                 .ok()
@@ -7266,6 +7274,7 @@ impl FactoryDaemon {
                         succeeded += 1;
                         continue;
                     }
+                    super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                         // cas-ab80: urgent Codex recipients still need the shared
                         // `Message from <sender>:` framing (same contract as
@@ -7473,6 +7482,7 @@ impl FactoryDaemon {
                     // only that bytes were typed.
                     let bytes_at_inject =
                         self.app.mux.pane_bytes_received(&pane_target).unwrap_or(0);
+                    super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: urgent inject"));
                     let outcome = self
                         .app
                         .mux
@@ -7663,6 +7673,7 @@ impl FactoryDaemon {
                     // already retracts the director's MERGE REQUIRED alerts,
                     // so it withdraws itself once the merge lands instead of
                     // being read later as an outstanding ask.
+                    super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     if nudge_only {
                         // cas-ef14 (GH #139): the recipient's harness already
                         // holds this payload — re-writing the inbox is the

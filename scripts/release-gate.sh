@@ -1717,7 +1717,10 @@ check_test_shape() {
         python3 scripts/check-test-shape.py || return $?
     fi
     if [[ -f scripts/test-check-test-shape.py ]]; then
-        release_test_child python3 scripts/test-check-test-shape.py
+        release_test_child python3 scripts/test-check-test-shape.py || return $?
+    fi
+    if [[ -f scripts/test-worker-proof-guards.py ]]; then
+        release_test_child python3 scripts/test-worker-proof-guards.py
     fi
 }
 

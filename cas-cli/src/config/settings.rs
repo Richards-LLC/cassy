@@ -346,8 +346,8 @@ pub struct QaConfig {
 
     /// Interactive terminal surfaces exercised through the real-build ledger,
     /// rather than a command's stdout capture. Other output paths in the same
-    /// delivery still require terminal-qa; CLI command paths always do when
-    /// output checks are enabled (terminal_render_paths is non-empty).
+    /// delivery still require terminal-qa; CLI commands and mux pane rendering
+    /// always do when output checks are enabled (terminal_render_paths is non-empty).
     #[serde(default = "default_terminal_interaction_paths")]
     pub terminal_interaction_paths: Vec<String>,
 
@@ -419,10 +419,13 @@ pub fn default_terminal_render_paths() -> Vec<String> {
         "**/cli/**",
         "**/ui/**",
         "**/tui/**",
-        "**/*render*",
-        "**/*output*",
-        "**/*theme*",
-        "**/*progress*",
+        "**/terminal/**",
+        "**/doctor.rs",
+        "**/doctor/**",
+        "**/cas-mux/**",
+        "**/ghostty_vt/**",
+        "**/ghostty_vt_sys/**",
+        "**/cas-diffs/**",
     ]
     .into_iter()
     .map(ToOwned::to_owned)

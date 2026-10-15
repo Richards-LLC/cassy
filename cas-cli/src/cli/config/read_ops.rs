@@ -276,10 +276,10 @@ pub(crate) fn execute_list(
 
                 fmt.write_raw(&format!("  {modified_marker}"))?;
                 if is_modified {
-                    let warn_color = fmt.theme().palette.status_warning;
+                    let warn_color = fmt.theme().palette.text_warning;
                     fmt.write_colored(meta.key, warn_color)?;
                     fmt.write_raw(" = ")?;
-                    let success_color = fmt.theme().palette.status_success;
+                    let success_color = fmt.theme().palette.text_success;
                     fmt.write_bold_colored(&value, success_color)?;
                 } else {
                     fmt.write_raw(meta.key)?;
@@ -477,10 +477,10 @@ pub(crate) fn execute_diff(
             fmt.newline()?;
             for (key, current, default) in &diffs {
                 fmt.write_raw("  ")?;
-                let warn_color = fmt.theme().palette.status_warning;
+                let warn_color = fmt.theme().palette.text_warning;
                 fmt.write_colored(key, warn_color)?;
                 fmt.write_raw(" = ")?;
-                let success_color = fmt.theme().palette.status_success;
+                let success_color = fmt.theme().palette.text_success;
                 fmt.write_bold_colored(current, success_color)?;
                 fmt.newline()?;
                 fmt.write_raw("    ")?;

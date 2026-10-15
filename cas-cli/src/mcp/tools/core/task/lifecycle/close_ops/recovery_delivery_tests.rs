@@ -45,6 +45,21 @@ struct Recovery {
 }
 
 fn fixture(env: &mut TestEnvGuard) -> Recovery {
+    fixture_with_surface(env, "footer.css", false)
+}
+
+fn fixture_with_surface(env: &mut TestEnvGuard, surface: &str, evidence_gate: bool) -> Recovery {
+    let (original_body, recovered_body) = match surface {
+        "footer.css" => (".footer { gap: 4px; }\n", ".footer { gap: 8px; }\n"),
+        path if path.ends_with(".ts") => (
+            "logger.debug(\"render started\");\n",
+            "logger.debug(\"render completed\");\n",
+        ),
+        _ => (
+            "println!(\"status: waiting\");\n",
+            "println!(\"status: ready\");\n",
+        ),
+    };
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q", "-b", "main"]);
@@ -52,8 +67,9 @@ fn fixture(env: &mut TestEnvGuard) -> Recovery {
     git(repo, &["add", ".gitignore"]);
     git(repo, &["commit", "-q", "-m", "seed"]);
     git(repo, &["checkout", "-q", "-b", OLD_BRANCH]);
-    std::fs::write(repo.join("footer.css"), ".footer { gap: 4px; }\n").unwrap();
-    git(repo, &["add", "footer.css"]);
+    std::fs::create_dir_all(repo.join(surface).parent().unwrap()).unwrap();
+    std::fs::write(repo.join(surface), original_body).unwrap();
+    git(repo, &["add", surface]);
     git(
         repo,
         &[
@@ -65,8 +81,8 @@ fn fixture(env: &mut TestEnvGuard) -> Recovery {
     );
     let old = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["checkout", "-q", "-b", BRANCH]);
-    std::fs::write(repo.join("footer.css"), ".footer { gap: 8px; }\n").unwrap();
-    git(repo, &["add", "footer.css"]);
+    std::fs::write(repo.join(surface), recovered_body).unwrap();
+    git(repo, &["add", surface]);
     git(
         repo,
         &[
@@ -116,7 +132,7 @@ fn fixture(env: &mut TestEnvGuard) -> Recovery {
     env.set("CAS_FACTORY_MODE", "1");
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     std::fs::write(cas_dir.join("config.toml"),
-        "[project]\ncanonical_id=\"cas-c6e1-fixture-project\"\n[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n").unwrap();
+        format!("[project]\ncanonical_id=\"cas-c6e1-fixture-project\"\n[verification]\nenabled=false\n[qa]\nevidence_gate={evidence_gate}\nindependent_pass=true\n")).unwrap();
     open_store(&cas_dir).unwrap().init().unwrap();
     open_rule_store(&cas_dir).unwrap().init().unwrap();
     open_skill_store(&cas_dir).unwrap().init().unwrap();
@@ -510,4 +526,135 @@ async fn long_note_history_close_stays_well_under_the_tool_budget_cas_3b81() {
         elapsed <= short_elapsed * 3 + std::time::Duration::from_secs(3),
         "close cost grew with note history: short {short_elapsed:?}, long {elapsed:?}"
     );
+}
+
+fn fresh_ledger(f: &Recovery) -> std::path::PathBuf {
+    let cas_dir = f.dir.path().join(".cas");
+    let paths = crate::config::resolved_factory_artifact_paths(&cas_dir, None);
+    let task_dir = paths.task_dirs(TASK)[0].clone();
+    std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::write(
+        task_dir.join("LEDGER.md"),
+        "| M01 | render contract | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+    )
+    .unwrap();
+    task_dir
+}
+
+#[tokio::test]
+async fn backend_renderer_log_only_close_parks_and_dispatches_qa_cas_2de9() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "src/contracts/pdf.renderer.ts", true);
+    let task_dir = fresh_ledger(&f);
+    let parked = close(&f).await;
+    assert_eq!(
+        parked.deliverables.factory_branch_anchor.as_deref(),
+        Some(f.final_tip.as_str())
+    );
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    let cas_dir = f.dir.path().join(".cas");
+    let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+    assert_eq!(rounds.len(), 1);
+    assert_eq!(rounds[0].bound_head, f.final_tip);
+    // Simulate the independent reviewer through the real store boundary, so
+    // re-close tests implementer evidence without a supervisor evidence waiver.
+    cas_store::claim_qa_pass(&cas_dir, TASK, "independent-reviewer", chrono::Utc::now()).unwrap();
+    cas_store::resolve_qa_pass(
+        &cas_dir,
+        TASK,
+        "independent-reviewer",
+        cas_types::QaVerdict::Approved,
+        "fixture independent review",
+        None,
+        task_dir.join("LEDGER.md").to_str().unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    git(
+        f.dir.path(),
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            BRANCH,
+            "-m",
+            "Integrate reviewed delivery",
+        ],
+    );
+    git(
+        f.dir.path(),
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
+    let output = close_output(&f).await;
+    assert_eq!(
+        open_task_store(&cas_dir).unwrap().get(TASK).unwrap().status,
+        TaskStatus::Closed,
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
+    let mut env = TestEnvGuard::temp_home();
+    for surface in [
+        "src/cli/status.rs",
+        "src/tui/status.rs",
+        "src/doctor.rs",
+        "crates/cas-mux/src/render.rs",
+        "crates/ghostty_vt/src/lib.rs",
+        "crates/ghostty_vt_sys/src/lib.rs",
+        "crates/cas-diffs/src/widget.rs",
+    ] {
+        let f = fixture_with_surface(&mut env, surface, true);
+        let task_dir = fresh_ledger(&f);
+        let output = close_output(&f).await;
+        assert!(
+            output.contains("terminal-qa receipt"),
+            "{surface}: {output}"
+        );
+        let cas_dir = f.dir.path().join(".cas");
+        let task = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress, "{surface}: {output}");
+        assert!(
+            cas_store::list_qa_passes(&cas_dir, TASK)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::create_dir_all(task_dir.join("terminal-qa")).unwrap();
+        std::fs::write(
+            task_dir.join("terminal-qa/report.md"),
+            "terminal-qa: PASS fixture\n",
+        )
+        .unwrap();
+        close(&f).await;
+    }
+}
+
+#[tokio::test]
+async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "src/cli/status.rs", true);
+    let cas_dir = f.dir.path().join(".cas");
+    cas_store::waive_qa_pass(
+        &cas_dir,
+        TASK,
+        "supervisor-session",
+        WORKER,
+        BRANCH,
+        &f.final_tip,
+        "fixture exact-head terminal evidence waiver",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let parked = close(&f).await;
+    assert_eq!(
+        parked.deliverables.factory_branch_anchor.as_deref(),
+        Some(f.final_tip.as_str())
+    );
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    assert!(parked.notes.contains("QA evidence ledger waived"));
+    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+    assert_eq!(passes.len(), 1);
+    assert_eq!(passes[0].bound_head, f.final_tip);
+    assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
 }

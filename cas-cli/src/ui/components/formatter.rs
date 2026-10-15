@@ -267,7 +267,7 @@ impl<'w> Formatter<'w> {
 
     /// Write text with the accent color.
     pub fn write_accent(&mut self, text: &str) -> io::Result<()> {
-        let color = self.theme.palette.accent;
+        let color = self.theme.palette.text_accent;
         self.write_colored(text, color)
     }
 
@@ -302,7 +302,7 @@ impl<'w> Formatter<'w> {
     pub fn heading(&mut self, text: &str) -> io::Result<()> {
         if self.mode == OutputMode::Styled {
             let bar = Icons::SEPARATOR_DOUBLE;
-            let color = self.theme.palette.accent;
+            let color = self.theme.palette.text_accent;
             self.write_bold_colored(&format!("{bar}{bar}{bar} {text} {bar}{bar}{bar}"), color)?;
         } else {
             write!(self.writer, "--- {text} ---")?;
@@ -329,7 +329,7 @@ impl<'w> Formatter<'w> {
 
     /// Print a success status: `✓ message`
     pub fn success(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_success;
+        let color = self.theme.palette.text_success;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::CHECK), color)?;
         } else {
@@ -340,7 +340,7 @@ impl<'w> Formatter<'w> {
 
     /// Print a warning: `⚠ message`
     pub fn warning(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_warning;
+        let color = self.theme.palette.text_warning;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::WARNING), color)?;
         } else {
@@ -351,7 +351,7 @@ impl<'w> Formatter<'w> {
 
     /// Print an error: `✗ message`
     pub fn error(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_error;
+        let color = self.theme.palette.text_error;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::CROSS), color)?;
         } else {
@@ -362,7 +362,7 @@ impl<'w> Formatter<'w> {
 
     /// Print an info message: `ℹ message`
     pub fn info(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_info;
+        let color = self.theme.palette.text_info;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::INFO), color)?;
         } else {

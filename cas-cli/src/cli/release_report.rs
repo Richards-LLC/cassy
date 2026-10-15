@@ -1918,6 +1918,7 @@ fn release_note_group_label(line: &str) -> Option<String> {
         .trim();
     let normalized = value.trim_end_matches(':').trim();
     if normalized.is_empty()
+        || normalized.eq_ignore_ascii_case("Top-level")
         || normalized.eq_ignore_ascii_case("Reply (Was → Now)")
         || normalized.contains("Was:")
         || normalized.contains("Now:")

@@ -391,7 +391,7 @@ async fn reminder_pass_never_waits_for_external_git_fetches() {
     agents
         .register(&cas_types::Agent::new("sup".into(), "supervisor".into()))
         .unwrap();
-    let reminders = open_reminder_store(&cas_dir).unwrap();
+    let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
     for n in 0..EXTERNAL_REMINDERS {
         let filter = serde_json::json!({"commit": "HEAD", "target_branch": format!("epic/{n}")});
         reminders

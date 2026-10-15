@@ -528,6 +528,7 @@ pub(crate) fn parse_external_wake_condition(
 /// target branch or tag is not present yet); process failures/timeouts are
 /// surfaced so the daemon can retain the pending row and retry on a later
 /// cadence.
+#[cfg(test)]
 pub(crate) fn external_wake_condition_satisfied(
     project: &Path,
     condition: &ExternalWakeCondition,
@@ -539,6 +540,7 @@ pub(crate) fn external_wake_condition_satisfied(
 /// compared when it is satisfied. For branch conditions, the fetch is forced
 /// into `refs/remotes/origin/<target>`; for tags, the remote is queried without
 /// updating local refs. Failures return false without consulting local state.
+#[cfg(test)]
 pub(crate) fn external_wake_condition_observation(
     project: &Path,
     condition: &ExternalWakeCondition,

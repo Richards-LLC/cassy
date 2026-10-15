@@ -93,6 +93,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `CONTRIBUTING`, the supervisor skill and the agent summaries describe each
   current check at its stage and remove the retired duplicate checks.
 
+### Changed — render scheduling gives input priority (#1210, cas-77f39)
+
+- Focused, unfocused and off-screen panes cap at 15, 5 and 0 fps; typing draws
+  first, and the spawn spinner is capped at 10 fps.
+
+### Fixed — disk-cache reclaim handles pressure and uncertainty (cas-cd3e)
+
+- Garbage collection safely reclaims stale worker build caches under disk
+  pressure and reports `indeterminate` separately.
+
+### Fixed — scratch paths accept environment variables (#1218, cas-6ada)
+
+- Scratch paths containing `$VAR` are no longer refused.
+
+### Fixed — explicit epic targets use the epic lane (#1216, cas-cf8e0)
+
+- An explicit `epic/` target now selects the target epic's lane.
+
 ## [3.56.0] - 2026-10-15
 
 ### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)

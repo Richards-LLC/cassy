@@ -3812,6 +3812,26 @@ mod pending_deadline_tests {
 
     /// Past the deadline the row is doomed, not in flight. Saying "still
     /// pending" there is the claimed-green shape this task exists to remove.
+    /// cas-a1ed: messages 4189870, 4189912 and 4189924 were held because
+    /// their busy recipients' panes were never silent. Status said "PAST — the
+    /// sweep will mark this undeliverable" although no sweep abandons a row
+    /// held for a live recipient, so a supervisor read a delivery as lost.
+    #[test]
+    fn a_row_held_for_a_busy_recipient_is_not_on_the_abandonment_deadline_cas_a1ed() {
+        for waited in [60, 1200] {
+            let line = pending_deadline_narrative(
+                DeliveryStage::Gated,
+                Some(cas_store::PendingReason::GatedNotReady),
+                Some("wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken"),
+                Some(waited),
+            );
+            assert!(line.contains("still pending"), "{line}");
+            assert!(line.contains("next tool call"), "{line}");
+            assert!(!line.contains("abandoned as undeliverable"), "{line}");
+            assert!(!line.contains("PAST"), "{line}");
+        }
+    }
+
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
         let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200));

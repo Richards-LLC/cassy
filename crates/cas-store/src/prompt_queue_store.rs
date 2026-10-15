@@ -8153,8 +8153,11 @@ mod tests {
     /// so the worker took many tool calls without seeing it (13+ minutes,
     /// message 4184454). A row claimed after the current turn began is
     /// surfaced at the next tool boundary and its claim becomes the hook's
-    /// receipt; one claimed before the turn began (possibly the turn's own
-    /// prompt) is not.
+    /// receipt. cas-a1ed: so is an unfinished claim made before the turn
+    /// began (messages 4189870 and 4189924 were claimed in one turn and the
+    /// next turn started without their Teams copies). Leaving out the turn's
+    /// own prompt is the hook's job: it holds the prompt text, and a rendered
+    /// copy is receipted when its turn starts.
     #[test]
     fn tool_boundary_surfaces_rows_claimed_for_transport_after_the_turn_began_cas_b5ad() {
         let (_temp, store) = create_test_store();
@@ -8176,8 +8179,8 @@ mod tests {
             ids(store
                 .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
                 .unwrap()),
-            vec![decision],
-            "the mid-turn claim reaches the worker at its next tool call"
+            vec![before, decision],
+            "every unfinished claim reaches the worker at its next tool call"
         );
         assert!(
             store
@@ -8205,6 +8208,40 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a completed handoff is not surfaced a second time"
+        );
+    }
+
+    /// cas-a1ed: a tool boundary that cannot place the current turn still
+    /// takes a row whose transport claim never completed. A long turn pushed
+    /// the turn's first line out of the transcript window, and this query hid
+    /// the claimed decision at every tool call. A completed handoff stays
+    /// excluded (cas-9568).
+    #[test]
+    fn tool_boundary_without_a_turn_takes_unfinished_claims_only_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let claimed = store
+            .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(claimed, "worker-1").unwrap());
+        let handed_off = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into the pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(handed_off, "worker-1").unwrap());
+        store.mark_transport_delivered(handed_off).unwrap();
+
+        let surfaced = store
+            .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+            .unwrap();
+        assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![claimed]);
+        let report = store.message_delivery_report(claimed).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(SurfacingSource::HookSurfaced));
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty(),
+            "surfaced once"
         );
     }
 

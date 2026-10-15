@@ -12,6 +12,7 @@ checksum placeholders below.
 Live on production — **User** — {{USER_IMPACT_PUNCH}}
 
 **Reply (Was → Now):**
+
 - Was: {{USER_WAS}} Now: {{USER_NOW}}
 - Install: use `cas update` for an existing installation, or download the
   vX.Y.Z archive for Linux x86_64 (SHA-256 `{{LINUX_SHA256}}`) or macOS ARM64
@@ -23,6 +24,7 @@ Live on production — **User** — {{USER_IMPACT_PUNCH}}
 Live on production — **Dev** — {{DEV_IMPACT_PUNCH}}
 
 **Reply (Was → Now):**
+
 - Was: {{DEV_WAS}} Now: {{DEV_NOW}}
 - Validation and artifact: {{VALIDATION_SUMMARY}} The published archives are
   `cas-x86_64-unknown-linux-gnu.tar.gz` (SHA-256 `{{LINUX_SHA256}}`) and

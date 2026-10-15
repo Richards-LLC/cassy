@@ -9,6 +9,11 @@
 # resolved: it exits 2 with an error rather than a found=false that would look
 # like a missing prebuild (cas-0906).
 set -euo pipefail
+# A git hook (the pre-push fast rows) exports GIT_DIR and friends. A fixture
+# `git init` would then reinitialise the real repository (cas-f95b), so drop
+# every repository-local git variable before touching a fixture repository.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lookup="$script_dir/find-release-prebuild.sh"
@@ -51,7 +56,7 @@ case "$2" in
     if [[ -z "${FAKE_TREE:-}" ]]; then exit 1; fi
     printf '%s\n' "$FAKE_TREE"
     ;;
-  *"/actions/workflows/"*"/runs?event=push"*)
+  *"/actions/workflows/"*"/runs?event=merge_group"*)
     cat "${FAKE_RECENT_RUNS_JSON:?}"
     ;;
   *"/actions/workflows/"*"/runs?"*)
@@ -247,17 +252,16 @@ make_repo origin https://github.com/Example/x.git
 FAKE_REPO_VIEW='not a slug' unresolvable "$tmp/not-a-checkout" 'a malformed gh answer is not used'
 unset FAKE_GH_LOG GIT_CEILING_DIRECTORIES
 
-# 12. cas-28eb: the release/** push's run built the landing tree before the
-# merge queue landed it (a real release: branch head 35a177531 and main merge
-# 5fe54c3d5 share tree 2a8b2a34). It is adopted without waiting for main's run.
+# 12. cas-28eb: a merge_group run built the landing tree before the queue
+# landed it (tree 2a8b2a34 shared by two commits). It is adopted by tree id.
 tree=2a8b2a348aa3b0291dbfeaded555e6a7178f6485
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 printf '{"workflow_runs":[{"id":222,"status":"completed","conclusion":"success","head_sha":"35a177531","head_commit":{"tree_id":"%s"}}]}' \
     "$tree" >"$tmp/recent.json"
 printf '%s' "$both_live" >"$tmp/artifacts/222.json"
 out="$(FAKE_TREE="$tree" FAKE_RECENT_RUNS_JSON="$tmp/recent.json" "$lookup" 5fe54c3d5 2>/dev/null)"
-expect_field "$out" found true 'a release-branch prebuild of the identical tree is adopted at land'
-expect_field "$out" run-id 222 'adoption names the release-branch run'
+expect_field "$out" found true 'a merge-queue prebuild of the identical tree is adopted at land'
+expect_field "$out" run-id 222 'adoption names the merge-queue run'
 
 # 13. A complete run of a different tree is never adopted: the tag rebuilds.
 out="$(FAKE_TREE=1111111111111111111111111111111111111111 FAKE_RECENT_RUNS_JSON="$tmp/recent.json" \

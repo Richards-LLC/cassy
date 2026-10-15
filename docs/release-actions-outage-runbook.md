@@ -39,7 +39,7 @@ rm -rf "$STAGE"
 sha256sum "$OUT/cas-x86_64-unknown-linux-gnu.tar.gz"
 ```
 
-`scripts/release.sh` remains the guarded helper for the full local-audit and manual-publish flow. Its `--manual-publish` mode deliberately requires both `--publish-tag` and `--acknowledge-workflow-conflict`; do not weaken those guards for an outage.
+There is no scripted local publisher (cas-f95b): `scripts/release.sh` prepares a release in its epic PR and `release.yml` publishes it. An outage publication is this manual procedure, and it still needs both assets and the published-asset receipt.
 
 ## macOS ARM64 is not optional
 

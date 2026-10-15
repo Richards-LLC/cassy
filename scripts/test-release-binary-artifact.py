@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """One local release build per release tree (cas-c096).
 
-The gate records its audited release archive; release.sh reuses it only when
-the tree, version, target, build identity and digests all match, and
-rebuilds on any mismatch. Cargo, rustc, zig and the ISA auditor are fakes:
+The gate records its audited release archive; the helper verifies a reuse
+only when the tree, version, target, build identity and digests all match.
+The local publisher that reused it is gone (cas-f95b): release.yml publishes
+the merge-queue build. Cargo, rustc, zig and the ISA auditor are fakes:
 the contract under test is the reuse decision, not a 10 minute build.
 """
 import json
@@ -16,6 +17,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# A git hook (the pre-push fast rows) exports GIT_DIR and friends; a fixture
+# `git init` would then reinitialise the real repository (cas-f95b).
+for _name in subprocess.run(['git', 'rev-parse', '--local-env-vars'], capture_output=True,
+                            text=True, check=False).stdout.split():
+    os.environ.pop(_name, None)
 HELPER = ROOT / 'scripts/release-binary-artifact.py'
 TARGET = 'x86_64-unknown-linux-gnu'
 
@@ -148,91 +155,6 @@ class RecordAndVerify(Fixture):
         entries = [path for path in (self.store / TARGET).iterdir() if not path.name.startswith('.')]
         self.assertEqual(len(entries), 6)
         self.assertEqual(self.verify().returncode, 0)
-
-
-class Publisher(Fixture):
-    """release.sh reuses a matching gate archive and rebuilds otherwise."""
-
-    def setUp(self):
-        super().setUp()
-        shutil.copy(ROOT / 'scripts/release.sh', self.repo / 'scripts/release.sh')
-        shutil.copy(ROOT / 'scripts/release-zig.sh', self.repo / 'scripts/release-zig.sh')
-        for name in ('check-release-host.sh', 'check-release-migration-snapshots.sh',
-                     'check-release-preflight.sh', 'check-portable-x86_64-isa.sh',
-                     'check-blake3-no-avx512-build.sh', 'find-release-prebuild.sh'):
-            self.executable(self.repo / 'scripts' / name, '#!/bin/sh\nexit 0\n')
-        self.audit_log = self.base / 'audit.log'
-        self.executable(self.repo / 'scripts/test-check-portable-x86_64-isa.sh',
-                        f'#!/bin/sh\nprintf "%s\\n" "$(cat "$1")" >>{self.audit_log}\n'
-                        'exit "${FIXTURE_AUDIT_STATUS:-0}"\n')
-        self.executable(self.bin / 'rustup', f'#!/bin/sh\necho {TARGET}\n')
-        self.executable(self.bin / 'cargo', '''#!/bin/sh
-printf '%s\\n' "$*" >>"$FIXTURE_CARGO_LOG"
-[ "$1" = clean ] && exit 0
-mkdir -p target/x86_64-unknown-linux-gnu/release/build/ghostty_vt_sys-fixture/out/zig-out/lib
-printf 'publisher-built executable\\n' > target/x86_64-unknown-linux-gnu/release/cas
-printf fixture > target/x86_64-unknown-linux-gnu/release/build/ghostty_vt_sys-fixture/out/zig-out/lib/libghostty_vt.a
-''')
-        self.commit('publisher fixture')
-        self.git('push', '-q', 'origin', 'main')
-
-    def publish(self, *args):
-        return subprocess.run(['bash', 'scripts/release.sh', *args], cwd=self.repo, env=self.env,
-                              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-    def built(self):
-        return self.cargo_log.exists() and 'zigbuild' in self.cargo_log.read_text()
-
-    def shipped_binary(self):
-        with tarfile.open(self.repo / f'dist/local-audit/cas-{TARGET}.tar.gz') as bundle:
-            return bundle.extractfile('cas').read()
-
-    def test_matching_gate_archive_is_reused_without_a_build(self):
-        self.record()
-        result = self.publish()
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertFalse(self.built(), result.stdout)
-        self.assertIn('Reused gate release binary', result.stdout)
-        self.assertEqual(self.shipped_binary(), self.binary.read_bytes())
-        self.assertEqual(self.audit_log.read_text(), self.binary.read_text(),
-                         'the reused executable skipped the packaged-binary ISA audit')
-
-    def test_tree_mismatch_rebuilds(self):
-        self.record()
-        (self.repo / 'cas-cli/lib.rs').write_text('// landed after the gate\n')
-        self.commit('post-gate change')
-        result = self.publish()
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('MISS key=tree', result.stdout)
-        self.assertTrue(self.built(), result.stdout)
-        self.assertEqual(self.shipped_binary(), b'publisher-built executable\n')
-
-    def test_version_mismatch_rebuilds(self):
-        self.record()
-        path = self.manifest_path()
-        manifest = json.loads(path.read_text())
-        manifest['version'] = '9.99.8'
-        path.write_text(json.dumps(manifest))
-        result = self.publish()
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('MISS key=version', result.stdout)
-        self.assertTrue(self.built(), result.stdout)
-
-    def test_manual_publish_always_builds_its_shipped_bytes(self):
-        self.record()
-        self.executable(self.bin / 'gh', '#!/bin/sh\nexit 0\n')
-        result = self.publish('--publish-tag', '--manual-publish', '--acknowledge-workflow-conflict')
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn('--manual-publish ships these local bytes', result.stdout)
-        self.assertTrue(self.built(), result.stdout)
-
-    def test_reused_binary_failing_the_isa_audit_stops_the_publish(self):
-        self.record()
-        self.env['FIXTURE_AUDIT_STATUS'] = '1'
-        result = self.publish()
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn('reused gate release binary failed the ISA audit', result.stdout)
-        self.assertFalse((self.repo / f'dist/local-audit/cas-{TARGET}.tar.gz').exists())
 
 
 if __name__ == '__main__':

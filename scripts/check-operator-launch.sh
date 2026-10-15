@@ -53,9 +53,9 @@ in_operator_terminal() {
     local -a env_args=("${operator_env[@]}")
     [[ -z "$extra_env" ]] || env_args+=("$extra_env")
     if [[ "$(uname -s)" == Darwin ]]; then
-        "${detach[@]}" env -i "${env_args[@]}" script -q /dev/null /bin/bash -lc "$command_line"
+        ${detach[@]+"${detach[@]}"} env -i "${env_args[@]}" script -q /dev/null /bin/bash -lc "$command_line"
     else
-        "${detach[@]}" env -i "${env_args[@]}" script -qec "/bin/bash -lc \"$command_line\"" /dev/null
+        ${detach[@]+"${detach[@]}"} env -i "${env_args[@]}" script -qec "/bin/bash -lc \"$command_line\"" /dev/null
     fi
 }
 

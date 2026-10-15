@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise preflight's real call seam and failed-publish tag ownership."""
+"""Exercise the train preflight's real zigbuild call seam (no build)."""
 import os
 from pathlib import Path
 import shutil
@@ -8,6 +8,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# A git hook (the pre-push fast rows) exports GIT_DIR and friends; a fixture
+# `git init` would then reinitialise the real repository (cas-f95b).
+for _name in subprocess.run(['git', 'rev-parse', '--local-env-vars'], capture_output=True,
+                            text=True, check=False).stdout.split():
+    os.environ.pop(_name, None)
 
 
 class PublishToolchain(unittest.TestCase):
@@ -30,7 +36,6 @@ class PublishToolchain(unittest.TestCase):
             (self.repo / directory).mkdir(parents=True)
         (self.repo / 'cas-cli/Cargo.toml').write_text('[package]\nversion = "9.99.9"\n')
         (self.repo / 'LICENSE').write_text('fixture')
-        shutil.copy(ROOT / 'scripts/release.sh', self.repo / 'scripts/release.sh')
         shutil.copy(ROOT / 'scripts/release-zig.sh', self.repo / 'scripts/release-zig.sh')
         for name in ['check-release-host.sh', 'check-release-migration-snapshots.sh',
                      'check-release-preflight.sh', 'check-portable-x86_64-isa.sh',
@@ -119,44 +124,6 @@ cut_preflight_check_publish_toolchain
         result = self.preflight('-1')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('unexpected', result.stdout)
-
-    def tag_exists(self):
-        return self.command('git', 'show-ref', '--verify', '--quiet', 'refs/tags/v9.99.9').returncode == 0
-
-    def publish(self):
-        return self.command('bash', 'scripts/release.sh', '--publish-tag')
-
-    def test_failed_publish_cleans_created_tag_and_resumes(self):
-        result = self.publish()
-        self.assertEqual(result.returncode, 47, result.stdout)
-        self.assertFalse(self.tag_exists(), result.stdout)
-        self.env['FIXTURE_BUILD_FAIL'] = '0'
-        result = self.publish()
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertTrue(self.tag_exists())
-        self.assertIn('refs/tags/v9.99.9', self.command('git', 'ls-remote', '--tags', 'origin').stdout)
-
-    def test_preexisting_local_tag_retained(self):
-        self.command('git', 'tag', '-a', 'v9.99.9', '-m', 'preexisting')
-        before = self.command('git', 'rev-parse', 'refs/tags/v9.99.9').stdout
-        self.assertEqual(self.publish().returncode, 47)
-        self.assertEqual(self.command('git', 'rev-parse', 'refs/tags/v9.99.9').stdout, before)
-
-    def test_unknown_remote_retains_created_tag(self):
-        self.command('git', 'remote', 'set-url', 'origin', str(self.base / 'missing'))
-        self.assertEqual(self.publish().returncode, 47)
-        self.assertTrue(self.tag_exists())
-
-    def test_remote_tag_retains_created_tag(self):
-        self.executable(self.bin / 'cargo', '#!/bin/sh\n[ "$1" = clean ] && exit 0\ngit push -q origin refs/tags/v9.99.9\nexit 47\n')
-        self.assertEqual(self.publish().returncode, 47)
-        self.assertTrue(self.tag_exists())
-
-    def test_replaced_tag_retained(self):
-        self.executable(self.bin / 'cargo', '#!/bin/sh\n[ "$1" = clean ] && exit 0\ngit tag -fa v9.99.9 -m replacement\nexit 47\n')
-        self.assertEqual(self.publish().returncode, 47)
-        self.assertTrue(self.tag_exists())
-        self.assertIn('replacement', self.command('git', 'cat-file', '-p', 'refs/tags/v9.99.9').stdout)
 
 
 if __name__ == '__main__':

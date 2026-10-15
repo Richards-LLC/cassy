@@ -583,6 +583,22 @@ environment prefixes, compound commands, repeated packages and broader flags.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+In the Cassy source repository, every named run first executes the fixed cheap
+guards: `test_support::lib_test_process_env_mutation_is_isolated`,
+`config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9`,
+and `scripts/check-test-shape.py --changed-since <task-target-base>`. Guard tests
+run separately from the requested selection, so their passes cannot hide a
+zero-match requested filter. The runner prints `guards: PASS` with the separate
+guard count and elapsed seconds; the `test: PASS` count remains the requested
+selection's count. Both invocations share the builder slot, private target and
+memory scope. Other repositories retain their existing named-test behavior.
+
+The same preflight compares removed/changed string literals against tracked
+test references and prints `Worker changed-string warning: <file>:<line> test
+<name>` for surviving assertions. Run or update the named assertions before
+push. This is a warning heuristic, not a complete dependency analysis. The diff
+uses the active task's integration target, with configured epic/default-branch
+fallbacks for standalone runs; pushing the worker branch never clears it.
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
@@ -1024,6 +1040,24 @@ lease-managed targets tolerate opaque unrelated processes while still checking
 every readable output handle, executable and mapping. Unknown legacy targets,
 replaced inodes and unavailable owner identities remain retained with bytes;
 they are never silently adopted. macOS keeps the conservative `lsof` probe.
+
+Explicit target-cache GC has a Linux-only exception for canonical,
+non-symlink `.cas/worktrees/<lane>/target` caches. Unrelated opaque processes
+no longer count as positive liveness. Reclamation requires no readable process
+use, no fresh registered owner with a matching PID start identity, a gone owner
+or terminal tasks, and no writes within `factory.target_cache_min_idle_secs`
+(default: 7200 seconds). GC holds the lane lock, every Cargo `.cargo-lock`, and
+any existing target lifetime lease through quarantine and deletion. It checks
+registry, recency, containment, target/worktree inodes and Cargo-lock identities
+again before renaming. Preview takes no lane or Cargo locks; selected bytes are
+what cleanup would try. One stat walk records recency, directory identities and
+the Cargo lock set; checks under the locks re-stat directories and known locks
+without walking every artifact again. Output includes per-target `scan_ms` (JSON
+`scan_elapsed_ms`). A busy lock without positive readable process evidence is
+`indeterminate`, with its lock path. Reports distinguish `live_process`,
+`indeterminate` and reclaimable (`eligible` or `selected`) caches. Integration trees, custom targets,
+previews and interrupted quarantines keep conservative opaque-process handling;
+legacy targets are never adopted into the lifetime-owner registry.
 
 Assembly and release scratch uses an owner record, PID start-time identity and
 an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before

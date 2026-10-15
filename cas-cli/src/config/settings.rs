@@ -610,6 +610,20 @@ pub struct FactoryConfig {
     #[serde(default)]
     pub worker_memory_high_gib: u32,
 
+    /// Most frames per second the factory TUI draws for output from the
+    /// focused pane (GH #1210). Input echo and layout changes are not capped.
+    /// Read when the daemon starts.
+    #[serde(default = "default_render_max_fps")]
+    pub render_max_fps: u32,
+
+    /// Most frames per second the factory TUI draws for output from visible
+    /// panes other than the focused one. Panes not on screen never draw.
+    /// The caps add up: at most `render_max_fps + render_unfocused_fps`
+    /// output frames/s. Read when the daemon starts; a hand-edited 0 reads
+    /// as 1.
+    #[serde(default = "default_render_unfocused_fps")]
+    pub render_unfocused_fps: u32,
+
     /// Minimum GiB available before starting a worker on its filesystem.
     /// Checked before creating or reusing a worktree, even with target seeding off. 0 disables it.
     #[serde(default = "default_spawn_min_free_gib")]
@@ -885,11 +899,19 @@ fn default_target_cache_low_watermark_percent() -> u8 {
 }
 
 fn default_target_cache_min_idle_secs() -> u64 {
-    60 * 60
+    2 * 60 * 60
 }
 
 fn default_target_cache_retention_count() -> usize {
     1
+}
+
+fn default_render_max_fps() -> u32 {
+    15
+}
+
+fn default_render_unfocused_fps() -> u32 {
+    5
 }
 
 impl Default for FactoryConfig {
@@ -909,6 +931,8 @@ impl Default for FactoryConfig {
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
             worker_memory_high_gib: 0,
+            render_max_fps: default_render_max_fps(),
+            render_unfocused_fps: default_render_unfocused_fps(),
             spawn_min_free_gib: default_spawn_min_free_gib(),
             prompt_retention_days: default_prompt_retention_days(),
             event_telemetry_retention_days: default_event_telemetry_retention_days(),
@@ -1904,7 +1928,7 @@ mod tests {
         assert_eq!(fc.epic_base_branch, None);
         assert_eq!(fc.target_cache_high_watermark_percent, 85);
         assert_eq!(fc.target_cache_low_watermark_percent, 75);
-        assert_eq!(fc.target_cache_min_idle_secs, 3600);
+        assert_eq!(fc.target_cache_min_idle_secs, 7200);
         assert_eq!(fc.target_cache_retention_count, 1);
         assert_eq!(fc.message_max_chars, 1200);
         assert_eq!(fc.message_max_chars_escalation, 2500);

@@ -2222,11 +2222,6 @@ mod tests {
                 "authoritative assignment acceptance",
                 "no prose ACK is required",
                 "execution plan is optional",
-                "authorizes and requires adding or updating tests for the change",
-                "running its affected targeted tests",
-                "Factory workers run the targeted tests for their change themselves.",
-                "The merge queue runs the full suite once; never run it locally.",
-                "Workers close their own tasks; never ask the supervisor to close your task on their behalf.",
                 "inbox on the next turn",
                 "only authenticated typed",
                 "blocker=true",
@@ -2234,6 +2229,12 @@ mod tests {
             ] {
                 assert!(prompt.text.contains(required), "{cli:?} missing {required}");
             }
+            assert!(
+                prompt
+                    .text
+                    .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY),
+                "{cli:?} missing task test policy"
+            );
             assert!(!prompt.text.contains("Then send an ACK"));
             assert!(prompt.durable_retry);
         }

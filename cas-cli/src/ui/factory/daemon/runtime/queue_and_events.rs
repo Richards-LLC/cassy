@@ -14424,20 +14424,14 @@ mod tests {
             .unwrap();
         assert_eq!(prompts.len(), harnesses.len());
         for prompt in prompts {
-            for required in [
-                "authorizes and requires adding or updating tests for the change",
-                "running its affected targeted tests",
-                "Factory workers run the targeted tests for their change themselves.",
-                "The merge queue runs the full suite once; never run it locally.",
-                "Workers close their own tasks; never ask the supervisor to close your task on their behalf.",
-            ] {
-                assert!(
-                    prompt.prompt.contains(required),
-                    "{}: {}",
-                    required,
-                    prompt.prompt
-                );
-            }
+            assert!(
+                prompt
+                    .prompt
+                    .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY),
+                "{}: {}",
+                crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
+                prompt.prompt
+            );
         }
     }
 

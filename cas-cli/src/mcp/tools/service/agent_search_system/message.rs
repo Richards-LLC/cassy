@@ -4620,7 +4620,7 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
-    async fn stale_source_merge_request_gh1179(offline: bool, local_merge: bool) {
+    async fn stale_source_merge_request_gh1179(offline: bool, local_merge: bool, status: TaskStatus) {
         let _env = TestEnvGuard::temp_home();
         let origin = tempfile::tempdir().unwrap();
         git(origin.path(), &["init", "-q", "--bare"]);
@@ -4675,7 +4675,10 @@ mod cas_89e1_post_merge_message_type_tests {
         core.set_agent_id_for_testing(worker.id.clone());
         let tasks = core.open_task_store().unwrap();
         let mut task = Task::new("cas-874e".into(), "live origin source".into());
-        task.status = TaskStatus::AwaitingMerge;
+        task.status = status;
+        if status == TaskStatus::InProgress {
+            task.deliverables.historical_factory_branch_anchors = vec![stale_tip.clone()];
+        }
         if local_merge {
             task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
         }
@@ -4722,17 +4725,22 @@ mod cas_89e1_post_merge_message_type_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn merge_request_refreshes_stale_source_before_landed_suppression_gh1179() {
-        stale_source_merge_request_gh1179(false, false).await;
+        stale_source_merge_request_gh1179(false, false, TaskStatus::AwaitingMerge).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn merge_request_failed_source_refresh_never_claims_landed_gh1179() {
-        stale_source_merge_request_gh1179(true, false).await;
+        stale_source_merge_request_gh1179(true, false, TaskStatus::AwaitingMerge).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn local_merge_request_keeps_local_authority_with_offline_origin_gh1179() {
-        stale_source_merge_request_gh1179(true, true).await;
+        stale_source_merge_request_gh1179(true, true, TaskStatus::AwaitingMerge).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reopened_merge_request_refreshes_stale_historical_tip_gh1179() {
+        stale_source_merge_request_gh1179(false, false, TaskStatus::InProgress).await;
     }
 
     /// GH #734: a worker in one factory session must not inherit the newest

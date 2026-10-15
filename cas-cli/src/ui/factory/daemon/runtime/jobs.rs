@@ -35,7 +35,7 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -105,7 +105,13 @@ pub(crate) struct JobResult<T> {
     pub(crate) key: String,
     pub(crate) generation: u64,
     pub(crate) outcome: Result<T, JobPanicked>,
+    /// How long the job itself ran. For a write-lane job this excludes
+    /// `writer_wait`.
     pub(crate) elapsed: Duration,
+    /// Write lane only: how long the job waited for the StoreWorker (its
+    /// backlog or a deferred-write retry) before it started. Not counted in
+    /// `elapsed` or against the budget (review round 2, M3).
+    pub(crate) writer_wait: Duration,
     /// True when the run took longer than its budget.
     pub(crate) over_budget: bool,
 }
@@ -129,6 +135,10 @@ pub(crate) enum Submitted {
     /// Refused: the runtime is closed ([`JobRuntime::close`]) or the lane's
     /// thread could not start. The work was not queued.
     Closed,
+    /// Refused: the key is queued or running on another lane. All jobs for one
+    /// key must use one lane, so a write can never run off the single writer
+    /// or after its lane has exited (review round 2, L2). Not queued.
+    LaneMismatch { busy_on: Lane },
 }
 
 /// The job a lane is running right now.
@@ -137,22 +147,41 @@ pub(crate) struct RunningJob {
     pub(crate) lane: Lane,
     pub(crate) kind: &'static str,
     pub(crate) key: String,
+    /// How long the job itself has run; zero while it waits for the writer.
     pub(crate) age: Duration,
     pub(crate) budget: Duration,
+    /// Write lane: the job has not started on the StoreWorker yet.
+    pub(crate) waiting_for_writer: bool,
+    /// Write lane: time spent waiting for the StoreWorker, so far or in total.
+    pub(crate) writer_wait: Duration,
 }
 
 impl RunningJob {
+    /// The job itself has run past its budget. Writer wait does not count.
     pub(crate) fn over_budget(&self) -> bool {
         self.age > self.budget
+    }
+
+    /// A write job has waited for the StoreWorker longer than its own budget:
+    /// the writer, not this job, is slow or wedged.
+    pub(crate) fn writer_stalled(&self) -> bool {
+        self.waiting_for_writer && self.writer_wait > self.budget
     }
 }
 
 /// Lane occupancy, for the watchdog and `loop.json`. `running` makes a job
-/// that is wedged mid-run visible (review round 1, item 6).
+/// that is wedged mid-run visible (review round 1, item 6). Work waiting
+/// behind a busy key counts as queued (review round 2, M2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LaneStats {
+    /// Jobs waiting to run, on the lane queue or behind a busy key; not the
+    /// running one.
     pub(crate) queued: usize,
     pub(crate) oldest_queued_age: Option<Duration>,
+    /// Critical jobs waiting, on the lane queue or behind a busy key.
+    pub(crate) critical_backlog: usize,
+    /// Age of the oldest waiting critical job (spec §4.2 watchdog metric).
+    pub(crate) oldest_critical_age: Option<Duration>,
     pub(crate) dropped_refresh: u64,
     pub(crate) running: Option<RunningJob>,
 }
@@ -337,12 +366,23 @@ struct Queued<T> {
     enqueued_at: Instant,
 }
 
+/// The job a lane thread took, as `lane_stats` sees it.
+struct Running {
+    kind: &'static str,
+    key: String,
+    /// When the lane took the job.
+    taken_at: Instant,
+    budget: Duration,
+    /// When the job itself started: at once on most lanes, on the
+    /// StoreWorker thread for the write lane.
+    started: Arc<OnceLock<Instant>>,
+}
+
 struct LaneState<T> {
     queue: VecDeque<Queued<T>>,
     closed: bool,
     dropped_refresh: u64,
-    /// `(kind, key, started_at, budget)` of the job running now.
-    running: Option<(&'static str, String, Instant, Duration)>,
+    running: Option<Running>,
 }
 
 struct LaneSlot<T> {
@@ -460,7 +500,9 @@ impl<T: Send + 'static> JobRuntime<T> {
     }
 
     /// Queue `work` under `spec`. Never blocks the caller beyond two short
-    /// in-process mutexes. All jobs for one key must use the same lane.
+    /// in-process mutexes. All jobs for one key must use the same lane; a
+    /// submit for a key busy on another lane is refused with
+    /// [`Submitted::LaneMismatch`].
     pub(crate) fn submit(
         &self,
         spec: JobSpec,
@@ -501,11 +543,18 @@ impl<T: Send + 'static> JobRuntime<T> {
         {
             let mut in_flight = lock(&self.shared.in_flight);
             if let Some(followups) = in_flight.get_mut(&queued.spec.key) {
-                debug_assert_eq!(
-                    followups.lane, queued.spec.lane,
-                    "all jobs for key {} must use one lane",
-                    queued.spec.key
-                );
+                if followups.lane != queued.spec.lane {
+                    tracing::error!(
+                        kind = queued.spec.kind,
+                        key = %queued.spec.key,
+                        lane = ?queued.spec.lane,
+                        busy_on = ?followups.lane,
+                        "factory job refused: its key is busy on another lane"
+                    );
+                    return Submitted::LaneMismatch {
+                        busy_on: followups.lane,
+                    };
+                }
                 return match queued.spec.criticality {
                     Criticality::Critical => {
                         followups.critical.push_back(queued);
@@ -559,52 +608,85 @@ impl<T: Send + 'static> JobRuntime<T> {
         std::iter::from_fn(|| receiver.try_recv().ok()).collect()
     }
 
-    /// Occupancy of one lane: queued jobs (not counting the one running), the
-    /// age of the oldest, and refresh jobs dropped so far.
+    /// Occupancy of one lane: waiting jobs (on the queue or behind a busy
+    /// key, not the running one), the critical backlog, their oldest ages,
+    /// refresh jobs dropped so far, and the running job.
     pub(crate) fn lane_stats(&self, lane: Lane) -> LaneStats {
         let Some(slot) = self.shared.lanes.get(&lane) else {
             return LaneStats::default();
         };
+        // Lock order: lane state, then in_flight.
         let state = lock(&slot.state);
-        LaneStats {
-            queued: state.queue.len(),
-            oldest_queued_age: state
-                .queue
-                .front()
-                .map(|queued| queued.enqueued_at.elapsed()),
+        let in_flight = lock(&self.shared.in_flight);
+        let now = Instant::now();
+        let mut stats = LaneStats {
             dropped_refresh: state.dropped_refresh,
-            running: state
-                .running
-                .as_ref()
-                .map(|(kind, key, started, budget)| RunningJob {
-                    lane,
-                    kind: *kind,
-                    key: key.clone(),
-                    age: started.elapsed(),
-                    budget: *budget,
-                }),
+            ..LaneStats::default()
+        };
+        let behind_keys = in_flight
+            .values()
+            .filter(|followups| followups.lane == lane)
+            .flat_map(|followups| followups.critical.iter().chain(followups.rerun.iter()));
+        for waiting in state.queue.iter().chain(behind_keys) {
+            let age = now.saturating_duration_since(waiting.enqueued_at);
+            stats.queued += 1;
+            stats.oldest_queued_age = stats.oldest_queued_age.max(Some(age));
+            if waiting.spec.criticality == Criticality::Critical {
+                stats.critical_backlog += 1;
+                stats.oldest_critical_age = stats.oldest_critical_age.max(Some(age));
+            }
         }
+        stats.running = state.running.as_ref().map(|running| {
+            let started = running.started.get().copied();
+            RunningJob {
+                lane,
+                kind: running.kind,
+                key: running.key.clone(),
+                age: started.map_or(Duration::ZERO, |at| now.saturating_duration_since(at)),
+                budget: running.budget,
+                waiting_for_writer: started.is_none(),
+                writer_wait: started
+                    .unwrap_or(now)
+                    .saturating_duration_since(running.taken_at),
+            }
+        });
+        stats
     }
 
-    /// Jobs still running past their budget, logged at WARN on
+    /// Jobs still running past their budget, and write jobs still waiting
+    /// for a StoreWorker that has stalled past their budget, logged at WARN on
     /// `cas::loop_watchdog`. The watchdog (C1) calls this on its own cadence,
     /// so a wedged job is reported while it is stuck, not only when it ends.
+    /// The two cases are logged apart, so a slow writer is not blamed on the
+    /// job waiting for it.
     pub(crate) fn over_budget_running(&self) -> Vec<RunningJob> {
         let stuck: Vec<RunningJob> = Lane::ALL
             .into_iter()
             .filter_map(|lane| self.lane_stats(lane).running)
-            .filter(RunningJob::over_budget)
+            .filter(|job| job.over_budget() || job.writer_stalled())
             .collect();
         for job in &stuck {
-            tracing::warn!(
-                target: "cas::loop_watchdog",
-                lane = ?job.lane,
-                kind = job.kind,
-                key = %job.key,
-                elapsed_ms = job.age.as_millis() as u64,
-                budget_ms = job.budget.as_millis() as u64,
-                "factory job still running past its budget"
-            );
+            if job.writer_stalled() {
+                tracing::warn!(
+                    target: "cas::loop_watchdog",
+                    lane = ?job.lane,
+                    kind = job.kind,
+                    key = %job.key,
+                    writer_wait_ms = job.writer_wait.as_millis() as u64,
+                    budget_ms = job.budget.as_millis() as u64,
+                    "factory write job still waiting for the store writer"
+                );
+            } else {
+                tracing::warn!(
+                    target: "cas::loop_watchdog",
+                    lane = ?job.lane,
+                    kind = job.kind,
+                    key = %job.key,
+                    elapsed_ms = job.age.as_millis() as u64,
+                    budget_ms = job.budget.as_millis() as u64,
+                    "factory job still running past its budget"
+                );
+            }
         }
         stuck
     }
@@ -614,7 +696,8 @@ impl<T: Send + 'static> JobRuntime<T> {
     /// Stop taking work: later submits return [`Submitted::Closed`]. Lanes
     /// still run every queued and waiting critical job and skip queued
     /// refresh work. Daemon shutdown calls this when the loop stops, then
-    /// [`JobRuntime::drain`].
+    /// [`JobRuntime::drain`] (see there for the order against the
+    /// StoreWorker).
     pub(crate) fn close(&self) {
         for slot in self.shared.lanes.values() {
             lock(&slot.state).closed = true;
@@ -624,8 +707,14 @@ impl<T: Send + 'static> JobRuntime<T> {
 
     /// Stop taking work and wait up to `timeout` for the lanes to finish:
     /// every queued and waiting critical job runs; queued refresh work is
-    /// skipped. Returns true when every lane thread exited in time. Used at
-    /// daemon shutdown, after the loop has stopped (like `StoreWorker::drain`).
+    /// skipped. Returns true when every lane thread exited in time.
+    ///
+    /// **Shutdown order.** Write-lane jobs run on the StoreWorker, so call
+    /// this after the loop has stopped and *before* the daemon waits for the
+    /// StoreWorker (`store_worker.wait_idle` in `lifecycle.rs`, about line
+    /// 2976) or drains it. Waiting on the StoreWorker first can report it idle
+    /// while critical write jobs still sit on the write lane, and draining it
+    /// first fails those writes ("the store writer is unavailable").
     pub(crate) fn drain(mut self, timeout: Duration) -> bool {
         self.close();
         let deadline = Instant::now() + timeout;
@@ -660,20 +749,38 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
+/// Run one job. Every panic, including one opening the read context, becomes
+/// a [`JobPanicked`] outcome, so the caller always releases the key and posts
+/// a result. `started` is set when the job itself begins.
 fn run_work<T: Send + 'static>(
     work: Work<T>,
     label: &'static str,
     reader: &mut Option<ReadContextFactory>,
     context: &mut Option<Box<dyn std::any::Any>>,
     writer: Option<&Arc<dyn WriteExecutor>>,
+    started: &Arc<OnceLock<Instant>>,
 ) -> Result<T, JobPanicked> {
     let caught = |panic: Box<dyn std::any::Any + Send>| JobPanicked {
         message: panic_message(panic.as_ref()),
     };
     match work {
         Work::Read(work) => {
+            let _ = started.set(Instant::now());
             if let Some(open) = reader.take() {
-                *context = open();
+                // A panicking factory must not wedge the lane (review round 2,
+                // M1). This job fails; later reads run without a context, as
+                // when the factory returns None.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(open)) {
+                    Ok(opened) => *context = opened,
+                    Err(panic) => {
+                        return Err(JobPanicked {
+                            message: format!(
+                                "opening the read context panicked: {}",
+                                panic_message(panic.as_ref())
+                            ),
+                        });
+                    }
+                }
             }
             let ctx = context.as_deref();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(ctx))).map_err(caught)
@@ -682,7 +789,9 @@ fn run_work<T: Send + 'static>(
             // Write-lane jobs run on the single writer, not on this thread.
             Some(writer) => {
                 let (sender, receiver) = mpsc::channel();
+                let started = Arc::clone(started);
                 let job = Box::new(move || {
+                    let _ = started.set(Instant::now());
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                         .map_err(|panic: Box<dyn std::any::Any + Send>| JobPanicked {
                             message: panic_message(panic.as_ref()),
@@ -701,7 +810,10 @@ fn run_work<T: Send + 'static>(
                     })
                 }
             }
-            None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(caught),
+            None => {
+                let _ = started.set(Instant::now());
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(caught)
+            }
         },
     }
 }
@@ -728,13 +840,15 @@ fn run_lane<T: Send + 'static>(
                         }
                         continue;
                     }
-                    state.running = Some((
-                        queued.spec.kind,
-                        queued.spec.key.clone(),
-                        Instant::now(),
-                        queued.spec.budget,
-                    ));
-                    break Some(queued);
+                    let started = Arc::new(OnceLock::new());
+                    state.running = Some(Running {
+                        kind: queued.spec.kind,
+                        key: queued.spec.key.clone(),
+                        taken_at: Instant::now(),
+                        budget: queued.spec.budget,
+                        started: Arc::clone(&started),
+                    });
+                    break Some((queued, started));
                 }
                 if state.closed {
                     break None;
@@ -745,12 +859,29 @@ fn run_lane<T: Send + 'static>(
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         };
-        let Some(Queued { spec, work, .. }) = next else {
+        let Some((Queued { spec, work, .. }, started)) = next else {
             return;
         };
-        let started = Instant::now();
-        let outcome = run_work(work, spec.kind, &mut reader, &mut context, writer.as_ref());
-        let elapsed = started.elapsed();
+        let taken_at = Instant::now();
+        let outcome = run_work(
+            work,
+            spec.kind,
+            &mut reader,
+            &mut context,
+            writer.as_ref(),
+            &started,
+        );
+        let finished = Instant::now();
+        // Time the job itself; a write job's wait for the StoreWorker is
+        // reported apart (review round 2, M3). A job that never started (the
+        // writer was gone) ran for zero time.
+        let began = started.get().copied().unwrap_or(finished);
+        let elapsed = finished.saturating_duration_since(began);
+        let writer_wait = if writer.is_some() {
+            began.saturating_duration_since(taken_at)
+        } else {
+            Duration::ZERO
+        };
         if let Err(panicked) = &outcome {
             tracing::error!(lane = ?lane, kind = spec.kind, key = %spec.key, message = %panicked.message, "factory job panicked");
         }
@@ -784,6 +915,7 @@ fn run_lane<T: Send + 'static>(
             generation: spec.generation,
             outcome,
             elapsed,
+            writer_wait,
             over_budget,
         });
     }
@@ -933,7 +1065,8 @@ mod tests {
         // The blocker is running, so everything below is backlog.
         started.wait();
 
-        let submitting = Instant::now();
+        // Every submit below returns while the lane is blocked; if one waited
+        // for room, the test would hang here (no wall-clock assertion).
         assert_eq!(
             runtime.submit(
                 spec("refresh-a", Lane::Write, Criticality::Refresh, 1),
@@ -972,15 +1105,12 @@ mod tests {
                 "critical work is never dropped"
             );
         }
-        assert!(
-            submitting.elapsed() < Duration::from_millis(50),
-            "submitting to a blocked, full lane never waits: {:?}",
-            submitting.elapsed()
-        );
         let stats = runtime.lane_stats(Lane::Write);
         assert_eq!(stats.dropped_refresh, 1);
-        assert!(stats.queued >= 7, "{stats:?}");
+        assert_eq!(stats.queued, 7, "{stats:?}");
+        assert_eq!(stats.critical_backlog, 5, "{stats:?}");
         assert!(stats.oldest_queued_age.is_some());
+        assert!(stats.oldest_critical_age.is_some());
 
         release.wait();
         let results = wait_for(&runtime, 8);
@@ -1024,6 +1154,7 @@ mod tests {
             generation: 4,
             outcome: Ok(()),
             elapsed: Duration::ZERO,
+            writer_wait: Duration::ZERO,
             over_budget: false,
         };
         assert!(
@@ -1181,15 +1312,14 @@ mod tests {
                 log.lock().unwrap().push(key);
             });
         }
-        let releaser = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            release.wait();
-        });
+        // Close while row-1 still runs, so the backlog is drained under
+        // shutdown rules, then let row-1 finish (no sleep, review round 2 L1).
+        runtime.close();
+        release.wait();
         assert!(
             runtime.drain(Duration::from_secs(5)),
             "lanes exit after the backlog"
         );
-        releaser.join().unwrap();
         let ran = ran.lock().unwrap().clone();
         assert_eq!(ran.iter().filter(|k| **k == "row-1").count(), 2, "{ran:?}");
         assert!(ran.contains(&"row-2"), "{ran:?}");
@@ -1260,5 +1390,215 @@ mod tests {
             );
         }
         assert!(runtime.drain(Duration::from_secs(5)));
+    }
+
+    /// Review round 2, M1: a read-context factory that panics fails that job,
+    /// frees its key and leaves the Read lane running (without a context).
+    #[test]
+    fn flv2_job_read_context_panic_does_not_wedge_the_lane() {
+        let reader: ReadContextFactory = Box::new(|| panic!("connection exploded"));
+        let runtime: JobRuntime<String> = JobRuntime::start_with(
+            4,
+            LaneWiring {
+                reader: Some(reader),
+                writer: Arc::new(GlobalStoreWorker),
+            },
+        );
+        assert_eq!(
+            runtime.submit_read(
+                spec("snapshot", Lane::Read, Criticality::Refresh, 1),
+                |_: Option<&u32>| "ran".to_string()
+            ),
+            Submitted::Queued
+        );
+        let first = wait_for(&runtime, 1).remove(0);
+        let message = first
+            .outcome
+            .expect_err("the open panic fails the job")
+            .message;
+        assert!(message.contains("connection exploded"), "{message}");
+        assert!(runtime.lane_stats(Lane::Read).running.is_none());
+        assert_eq!(
+            runtime.submit_read(
+                spec("snapshot", Lane::Read, Criticality::Refresh, 2),
+                |ctx: Option<&u32>| format!("{ctx:?}")
+            ),
+            Submitted::Queued,
+            "the key is free"
+        );
+        let second = wait_for(&runtime, 1).remove(0);
+        assert_eq!(second.outcome.expect("no panic"), "None");
+    }
+
+    /// Review round 2, M2: critical work waiting behind a busy key counts in
+    /// the lane's queued total and critical backlog age.
+    #[test]
+    fn flv2_job_critical_behind_busy_key_is_counted() {
+        let runtime: JobRuntime<()> = JobRuntime::start(4);
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (s, r) = (Arc::clone(&started), Arc::clone(&release));
+        runtime.submit(
+            spec("row-1", Lane::Blocking, Criticality::Critical, 1),
+            move || {
+                s.wait();
+                r.wait();
+            },
+        );
+        started.wait();
+        for generation in [2, 3] {
+            assert_eq!(
+                runtime.submit(
+                    spec("row-1", Lane::Blocking, Criticality::Critical, generation),
+                    || ()
+                ),
+                Submitted::QueuedBehindKey
+            );
+        }
+        runtime.submit(
+            spec("row-1", Lane::Blocking, Criticality::Refresh, 4),
+            || (),
+        );
+        let stats = runtime.lane_stats(Lane::Blocking);
+        assert_eq!(stats.queued, 3, "{stats:?}");
+        assert_eq!(stats.critical_backlog, 2, "{stats:?}");
+        assert!(stats.oldest_critical_age.is_some(), "{stats:?}");
+        assert!(stats.running.is_some());
+        release.wait();
+        assert_eq!(wait_for(&runtime, 4).len(), 4);
+        let stats = runtime.lane_stats(Lane::Blocking);
+        assert_eq!((stats.queued, stats.critical_backlog), (0, 0), "{stats:?}");
+    }
+
+    /// A writer that holds each job until the test opens its gate, standing in
+    /// for a StoreWorker backlog or deferred-write retry.
+    struct GatedWriter {
+        gate: Arc<Barrier>,
+    }
+
+    impl WriteExecutor for GatedWriter {
+        fn execute(&self, _label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+            let gate = Arc::clone(&self.gate);
+            std::thread::spawn(move || {
+                gate.wait();
+                job();
+            });
+            true
+        }
+    }
+
+    /// Review round 2, M3: time a write job waits for the StoreWorker is
+    /// reported apart from the job's own run time and budget.
+    #[test]
+    fn flv2_job_writer_wait_is_not_charged_to_the_job() {
+        let gate = Arc::new(Barrier::new(2));
+        let runtime: JobRuntime<()> = JobRuntime::start_with(
+            4,
+            LaneWiring {
+                reader: None,
+                writer: Arc::new(GatedWriter {
+                    gate: Arc::clone(&gate),
+                }),
+            },
+        );
+        let mut stamp = spec("stamp", Lane::Write, Criticality::Critical, 1);
+        stamp.budget = Duration::from_millis(20);
+        runtime.submit(stamp, || ());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let waiting = loop {
+            let running = runtime.lane_stats(Lane::Write).running;
+            if let Some(job) = running.filter(|job| job.writer_wait > Duration::from_millis(40)) {
+                break job;
+            }
+            assert!(Instant::now() < deadline, "the write job never queued");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(waiting.waiting_for_writer);
+        assert_eq!(waiting.age, Duration::ZERO);
+        assert!(waiting.writer_stalled() && !waiting.over_budget());
+        let stuck = runtime.over_budget_running();
+        assert_eq!(stuck.len(), 1);
+        assert!(stuck[0].writer_stalled());
+        gate.wait();
+        let result = wait_for(&runtime, 1).remove(0);
+        assert!(
+            result.writer_wait >= Duration::from_millis(40),
+            "{result:?}"
+        );
+        assert!(
+            !result.over_budget,
+            "the writer's backlog is not the job's: {result:?}"
+        );
+        assert!(result.elapsed < result.writer_wait, "{result:?}");
+    }
+
+    /// Review round 2, L2: a key busy on one lane refuses a submit on another
+    /// lane in every build, instead of running it off the single writer.
+    #[test]
+    fn flv2_job_mixed_lanes_for_a_key_are_refused() {
+        let runtime: JobRuntime<u8> = JobRuntime::start(4);
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (s, r) = (Arc::clone(&started), Arc::clone(&release));
+        runtime.submit(
+            spec("row-9", Lane::Blocking, Criticality::Refresh, 1),
+            move || {
+                s.wait();
+                r.wait();
+                1
+            },
+        );
+        started.wait();
+        assert_eq!(
+            runtime.submit(spec("row-9", Lane::Write, Criticality::Critical, 2), || 2),
+            Submitted::LaneMismatch {
+                busy_on: Lane::Blocking
+            }
+        );
+        release.wait();
+        let results = wait_for(&runtime, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            runtime.submit(spec("row-9", Lane::Write, Criticality::Critical, 3), || 3),
+            Submitted::Queued,
+            "once the key is free, another lane may take it"
+        );
+        assert_eq!(wait_for(&runtime, 1)[0].outcome, Ok(3));
+    }
+
+    /// Review round 2: a panic inside a write-lane job posts a result, frees
+    /// the key and leaves the StoreWorker serving later writes.
+    #[test]
+    fn flv2_job_write_lane_panic_posts_result() {
+        let runtime: JobRuntime<String> = JobRuntime::start_with(
+            4,
+            LaneWiring {
+                reader: None,
+                writer: Arc::new(super::super::store_worker::StoreWorker::start()),
+            },
+        );
+        assert_eq!(
+            runtime.submit(
+                spec("stamp", Lane::Write, Criticality::Critical, 1),
+                || panic!("stamp exploded")
+            ),
+            Submitted::Queued
+        );
+        let failed = wait_for(&runtime, 1).remove(0);
+        assert_eq!(
+            failed.outcome.expect_err("panicked").message,
+            "stamp exploded"
+        );
+        assert_eq!(
+            runtime.submit(spec("stamp", Lane::Write, Criticality::Critical, 2), || {
+                std::thread::current().name().unwrap_or("").to_string()
+            }),
+            Submitted::Queued,
+            "the key is free after a panic"
+        );
+        assert_eq!(
+            wait_for(&runtime, 1).remove(0).outcome.expect("no panic"),
+            "factory-store-worker"
+        );
     }
 }

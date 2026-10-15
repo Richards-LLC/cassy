@@ -592,6 +592,83 @@ mod tests {
     }
 
     #[test]
+    fn ct2_p2_attention_keys_age_out() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentStatus};
+        let (temp, store) = create_test_store();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        for (id, session, status) in [
+            ("live", "live-session", AgentStatus::Active),
+            ("ended", "ended-session", AgentStatus::Shutdown),
+            ("reused", "new-session", AgentStatus::Active),
+        ] {
+            let mut agent = Agent::new(id.into(), id.into());
+            agent.factory_session = Some(session.into());
+            agent.status = status;
+            agents.register(&agent).unwrap();
+        }
+        let insert = |supervisor: &str, session: &str, suffix: &str, delivered: bool| {
+            let payload = serde_json::json!({"factory_session": session}).to_string();
+            let key = format!("worker-attention:{session}:worker_idle:worker:{suffix}");
+            let NotifyIdempotentResult::Created(id) = store
+                .notify_idempotent(
+                    supervisor,
+                    "worker_idle",
+                    &payload,
+                    NotificationPriority::High,
+                    &key,
+                )
+                .unwrap()
+            else {
+                panic!("new episode")
+            };
+            if delivered {
+                store.mark_prompt_delivered(id).unwrap();
+            }
+            id
+        };
+        let live = insert("live", "live-session", "old", true);
+        let ended = insert("ended", "ended-session", "old", true);
+        let reused = insert("reused", "old-session", "old", true);
+        let missing = insert("removed", "removed-session", "old", true);
+        let pending = insert("ended", "ended-session", "pending", false);
+        let fresh = insert("ended", "ended-session", "fresh", true);
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE supervisor_queue SET created_at = ?1 WHERE id <> ?2",
+                params![
+                    (Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+                    fresh
+                ],
+            )
+            .unwrap();
+        }
+        // Bounded transactions retain active-session dedupe and undelivered
+        // outbox state, while terminal/removed/rebound session keys age out.
+        let removed: usize = (0..4)
+            .map(|_| store.prune_finished_batch(14 * 86400, 1).unwrap())
+            .sum();
+        assert_eq!(removed, 3);
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id FROM supervisor_queue ORDER BY id")
+            .unwrap();
+        let actual: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        let mut expected = vec![live, pending, fresh];
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert!(!actual.contains(&ended));
+        assert!(!actual.contains(&reused));
+        assert!(!actual.contains(&missing));
+    }
+
+    #[test]
     fn test_notify_idempotent_no_duplicate() {
         let (_temp, store) = create_test_store();
         let key = "cas-x:in_progress:closed:sess-a:task_closed";

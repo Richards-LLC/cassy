@@ -17575,6 +17575,8 @@ mod stall_nudge_rework_tests {
         daemon.process_prompt_queue().await.unwrap();
         let row = queue.queued_prompt(id).unwrap().unwrap();
         assert!(row.processed_at.is_some(), "the actual busy→free queue transition must withdraw resumed work");
-        assert!(row.transport_delivered_at.is_none(), "resumed work must never receive the stale nudge");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let transported: Option<String> = conn.query_row("SELECT transport_delivered_at FROM prompt_queue WHERE id = ?", [id], |r| r.get(0)).unwrap();
+        assert!(transported.is_none(), "resumed work must never receive the stale nudge");
     }
 }

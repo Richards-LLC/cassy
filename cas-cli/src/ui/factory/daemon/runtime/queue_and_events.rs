@@ -4312,32 +4312,44 @@ impl FactoryDaemon {
                         // Registered, but the hook canary has not landed yet.
                         return None;
                     }
-                    let process_exited = active_agents.iter().any(|agent| {
-                        agent.name == *worker
-                            && agent.pid.is_some()
-                            && !crate::mcp::tools::service::factory_ops::agent_process_is_alive(
-                                agent,
-                            )
-                    });
-                    if process_exited {
-                        return Some((
-                            worker.clone(),
-                            VerificationAction::Failed(format!(
-                                "Worker harness process exited during post-registration boot verification.{}",
-                                pane_tail
-                                    .as_deref()
-                                    .map(|tail| format!("\n\nLast worker pane output:\n{tail}"))
-                                    .unwrap_or_default()
-                            )),
-                        ));
+                    let boot_window_elapsed = verification.registered_at.is_some_and(
+                        |registered_at| {
+                            now.saturating_duration_since(registered_at)
+                                >= SPAWN_BOOT_VERIFICATION_WINDOW
+                        },
+                    );
+                    // Registration can precede Claude's first successful CAS
+                    // MCP connection. The worker may spend 20 seconds waiting
+                    // for that server while its registered child is absent or
+                    // restarting. Treating one missing-process observation as
+                    // an exit bypasses this boot window and kills a live pane;
+                    // only judge the process after the full window has elapsed.
+                    if boot_window_elapsed {
+                        let process_exited = active_agents.iter().any(|agent| {
+                            agent.name == *worker
+                                && agent.pid.is_some()
+                                && !crate::mcp::tools::service::factory_ops::agent_process_is_alive(
+                                    agent,
+                                )
+                        });
+                        if process_exited {
+                            return Some((
+                                worker.clone(),
+                                VerificationAction::Failed(format!(
+                                    "Worker harness process exited during post-registration boot verification.{}",
+                                    pane_tail
+                                        .as_deref()
+                                        .map(|tail| format!("\n\nLast worker pane output:\n{tail}"))
+                                        .unwrap_or_default()
+                                )),
+                            ));
+                        }
                     }
                     if verification.registered_at.is_none() {
                         verification.registered_at = Some(now);
                         return Some((worker.clone(), VerificationAction::Confirmed));
                     }
-                    if now.saturating_duration_since(verification.registered_at.unwrap())
-                        >= SPAWN_BOOT_VERIFICATION_WINDOW
-                    {
+                    if boot_window_elapsed {
                         return Some((worker.clone(), VerificationAction::Expired));
                     }
                 } else if let Some(registered_at) = verification.registered_at {
@@ -10017,7 +10029,7 @@ mod tests {
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "new-supervisor");
-        // pin: the fired reminder names its trigger so the supervisor knows why it woke.
+        // pin: The fired reminder preserves its trigger condition so the supervisor knows why it woke.
         assert!(prompts[0].prompt.contains("external condition satisfied"));
 
         // A stale pre-restart snapshot cannot create a second delivery: the
@@ -10639,9 +10651,9 @@ mod tests {
             .peek_all(10)
             .unwrap();
         let prompt = &queued[0].prompt;
-        // pin: the section heading is how a worker finds the cited issues in its brief.
+        // pin: Spawn briefs label cited GitHub issue context so workers can find it.
         assert!(prompt.contains("Cited GitHub issues"), "{prompt}");
-        // pin: the cited issue reference must reach the worker verbatim.
+        // pin: Spawn briefs preserve attached repository and issue identifiers verbatim.
         assert!(prompt.contains("acme/widgets#77"), "{prompt}");
         assert!(
             prompt.contains(
@@ -10966,9 +10978,9 @@ mod tests {
             .expect("stale quarantine notifies the supervisor sender");
         assert_eq!(notice.target, "supervisor");
         assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
-        // pin: the stale-queue notice must name the exact message and recipient.
+        // pin: The watchdog identifies the exact stale message and recipient for triage.
         assert!(notice.prompt.contains(&format!("Message {ancient} to wise-raven-21")));
-        // pin: the notice names the stale-queue condition the supervisor acts on.
+        // pin: The supervisor is told stale queue items need action.
         assert!(notice.prompt.contains("stale queue item"));
     }
 
@@ -13855,7 +13867,7 @@ mod tests {
             prompts[0].summary.as_deref(),
             Some("Worker spawn cancelled: clock-fixer")
         );
-        // pin: the failure reason the supervisor reads to retry the spawn.
+        // pin: Cancellation results say no worker pane registered and give the retry reason.
         assert!(prompts[0].prompt.contains("No worker pane was registered"));
         assert!(
             prompts[0]
@@ -14011,7 +14023,7 @@ mod tests {
             Some("Worker spawn failed at register: short-lived-worker")
         );
         assert!(prompts[0].prompt.contains("request 407"));
-        // pin: the notice names the lifecycle stage that failed.
+        // pin: Registration-failure notices identify the lifecycle stage that failed.
         assert!(prompts[0].prompt.contains("stage=register"));
     }
 
@@ -14484,13 +14496,13 @@ mod tests {
             prompts[0].prompt
         );
         assert!(
-            // pin: the relay names the lifecycle state that woke the supervisor.
+            // pin: The relay and worker brief name awaiting_merge to preserve task boundaries.
             prompts[0].prompt.contains("awaiting_merge lifecycle"),
             "the brief must carry the task title: {}",
             prompts[0].prompt
         );
         assert!(
-            // pin: the brief must carry the exact task start command.
+            // pin: The brief gives the exact task-start command so workers accept assigned work.
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
@@ -14575,7 +14587,7 @@ mod tests {
             .expect("demo task brief")
             .prompt;
         assert!(
-            // pin: the demo statement reaches the worker verbatim.
+            // pin: Spawn briefs carry the stored demo statement verbatim for QA intent.
             prompt.contains("Demo statement: As a reader, I open the page and see the result."),
             "worker brief must carry the stored demo statement: {prompt}"
         );
@@ -14607,13 +14619,14 @@ mod tests {
             .expect("spawn brief")
             .prompt;
         assert!(
-            // pin: Codex workers need the exact harness-prefixed tool names.
+            // pin: Codex spawn briefs use the exact Codex MCP namespace for task lookup.
             prompt.contains("mcp__cs__task action=show")
-                // pin: Codex workers need the exact harness-prefixed tool names.
+                // pin: Codex spawn briefs use the exact Codex MCP namespace for task startup.
                 && prompt.contains("mcp__cs__task action=start"),
             "Codex spawn briefs must use the worker's mcp__cs__ namespace: {prompt}"
         );
         assert!(
+            // pin: Codex spawn briefs must not expose Claude's MCP namespace.
             !prompt.contains("mcp__cas__task"),
             "Codex spawn briefs must not leak Claude's namespace: {prompt}"
         );
@@ -14704,7 +14717,7 @@ mod tests {
         ))
         .join("cas-stale-path");
         assert!(
-            // pin: the warning heading marks whether the contract warning was sent.
+            // pin: Out-of-contract artifact paths surface the workspace warning before work.
             stale_prompt.prompt.contains("Workspace-contract warning"),
             "out-of-contract path must be surfaced before work begins: {}",
             stale_prompt.prompt
@@ -14717,13 +14730,13 @@ mod tests {
             stale_prompt.prompt
         );
         assert!(
-            // pin: the warning heading marks whether the contract warning was sent.
+            // pin: Valid in-worktree artifact paths do not produce a stale-path warning.
             !clean_prompt.prompt.contains("Workspace-contract warning"),
             "in-worktree paths must not produce a stale-path warning: {}",
             clean_prompt.prompt
         );
         assert!(
-            // pin: the warning heading marks whether the contract warning was sent.
+            // pin: A path mentioned as context is not a resolved output and must not warn.
             !mentioned_prompt.prompt.contains("Workspace-contract warning"),
             "paths mentioned as context must not become output warnings: {}",
             mentioned_prompt.prompt
@@ -14774,12 +14787,12 @@ mod tests {
             .unwrap()
             .prompt;
         assert!(
-            // pin: the exact dependency command the worker must run.
+            // pin: JS/TS briefs require lockfile-safe `npm ci` setup in each isolated worktree.
             prompt.contains("Before running any JS/TS test or build command, run `npm ci`"),
             "the task brief must name the lockfile-safe setup command before work begins: {prompt}"
         );
         assert!(
-            // pin: the reason the worker cannot reuse dependencies across worktrees.
+            // pin: The brief explains that isolated worktrees cannot safely share node_modules.
             prompt.contains("does not share node_modules across worktrees"),
             "the brief must explain why a shared dependency symlink is unsafe: {prompt}"
         );
@@ -14807,6 +14820,84 @@ mod tests {
             verification.task_id.as_deref(),
             Some("cas-aee6"),
             "request 414 carried cas-aee6 — that pairing must survive to registration"
+        );
+    }
+
+    /// GH #1173: a Claude worker can register and then spend the documented
+    /// 20-second startup wait for the CAS server. A registered MCP child that
+    /// is temporarily unavailable must not make boot verification reap the
+    /// still-starting harness before its post-registration window expires.
+    #[tokio::test]
+    async fn post_registration_verification_tolerates_cas_server_wait_gh_1173() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let worker = "gh-1173-waiting-worker";
+        daemon.session_name = "gh-1173-factory-session".into();
+
+        let launched_wall = std::time::SystemTime::now() - Duration::from_secs(40);
+        crate::factory_hook_canary::record_session_start(&cas_dir, worker, "gh-1173-session")
+            .unwrap();
+
+        // A registered MCP child can be unavailable while the Claude harness
+        // is still in its CAS-server startup wait. The pane has not exited;
+        // this stale child PID is only the liveness observation that currently
+        // short-circuits the 60-second post-registration verification window.
+        let mut agent = cas_types::Agent::new("gh-1173-agent".into(), worker.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.status = AgentStatus::Active;
+        agent.factory_session = Some(daemon.session_name.clone());
+        let unavailable_pid = (2_000_000..2_000_100)
+            .find(|pid| !crate::mcp::daemon::pid_alive(*pid))
+            .expect("the fixture needs an unavailable MCP child pid");
+        agent.pid = Some(unavailable_pid);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, unavailable_pid);
+        assert!(
+            !crate::mcp::tools::service::factory_ops::agent_process_is_alive(&agent),
+            "the fixture must represent an unavailable server child"
+        );
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
+
+        let now = Instant::now();
+        daemon.spawn_verifications.insert(
+            worker.into(),
+            SpawnVerification {
+                request_id: Some(1173),
+                launched_at: now - Duration::from_secs(40),
+                registered_at: Some(now - Duration::from_secs(20)),
+                task_id: None,
+                launched_wall,
+            },
+        );
+
+        daemon.reconcile_spawn_verifications().await;
+
+        assert!(
+            daemon.spawn_verifications.contains_key(worker),
+            "a dead MCP-child observation at 20 seconds must stay inside the boot window"
+        );
+        assert!(
+            !daemon.dead_workers.contains(worker),
+            "a worker still waiting for CAS must not be killed as boot-failed"
+        );
+
+        daemon
+            .spawn_verifications
+            .get_mut(worker)
+            .expect("the worker remains in the boot-verification window")
+            .registered_at = Some(Instant::now() - Duration::from_secs(60));
+        daemon.reconcile_spawn_verifications().await;
+
+        assert!(
+            daemon.dead_workers.contains(worker),
+            "a dead registered worker must still fail after the 60-second boot window"
+        );
+        assert!(
+            !daemon.spawn_verifications.contains_key(worker),
+            "completed failure must remove the spawn verification"
         );
     }
 

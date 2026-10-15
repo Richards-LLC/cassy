@@ -4,6 +4,17 @@ use crate::ui::factory::daemon::imports::*;
 /// handled at this cadence.
 pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Stable identity for one alarm episode, independent of delivery retries.
+/// Session scope belongs to the caller's outer key. Tuple encoding prevents
+/// separators inside a kind or subject from aliasing a different episode.
+pub(crate) fn attention_episode_key(
+    kind: &str,
+    subject: &str,
+    episode_start: chrono::DateTime<chrono::Utc>,
+) -> String {
+    serde_json::json!([kind, subject, episode_start.to_rfc3339()]).to_string()
+}
+
 /// Persist one worker-health incident and hand it to the supervisor's durable
 /// prompt queue. The detector has already debounced the episode and the event
 /// has already been delivery-revalidated when this runs.
@@ -18,7 +29,7 @@ fn enqueue_worker_attention_relay(
 fn enqueue_worker_attention_relay_for_episode(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
-    _episode_start: Option<chrono::DateTime<chrono::Utc>>,
+    episode_start: Option<chrono::DateTime<chrono::Utc>>,
 ) -> WorkerAttentionRelayOutcome {
     if let crate::ui::factory::director::DirectorEvent::SupervisorStalled {
         next_step,
@@ -124,6 +135,14 @@ fn enqueue_worker_attention_relay_for_episode(
         ),
         _ => format!("Worker {worker} is idle with no active task and needs supervisor attention."),
     };
+    let Some(episode_start) = episode_start else {
+        // No timestamp evidence is not a new occurrence. Never substitute
+        // delivery time, which would manufacture a fresh alarm on every retry.
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let subject = task_id
+        .map(|task| serde_json::json!([worker, task]).to_string())
+        .unwrap_or_else(|| worker.to_string());
     enqueue_worker_attention_relay_detail(
         cas_dir,
         kind,
@@ -131,7 +150,7 @@ fn enqueue_worker_attention_relay_for_episode(
         task_id,
         elapsed_secs,
         &detail,
-        &format!("{kind}:{worker}:{}", task_id.unwrap_or("")),
+        &attention_episode_key(kind, &subject, episode_start),
     )
 }
 
@@ -1063,7 +1082,7 @@ mod worker_attention_tests {
             }
             let event = idle.expect("sustained idle emits after debounce");
             let start = detector
-                .worker_idle_since("gold-fox")
+                .worker_attention_episode_start(&event)
                 .expect("idle episode start");
             starts.push(start);
             let first = enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(start));
@@ -1101,6 +1120,29 @@ mod worker_attention_tests {
             2,
             "each episode reaches the real supervisor lane once"
         );
+    }
+
+    #[test]
+    fn ct2_p2_second_stall_episode_relays() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "ct2-stall")]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "ct2-stall");
+        let start = chrono::Utc::now();
+        let event = crate::ui::factory::director::DirectorEvent::WorkerStalled {
+            worker: "gold-fox".into(), task_id: "cas-same-task".into(), elapsed_secs: 600, escalate: true,
+        };
+        for epoch in [start, start + chrono::Duration::minutes(10)] {
+            let sent = enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(epoch));
+            let retry = enqueue_worker_attention_relay_for_episode(&cas_dir, &event, Some(epoch));
+            assert!(matches!(sent, WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert_eq!(sent, retry);
+        }
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        assert_eq!(queue.peek("supervisor-id", 10).unwrap().len(), 2);
+        assert_eq!(enqueue_worker_attention_relay_for_episode(&cas_dir, &event, None), WorkerAttentionRelayOutcome::Pending);
+        assert_eq!(queue.peek("supervisor-id", 10).unwrap().len(), 2);
+        assert_ne!(attention_episode_key("a:b", "c", start), attention_episode_key("a", "b:c", start));
     }
 
     fn assert_recovery_wake_requires_daemon(row: &cas_store::QueuedPrompt) {
@@ -3174,10 +3216,13 @@ impl FactoryDaemon {
         // GH #1165: on the store worker, in event order.
         if !delivery_events.is_empty() {
             let cas_dir = self.app.cas_dir().to_path_buf();
-            let events = delivery_events.clone();
+            let events = delivery_events
+                .iter()
+                .map(|event| (event.clone(), self.app.worker_attention_episode_start(event)))
+                .collect::<Vec<_>>();
             store_worker.submit("worker attention relays", move || {
-                for event in &events {
-                    enqueue_worker_attention_relay_for_episode(&cas_dir, event, None);
+                for (event, episode_start) in &events {
+                    enqueue_worker_attention_relay_for_episode(&cas_dir, event, *episode_start);
                 }
             });
         }

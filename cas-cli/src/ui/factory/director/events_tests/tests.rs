@@ -3255,3 +3255,33 @@ fn test_09d0_clearing_hold_resumes_idle_detection() {
         "idle detection must resume once the hold is cleared: {events:?}"
     );
 }
+
+#[test]
+fn ct2_p2_stall_episode_baseline_tracks_activity() {
+    let now = chrono::Utc::now();
+    let tick = std::time::Instant::now();
+    for assigned_open in [false, true] {
+        let mut data = if assigned_open {
+            assigned_unstarted_data(now, 600)
+        } else {
+            stalled_data_for(make_agent_working_stalled("agent-1", "lively-crow", "cas-same", 0, Some(600), now))
+        };
+        let baseline = now - chrono::Duration::seconds(400);
+        data.agents[0].latest_activity = Some(("tool_call".into(), baseline));
+        let mut detector = DirectorEventDetector::new(vec!["lively-crow".into()], "supervisor".into());
+        detector.set_stall_threshold_secs(300);
+        detector.initialize(&data);
+        let events = detector.detect_changes_at(&data, None, tick, now);
+        let event = events.iter().find(|event| matches!(event, DirectorEvent::WorkerStalled { .. })).unwrap();
+        assert_eq!(detector.worker_attention_episode_start(event), Some(baseline));
+        let resumed = now + chrono::Duration::seconds(60);
+        data.agents[0].latest_activity = Some(("tool_call".into(), resumed));
+        data.agents[0].last_heartbeat = Some(resumed);
+        detector.detect_changes_at(&data, None, tick + Duration::from_secs(60), resumed);
+        let later = now + chrono::Duration::seconds(660);
+        data.agents[0].last_heartbeat = Some(later);
+        let events = detector.detect_changes_at(&data, None, tick + Duration::from_secs(660), later);
+        let event = events.iter().find(|event| matches!(event, DirectorEvent::WorkerStalled { .. })).unwrap();
+        assert_eq!(detector.worker_attention_episode_start(event), Some(resumed));
+    }
+}

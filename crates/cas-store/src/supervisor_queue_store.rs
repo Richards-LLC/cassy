@@ -184,9 +184,10 @@ pub trait SupervisorQueueStore: Send + Sync {
     ///
     /// Finished means: an outbox row (`transition_key` set) whose prompt was
     /// delivered, or a pull row (no key) that was processed. Pending and
-    /// undelivered rows stay. Keys that can recur for the same subject
-    /// (`worker-attention:`, `integration:`) stay, because deleting them would
-    /// let [`Self::notify_idempotent`] fire the same event again.
+    /// undelivered rows stay. Attention keys stay while their session has a
+    /// registered non-shutdown agent; old delivered keys from ended sessions
+    /// age out. Missing registry/session evidence stays conservative.
+    /// Integration keys stay to prevent replay of an unchanged integration.
     fn prune_finished_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
 
     /// Close the store
@@ -550,12 +551,29 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
         let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
         crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            // A queue-only legacy database has no session registry yet. Do
+            // not treat that lack of evidence as proof that a session ended.
+            let has_agents: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+                [],
+                |row| row.get(0),
+            )?;
+            let ended_attention = if has_agents {
+                "NULLIF(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session'), '') IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM agents
+                     WHERE agents.factory_session = json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session')
+                       AND agents.status <> 'shutdown'
+                 )"
+            } else {
+                "0"
+            };
             // Outbox rows are finished once their prompt is delivered (the
             // outbox re-relays only prompt_delivered_at IS NULL); pull rows once
-            // processed. Keys that recur for one subject stay, or
-            // notify_idempotent would insert the same event again.
+            // processed. Preserve same-episode dedupe for any live member of
+            // the session, including a replacement supervisor after resume.
             Ok(tx.execute(
-                "DELETE FROM supervisor_queue
+                &format!("DELETE FROM supervisor_queue
                  WHERE id IN (
                      SELECT id FROM supervisor_queue
                      WHERE created_at < ?1
@@ -563,12 +581,13 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                            (transition_key IS NULL AND processed_at IS NOT NULL)
                            OR (transition_key IS NOT NULL
                                AND prompt_delivered_at IS NOT NULL
-                               AND transition_key NOT LIKE 'worker-attention:%'
+                               AND (transition_key NOT LIKE 'worker-attention:%'
+                                    OR ({ended_attention}))
                                AND transition_key NOT LIKE 'integration:%')
                        )
                      ORDER BY id
                      LIMIT ?2
-                 )",
+                 )"),
                 params![cutoff, batch as i64],
             )?)
         })

@@ -1192,6 +1192,9 @@ pub struct DirectorEventDetector {
     /// resolved worker name. Kept across prompt delivery so send-time
     /// revalidation can recognize supervisor contact newer than the streak.
     idle_transition_at: HashMap<String, DateTime<chrono::Utc>>,
+    /// The effective activity baseline captured when a stall event is emitted.
+    /// Reusing the detector's evidence keeps delivery retries in one episode.
+    stall_episode_start: HashMap<String, DateTime<chrono::Utc>>,
     /// Workers whose current idle transition has already been handled by a
     /// supervisor message. This survives queue drainage and clears only when
     /// the worker resumes task/activity or leaves the session.
@@ -1327,6 +1330,7 @@ impl DirectorEventDetector {
             consecutive_idle_ticks: HashMap::new(),
             idle_already_emitted: HashSet::new(),
             idle_transition_at: HashMap::new(),
+            stall_episode_start: HashMap::new(),
             idle_handled_by_supervisor: HashSet::new(),
             task_completed_announced: HashSet::new(),
             task_assigned_announced: HashSet::new(),
@@ -1518,6 +1522,17 @@ impl DirectorEventDetector {
     /// race recheck performed after event detection.
     pub fn worker_idle_since(&self, worker_name: &str) -> Option<DateTime<chrono::Utc>> {
         self.idle_transition_at.get(worker_name).copied()
+    }
+
+    pub(crate) fn worker_attention_episode_start(
+        &self,
+        event: &DirectorEvent,
+    ) -> Option<DateTime<chrono::Utc>> {
+        match event {
+            DirectorEvent::WorkerIdle { worker, .. } => self.worker_idle_since(worker),
+            DirectorEvent::WorkerStalled { worker, .. } => self.stall_episode_start.get(worker).copied(),
+            _ => None,
+        }
     }
 
     /// Remove a worker from the tracked list (call when shutting down workers)
@@ -1793,12 +1808,14 @@ impl DirectorEventDetector {
                     .unwrap_or(false);
                 let effective_threshold =
                     effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
-                let elapsed = task.updated_at.and_then(|assigned_at| {
-                    let activity_baseline = agent
+                let activity_baseline = task.updated_at.map(|assigned_at| {
+                    agent
                         .latest_activity
                         .as_ref()
                         .map(|(_, activity_at)| assigned_at.max(*activity_at))
-                        .unwrap_or(assigned_at);
+                        .unwrap_or(assigned_at)
+                });
+                let elapsed = task.updated_at.zip(activity_baseline).and_then(|(assigned_at, activity_baseline)| {
                     let quiet_age_secs = (now_utc - activity_baseline).num_seconds();
                     let assigned_age_secs = (now_utc - assigned_at).num_seconds();
                     (quiet_age_secs >= effective_threshold as i64 && assigned_age_secs >= 0)
@@ -1810,6 +1827,7 @@ impl DirectorEventDetector {
                     && self.transcript_confirms_stall(&resolved_name)
                 {
                     if !self.stall_escalated.contains(&agent.id) {
+                        self.stall_episode_start.insert(resolved_name.clone(), activity_baseline.unwrap());
                         events.push(DirectorEvent::WorkerStalled {
                             worker: resolved_name.clone(),
                             task_id: task.id.clone(),
@@ -1940,6 +1958,7 @@ impl DirectorEventDetector {
                             // worker (re-inject the task prompt) before
                             // paging the supervisor — a single re-poke often
                             // unsticks these (see bug report cas-9829).
+                            self.stall_episode_start.insert(resolved_name.clone(), effective_activity_ts.unwrap());
                             events.push(DirectorEvent::WorkerStalled {
                                 worker: resolved_name.clone(),
                                 task_id: task_id.clone(),
@@ -1950,6 +1969,7 @@ impl DirectorEventDetector {
                         } else if !self.stall_escalated.contains(&agent.id) {
                             // Still stalled after the nudge — escalate to
                             // the supervisor.
+                            self.stall_episode_start.insert(resolved_name.clone(), effective_activity_ts.unwrap());
                             events.push(DirectorEvent::WorkerStalled {
                                 worker: resolved_name.clone(),
                                 task_id: task_id.clone(),
@@ -2094,6 +2114,8 @@ impl DirectorEventDetector {
         self.idle_already_emitted
             .retain(|id| seen_factory_agents.contains(id));
         self.idle_transition_at
+            .retain(|name, _| seen_factory_agent_names.contains(name));
+        self.stall_episode_start
             .retain(|name, _| seen_factory_agent_names.contains(name));
         self.idle_handled_by_supervisor
             .retain(|name| seen_factory_agent_names.contains(name));

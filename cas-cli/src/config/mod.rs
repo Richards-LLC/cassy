@@ -181,18 +181,30 @@ impl Config {
 
     /// Resolve the project destination in the context of a local checkout.
     /// This read-only view never materializes inferred values in config.toml.
-    pub fn issue_repo_registry_for_project(&self, _cas_root: &std::path::Path) -> IssueRepoRegistry {
-        self.issue_repo_registry()
+    pub fn issue_repo_registry_for_project(&self, cas_root: &std::path::Path) -> IssueRepoRegistry {
+        let mut registry = self.issue_repo_registry();
+        if registry.project.is_none() {
+            registry.project = crate::cloud::git_origin_url(cas_root)
+                .and_then(|url| crate::cli::integrate::github::parse_origin_url(&url))
+                .map(|repo| repo.full_name())
+                .filter(|repo| crate::gh_graphql::split_repo(repo).is_ok());
+        }
+        registry
     }
 
     /// Effective config view for commands with a known project root. Stored
     /// values remain available through `get` for editing and serialization.
     pub fn get_resolved(&self, key: &str, cas_root: &std::path::Path) -> Option<String> {
         if key == "issues.repo" {
-            Some(self.issue_repo_registry_for_project(cas_root).project.unwrap_or_default())
-        } else { self.get(key) }
+            Some(
+                self.issue_repo_registry_for_project(cas_root)
+                    .project
+                    .unwrap_or_default(),
+            )
+        } else {
+            self.get(key)
+        }
     }
-
 }
 
 impl Config {

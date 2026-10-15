@@ -156,7 +156,9 @@ impl IssueRepoRegistry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuesConfig {
-    /// GitHub repository in `owner/repo` form used by Cassy-system bug filing.
+    /// Explicit project GitHub issue repository in `owner/repo` form. CLI
+    /// reads may infer origin; legacy Cassy-system bug filing uses only this
+    /// stored override or the Cassy component destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 

@@ -1782,3 +1782,146 @@ fn worktree_pr_body_reads_task_metadata_and_writes_review_file() {
         "worktree", "pr-body", "--base", "missing-ref", "--head", "HEAD",
     ]).assert().failure();
 }
+
+#[test]
+fn issue_repo_cli_reads_show_origin_without_saving_cas_f398() {
+    let temp = TempDir::new().unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+    let root = temp.path().join(".cas");
+    let mut config = cas::config::Config::load(&root).unwrap();
+    config.set("issues.repo", "").unwrap();
+    config.save(&root).unwrap();
+    let before = std::fs::read(root.join("config.toml")).unwrap();
+
+    // pin: get's scalar is interpolated as gh --repo, with no human annotation.
+    cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["config", "get", "issues.repo"])
+        .assert()
+        .success()
+        .stdout("example/project\n");
+    for args in [
+        vec!["config", "list", "--section", "issues"],
+        vec!["config", "describe", "issues.repo"],
+        vec!["config", "search", "issues.repo"],
+    ] {
+        cas_cmd(temp.path())
+            .current_dir(temp.path())
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("example/project"))
+            .stdout(predicate::str::contains("(from origin; unset in config)"));
+    }
+    for (args, value_key) in [
+        (vec!["config", "get", "issues.repo", "--json"], "value"),
+        (
+            vec!["config", "list", "--section", "issues", "--json"],
+            "value",
+        ),
+        (
+            vec!["config", "describe", "issues.repo", "--json"],
+            "current_value",
+        ),
+        (
+            vec!["config", "search", "issues.repo", "--json"],
+            "current_value",
+        ),
+    ] {
+        let output = cas_cmd(temp.path())
+            .current_dir(temp.path())
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let item = if json.is_array() {
+            json.as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["key"] == "issues.repo")
+                .unwrap()
+        } else if json.get("issues").is_some() {
+            &json["issues"]["issues.repo"]
+        } else {
+            &json
+        };
+        assert_eq!(item[value_key], "example/project");
+        assert_eq!(item["source"], "origin");
+        assert_eq!(item["configured"], false);
+    }
+    let doctor = cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["doctor", "--json"])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(doctor)
+            .unwrap()
+            .contains("issues.repo unset; resolved from origin example/project")
+    );
+    assert_eq!(std::fs::read(root.join("config.toml")).unwrap(), before);
+    assert!(
+        cas::config::Config::load(&root)
+            .unwrap()
+            .issue_repo_registry()
+            .project
+            .is_none()
+    );
+
+    cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["config", "set", "issues.repo", "custom/override"])
+        .assert()
+        .success();
+    let output = cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["config", "get", "issues.repo", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let explicit: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(explicit["value"], "custom/override");
+    assert_eq!(explicit["source"], "config");
+    assert_eq!(explicit["configured"], true);
+    cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["config", "reset", "issues.repo"])
+        .assert()
+        .success();
+    cas_cmd(temp.path())
+        .current_dir(temp.path())
+        .args(["config", "get", "issues.repo"])
+        .assert()
+        .success()
+        .stdout("example/project\n");
+}
+

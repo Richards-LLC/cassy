@@ -1619,20 +1619,29 @@ fn lesson_recurrence_check(runs: &[crate::cli::release_report::LessonRecurrence]
     Some(Check::new("lesson recurrence", CheckStatus::Warning, message))
 }
 
-/// Render the resolved issue destinations as one healthy Config row. The
-/// project destination can be unset, but component destinations are always
-/// available from compiled defaults; neither condition is a doctor warning.
+/// Report the effective destinations and distinguish an inferred project
+/// repository from an explicit setting. This check never writes config.
 fn issue_repositories_check(config: &Config, cas_root: &Path) -> Check {
     let repos = config.issue_repo_registry_for_project(cas_root);
+    let configured = config.issue_repo_registry().project.is_some();
+    let project = if configured {
+        format!("project={}", repos.project.as_deref().unwrap_or_default())
+    } else if let Some(repo) = &repos.project {
+        format!("issues.repo unset; resolved from origin {repo}")
+    } else {
+        "issues.repo unset; no usable GitHub origin; set `cas config set issues.repo owner/repo`"
+            .to_string()
+    };
     Check::new(
         "issue repositories",
-        CheckStatus::Ok,
+        if configured {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warning
+        },
         format!(
-            "project={} | cassy={} | violet={} | cloud={}",
-            repos.project.as_deref().unwrap_or("<unset>"),
-            repos.cassy,
-            repos.violet,
-            repos.cloud,
+            "{project} | cassy={} | violet={} | cloud={}",
+            repos.cassy, repos.violet, repos.cloud,
         ),
     )
 }
@@ -6347,27 +6356,70 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         fs::create_dir(&root).unwrap();
-        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", "https://github.com/Richards-LLC/violet_ps.git"]] {
-            assert!(std::process::Command::new("git").current_dir(temp.path()).args(args).status().unwrap().success());
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Richards-LLC/violet_ps.git",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
         let check = issue_repositories_check(&Config::default(), &root);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("issues.repo unset; resolved from origin Richards-LLC/violet_ps"), "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains("issues.repo unset; resolved from origin Richards-LLC/violet_ps"),
+            "{}",
+            check.message
+        );
         assert!(!root.join("config.toml").exists());
     }
 
     #[test]
-    fn issue_repository_doctor_row_resolves_defaults_without_warning() {
+    fn issue_repository_doctor_row_warns_when_project_is_unset() {
         let temp = tempfile::tempdir().unwrap();
         let check = issue_repositories_check(&Config::default(), temp.path());
         assert_eq!(check.name, "issue repositories");
-        assert!(matches!(check.status, CheckStatus::Ok));
-        assert!(check.message.contains("project=<unset>"));
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("issues.repo unset; no usable GitHub origin")
+        );
+        assert!(
+            check
+                .message
+                .contains("cas config set issues.repo owner/repo")
+        );
         assert!(check.message.contains("cassy=Richards-LLC/cassy"));
         assert!(check.message.contains("violet=Richards-LLC/violet_ps"));
-        assert!(check
-            .message
-            .contains("cloud=Richards-LLC/petra-stella-cloud"));
+        assert!(
+            check
+                .message
+                .contains("cloud=Richards-LLC/petra-stella-cloud")
+        );
+    }
+
+    #[test]
+    fn issue_repository_doctor_explicit_override_is_healthy_cas_f398() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.set("issues.repo", "example/explicit").unwrap();
+        let check = issue_repositories_check(&config, temp.path());
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("project=example/explicit"));
+        assert!(!check.message.contains("unset"));
     }
 
     #[test]

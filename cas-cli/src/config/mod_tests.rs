@@ -1308,15 +1308,153 @@ fn unset_issue_repo_resolves_local_origin_without_persisting_cas_f398() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join(".cas");
     std::fs::create_dir(&root).unwrap();
-    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", "git@github.com:Richards-LLC/violet_ps.git"]] {
-        assert!(std::process::Command::new("git").current_dir(temp.path()).args(args).status().unwrap().success());
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:Richards-LLC/violet_ps.git",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
     let before = "[issues.components]\nviolet = \"Richards-LLC/violet_ps\"\n";
     std::fs::write(root.join("config.toml"), before).unwrap();
     let config = Config::load(&root).unwrap();
-    assert_eq!(config.get_resolved("issues.repo", &root).as_deref(), Some("Richards-LLC/violet_ps"));
-    assert_eq!(config.issue_repo_registry_for_project(&root).project.as_deref(), Some("Richards-LLC/violet_ps"));
+    assert_eq!(
+        config.get_resolved("issues.repo", &root).as_deref(),
+        Some("Richards-LLC/violet_ps")
+    );
+    assert_eq!(
+        config
+            .issue_repo_registry_for_project(&root)
+            .project
+            .as_deref(),
+        Some("Richards-LLC/violet_ps")
+    );
     assert!(config.issues.as_ref().unwrap().repo.is_none());
-    assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(root.join("config.toml")).unwrap(),
+        before
+    );
     assert!(!toml::to_string(&config).unwrap().contains("repo ="));
 }
+
+// Real local Git repositories exercise the same boundary as config CLI reads.
+fn issue_origin_fixture_cas_f398(origin: Option<&str>) -> (TempDir, std::path::PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    if let Some(origin) = origin {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args(["remote", "add", "origin", origin])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    (temp, root)
+}
+
+#[test]
+fn issue_repo_origin_forms_and_explicit_override_cas_f398() {
+    let _env = TestEnvGuard::new();
+    for origin in [
+        "https://github.com/example/project.git",
+        "git@github.com:example/project.git",
+        "ssh://git@github.com/example/project.git",
+    ] {
+        let (_temp, root) = issue_origin_fixture_cas_f398(Some(origin));
+        let mut config = Config::default();
+        let inferred = config.issue_repo_registry_for_project(&root);
+        assert_eq!(
+            inferred.project.as_deref(),
+            Some("example/project"),
+            "{origin}"
+        );
+        assert_eq!(inferred.cassy, config.issue_repo_registry().cassy);
+        assert_eq!(inferred.violet, config.issue_repo_registry().violet);
+        assert_eq!(inferred.cloud, config.issue_repo_registry().cloud);
+        config.set("issues.repo", " custom/override ").unwrap();
+        assert_eq!(
+            config.get_resolved("issues.repo", &root).as_deref(),
+            Some("custom/override")
+        );
+        config.set("issues.repo", " ").unwrap();
+        assert_eq!(
+            config.get_resolved("issues.repo", &root).as_deref(),
+            Some("example/project")
+        );
+        assert_eq!(config.get("issues.repo").as_deref(), Some(""));
+        assert_eq!(
+            config.get_resolved("history.github_repo", &root),
+            config.get("history.github_repo")
+        );
+        assert_eq!(config.get_resolved("unknown.key", &root), None);
+        assert!(!root.join("config.toml").exists());
+    }
+}
+
+#[test]
+fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
+    let _env = TestEnvGuard::new();
+    for origin in [
+        None,
+        Some("https://gitlab.com/example/project.git"),
+        Some("https://github.com/example/project/extra"),
+        Some("https://github.com/example/bad%20repo.git"),
+        Some("https://github.com/example/.git"),
+    ] {
+        let (_temp, root) = issue_origin_fixture_cas_f398(origin);
+        let mut config = Config::default();
+        config
+            .set("issues.components.violet", "example/violet")
+            .unwrap();
+        assert_eq!(
+            config.get_resolved("issues.repo", &root).as_deref(),
+            Some(""),
+            "{origin:?}"
+        );
+        assert!(
+            config
+                .issue_repo_registry_for_project(&root)
+                .project
+                .is_none()
+        );
+    }
+    let (parent, _) = issue_origin_fixture_cas_f398(Some("https://github.com/example/parent.git"));
+    let child = parent.path().join("nested/.cas");
+    std::fs::create_dir_all(&child).unwrap();
+    assert!(
+        Config::default()
+            .issue_repo_registry_for_project(&child)
+            .project
+            .is_none()
+    );
+    let outside = TempDir::new().unwrap();
+    assert!(
+        Config::default()
+            .issue_repo_registry_for_project(outside.path())
+            .project
+            .is_none()
+    );
+}
+

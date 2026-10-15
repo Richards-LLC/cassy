@@ -7,38 +7,37 @@ pub const VERIFICATION_REJECTED_REOPEN_LABEL: &str = "verification-rejected-reop
 const MAX_VERIFICATION_ISSUES_BYTES: usize = 512 * 1024;
 const VERIFICATION_ISSUE_FIELDS: &str = "each issue requires string fields `file`, `category`, and `problem` (`description` or `message` may replace `problem`); optional fields are `line`, `severity`, `code`, and `suggestion` (`fix` may replace `suggestion`)";
 
+fn invalid_verification_issues(reason: impl std::fmt::Display) -> String {
+    format!("Invalid verification issues: {reason}; input omitted; {VERIFICATION_ISSUE_FIELDS}.")
+}
+
 fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>, String> {
     if issues_json.len() > MAX_VERIFICATION_ISSUES_BYTES {
-        return Err(format!(
-            "Invalid verification issues: JSON exceeds 512 KiB; {VERIFICATION_ISSUE_FIELDS}."
-        ));
+        return Err(invalid_verification_issues("JSON exceeds 512 KiB"));
     }
 
-    let mut value: serde_json::Value = serde_json::from_str(issues_json).map_err(|_| {
-        format!(
-            "Invalid verification issues: expected valid JSON array of issue objects; {VERIFICATION_ISSUE_FIELDS}."
-        )
-    })?;
+    let mut value: serde_json::Value = serde_json::from_str(issues_json)
+        .map_err(|_| invalid_verification_issues("expected valid JSON array of issue objects"))?;
     let Some(items) = value.as_array_mut() else {
-        return Err(format!(
-            "Invalid verification issues: expected a JSON array of issue objects; {VERIFICATION_ISSUE_FIELDS}."
+        return Err(invalid_verification_issues(
+            "expected a JSON array of issue objects",
         ));
     };
 
     for (index, item) in items.iter_mut().enumerate() {
         let Some(object) = item.as_object_mut() else {
-            return Err(format!(
-                "Invalid verification issues: item {index} must be an object; {VERIFICATION_ISSUE_FIELDS}."
-            ));
+            return Err(invalid_verification_issues(format!(
+                "item {index} must be an object"
+            )));
         };
 
         if !object.contains_key("problem") {
             for alias in ["description", "message"] {
                 if let Some(value) = object.get(alias).cloned() {
                     if !value.is_string() {
-                        return Err(format!(
-                            "Invalid verification issues: item {index} field `{alias}` must be a string; {VERIFICATION_ISSUE_FIELDS}."
-                        ));
+                        return Err(invalid_verification_issues(format!(
+                            "item {index} field `{alias}` must be a string"
+                        )));
                     }
                     object.insert("problem".to_string(), value);
                     break;
@@ -48,9 +47,9 @@ fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>
         if !object.contains_key("suggestion") {
             if let Some(value) = object.get("fix").cloned() {
                 if !value.is_string() && !value.is_null() {
-                    return Err(format!(
-                        "Invalid verification issues: item {index} field `fix` must be a string or null; {VERIFICATION_ISSUE_FIELDS}."
-                    ));
+                    return Err(invalid_verification_issues(format!(
+                        "item {index} field `fix` must be a string or null"
+                    )));
                 }
                 object.insert("suggestion".to_string(), value);
             }
@@ -67,9 +66,9 @@ fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>
             match object.get(field) {
                 Some(serde_json::Value::String(_)) => {}
                 Some(_) => {
-                    return Err(format!(
-                        "Invalid verification issues: item {index} field `{field}` must be a string; {VERIFICATION_ISSUE_FIELDS}."
-                    ));
+                    return Err(invalid_verification_issues(format!(
+                        "item {index} field `{field}` must be a string"
+                    )));
                 }
                 None => missing.push(field),
             }
@@ -80,18 +79,22 @@ fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>
                 .map(|field| format!("`{field}`"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(format!(
-                "Invalid verification issues: item {index} is missing required field(s) {missing}; {VERIFICATION_ISSUE_FIELDS}."
-            ));
+            return Err(invalid_verification_issues(format!(
+                "item {index} is missing required field(s) {missing}"
+            )));
         }
 
         for field in ["code", "suggestion"] {
             if let Some(value) = object.get(field) {
                 if !value.is_string() && !(field == "suggestion" && value.is_null()) {
-                    return Err(format!(
-                        "Invalid verification issues: item {index} field `{field}` must be a string{}; {VERIFICATION_ISSUE_FIELDS}.",
-                        if field == "suggestion" { " or null" } else { "" }
-                    ));
+                    return Err(invalid_verification_issues(format!(
+                        "item {index} field `{field}` must be a string{}",
+                        if field == "suggestion" {
+                            " or null"
+                        } else {
+                            ""
+                        }
+                    )));
                 }
             }
         }
@@ -101,25 +104,22 @@ fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>
                     .as_u64()
                     .is_some_and(|line| line <= u64::from(u32::MAX))
             {
-                return Err(format!(
-                    "Invalid verification issues: item {index} field `line` must be a non-negative 32-bit integer or null; {VERIFICATION_ISSUE_FIELDS}."
-                ));
+                return Err(invalid_verification_issues(format!(
+                    "item {index} field `line` must be a non-negative 32-bit integer or null"
+                )));
             }
         }
         if let Some(value) = object.get("severity") {
             if !matches!(value.as_str(), Some("blocking" | "warning")) {
-                return Err(format!(
-                    "Invalid verification issues: item {index} field `severity` must be `blocking`, `warning`, or `high`; {VERIFICATION_ISSUE_FIELDS}."
-                ));
+                return Err(invalid_verification_issues(format!(
+                    "item {index} field `severity` must be `blocking`, `warning`, or `high`"
+                )));
             }
         }
     }
 
-    serde_json::from_value(value).map_err(|_| {
-        format!(
-            "Invalid verification issues: could not decode issue objects; {VERIFICATION_ISSUE_FIELDS}."
-        )
-    })
+    serde_json::from_value(value)
+        .map_err(|_| invalid_verification_issues("could not decode issue objects"))
 }
 
 impl CasCore {

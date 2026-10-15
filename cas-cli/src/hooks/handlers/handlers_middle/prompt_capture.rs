@@ -121,16 +121,17 @@ pub fn handle_user_prompt_submit(
             factory_context.push_str(&mail);
         }
         if let Some(root) = cas_root {
-            if let Some(packet) = crate::ambient_recall::build_ambient_recall_context(
-                input,
-                root,
-                input.submitted_prompt(),
-                false,
-            ) {
-                if !factory_context.is_empty() {
-                    factory_context.push_str("\n\n");
-                }
-                factory_context.push_str(&packet.full);
+            // cas-1f0c: the mail above is already receipted; recall may not
+            // take it down (panic) or push the output past Claude Code's cap.
+            if let Some(packet) = super::factory_inbox::after_mail(|| {
+                crate::ambient_recall::build_ambient_recall_context(
+                    input,
+                    root,
+                    input.submitted_prompt(),
+                    false,
+                )
+            }) {
+                super::factory_inbox::push_within_hook_cap(&mut factory_context, &packet.full, 0);
             }
         }
     }

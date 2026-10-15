@@ -945,6 +945,14 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
         .join("\n")
 }
 
+fn queued_notification_id(receipt: &str) -> i64 {
+    let (id, _) = receipt
+        .strip_prefix("queued #")
+        .and_then(|rest| rest.split_once(" → "))
+        .unwrap_or_else(|| panic!("expected a queued receipt with an id and target: {receipt}"));
+    id.parse().expect("queued receipt id must be an integer")
+}
+
 fn worker_status_block<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let marker = format!(" | {name} (heartbeat:");
     text.split("  liveness: ")
@@ -6986,9 +6994,10 @@ async fn test_coordination_message_urgent_succeeds_after_observed_delivery() {
     let result = result.expect("observed Claude interrupt should succeed");
     let text = get_text(&result);
     assert!(
-        text.contains("URGENT"),
-        "response should mark URGENT: {text}"
+        text.contains("(interrupt-and-redirect)"),
+        "response must distinguish an urgent interrupt: {text}"
     );
+    assert_eq!(queued_notification_id(&text), message_id);
 
     let report = queue
         .message_delivery_report(message_id)
@@ -7154,10 +7163,8 @@ async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_h
     );
 }
 
-/// cas-6913 AC2: a message to a target that IS registered must say so
-/// honestly — the response must confirm registration ("target is
-/// registered") and (cas-893c) must not claim delivery for a merely
-/// enqueued message. Regression guard against re-collapsing the two cases.
+/// cas-6913 / cas-1b2e: a registered target gets a compact receipt without
+/// the pending-registration explanation or an unearned delivery claim.
 #[tokio::test]
 async fn test_coordination_message_to_registered_target_reports_delivery_status() {
     let _guard = EnvGuard::set(&[
@@ -7171,20 +7178,22 @@ async fn test_coordination_message_to_registered_target_reports_delivery_status(
     let result = env.service.coordination(Parameters(req)).await;
     assert!(result.is_ok(), "message should succeed: {result:?}");
     let text = get_text(&result.unwrap());
-    assert!(
-        text.contains("target is registered"),
-        "response should confirm the target is registered: {text}"
+    let id = queued_notification_id(&text);
+    assert_eq!(
+        text,
+        format!("queued #{id} → swift-fox (enqueued)"),
+        "a registered target gets only its queue stage"
     );
-    assert!(
-        !text.contains("not yet registered"),
-        "a registered target must not read as unregistered: {text}"
-    );
+    let rows = env.prompt_queue().peek_all(10).expect("queued message");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].target, "swift-fox");
 }
 
 /// cas-893c AC2: a non-urgent message to a registered target must NOT read
 /// as delivered. "queued for next poll" previously implied success; the
-/// response must now say it's merely enqueued and point at `message_status`
-/// to check the real state before escalating.
+/// compact response must say it's merely enqueued. The returned id drives
+/// `message_status` for the full delivery explanation.
 #[tokio::test]
 async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     let _guard = EnvGuard::set(&[
@@ -7203,13 +7212,21 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
         "must not use the old delivery-implying phrasing: {text}"
     );
     assert!(
-        text.contains("not yet confirmed delivered"),
-        "must honestly state delivery is not confirmed: {text}"
+        text.contains("(enqueued)"),
+        "must report only the current queue stage: {text}"
     );
     assert!(
-        text.contains("message_status"),
-        "must point the sender at message_status to check the real state: {text}"
+        !text.to_lowercase().contains("delivered"),
+        "enqueue must not claim transport delivery: {text}"
     );
+    let id = queued_notification_id(&text);
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.stage, cas_store::DeliveryStage::Enqueued);
+    assert!(report.recipient_transport_at.is_none());
 }
 
 /// cas-6ad2: a worker response after the supervisor message that prompted the
@@ -7603,10 +7620,12 @@ async fn test_real_factory_codex_worker_can_message_supervisor_alias() {
         .await
         .expect("worker must resolve and enqueue to supervisor alias");
     let text = get_text(&result);
-    assert!(text.contains("To: cosmic-bear-43"), "{text}");
+    let id = queued_notification_id(&text);
+    assert_eq!(text, format!("queued #{id} → cosmic-bear-43 (enqueued)"));
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek messages");
     assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].id, id);
     assert_eq!(prompts[0].target, "cosmic-bear-43");
 }
 
@@ -7665,17 +7684,28 @@ async fn cas_5068_same_session_peer_warning_reaches_peer_and_supervisor_copy() {
         .await
         .expect("same-session peer warning must queue");
     let text = get_text(&result);
-    assert!(text.contains("To: worker-b"), "{text}");
-    assert!(text.contains("supervisor_copy_notification_id:"), "{text}");
+    let peer_id = queued_notification_id(&text);
+    let copy_id = text
+        .split_once("; supervisor copy #")
+        .expect("peer warning receipt must retain the supervisor copy id")
+        .1
+        .parse::<i64>()
+        .expect("numeric supervisor copy id");
+    assert_ne!(peer_id, copy_id);
+    assert_eq!(
+        text,
+        format!("queued #{peer_id} → worker-b (enqueued); supervisor copy #{copy_id}")
+    );
 
     let rows = env.prompt_queue().peek_all(10).expect("queued rows");
     assert_eq!(rows.len(), 2, "peer warning and supervisor copy: {rows:?}");
     assert!(
         rows.iter()
-            .any(|row| row.target == "worker-b" && !row.urgent)
+            .any(|row| row.id == peer_id && row.target == "worker-b" && !row.urgent)
     );
     assert!(rows.iter().any(|row| {
-        row.target == "supervisor-a"
+        row.id == copy_id
+            && row.target == "supervisor-a"
             && !row.urgent
             && row
                 .prompt
@@ -7791,12 +7821,7 @@ async fn test_worker_duplicate_send_reports_suppression() {
         .await
         .expect("first send");
     let first_text = get_text(&first_result);
-    let first_id = first_text
-        .lines()
-        .find_map(|line| line.strip_prefix("notification_id: "))
-        .expect("first response notification id")
-        .parse::<i64>()
-        .expect("numeric notification id");
+    let first_id = queued_notification_id(&first_text);
     env.prompt_queue()
         .mark_transport_delivered(first_id)
         .expect("deliver first report");
@@ -7814,8 +7839,14 @@ async fn test_worker_duplicate_send_reports_suppression() {
         "dedup must be visible instead of claiming a fresh enqueue: {duplicate_text}"
     );
     assert!(
-        !duplicate_text.starts_with("Message queued"),
+        !duplicate_text.starts_with("queued #"),
         "a suppressed duplicate must not impersonate a fresh queue insert: {duplicate_text}"
+    );
+    assert!(duplicate_text.starts_with(&format!("suppressed #{first_id} → ")));
+    assert!(env.prompt_queue().queued_prompt(first_id).unwrap().is_some());
+    assert!(
+        env.prompt_queue().peek_all(10).unwrap().is_empty(),
+        "the delivered original remains stored; dedup must not queue a new row"
     );
 }
 
@@ -7868,9 +7899,8 @@ async fn test_worker_peer_message_does_not_confirm_supervisor_instruction() {
     );
 }
 
-/// cas-0440: the send response must name the same parameter that
-/// `message_status` accepts. Drive the caller-visible two-call sequence:
-/// send a message, copy the returned notification_id verbatim, then query it.
+/// cas-0440 / cas-1b2e: drive the caller-visible two-call sequence:
+/// send a message, copy the compact receipt id into notification_id, then query it.
 #[tokio::test]
 async fn test_coordination_message_returned_notification_id_drives_status_query() {
     let _guard = EnvGuard::set(&[
@@ -7888,18 +7918,8 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
     );
     let send_text = get_text(&send_result.unwrap());
 
-    let notification_id = send_text
-        .lines()
-        .find_map(|line| line.strip_prefix("notification_id: "))
-        .expect("message response must label the returned prompt queue ID as notification_id")
-        .parse::<i64>()
-        .expect("returned notification_id must be an integer");
-    assert!(
-        send_text.contains(&format!(
-            "`message_status` with `notification_id={notification_id}`"
-        )),
-        "response must give the exact parameter spelling for the follow-up call: {send_text}"
-    );
+    let notification_id = queued_notification_id(&send_text);
+    assert_eq!(send_text.lines().count(), 1, "{send_text}");
 
     let mut status_req = coord_msg("message_status", "swift-fox", "unused", None);
     status_req.notification_id = Some(notification_id);
@@ -7974,7 +7994,7 @@ async fn test_message_status_exposes_undelivered_after() {
 
 /// cas-73c8 AC3: `director` is a permanent team member and the source of
 /// inbound teammate messages, but is not an agent_store registration.
-/// Outbound `target=director` must report registered (symmetric with inbound).
+/// Outbound `target=director` gets the compact registered-target receipt.
 #[tokio::test]
 async fn test_coordination_message_to_director_reports_registered() {
     let _guard = EnvGuard::set(&[
@@ -7991,13 +8011,15 @@ async fn test_coordination_message_to_director_reports_registered() {
         "message to director should succeed: {result:?}"
     );
     let text = get_text(&result.unwrap());
-    assert!(
-        text.contains("target is registered"),
-        "director must resolve as registered: {text}"
+    let id = queued_notification_id(&text);
+    assert_eq!(
+        text,
+        format!("queued #{id} → director (enqueued)"),
+        "director must not get pending-registration detail"
     );
-    assert!(
-        !text.contains("not yet registered"),
-        "director must not read as unregistered after inbound teammate traffic: {text}"
+    assert_eq!(
+        env.prompt_queue().peek_all(10).unwrap()[0].target,
+        "director"
     );
 }
 
@@ -8025,12 +8047,22 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     assert!(result.is_ok(), "message should still enqueue: {result:?}");
     let text = get_text(&result.unwrap());
     assert!(
-        text.contains("not yet registered"),
+        text.contains("Target is not registered yet"),
         "response must honestly flag the target as not yet registered: {text}"
     );
     assert!(
-        !text.contains("target is registered"),
-        "an unregistered target must not read as registered: {text}"
+        text.contains("the row will deliver when it registers"),
+        "an unregistered target must explain the registration wait: {text}"
+    );
+    let id = queued_notification_id(&text);
+    assert!(
+        text.contains(&format!("message_status notification_id={id}")),
+        "{text}"
+    );
+    assert_eq!(
+        text.lines().count(),
+        2,
+        "pending registration expands the receipt"
     );
 
     // The message still lands in the queue — this is about honest
@@ -8038,6 +8070,7 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     // eventual delivery once the name is registered.
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].id, id);
     assert_eq!(prompts[0].target, "not-born-yet");
 }
 
@@ -10649,12 +10682,7 @@ async fn cas_5087_a_supervisor_message_crosses_sessions_and_wakes_the_recipient(
             .await
             .expect("a supervisor must be able to message a supervisor in another session"),
     );
-    let notification_id = send
-        .lines()
-        .find_map(|line| line.strip_prefix("notification_id: "))
-        .expect("send response must return a notification_id")
-        .parse::<i64>()
-        .expect("notification_id must be an integer");
+    let notification_id = queued_notification_id(&send);
 
     // (2) The row belongs to the RECIPIENT's session. This single stamp is the
     // whole routing fix — every filter below selects on it.
@@ -10856,12 +10884,7 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
             .await
             .expect("a worker must be able to raise a blocker"),
     );
-    let notification_id = send
-        .lines()
-        .find_map(|line| line.strip_prefix("notification_id: "))
-        .expect("send response must return a notification_id")
-        .parse::<i64>()
-        .expect("notification_id must be an integer");
+    let notification_id = queued_notification_id(&send);
 
     let rows = env.prompt_queue().peek_all(10).expect("peek");
     let row = rows
@@ -10928,12 +10951,7 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
             .await
             .expect("ordinary message"),
     );
-    let free_id = free_text
-        .lines()
-        .find_map(|line| line.strip_prefix("notification_id: "))
-        .expect("notification_id")
-        .parse::<i64>()
-        .expect("integer");
+    let free_id = queued_notification_id(&free_text);
     let rows = env.prompt_queue().peek_all(10).expect("peek");
     let free_row = rows
         .iter()

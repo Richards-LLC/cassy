@@ -2158,13 +2158,11 @@ impl CasService {
             );
         }
 
-        // cas-6913: "Message queued" reads as delivery confirmation, but a
-        // message addressed to a not-yet-registered worker name (the common
-        // spawn-then-immediately-assign sequence) sits in the queue until
-        // that name shows up in the agent store — the supervisor has no
-        // signal this happened. Check registration state up front so the
-        // response can say so honestly. `all_workers` is a broadcast, not a
-        // single-target claim, so it's always reported as delivered framing.
+        // cas-6913: a message addressed to a not-yet-registered worker name
+        // (the common spawn-then-immediately-assign sequence) sits in the
+        // queue until that name shows up in the agent store. Check
+        // registration state so the compact receipt can add this exception.
+        // `all_workers` is a broadcast, not a single-target claim.
         //
         // cas-73c8: `director` is a permanent team member (TeamsManager
         // init_team_config) and the source of inbound teammate messages, but
@@ -2756,39 +2754,73 @@ impl CasService {
                 .map_err(|message| Self::error(ErrorCode::INTERNAL_ERROR, message))?;
         }
 
-        // cas-6913 / cas-893c: honest delivery-status line. Urgent takes
-        // priority in the wording since it describes the delivery MECHANISM
-        // (interrupt) — but an urgent message to an unregistered target
-        // still can't interrupt a turn that doesn't exist yet, so the
-        // registration caveat wins even for urgent sends.
-        //
-        // cas-893c: the non-urgent line previously read "queued for next
-        // poll (target is registered)", which a sender reasonably read as
-        // "delivered". It is not: the daemon enqueues this row and will
-        // attempt a transport handoff (teams-inbox file write or PTY
-        // inject) on its next tick, but that handoff succeeding is not the
-        // same as the recipient actually reading it — a Claude teammate
-        // only polls its inbox at a turn boundary, which an idle worker
-        // parked awaiting input may not reach on its own for a long time.
-        // The daemon now also nudges an idle recipient directly over PTY
-        // (see queue_and_events.rs `worker_looks_idle`), but that nudge is
-        // best-effort, not guaranteed — so the response must not claim
-        // delivery either way. Use `message_status` to check the actual
-        // stage reached.
-        let delivery_status = if !target_is_registered {
-            "Delivery: queued — target not yet registered, will deliver on registration\n"
-                .to_string()
-        } else if urgent {
-            "Delivery: interrupt-and-redirect (breaks the target's in-flight turn, then injects)\n"
-                .to_string()
-        } else {
+        // P1.6: the send result is a compact current-stage receipt. The
+        // detailed delivery report stays available through message_status;
+        // only actionable exceptions expand the send result.
+        let send_report = queue.message_delivery_report(message_id).ok().flatten();
+        let delivery_stage = send_report
+            .as_ref()
+            .map(|report| report.stage)
+            .unwrap_or(cas_store::DeliveryStage::Enqueued);
+        let stage_text = delivery_stage.to_string();
+        let report_detail = send_report
+            .as_ref()
+            .and_then(|report| {
+                report.pending_detail.as_deref().or_else(|| {
+                    report.pending_reason.map(|reason| reason.as_str())
+                })
+            })
+            .unwrap_or("inspect message_status for the current delivery detail");
+        let supervisor_copy_suffix = supervisor_copy_id
+            .map(|id| format!("; supervisor copy #{id}"))
+            .unwrap_or_default();
+        let receipt = if duplicate_suppressed {
             format!(
-                "Delivery: enqueued (target is registered) — not yet confirmed delivered. The \
-                 daemon will attempt transport handoff on its next tick and nudge the recipient if \
-                 it looks idle, but neither guarantees the recipient has read it. Check \
-                 `message_status` with `notification_id={message_id}` if you need to know whether \
-                 this landed before escalating.\n"
+                "suppressed #{message_id} → {resolved_target} (duplicate; no new row)\
+                 {supervisor_copy_suffix}"
             )
+        } else if !target_is_registered {
+            format!(
+                "queued #{message_id} → {resolved_target} ({stage_text})\n\
+                 Target is not registered yet; the row will deliver when it registers. \
+                 Check message_status notification_id={message_id} for its latest stage. \
+                 {supervisor_copy_suffix}"
+            )
+        } else if urgent {
+            format!(
+                "queued #{message_id} → {resolved_target} (interrupt-and-redirect)\
+                 {supervisor_copy_suffix}"
+            )
+        } else {
+            match delivery_stage {
+                cas_store::DeliveryStage::Gated => format!(
+                    "queued #{message_id} → {resolved_target} (gated)\n\
+                     Delivery is gated: {report_detail}. Check message_status\
+                     notification_id={message_id} for changes.\
+                     {supervisor_copy_suffix}"
+                ),
+                cas_store::DeliveryStage::Dropped | cas_store::DeliveryStage::Abandoned => {
+                    format!(
+                        "failed #{message_id} → {resolved_target} ({stage_text}: {report_detail}).\
+                         Check message_status notification_id={message_id} for details.\
+                         {supervisor_copy_suffix}"
+                    )
+                }
+                cas_store::DeliveryStage::Suppressed => format!(
+                    "suppressed #{message_id} → {resolved_target} ({report_detail}).\
+                     Check message_status notification_id={message_id} for details.\
+                     {supervisor_copy_suffix}"
+                ),
+                cas_store::DeliveryStage::PartiallyDelivered => format!(
+                    "partial #{message_id} → {resolved_target} ({report_detail}).\
+                     Check message_status notification_id={message_id} for details.\
+                     {supervisor_copy_suffix}"
+                ),
+                _ => format!(
+                    "queued #{message_id} → {resolved_target} ({stage_text})\
+                     {supervisor_copy_suffix}"
+                ),
+            }
         };
 
         let message_id_text = message_id.to_string();
@@ -2810,33 +2842,7 @@ impl CasService {
             ],
         );
 
-        if duplicate_suppressed {
-            return Ok(Self::success(format!(
-                "Duplicate message suppressed\n\nnotification_id: {}\nFrom: {} ({})\nTo: {}\n\
-                 Delivery: no new queue row — an identical message was delivered recently and \
-                 still awaits confirmation. Check `message_status` with \
-                 `notification_id={message_id}` before retrying.\nMessage: {}",
-                message_id,
-                display_name,
-                role,
-                resolved_target,
-                truncate_str(&message, 100)
-            )));
-        }
-
-        Ok(Self::success(format!(
-            "{} queued\n\nnotification_id: {}\n{}From: {} ({})\nTo: {}\n{}Message: {}",
-            if urgent { "URGENT message" } else { "Message" },
-            message_id,
-            supervisor_copy_id
-                .map(|id| format!("supervisor_copy_notification_id: {id}\n"))
-                .unwrap_or_default(),
-            display_name,
-            role,
-            resolved_target,
-            delivery_status,
-            truncate_str(&message, 100)
-        )))
+        Ok(Self::success(receipt))
     }
 
     pub(in crate::mcp::tools::service) async fn inbox_poll(
@@ -4467,6 +4473,12 @@ mod cas_89e1_post_merge_message_type_tests {
             .join("\n")
     }
 
+    fn assert_queued_receipt(response: &str) {
+        // pin: ordinary successful sends expose one compact id, target, and current stage.
+        assert!(response.starts_with("queued #"), "{response}");
+        assert_eq!(response.lines().count(), 1, "{response}");
+    }
+
     fn message_request(merge_request: bool) -> AgentRequest {
         serde_json::from_value(serde_json::json!({
             "action": "message",
@@ -4589,16 +4601,22 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect("ordinary escalation is delivered"),
         );
-        assert!(escalation.contains("Message queued"), "{escalation}");
         assert!(
             !escalation.contains("Merge already landed"),
             "an untyped escalation must not be suppressed: {escalation}"
         );
-        let queued = crate::store::open_prompt_queue_store(&cas_root)
-            .expect("prompt queue")
-            .poll_all(10)
-            .expect("queued escalation");
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let queued = queue.poll_all(10).expect("queued escalation");
         assert_eq!(queued.len(), 1, "ordinary escalation must reach the queue");
+        let report = queue
+            .message_delivery_report(queued[0].id)
+            .expect("read send stage")
+            .expect("send receipt row");
+        // pin: ordinary sends return only their current queue id, target, and stage.
+        assert_eq!(
+            escalation,
+            format!("queued #{} → {} ({})", report.id, report.target, report.stage)
+        );
         assert!(
             crate::prompt_revalidation::parse_merge_request_envelope(&queued[0].prompt).is_none(),
             "ordinary escalation must not acquire a merge envelope: {:?}",
@@ -4668,7 +4686,7 @@ mod cas_89e1_post_merge_message_type_tests {
         request.task_id = Some(task_b.id.clone());
         let response = response_text(service.message_send(request).await.expect("fresh B request"));
         // pin: this request must return its queued state once the worker asks for merge.
-        assert!(response.contains("Message queued"), "{response}");
+        assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
         let (row, envelope) = rows.iter().find_map(|row| {
             let envelope = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)?;
@@ -4779,15 +4797,20 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.unwrap());
-        assert!(response.contains("Message queued"), "{response}");
+        assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&root)
             .unwrap()
             .peek_all(20)
             .unwrap();
-        let envelope = rows
+        let (row, envelope) = rows
             .iter()
-            .find_map(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt))
+            .find_map(|row| {
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+                    .map(|envelope| (row, envelope))
+            })
             .expect("typed merge request is durable");
+        assert_eq!(row.target, "supervisor");
+        assert_eq!(response, format!("queued #{} → supervisor (enqueued)", row.id));
         assert_eq!(envelope.branch_tip, tip);
         let reopened = tasks.get(&task.id).unwrap();
         let git = crate::prompt_revalidation::queued_merge_request_decision(
@@ -4929,7 +4952,7 @@ mod cas_89e1_post_merge_message_type_tests {
             !response.contains("Merge already landed"),
             "another task's merged branch must not suppress this request: {response}"
         );
-        assert!(response.contains("Message queued"), "{response}");
+        assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .unwrap()
             .poll_all(10)
@@ -5027,7 +5050,7 @@ mod cas_89e1_post_merge_message_type_tests {
         }
         assert!(!response.contains("Merge already landed"), "{response}");
         if offline {
-            assert!(response.contains("Message queued"), "{response}");
+            assert_queued_receipt(&response);
             let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
             let envelope = rows.iter().find_map(|row|
                 crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
@@ -5061,7 +5084,7 @@ mod cas_89e1_post_merge_message_type_tests {
             assert!(inbox.contains("Fresh worker delivery"), "{inbox}");
             assert!(inbox.contains(note), "{inbox}");
         } else {
-            assert!(response.contains("Message queued"), "{response}");
+            assert_queued_receipt(&response);
             let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
             let envelope = rows.iter().find_map(|row|
                 crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
@@ -5166,7 +5189,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.expect("merge request"));
-        assert!(response.contains("Message queued"), "{response}");
+        assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
             .poll_all(10)
@@ -5179,6 +5202,8 @@ mod cas_89e1_post_merge_message_type_tests {
             })
             .expect("typed request carries the merge envelope");
 
+        assert_eq!(row.target, "supervisor");
+        assert_eq!(response, format!("queued #{} → supervisor (enqueued)", row.id));
         assert_eq!(envelope.branch_tip, live_tip);
         assert_eq!(envelope.anchor_tip.as_deref(), Some(old_anchor.as_str()));
         assert_eq!(envelope.target_branch_tip, target_tip);
@@ -5265,12 +5290,12 @@ mod cas_89e1_post_merge_message_type_tests {
             .message_send(message_request_to("supervisor"))
             .await
             .expect("owner message is delivered");
-        assert!(response_text(owner_result).contains("Message queued"));
+        assert_queued_receipt(&response_text(owner_result));
         let explicit_result = service
             .message_send(message_request_to("supervisor-b"))
             .await
             .expect("explicit live supervisor message is delivered");
-        assert!(response_text(explicit_result).contains("Message queued"));
+        assert_queued_receipt(&response_text(explicit_result));
 
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
@@ -5338,7 +5363,7 @@ mod cas_89e1_post_merge_message_type_tests {
                     .await
                     .expect("same-session worker action is queued"),
             );
-            assert!(response.contains("Message queued"), "{response}");
+            assert_queued_receipt(&response);
             let rows = crate::store::open_prompt_queue_store(&cas_root)
                 .unwrap()
                 .poll_all(10)
@@ -5422,7 +5447,7 @@ mod cas_89e1_post_merge_message_type_tests {
             .message_send(message_request_to("supervisor"))
             .await
             .expect("target=supervisor resolves while the owning supervisor is live");
-        assert!(response_text(result).contains("Message queued"));
+        assert_queued_receipt(&response_text(result));
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
             .poll_all(10)

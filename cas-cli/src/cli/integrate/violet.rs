@@ -1326,8 +1326,7 @@ pub(super) fn update_machine_credentials() -> Result<std::collections::BTreeMap<
         .into_iter()
         .filter_map(|(name, value)| {
             let canonical = canonical_violet_credential_name(&name);
-            (canonical != name
-                && cas_pty::violet_env::canonical_credential(&canonical)
+            (cas_pty::violet_env::canonical_credential(&canonical)
                 && !value.trim().is_empty()
                 && !value.contains(['$', '`'])
                 && !std::env::var(&name)
@@ -3317,6 +3316,30 @@ mod tests {
     const FAKE_BYPASS: &str = "bypass-secret-do-not-leak";
     const TEST_LABEL: &str = "SOUNDWAVE";
     const TEST_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_SOUNDWAVE";
+
+    #[test]
+    fn cas_678d_round1_static_canonical_profile_is_imported_without_editing_profile() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        env.set("SHELL", "/bin/bash");
+        env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+        env.remove("VIOLET_SLACK_TOKEN_PROFILE_FIXTURE");
+        let original = "export VIOLET_SLACK_TOKEN_PROFILE_FIXTURE='static-fixture'\n";
+        fs::write(home.join(".profile"), original).unwrap();
+        let resolved = update_machine_credentials().unwrap();
+        assert_eq!(
+            resolved
+                .get("VIOLET_SLACK_TOKEN_PROFILE_FIXTURE")
+                .map(String::as_str),
+            Some("static-fixture")
+        );
+        assert_eq!(fs::read_to_string(home.join(".profile")).unwrap(), original);
+        assert_eq!(
+            cas_pty::violet_env::resolved_environment(&[], &[])
+                .get("VIOLET_SLACK_TOKEN_PROFILE_FIXTURE"),
+            resolved.get("VIOLET_SLACK_TOKEN_PROFILE_FIXTURE")
+        );
+    }
 
     #[test]
     fn cas_678d_round1_import_skips_shell_expressions_and_live_exports() {

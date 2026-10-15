@@ -13,6 +13,27 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+#[test]
+fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
+    let mut guard = TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    guard.set("XDG_CONFIG_HOME", home.join(".config"));
+    guard.set("SHELL", "/bin/bash");
+    guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    guard.set("VIOLET_SLACK_TOKEN_FACTORY_FIXTURE", "");
+    std::fs::write(home.join("credentials.env"), "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='private-fixture'\n").unwrap();
+    std::fs::write(home.join(".profile"), "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='$(pass show secret)'\n").unwrap();
+    let proxy = home.join(".config/code-mode-mcp/config.toml");
+    std::fs::create_dir_all(proxy.parent().unwrap()).unwrap();
+    std::fs::write(proxy, "[servers.violet]\ntransport='http'\nurl='https://violet-hub.vercel.app/mcp/slack'\nauth='env:VIOLET_SLACK_TOKEN_FACTORY_FIXTURE'\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig { cwd: home.clone(), workers: 1,
+            worker_cli: cli, include_director: false, ..Default::default() });
+        let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_FACTORY_FIXTURE"), Some("private-fixture"));
+    }
+}
+
 #[tokio::test]
 async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
@@ -1230,7 +1251,7 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
 }
 
 #[test]
-fn factory_pane_configs_reads_proxy_credentials_from_login_profile_source() {
+fn factory_pane_configs_requires_private_file_for_canonical_violet() {
     let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
     env.set("XDG_CONFIG_HOME", config_home.path());
@@ -1277,6 +1298,11 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"
         include_director: false,
         ..MuxConfig::default()
     };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, initial_worker) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+    assert_eq!(env_value(initial_worker, "VIOLET_SLACK_TOKEN_PROFILE_SOURCE"), None);
+    // Canonical Violet launches do not depend on whether a login shell ran.
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
     let configs = Mux::factory_pane_configs(&config);
     let (_, worker_config) = configs
         .iter()

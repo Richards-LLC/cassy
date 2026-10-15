@@ -362,9 +362,16 @@ fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::
     for path in credential_source_paths() {
         load_shell_environment(&path, &mut values, &mut BTreeSet::new(), 0);
     }
+    // Canonical Violet values must match the direct harness/probe resolver;
+    // a later shell-profile assignment must not replace the private-file value.
+    let violet = cas_pty::violet_env::resolved_environment(&[], &[]);
     names
         .into_iter()
         .filter_map(|name| {
+            if cas_pty::violet_env::canonical_credential(&name) {
+                return violet.get(&name).filter(|v| !v.trim().is_empty())
+                    .cloned().map(|value| (name, value));
+            }
             std::env::var(&name)
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -455,6 +462,9 @@ fn shell_assignment(line: &str) -> Option<(String, String)> {
         return None;
     }
     let raw_value = raw_value.trim();
+    if raw_value.contains(['$', '`']) {
+        return None;
+    }
     let value = if raw_value.starts_with('\'') && raw_value.ends_with('\'') {
         raw_value[1..raw_value.len() - 1].replace("'\\''", "'")
     } else if raw_value.starts_with('"') && raw_value.ends_with('"') {

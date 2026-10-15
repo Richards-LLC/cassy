@@ -31,6 +31,8 @@ fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
     args.dry_run = true;
     let phase = refresh_user_level_store(&args, &update_test_cli(true));
     assert!(matches!(phase, ProjectPhase::Planned(_)));
+    args.user = true;
+    execute(&args, &update_test_cli(true), None).unwrap();
     assert!(!env.home().join(".claude/skills").exists());
     assert!(!env.home().join(".config/cas/credentials.env").exists());
 }

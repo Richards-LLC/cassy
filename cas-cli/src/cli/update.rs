@@ -346,6 +346,14 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle user-level builtin distribution (~/.claude, ~/.codex)
     if args.user {
+        if args.dry_run {
+            if cli.json {
+                println!("{}", serde_json::json!({"user_level": "planned"}));
+            } else {
+                println!("User-level builtin sync planned (dry run)");
+            }
+            return Ok(());
+        }
         let mut steps = UpdateStepTracker::new(1, !cli.json);
         return steps.run("Distributing built-ins to user-level", || {
             sync_user_builtins(cli)
@@ -1268,8 +1276,6 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
             Err(error) => ProjectPhase::Failed(error.to_string()),
         };
     }
-
-
     let migration = run_project_phase("user-level migration", false, || {
         run_schema_migrations(args, cli, Some(&cas_root))
     });

@@ -41,6 +41,19 @@ pub use operator_delivery::{
 /// caller applies the same bound.
 pub const PROMPT_RETRY_MAX_ATTEMPTS: u32 = 120;
 pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
+
+/// SQL predicate, true for rows outside the operator lane (cas-d88c).
+///
+/// `target=operator` rows, and any `commander:<label>` alias, belong to the
+/// operator delivery lane (communication contract v2, P3.1): the Commander hub
+/// drains them through `peek_operator_replies` and the operator outbox.
+/// They are not factory-session roster members, so a roster sweep must never
+/// stamp them `abandoned_unknown_target`. Doing that marked 100 of 105
+/// supervisor→operator turns in one session abandoned about 930 s after
+/// enqueue. It also hid them from the hub drain (`processed_at IS NULL`) and
+/// sent the supervisor a false abandonment notice for each one.
+const OPERATOR_LANE_EXCLUSION: &str =
+    "lower(trim(target)) <> 'operator' AND lower(trim(target)) NOT LIKE 'commander:%'";
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
 const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// Exact-content worker reports are collapsed only while a recent,
@@ -6597,6 +6610,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  WHERE processed_at IS NULL
                    AND factory_session = ?
                    AND created_at < ?
+                   AND {OPERATOR_LANE_EXCLUSION}
                    AND target NOT IN ({placeholders}) RETURNING id"
             );
             let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = vec![

@@ -1559,7 +1559,8 @@ pub enum SupervisorWakeClass {
     PeerSupervisor,
     /// A peer supervisor of this repo on another machine, relayed by the
     /// Cassy Cloud peer mailbox: a Daemon-stamped row whose first line is a
-    /// CAS-written `<cas-peer-message …/>` envelope (cas-f9c7).
+    /// CAS-written `<cas-peer-message …/>` envelope carrying a direct reply,
+    /// ask or blocker. Peer FYIs remain inbox-only (cas-1f25).
     CloudPeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
@@ -5085,8 +5086,11 @@ impl FactoryDaemon {
                 }
                 // cas-f9c7: the peer mailbox puller writes this envelope; the
                 // cloud stamped the sender from its agent registry.
-                if crate::cloud::peer_mailbox::parse_envelope(prompt).is_some() {
-                    return Some(SupervisorWakeClass::CloudPeerSupervisor);
+                if let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(prompt) {
+                    // cas-1f25: receiving Cloud mail establishes identity, not
+                    // action intent. Do not let an FYI borrow a daemon wake
+                    // class by quoting an unrelated envelope in its body.
+                    return peer.wakes_idle().then_some(SupervisorWakeClass::CloudPeerSupervisor);
                 }
                 // cas-619f: CAS itself escalates a delivery whose independent
                 // QA was rejected `qa.max_rounds` times with a blocker

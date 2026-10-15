@@ -34,6 +34,27 @@ function hubTurn(snapshot: Record<string, unknown>) {
 }
 
 describe("inbox projection", () => {
+  it("replays terminal questions followed by mirrored answers once in cloud feed order (cas-5c89)", () => {
+    const question = event(hubTurn({ prompt_id: 811, source: "terminal", target: "terminal-history", prompt: "What changed?", operator: null }));
+    const answer = event(hubTurn({
+      prompt_id: 812, source: "supervisor", target: "operator", kind: "answer", recipient_device_id: "*",
+      prompt: JSON.stringify({ schema_version: 2, reply_to: 811, message: "**Two fixes landed.**", summary: "Two fixes", device_id: "*", kind: "answer", attachments: [] }),
+    }));
+    const turns = inboxThreads([answer, question, answer, question], "hub-1").get("cas-src-quiet-hawk-74");
+    expect(turns).toMatchObject([
+      { kind: "message", notificationId: 811, text: "What changed?", deviceId: "terminal", operatorLabel: "Terminal" },
+      { kind: "reply", notificationId: 812, message: "**Two fixes landed.**", summary: "Two fixes", replyTo: 811, deviceId: "*", turnKind: "answer" },
+    ]);
+  });
+
+  it("keeps JSON typed by an operator and plain supervisor replies as text (cas-5c89)", () => {
+    const json = '{"message":"operator typed JSON","reply_to":123}';
+    expect(projectInboxEvent(event(hubTurn({ prompt_id: 3, source: "terminal", target: "terminal-history", prompt: json }))))
+      .toMatchObject({ kind: "message", text: json });
+    expect(projectInboxEvent(event(hubTurn({ prompt_id: 4, target: "operator", prompt: json }))))
+      .toMatchObject({ kind: "reply", message: json, replyTo: null });
+  });
+
   it("maps a supervisor reply to the hub history's notification id", () => {
     const turn = projectInboxEvent(
       event(

@@ -1247,9 +1247,10 @@ fn agents_table_exists(conn: &Connection) -> Result<bool> {
 /// (cas-6853; communication contract v2, P1.5, P2.4, P3.7). Direct rows pass
 /// through untouched. A broadcast reaches the recipient only when all of these
 /// hold:
-/// - it is not the recipient's own broadcast, and the recipient is not a
-///   supervisor: `all_workers` addresses workers, and the sender never gets
-///   its own broadcast back;
+/// - it is not the recipient's own broadcast: the sender is not the
+///   recipient, and not this session's supervisor when the recipient is that
+///   supervisor under either alias. Other senders' broadcasts, such as the
+///   director's, still reach supervisors;
 /// - no newer, still-deliverable broadcast with the same `supersede_key`
 ///   exists;
 /// - the recipient's current registration predates it, unless it is `sticky`
@@ -1258,13 +1259,30 @@ fn agents_table_exists(conn: &Connection) -> Result<bool> {
 ///   start.
 fn broadcast_audience_sql(recipient: &str, agents_table: bool) -> String {
     let r = sql_literal(recipient);
-    let agent_clauses = if agents_table {
+    // Own-broadcast test (P1.5): the sender is the recipient itself, or both
+    // are this session's supervisor (its pane name or the `supervisor` alias).
+    // Broadcasts from anyone else, such as the director, still reach every
+    // supervisor alias (cas-6853 review, CI run 38776375537).
+    let (recipient_is_supervisor, source_is_supervisor) = if agents_table {
+        (
+            format!(
+                "({r} = 'supervisor' OR EXISTS (SELECT 1 FROM agents sup
+                     WHERE sup.name = {r} AND sup.role = 'supervisor'
+                       AND (q.factory_session IS NULL
+                            OR sup.factory_session = q.factory_session)))"
+            ),
+            "(q.source = 'supervisor' OR EXISTS (SELECT 1 FROM agents sender
+                 WHERE sender.name = q.source AND sender.role = 'supervisor'
+                   AND (q.factory_session IS NULL
+                        OR sender.factory_session = q.factory_session)))"
+                .to_string(),
+        )
+    } else {
+        (format!("({r} = 'supervisor')"), "(q.source = 'supervisor')".to_string())
+    };
+    let late_clause = if agents_table {
         format!(
-            "AND NOT EXISTS (SELECT 1 FROM agents sup
-                             WHERE sup.name = {r} AND sup.role = 'supervisor'
-                               AND (q.factory_session IS NULL
-                                    OR sup.factory_session = q.factory_session))
-             AND (q.sticky = 1 OR NOT EXISTS (
+            "AND (q.sticky = 1 OR NOT EXISTS (
                    SELECT 1 FROM agents late
                     WHERE late.name = {r}
                       AND (q.factory_session IS NULL
@@ -1277,8 +1295,9 @@ fn broadcast_audience_sql(recipient: &str, agents_table: bool) -> String {
     };
     format!(
         "AND (q.target <> 'all_workers' OR (
-               q.source <> {r} AND {r} <> 'supervisor'
-               {agent_clauses}
+               q.source <> {r}
+               AND NOT ({recipient_is_supervisor} AND {source_is_supervisor})
+               {late_clause}
                AND (q.supersede_key IS NULL OR NOT EXISTS (
                      SELECT 1 FROM prompt_queue newer
                       WHERE newer.target = 'all_workers'
@@ -11103,6 +11122,26 @@ mod tests {
             0,
             "status counts agree with the drain"
         );
+    }
+
+    /// Communication contract v2, P1.5 (cas-6853 review): only the sender's
+    /// OWN broadcast is withheld. A director broadcast still reaches the
+    /// supervisor under its pane name and under the `supervisor` alias, while
+    /// the supervisor's own broadcast reaches neither alias.
+    #[test]
+    fn ct2_p1_own_broadcast_withheld_but_director_broadcast_reaches_supervisor() {
+        let (_temp, store) = create_test_store();
+        register_agent_at(&store, "lead-sup", "supervisor", 7200);
+        let own = store
+            .enqueue_with_session("lead-sup", "all_workers", "own policy", "factory-a")
+            .unwrap();
+        let director = store
+            .enqueue_with_session("director", "all_workers", "all hands", "factory-a")
+            .unwrap();
+
+        assert_eq!(polled_ids(&store, "lead-sup"), vec![director]);
+        assert_eq!(polled_ids(&store, "supervisor"), vec![director]);
+        assert!(!polled_ids(&store, "supervisor").contains(&own));
     }
 
     /// Communication contract v2, P2.4 (cas-6853): a newer broadcast with the

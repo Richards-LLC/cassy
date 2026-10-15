@@ -76,6 +76,31 @@ impl Fixture {
         id
     }
 
+    fn gate(&self, id: i64) {
+        self.queue
+            .record_pending_reason(
+                id,
+                cas_store::PendingReason::GatedNotReady,
+                Some("wake_declined_by_policy: pane has not been silent long enough"),
+            )
+            .unwrap();
+        self.queue
+            .record_wake_attempt(
+                id,
+                cas_store::WakeAttempt::NotAttempted,
+                Some("wake declined for busy recipient"),
+            )
+            .unwrap();
+        assert_eq!(
+            self.queue
+                .message_delivery_report(id)
+                .unwrap()
+                .unwrap()
+                .stage,
+            cas_store::DeliveryStage::Gated
+        );
+    }
+
     fn codex_turn(&self, text: &str) {
         let account = self.root.path().join("codex");
         let sessions = account.join("sessions/2026/10/15");
@@ -276,15 +301,16 @@ fn cas_07ee_same_recipient_unbound_reply_still_alarms() {
 fn cas_07ee_same_recipient_unrelated_note_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
-    f.aged(
+    let id = f.aged(
         "supervisor",
         "worker",
         "Supervisor clarified narrow drift rule: one canonical candidate",
     );
+    f.gate(id);
     let event = Event::new(
         EventType::TaskNoteAdded,
         EventEntityType::Task,
-        "cas-07ee",
+        "cas-unrelated",
         "Supervisor clarified narrow drift rule: one canonical candidate",
     )
     .with_session("worker-id");
@@ -303,6 +329,7 @@ fn cas_07ee_same_recipient_unrelated_codex_turn_still_alarms() {
     let _env = env();
     let mut f = Fixture::new();
     let id = f.aged("supervisor", "worker", "Please apply the scope boundary");
+    f.gate(id);
     assert!(f.queue.claim_recipient_transport(id, "worker").unwrap());
     f.codex_turn("A separate task that never carried this queued body");
     let created = f.queue.queued_prompt(id).unwrap().unwrap().created_at;
@@ -362,7 +389,8 @@ fn cas_07ee_untyped_approvals_still_raise_idle_unread() {
         "Approved; I will merge on green CI, then tell you to re-close.",
     ] {
         let mut f = Fixture::new();
-        f.aged("supervisor", "worker", body);
+        let id = f.aged("supervisor", "worker", body);
+        f.gate(id);
         f.daemon
             .pane_silent_since
             .insert("worker".into(), Instant::now() - Duration::from_secs(900));
@@ -712,5 +740,23 @@ fn cas_07ee_note_reference_prefix_does_not_satisfy_another_row() {
     assert!(
         !f.scan().is_empty(),
         "numeric prefixes are not exact row references"
+    );
+}
+
+#[test]
+fn cas_07ee_closure_without_merge_evidence_still_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "cas-07ee merged; re-close now");
+    let mut task = Task::new("cas-07ee".into(), "delivery".into());
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    crate::store::open_task_store_local(&f.cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "closure alone does not prove the requested merge for #{id}"
     );
 }

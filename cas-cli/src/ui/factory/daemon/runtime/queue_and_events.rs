@@ -6365,7 +6365,11 @@ impl FactoryDaemon {
                 }
                 let pane = self.pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
-                    match record_worker_wake_decline(queue.as_ref(), queued.id, WakeDecision::deny(reason), pane.tool_call) {
+                    let decline = queue.record_pending_reason(queued.id,
+                        cas_store::PendingReason::GatedNotReady, Some(reason))
+                        .and_then(|()| record_worker_wake_decline(queue.as_ref(), queued.id,
+                            WakeDecision::deny(reason), pane.tool_call));
+                    match decline {
                         Ok(declines) => {
                             let delay = declines.map(|n| 5u64.saturating_mul(1u64 << n.min(3))).unwrap_or(15);
                             self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(delay), signature));

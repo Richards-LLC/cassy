@@ -519,12 +519,13 @@ pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Optio
             if scoped.is_empty() {
                 return None;
             }
-            refusal_for_merge(cwd, &qa, &scoped, merge)
+            refusal_for_merge(cas_root, cwd, &qa, &scoped, merge)
         })
         .map(|refusal| format!("🚫 {refusal}"))
 }
 
 fn refusal_for_merge(
+    cas_root: &Path,
     cwd: &Path,
     qa: &QaConfig,
     gated: &[(Task, Vec<QaPass>)],
@@ -566,7 +567,7 @@ fn refusal_for_merge(
                         qa,
                         passes,
                         branch,
-                        branch.trim_start_matches("factory/"),
+                        &super::delivery_implementer(cas_root, task),
                     )
                 })
         })
@@ -747,7 +748,7 @@ fn delivery_repo(cas_root: &Path, task_id: &str) -> PathBuf {
 }
 
 /// [`delivery_repo`] for a task already in hand.
-fn task_repo(cas_root: &Path, task: &Task) -> PathBuf {
+pub(crate) fn task_repo(cas_root: &Path, task: &Task) -> PathBuf {
     task.deliverables
         .work_target
         .as_ref()

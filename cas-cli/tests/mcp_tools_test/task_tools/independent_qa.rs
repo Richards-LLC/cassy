@@ -1238,7 +1238,10 @@ async fn own_task_branch_waiver_cas_3288() {
     let cas_dir = repo.join(".cas");
     let remote = tempfile::tempdir().unwrap();
     git(remote.path(), &["init", "-q", "--bare"]);
-    git(&repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
     git(&repo, &["push", "-q", "origin", "factory/test-agent"]);
     let branch = format!("factory/test-agent-{task_id}");
     git(&repo, &["switch", "-q", "-c", &branch]);
@@ -1247,17 +1250,35 @@ async fn own_task_branch_waiver_cas_3288() {
     // Assignees can be registered ids, not just worker names.
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(&task_id).unwrap();
-    task.assignee = Some(open_agent_store(&cas_dir).unwrap().list(None).unwrap()
-        .into_iter().find(|agent| agent.name == "test-agent").unwrap().id);
+    task.assignee = Some(
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .unwrap()
+            .id,
+    );
     tasks.update(&task).unwrap();
     let service = CasService::new(supervisor_core(&cas_dir), None);
     let _role = SupervisorRole::enter(&mut test_env);
-    let waived = extract_text(service.verification(Parameters(verification(serde_json::json!({
-        "action": "qa_waive", "task_id": task_id,
-        "head_sha": head, "summary": "reviewed task delivery",
-    })))).await.expect("waive the task branch, not the older worker lane"));
-    assert!(!waived.contains("which this waiver does not cover"), "{waived}");
-    let pass = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().remove(0);
+    let waived = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive", "task_id": task_id,
+                "head_sha": head, "summary": "reviewed task delivery",
+            }))))
+            .await
+            .expect("waive the task branch, not the older worker lane"),
+    );
+    assert!(
+        !waived.contains("which this waiver does not cover"),
+        "{waived}"
+    );
+    let pass = cas_store::list_qa_passes(&cas_dir, &task_id)
+        .unwrap()
+        .remove(0);
     assert_eq!(pass.branch, branch);
     assert_eq!(pass.bound_head, head);
     assert!(cas::qa_pass::branch_merge_refusal(&cas_dir, &repo, &branch).is_none());
@@ -1272,26 +1293,48 @@ async fn fresh_origin_waiver_receipt_cas_3288() {
     let cas_dir = repo.join(".cas");
     let remote = tempfile::tempdir().unwrap();
     git(remote.path(), &["init", "-q", "--bare"]);
-    git(&repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
     let branch = format!("factory/test-agent-{task_id}");
     git(&repo, &["switch", "-q", "-c", &branch]);
     let old = git(&repo, &["rev-parse", "HEAD"]);
-    let head = commit_file(&repo, "web/task.css", "a{color:red}\n", "new remote delivery");
+    let head = commit_file(
+        &repo,
+        "web/task.css",
+        "a{color:red}\n",
+        "new remote delivery",
+    );
     git(&repo, &["push", "-q", "origin", &branch]);
     git(&repo, &["reset", "-q", "--hard", &old]);
-    git(&repo, &["update-ref", &format!("refs/remotes/origin/{branch}"), &old]);
+    git(
+        &repo,
+        &["update-ref", &format!("refs/remotes/origin/{branch}"), &old],
+    );
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(&task_id).unwrap();
     task.deliverables.parked_branch = Some(branch.clone());
     tasks.update(&task).unwrap();
     let service = CasService::new(supervisor_core(&cas_dir), None);
     let _role = SupervisorRole::enter(&mut test_env);
-    let waived = extract_text(service.verification(Parameters(verification(serde_json::json!({
-        "action": "qa_waive", "task_id": task_id,
-        "head_sha": head, "summary": "reviewed fresh origin head",
-    })))).await.unwrap());
-    assert!(!waived.contains("which this waiver does not cover"), "{waived}");
-    assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap()[0].bound_head, head);
+    let waived = extract_text(
+        service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive", "task_id": task_id,
+                "head_sha": head, "summary": "reviewed fresh origin head",
+            }))))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        !waived.contains("which this waiver does not cover"),
+        "{waived}"
+    );
+    assert_eq!(
+        cas_store::list_qa_passes(&cas_dir, &task_id).unwrap()[0].bound_head,
+        head
+    );
 }
 
 /// A PR on the task branch must still be gated when the only old QA round
@@ -1302,21 +1345,48 @@ async fn merge_hook_task_branch_binding_cas_3288() {
     let (_temp, _core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let old = git(&repo, &["rev-parse", "HEAD"]);
-    cas_store::waive_qa_pass(&cas_dir, &task_id, "supervisor", "test-agent",
-        "factory/test-agent", &old, "previous waiver", chrono::Utc::now()).unwrap();
+    cas_store::waive_qa_pass(
+        &cas_dir,
+        &task_id,
+        "supervisor",
+        "test-agent",
+        "factory/test-agent",
+        &old,
+        "previous waiver",
+        chrono::Utc::now(),
+    )
+    .unwrap();
     let branch = format!("factory/test-agent-{task_id}");
     git(&repo, &["switch", "-q", "-c", &branch]);
-    let head = commit_file(&repo, "web/task.css", "a{color:red}\n", "unreviewed task head");
+    let head = commit_file(
+        &repo,
+        "web/task.css",
+        "a{color:red}\n",
+        "unreviewed task head",
+    );
     let stub_dir = tempfile::tempdir().unwrap();
     let gh = stub_dir.path().join("gh");
-    cas::test_paths::warm_stub(&gh, &format!(
-        "#!/bin/sh\nprintf '%s' '{{\"headRefName\":\"{branch}\",\"headRefOid\":\"{head}\"}}'\n"));
+    cas::test_paths::warm_stub(
+        &gh,
+        &format!(
+            "#!/bin/sh\nprintf '%s' '{{\"headRefName\":\"{branch}\",\"headRefOid\":\"{head}\"}}'\n"
+        ),
+    );
     test_env.set("CAS_QA_GH", &gh);
     let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3374")
         .expect("the old lane's waiver must not allow the task PR's unreviewed head");
     assert!(refusal.contains(&task_id), "{refusal}");
-    cas_store::waive_qa_pass(&cas_dir, &task_id, "supervisor", "test-agent",
-        &branch, &head, "task head reviewed", chrono::Utc::now()).unwrap();
+    cas_store::waive_qa_pass(
+        &cas_dir,
+        &task_id,
+        "supervisor",
+        "test-agent",
+        &branch,
+        &head,
+        "task head reviewed",
+        chrono::Utc::now(),
+    )
+    .unwrap();
     assert!(cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3374").is_none());
 }
 

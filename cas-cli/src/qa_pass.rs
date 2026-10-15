@@ -329,6 +329,61 @@ pub fn waiver_head(
     recorded.map(|head| WaiverHead { head, advanced_from: None, why: None })
 }
 
+/// The delivery's registered worker name, independent of the assignee's id/name form.
+pub(crate) fn delivery_implementer(cas_root: &Path, task: &Task) -> String {
+    task.assignee
+        .as_deref()
+        .map(|assigned| {
+            crate::store::open_agent_store(cas_root)
+                .ok()
+                .and_then(|store| {
+                    crate::mcp::tools::core::task::resolve_agent_identity(store.as_ref(), assigned)
+                })
+                .map(|agent| agent.name)
+                .unwrap_or_else(|| assigned.to_string())
+        })
+        .or_else(|| {
+            task.deliverables.parked_branch.as_deref()
+                .and_then(|branch| branch.strip_prefix("factory/"))
+                .map(|worker| worker.strip_suffix(&format!("-{}", task.id)).unwrap_or(worker).to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// One QA branch binding for waivers and merge hooks (GH #1175/#1200).
+/// Recorded delivery branches survive reassignment and companion-task deliveries.
+/// An old round on the worker's plain lane must not hide its own task branch.
+pub(crate) fn delivery_branch(
+    task: &Task,
+    passes: &[QaPass],
+    implementer: &str,
+    branch_exists: impl Fn(&str) -> bool,
+) -> String {
+    let normalize = |branch: &str| {
+        branch
+            .trim()
+            .trim_start_matches("refs/heads/")
+            .trim_start_matches("refs/remotes/origin/")
+            .trim_start_matches("origin/")
+            .to_string()
+    };
+    let own = crate::factory_isolation::expected_worker_branch(implementer);
+    let recorded = task.deliverables.parked_branch.as_deref()
+        .filter(|branch| !branch.trim().is_empty())
+        .or_else(|| passes.iter()
+            .find(|pass| !pass.is_withdrawn() && !pass.branch.trim().is_empty())
+            .map(|pass| pass.branch.as_str()))
+        .map(normalize);
+    if let Some(branch) = recorded.as_ref().filter(|branch| *branch != &own) {
+        return branch.clone();
+    }
+    let task_branch = crate::factory_isolation::worker_task_branch(implementer, &task.id);
+    if !implementer.is_empty() && branch_exists(&task_branch) {
+        return task_branch;
+    }
+    recorded.unwrap_or(own)
+}
+
 /// The current tip of `branch` in `repo`, as a full SHA.
 pub fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
     let out = Command::new("git")
@@ -593,13 +648,13 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
     // delivery remains InProgress. The recorded round, not the park status,
     // determines whether this merge needs an independent verdict.
     let deliveries = task_store.list(None).ok()?;
-    let worker = branch.trim_start_matches("factory/");
     for task in deliveries
         .iter()
         .filter(|task| task.status != cas_types::TaskStatus::Closed)
     {
         let passes = cas_store::list_qa_passes(cas_root, &task.id).unwrap_or_default();
-        if !branch_binds_task(task, &qa, &passes, branch, worker) {
+        let implementer = delivery_implementer(cas_root, task);
+        if !branch_binds_task(task, &qa, &passes, branch, &implementer) {
             continue;
         }
         let head = Command::new("git")
@@ -634,12 +689,11 @@ fn branch_binds_task(
     qa: &QaConfig,
     passes: &[QaPass],
     branch: &str,
-    worker: &str,
+    implementer: &str,
 ) -> bool {
+    // A PR's returned head branch itself proves the per-task branch exists.
     gate_applies(task, qa, passes)
-        && (task.deliverables.parked_branch.as_deref() == Some(branch)
-            || task.assignee.as_deref() == Some(worker)
-            || passes.iter().any(|pass| pass.branch == branch))
+        && delivery_branch(task, passes, implementer, |candidate| candidate == branch) == branch
 }
 
 /// Reviewable paths from the delivery's first-parent content commits after
@@ -1726,14 +1780,14 @@ mod tests {
             &qa,
             &[pending.clone()],
             "factory/impl",
-            "impl"
+            "replacement"
         ));
         assert!(!branch_binds_task(
             &delivery,
             &qa,
             &[pending.clone()],
             "factory/unrelated",
-            "unrelated"
+            "replacement"
         ));
         assert!(merge_gate(&delivery, &qa, &[pending], "aaaa1111").is_err());
         assert!(merge_gate(&delivery, &qa, &[pass("aaaa1111", Waived)], "aaaa1111").is_ok());

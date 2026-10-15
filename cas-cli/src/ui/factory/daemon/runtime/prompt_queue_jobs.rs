@@ -349,6 +349,7 @@ impl InFlightSet {
         expired
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -463,6 +464,17 @@ impl<T: Copy> TranscriptProbeCache<T> {
     }
 }
 
+/// Whether control may inject a selected row now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// Send it; it is in flight under `generation`.
+    Inject { generation: u64 },
+    /// An earlier inject of this row has not settled.
+    InFlight,
+    /// Another channel, or an earlier handoff that keeps its claim, holds it.
+    NotClaimed,
+}
+
 /// Claims the current selection took, until they are handed off or released.
 #[derive(Debug, Default)]
 struct PassClaims {
@@ -495,6 +507,8 @@ pub(crate) struct QueueJobs {
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
     /// Wake-gate "tool call in flight" probes, per pane.
     pub(crate) tool_call_probes: TranscriptProbeCache<bool>,
+    /// Inbox prunes completed (watchdog and tests).
+    pub(crate) prunes_done: u64,
 }
 
 impl QueueJobs {
@@ -508,11 +522,13 @@ impl QueueJobs {
     }
 
     /// Jobs on explicit wiring (tests: a recording or gated writer).
+    #[cfg(test)]
     pub(crate) fn start_with(wiring: LaneWiring) -> Self {
         Self::with_exec(Exec::Lanes(JobRuntime::start_with(LANE_CAPACITY, wiring)))
     }
 
     /// Every job runs on the submitting thread before `submit` returns.
+    #[cfg(test)]
     pub(crate) fn inline() -> Self {
         Self::with_exec(Exec::Inline(VecDeque::new()))
     }
@@ -533,6 +549,7 @@ impl QueueJobs {
             config: ConfigCache::default(),
             store: None,
             tool_call_probes: TranscriptProbeCache::default(),
+            prunes_done: 0,
         }
     }
 
@@ -641,6 +658,33 @@ impl QueueJobs {
                 error,
             })
         });
+    }
+
+    /// Decide whether control may inject `(row, recipient)` now (spec §4.5
+    /// rules 1–2): not while an earlier inject of the row is in flight, and
+    /// only under a transport claim. `claim` takes one when the selection did
+    /// not consider this recipient. On `Inject` the row is in flight from
+    /// `now`.
+    pub(crate) fn admit(
+        &mut self,
+        row: i64,
+        recipient: &str,
+        now: Instant,
+        claim: impl FnOnce() -> anyhow::Result<bool>,
+    ) -> anyhow::Result<Admission> {
+        if self.in_flight.holds_row(row) {
+            return Ok(Admission::InFlight);
+        }
+        let claimed = match self.use_claim(row, recipient) {
+            Some(claimed) => claimed,
+            None => claim()?,
+        };
+        if !claimed {
+            return Ok(Admission::NotClaimed);
+        }
+        Ok(Admission::Inject {
+            generation: self.begin_inject(row, recipient, now),
+        })
     }
 
     /// Record an inject about to be sent; returns its generation.
@@ -882,7 +926,10 @@ impl QueueJobs {
                         self.retractions.remove(&recipient);
                     }
                 },
-                QueueJobOutcome::Pruned(report) => log_prune(&report),
+                QueueJobOutcome::Pruned(report) => {
+                    self.prunes_done += 1;
+                    log_prune(&report);
+                }
                 QueueJobOutcome::Mirrored(state) => {
                     self.mirror_in_flight = false;
                     self.mirror_state = Some(state);

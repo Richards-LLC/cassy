@@ -1486,6 +1486,7 @@ impl TeamsManager {
     /// Returns the number of rows retracted (0 if the inbox doesn't exist,
     /// can't be parsed, or nothing matched — never an error for a missing
     /// file, since "no inbox yet" is not a failure here).
+    #[cfg(test)]
     pub fn prune_stale_idle_alerts(
         &self,
         target: &str,
@@ -1515,6 +1516,7 @@ impl TeamsManager {
     ///
     /// Returns the number of rows retracted (0 if the inbox doesn't exist,
     /// can't be parsed, or nothing matched).
+    #[cfg(test)]
     pub fn prune_stale_merge_alerts(
         &self,
         target: &str,
@@ -1532,6 +1534,7 @@ impl TeamsManager {
     /// Best-effort retraction for unread epic-completion rows. The caller's
     /// predicate must return true only for positively-proven stale state;
     /// uncertainty returns false and preserves the row.
+    #[cfg(test)]
     pub fn prune_stale_epic_completion_alerts(
         &self,
         target: &str,
@@ -1555,6 +1558,7 @@ impl TeamsManager {
     /// any); `is_stale(key) == true` removes the row. Already-`read` rows
     /// are NEVER touched by either caller (AC#3: a human who has seen a
     /// message must never have it retroactively vanish).
+    #[cfg(test)]
     fn prune_stale_rows_by_key(
         &self,
         target: &str,

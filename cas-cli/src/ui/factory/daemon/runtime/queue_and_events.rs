@@ -2094,7 +2094,7 @@ fn worker_recipient_shut_down(
 /// roster, withdraw rows for recipients that shut down, collapse duplicate
 /// worker deaths, then select the batch, stamp it `Selected` and take its
 /// transport claims in one transaction.
-fn run_queue_select(
+pub(super) fn run_queue_select(
     request: &super::prompt_queue_jobs::QueueSelectRequest,
     generation: u64,
 ) -> anyhow::Result<super::prompt_queue_jobs::QueueSelection> {
@@ -6084,13 +6084,14 @@ impl FactoryDaemon {
 
         let queue = self.queue_jobs.store(self.app.cas_dir())?;
         let super::prompt_queue_jobs::QueueSelection {
+            generation,
             registered_agents,
             retargeted_rows,
             shut_down_recipients,
             native_agents,
             rows: prompts,
-            ..
         } = selection;
+        tracing::trace!(target: "cas::coordination", generation, rows = prompts.len(), "delivering a QueueSelect batch");
         for id in retargeted_rows {
             self.forget_row_delivery_state(id);
         }
@@ -6839,13 +6840,20 @@ impl FactoryDaemon {
                     // cas-ef14: the harness filed our copy but the pane has not
                     // spoken yet and the window is still open. Writing again
                     // would duplicate; consuming would repeat the silent stall.
-                    let _ = queue.record_pending_reason(
-                        queued.id,
-                        cas_store::PendingReason::GatedNotReady,
+                    // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                    let pending_detail: Option<&str> =
                         Some(
                             "inbox copy drained by the harness; awaiting evidence the recipient \
                              surfaced it as a turn",
-                        ),
+                        );
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: pending_detail.map(str::to_string),
+                        },
                     );
                     tracing::debug!(
                         target: "cas::coordination",
@@ -6948,12 +6956,19 @@ impl FactoryDaemon {
                 match decision {
                     ClaudeRedelivery::Deliver => {}
                     ClaudeRedelivery::Cooldown => {
-                        let _ = queue.record_pending_reason(
-                            queued.id,
-                            cas_store::PendingReason::GatedNotReady,
+                        // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                        let pending_detail: Option<&str> =
                             Some(
                                 "Claude inbox redelivery cooldown — exponential spacing protects the worker context",
-                            ),
+                            );
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason {
+                                reason: cas_store::PendingReason::GatedNotReady,
+                                detail: pending_detail.map(str::to_string),
+                            },
                         );
                         continue;
                     }
@@ -7057,9 +7072,8 @@ impl FactoryDaemon {
                     LifecycleRedelivery::Cooldown => {
                         // GatedNotReady: withheld by policy, not a failed
                         // attempt — it must not burn the row's retry budget.
-                        let _ = queue.record_pending_reason(
-                            queued.id,
-                            cas_store::PendingReason::GatedNotReady,
+                        // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                        let pending_detail: Option<&str> =
                             // cas-9e81: cas-ceae widened this cadence from
                             // supervisor lifecycle rows to ANY row already
                             // written to an inbox, but the operator-facing
@@ -7069,7 +7083,15 @@ impl FactoryDaemon {
                             // to do with. Same rule, honest label.
                             Some(
                                 "re-nudge cooldown — this row was already delivered this interval",
-                            ),
+                            );
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason {
+                                reason: cas_store::PendingReason::GatedNotReady,
+                                detail: pending_detail.map(str::to_string),
+                            },
                         );
                         tracing::debug!(
                             target: "cas::coordination",
@@ -7218,10 +7240,17 @@ impl FactoryDaemon {
             // non-blocking) reason so the distinction is visible without
             // changing the retry/ownership semantics at all.
             if target != "all_workers" && native_agents.contains(target.as_str()) {
-                let _ = queue.record_pending_reason(
+                // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                let pending_detail: Option<&str> =
+                    Some("native extension agent — delivered via its own polling API, not daemon PTY/inbox");
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
                     queued.id,
-                    cas_store::PendingReason::AwaitingDelivery,
-                    Some("native extension agent — delivered via its own polling API, not daemon PTY/inbox"),
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::PendingReason {
+                        reason: cas_store::PendingReason::AwaitingDelivery,
+                        detail: pending_detail.map(str::to_string),
+                    },
                 );
                 continue;
             }
@@ -7260,10 +7289,17 @@ impl FactoryDaemon {
                     // attempt: the daemon has not touched the transport yet.
                     // Keep the forensic reason without consuming the bounded
                     // retry budget or starting its age clock.
-                    let _ = queue.record_pending_reason(
+                    // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                    let pending_detail: Option<&str> =
+                        Some("pane not ready for injection");
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        cas_store::PendingReason::GatedNotReady,
-                        Some("pane not ready for injection"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: pending_detail.map(str::to_string),
+                        },
                     );
                     continue;
                 }
@@ -7566,20 +7602,20 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                // cas-d2a2: QueueSelect took this claim atomically with the
-                // selection (spec §4.5 rule 1). False: a hook/poll, or an
-                // earlier handoff that keeps its claim, holds the row.
-                let claimed = match self.queue_jobs.use_claim(queued.id, &queued.target) {
-                    Some(claimed) => claimed,
-                    None => queue.claim_recipient_transport(queued.id, &queued.target)?,
+                // cas-d2a2 (spec §4.5 rules 1–2): QueueSelect took this claim
+                // atomically with the selection. Not claimed: a hook/poll, or
+                // an earlier handoff that keeps its claim, holds the row. From
+                // here the row is in flight until its stamps land.
+                let inject_generation = match self.queue_jobs.admit(
+                    queued.id,
+                    &queued.target,
+                    Instant::now(),
+                    || Ok(queue.claim_recipient_transport(queued.id, &queued.target)?),
+                )? {
+                    super::prompt_queue_jobs::Admission::Inject { generation } => generation,
+                    super::prompt_queue_jobs::Admission::InFlight
+                    | super::prompt_queue_jobs::Admission::NotClaimed => continue,
                 };
-                if !claimed {
-                    continue;
-                }
-                // Spec §4.5 rule 2: in flight from here until its stamps land.
-                let inject_generation =
-                    self.queue_jobs
-                        .begin_inject(queued.id, &queued.target, Instant::now());
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached

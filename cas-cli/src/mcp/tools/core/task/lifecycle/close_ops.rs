@@ -23932,6 +23932,7 @@ mod merge_state_gate_tests {
         use cas_types::{Agent, AgentRole, WorkTarget};
 
         let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
         let dir = init_factory_repo("retarget-worker");
         let p = dir.path();
         let bare = tempfile::tempdir().unwrap();
@@ -23947,7 +23948,7 @@ mod merge_state_gate_tests {
         let tip = rev_parse_local(p, branch);
         let root = p.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-retarget-fixture\"\n[verification]\nenabled = false\n").unwrap();
         env.set("CAS_ROOT", &root);
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         let core = CasCore::with_daemon(root.clone(), None, None);
@@ -23964,12 +23965,12 @@ mod merge_state_gate_tests {
         task.risk = vec![TaskRisk::None];
         task.deliverables.factory_branch_anchor = Some(tip.clone());
         task.deliverables.parked_branch = Some(branch.into());
-        task.deliverables.work_target = Some(WorkTarget { repo_selector: p.to_str().unwrap().into(), target_branch: "main".into() });
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-retarget-fixture".into(), target_branch: "main".into() });
         store.add(&task).unwrap();
         for (id, target) in [("cas-old-parent", "main"), ("cas-new-parent", "epic/new-target")] {
             let mut epic = Task::new(id.into(), "Parent epic".into());
             epic.task_type = TaskType::Epic;
-            epic.deliverables.work_target = Some(WorkTarget { repo_selector: p.to_str().unwrap().into(), target_branch: target.into() });
+            epic.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-retarget-fixture".into(), target_branch: target.into() });
             store.add(&epic).unwrap();
         }
         let service = CasService::new(core, None);
@@ -23996,7 +23997,8 @@ mod merge_state_gate_tests {
         use cas_types::{Agent, AgentRole};
         use crate::prompt_revalidation::{MergeRequestEnvelope, MergeRequestDecision, MergeRequestDelivery, merge_request_delivery_decision};
 
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
         let dir = TempDir::new().unwrap();
         let core = CasCore::with_daemon(dir.path().to_path_buf(), None, None);
         let store = core.open_task_store().unwrap();

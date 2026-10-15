@@ -1747,15 +1747,40 @@ impl CasService {
                     Some(&task),
                     Some(&repo.repo_root),
                 );
-                if let Some(branch) = branch.as_deref()
-                    && let Err(message) = crate::prompt_revalidation::refresh_merge_request_source(
+                let source_is_fresh = if let Some(branch) = branch.as_deref() {
+                    match crate::prompt_revalidation::refresh_merge_request_source(
                         &repo.repo_root,
                         branch,
                         task.delivery_mode,
-                    )
-                {
-                    return Ok(CallToolResult::error(vec![Content::text(message)]));
-                }
+                    ) {
+                        Ok(fresh) => fresh,
+                        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+                    }
+                } else { true };
+                let branch = if !source_is_fresh {
+                    let note = "source freshness unavailable; not checked for already-landed";
+                    message = attach_merge_request_envelope(
+                        &format!("{message}\n\n{note}"),
+                        &MergeRequestEnvelope {
+                            task_id: task.id.clone(),
+                            branch_tip: task.deliverables.factory_branch_anchor.clone()
+                                .or_else(|| branch.as_deref().and_then(|branch| {
+                                    crate::prompt_revalidation::resolve_live_branch_tip(&repo.repo_root, branch, None)
+                                })).unwrap_or_default(),
+                            target_branch: repo.target_branch.clone(),
+                            target_branch_tip: crate::prompt_revalidation::resolve_target_branch_tip(
+                                &repo.repo_root, &repo.target_branch,
+                            ).unwrap_or_default(),
+                            anchor_tip: task.deliverables.factory_branch_anchor.clone(),
+                            commits_not_on_target_base: 0,
+                            pr_number: requested_pr_number,
+                            source_freshness_unavailable: Some(note.into()),
+                        },
+                    );
+                    // Preserve the typed wake, but skip cached source/anchor
+                    // suppression and automatic anchor advancement below.
+                    None
+                } else { branch };
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its
                 // delivery lands or the worker starts another task on this
@@ -1766,6 +1791,7 @@ impl CasService {
                     .as_deref()
                     .is_some_and(|active_id| active_id != task.id);
                 if task.status == cas_types::TaskStatus::AwaitingMerge
+                    && source_is_fresh
                     && other_task_active
                     && recorded_anchor.is_none()
                 {
@@ -1774,7 +1800,7 @@ impl CasService {
                         task.id
                     )));
                 }
-                let anchor_integrated = recorded_anchor.as_deref().is_some_and(|anchor| {
+                let anchor_integrated = source_is_fresh && recorded_anchor.as_deref().is_some_and(|anchor| {
                     matches!(
                         revalidate_merge_request(
                             &repo.repo_root,
@@ -1983,6 +2009,7 @@ impl CasService {
                                     target_branch_tip: target_tip,
                                     commits_not_on_target_base,
                                     pr_number: requested_pr_number,
+                                    source_freshness_unavailable: None,
                                 },
                             );
                         }
@@ -4693,7 +4720,7 @@ mod cas_89e1_post_merge_message_type_tests {
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
         let mut request = message_request(true);
-        request.task_id = Some(task.id);
+        request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.unwrap());
         if local_merge {
             assert!(response.contains("Merge already landed"), "{response}");
@@ -4701,9 +4728,39 @@ mod cas_89e1_post_merge_message_type_tests {
         }
         assert!(!response.contains("Merge already landed"), "{response}");
         if offline {
-            assert!(response.contains("freshness unavailable"), "{response}");
-            assert!(response.contains("No merge request was queued"), "{response}");
-            assert!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().is_empty());
+            assert!(response.contains("Message queued"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let envelope = rows.iter().find_map(|row|
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+            ).expect("offline request retains its typed supervisor wake");
+            let note = "source freshness unavailable; not checked for already-landed";
+            assert_eq!(envelope.source_freshness_unavailable.as_deref(), Some(note));
+            assert!(rows.iter().any(|row| row.prompt.contains(note)));
+            assert_eq!(crate::prompt_revalidation::queued_merge_request_decision(
+                repo, Some(&task), &envelope,
+            ), crate::prompt_revalidation::MergeRequestDecision::Unverifiable);
+            let cached_landed = crate::prompt_revalidation::MergeRequestDecision::AlreadyIntegrated {
+                target_tip: target_tip.clone(),
+            };
+            assert_eq!(crate::prompt_revalidation::merge_request_delivery_decision(
+                Some(&task), &envelope, &cached_landed,
+            ), crate::prompt_revalidation::MergeRequestDelivery::Deliver);
+            let mut closed = task.clone();
+            closed.status = TaskStatus::Closed;
+            assert!(matches!(crate::prompt_revalidation::merge_request_delivery_decision(
+                Some(&closed), &envelope, &cached_landed,
+            ), crate::prompt_revalidation::MergeRequestDelivery::SuppressResolved { .. }));
+            let inbox_core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            inbox_core.set_agent_id_for_testing("supervisor-id".into());
+            #[cfg(feature = "mcp-proxy")]
+            let inbox = CasService::new(inbox_core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let inbox = CasService::new(inbox_core);
+            let inbox = response_text(inbox.inbox_poll(serde_json::from_value(
+                serde_json::json!({"action": "inbox_poll"}),
+            ).unwrap()).await.unwrap());
+            assert!(inbox.contains("Fresh worker delivery"), "{inbox}");
+            assert!(inbox.contains(note), "{inbox}");
         } else {
             assert!(response.contains("Message queued"), "{response}");
             let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
@@ -4741,6 +4798,20 @@ mod cas_89e1_post_merge_message_type_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn reopened_merge_request_refreshes_stale_historical_tip_gh1179() {
         stale_source_merge_request_gh1179(false, false, TaskStatus::InProgress).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reopened_merge_request_offline_still_queues_gh1179() {
+        stale_source_merge_request_gh1179(true, false, TaskStatus::InProgress).await;
+    }
+
+    #[test]
+    fn unsafe_merge_request_source_still_refuses_gh1179() {
+        let repo = tempfile::tempdir().unwrap();
+        let error = crate::prompt_revalidation::refresh_merge_request_source(
+            repo.path(), "-unsafe", cas_types::DeliveryMode::LocalMerge,
+        ).expect_err("unsafe source names must refuse before any Git probe");
+        assert!(error.contains("unsafe source branch"), "{error}");
     }
 
     /// GH #734: a worker in one factory session must not inherit the newest

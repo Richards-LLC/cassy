@@ -49,7 +49,7 @@ pub const SLOW_RING_CAP: usize = 32;
 pub const SLOW_STATUS_SECS: u64 = 10;
 
 /// One snapshot of the daemon loop, written by its watchdog thread.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonLoopStatus {
     pub pid: u32,
     pub session: String,
@@ -110,6 +110,23 @@ pub struct DaemonLoopStatus {
     pub lane_violations: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lane_violation_sites: Vec<String>,
+    /// TUI frames sent in the window, by cause (`input`, `layout`,
+    /// `output_focused`, `output_unfocused`; cas-77f39, GH #1210). Frames per
+    /// second are their sum × 1000 / `frame_window_ms`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub frames: std::collections::BTreeMap<String, u64>,
+    /// Further causes carried by those frames instead of drawing their own.
+    #[serde(default)]
+    pub frames_coalesced: u64,
+    /// Median bytes of one frame in the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_bytes_p50: Option<u64>,
+    /// Length of the frame window, in milliseconds.
+    #[serde(default)]
+    pub frame_window_ms: u64,
+    /// TUI frames per second over the window, to one decimal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_per_s: Option<f64>,
 }
 
 /// One job lane's occupancy (factory loop v2 §4.2, §6.5).
@@ -411,6 +428,11 @@ mod tests {
             job_lanes: Default::default(),
             lane_violations: 0,
             lane_violation_sites: Vec::new(),
+            frames: Default::default(),
+            frames_coalesced: 0,
+            frame_bytes_p50: None,
+            frame_window_ms: 0,
+            frames_per_s: None,
         }
     }
 

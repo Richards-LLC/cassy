@@ -9,7 +9,7 @@ pub(super) fn register_issues(registry: &mut ConfigRegistry) {
         key: "issues.repo",
         section: "issues",
         name: "Issue Intake Repository",
-        description: "GitHub repository in owner/repo form for Cassy-system bug reports. This is project-local and intentionally has no inferred default: a downstream project's origin may not be the Cassy upstream. Code-history indexing uses history.github_repo instead.",
+        description: "This project's GitHub issue repository in owner/repo form. CLI reads resolve an unset value from the local GitHub origin without saving it; doctor flags the unset setting. Cassy-system bug reports use issues.components.cassy (or the legacy explicit issues.repo override), not the inferred origin. Code-history indexing uses history.github_repo.",
         value_type: ConfigType::String,
         default: "",
         constraint: Constraint::None,
@@ -17,8 +17,8 @@ pub(super) fn register_issues(registry: &mut ConfigRegistry) {
         requires_feature: None,
         keywords: &["issues", "github", "bugs", "intake", "repository", "upstream"],
         use_cases: &[
-            "Route Cassy-system bugs from a downstream project to its configured Cassy upstream",
-            "Leave empty to preserve reports locally until an explicit target is configured",
+            "Override the origin-derived project issue tracker",
+            "Leave unset to resolve CLI reads from the local GitHub origin without writing config",
         ],
     });
     registry.register(ConfigMeta {

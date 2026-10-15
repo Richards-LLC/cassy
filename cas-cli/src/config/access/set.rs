@@ -188,6 +188,23 @@ impl Config {
                         "Invalid integer value for factory.worker_memory_high_gib: {value}"
                     )))?;
             }
+            "factory.render_max_fps" | "factory.render_unfocused_fps" => {
+                let fps: u32 = value
+                    .parse()
+                    .ok()
+                    .filter(|fps| (1..=120).contains(fps))
+                    .ok_or_else(|| {
+                        MemError::Parse(format!(
+                            "Invalid value for {key}: {value} (expected 1..=120 frames per second)"
+                        ))
+                    })?;
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                if key == "factory.render_max_fps" {
+                    factory.render_max_fps = fps;
+                } else {
+                    factory.render_unfocused_fps = fps;
+                }
+            }
             "factory.spawn_min_free_gib" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.spawn_min_free_gib = value.parse().map_err(|_| {
@@ -269,7 +286,11 @@ impl Config {
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
             }
-            "factory.supervisor_only_mcp" | "factory.supervisor_only_env" | "factory.worker_credential_env" => {
+            "factory.supervisor_only_mcp"
+            | "factory.supervisor_only_env"
+            | "factory.worker_credential_env"
+            | "factory.worker_denied_clis"
+            | "factory.worker_denied_mcp_tools" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let names = value.split(',').map(str::trim).filter(|name| !name.is_empty())
                     .map(str::to_string).collect();
@@ -277,6 +298,10 @@ impl Config {
                     factory.worker_policy.supervisor_only_mcp = names;
                 } else if key == "factory.supervisor_only_env" {
                     factory.worker_policy.supervisor_only_env = names;
+                } else if key == "factory.worker_denied_clis" {
+                    factory.worker_denied_clis = names;
+                } else if key == "factory.worker_denied_mcp_tools" {
+                    factory.worker_denied_mcp_tools = names;
                 } else {
                     factory.worker_policy.worker_credential_env = names;
                 }

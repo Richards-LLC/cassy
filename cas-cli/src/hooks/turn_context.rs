@@ -30,6 +30,10 @@ struct TurnState {
     /// cas-b5e4: epoch milliseconds of the last tool-boundary inbox check.
     #[serde(default)]
     mail_checked_at: i64,
+    /// cas-1f0c: turns whose `CAS wake: message N` pointers are resolved, so
+    /// their later tool boundaries stop re-checking the named rows.
+    #[serde(default)]
+    pointers_resolved: Vec<String>,
 }
 
 struct Receipt {
@@ -73,11 +77,15 @@ impl Receipt {
     }
 
     fn remember(&mut self, key: &str) {
-        if !self.state.delivered.iter().any(|seen| seen == key) {
-            self.state.delivered.push(key.to_string());
-            if self.state.delivered.len() > RECENT_TURNS {
-                self.state.delivered.remove(0);
-            }
+        remember_recent(&mut self.state.delivered, key);
+    }
+}
+
+fn remember_recent(keys: &mut Vec<String>, key: &str) {
+    if !keys.iter().any(|seen| seen == key) {
+        keys.push(key.to_string());
+        if keys.len() > RECENT_TURNS {
+            keys.remove(0);
         }
     }
 }
@@ -201,29 +209,69 @@ fn turn_start_line(line: &[u8], session: &str) -> Option<TranscriptTurn> {
 /// row surfaces once. Recall still runs once per turn, and only when the
 /// normal prompt hook did not serve the turn.
 pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String> {
+    fallback_context_within(root, input, 0)
+}
+
+/// [`fallback_context`] for an output that already carries `reserved`
+/// characters of other context (cas-1f0c: PostToolUse lessons and guardrail
+/// warnings), so the whole stays within Claude Code's hook cap.
+pub(crate) fn fallback_context_within(
+    root: &Path,
+    input: &HookInput,
+    reserved: usize,
+) -> Option<String> {
     if crate::internal_llm::is_internal_invocation()
         || !super::handlers::handlers_middle::factory_inbox::owns_factory_inbox(input)
     {
         return None;
     }
     use super::handlers::handlers_middle::factory_inbox::{
-        CurrentTurn, inbox_signal_stamp, surface_factory_inbox_after_tool_result,
+        CurrentTurn, inbox_signal_stamp, names_wake_pointer, surface_factory_inbox_after_tool_result,
+        surface_turn_prompt_rows,
     };
     let turn = input
         .transcript_path
         .as_deref()
         .and_then(|path| latest_turn_with_start(Path::new(path), &input.session_id));
     let signal = inbox_signal_stamp(root, input);
-    let turn_unserved = turn.as_ref().is_some_and(|(key, _, _)| {
-        Receipt::open(root, &input.session_id)
-            .is_some_and(|receipt| !receipt.state.delivered.contains(key))
-    });
-    if signal.is_none() && !turn_unserved {
+    let (turn_unserved, pointers_pending) = turn
+        .as_ref()
+        .and_then(|(key, prompt, _)| {
+            let receipt = Receipt::open(root, &input.session_id)?;
+            Some((
+                !receipt.state.delivered.contains(key),
+                names_wake_pointer(prompt) && !receipt.state.pointers_resolved.contains(key),
+            ))
+        })
+        .unwrap_or((false, false));
+    if signal.is_none() && !turn_unserved && !pointers_pending {
         return None;
     }
     let mut receipt = Receipt::open(root, &input.session_id)?;
     let mut parts = Vec::new();
     let mut changed = false;
+    // cas-1f0c: one render budget for every block this output carries.
+    let mut budget = super::handlers::handlers_middle::factory_inbox::hook_body_budget(reserved);
+
+    // cas-1f0c: the rows this turn's own prompt names come first, and before
+    // the turn is recorded below, so only an earlier surfacing reads as
+    // "already shown". A Claude Teams copy is a pointer, and its teammate turn
+    // fires no UserPromptSubmit; a pointer turn whose turn-start hook failed
+    // or ran out of room is retried here until its rows resolve.
+    if let Some((key, prompt, _)) = &turn {
+        let first_boundary = !receipt.state.delivered.contains(key);
+        let pending = names_wake_pointer(prompt) && !receipt.state.pointers_resolved.contains(key);
+        if (first_boundary || pending)
+            && let Some(outcome) =
+                surface_turn_prompt_rows(root, input, prompt, first_boundary, &mut budget)
+        {
+            parts.extend(outcome.text);
+            if outcome.complete && names_wake_pointer(prompt) {
+                remember_recent(&mut receipt.state.pointers_resolved, key);
+                changed = true;
+            }
+        }
+    }
 
     if let Some(signal) = signal
         && signal > receipt.state.mail_checked_at
@@ -249,7 +297,9 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
                 prompt: prompt.as_str(),
             })
         });
-        if let Some(mail) = surface_factory_inbox_after_tool_result(Some(root), input, current) {
+        if let Some(mail) =
+            surface_factory_inbox_after_tool_result(Some(root), input, current, &mut budget)
+        {
             parts.push(mail);
         }
     }
@@ -264,14 +314,29 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
         receipt.remember(key);
         receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
         changed = true;
-        if let Some(packet) =
+        // cas-1f0c: mail above is already receipted; recall may not take it
+        // down (panic) or push the output past Claude Code's cap.
+        if let Some(packet) = super::handlers::handlers_middle::factory_inbox::after_mail(|| {
             crate::ambient_recall::build_local_ambient_recall_context(input, root, prompt)
-        {
-            parts.push(packet.full);
+        }) {
+            let mut joined = parts.join("\n\n");
+            if super::handlers::handlers_middle::factory_inbox::push_within_hook_cap(
+                &mut joined,
+                &packet.full,
+                reserved,
+            ) {
+                parts.push(packet.full);
+            }
         }
     }
-    if changed {
-        receipt.save()?;
+    // cas-1f0c: a failed save must not drop mail that is already receipted;
+    // the turn is then simply re-examined at the next tool call.
+    if changed && receipt.save().is_none() {
+        tracing::warn!(
+            target: "cas::coordination",
+            session = %input.session_id,
+            "cas-1f0c: turn-context receipt not saved; returning the rendered context anyway"
+        );
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }

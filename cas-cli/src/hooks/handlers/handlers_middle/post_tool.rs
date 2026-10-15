@@ -16,8 +16,13 @@ pub fn handle_post_tool_use(
     let lessons = cas_root.and_then(|root| {
         crate::hooks::operation_lessons::context_for_tool(root, &normalize_post_tool_input(input))
     });
-    let fallback =
-        cas_root.and_then(|root| crate::hooks::turn_context::fallback_context(root, input));
+    // cas-1f0c: the lessons and the guardrail warning share this output with
+    // the mail, so they are reserved inside Claude Code's hook cap.
+    let reserved = lessons.as_deref().map_or(0, |lessons| lessons.chars().count() + 1)
+        + post_tool_context(&output).map_or(0, |warning| warning.chars().count() + 1);
+    let fallback = cas_root.and_then(|root| {
+        crate::hooks::turn_context::fallback_context_within(root, input, reserved)
+    });
     let context = match (lessons, fallback) {
         (Some(lessons), Some(fallback)) => format!("{lessons}\n{fallback}"),
         (Some(context), None) | (None, Some(context)) => context,

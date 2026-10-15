@@ -5507,6 +5507,29 @@ mod tests {
         assert!(resolved.reason.contains("legacy epic.branch absent"));
     }
 
+    /// GH #1216 (cas-cf8e0): an epic created with target_branch=epic/x
+    /// records epic/x as both its branch and its WorkTarget, and its child
+    /// inherits it. worktree_merge must land on epic/x, as the epic's lane.
+    #[test]
+    fn declared_merge_target_for_an_adopted_explicit_epic_lane_gh_1216() {
+        let lane = cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "epic/violet-log-hygiene".into(),
+        };
+        let mut epic = cas_types::Task::new("cas-c3da".into(), "epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/violet-log-hygiene".into());
+        epic.deliverables.work_target = Some(lane.clone());
+        let mut child = cas_types::Task::new("cas-c3da-child".into(), "child".into());
+        child.deliverables.work_target = Some(lane);
+
+        let resolved = declared_system_b_merge_target(&child, Some(&epic), &child.id)
+            .expect("the adopted lane resolves");
+        assert_eq!(resolved.branch, "epic/violet-log-hygiene");
+        assert!(resolved.epic_lane, "{}", resolved.reason);
+        assert!(!resolved.trunk_fallback);
+    }
+
     #[test]
     fn declared_merge_target_moves_duplicate_child_default_to_live_epic_lane_cas_d22d() {
         let mut epic = cas_types::Task::new("cas-d22d-epic".into(), "epic".into());

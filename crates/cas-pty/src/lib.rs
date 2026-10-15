@@ -48,6 +48,7 @@ pub mod conformance;
 mod error;
 pub mod opencode;
 mod pty;
+pub mod violet_env;
 
 pub use claude_trust::{
     CLAUDE_TRUST_FIELD, ClaudeTrustOutcome, claude_global_config_path,

@@ -26,6 +26,8 @@ impl CasService {
         message: &str,
         in_reply_to: Option<i64>,
         urgent: bool,
+        kind: Option<&str>,
+        blocker: bool,
     ) -> Result<Option<CallToolResult>, McpError> {
         if LOCAL_TARGETS
             .iter()
@@ -84,7 +86,10 @@ impl CasService {
                 return Err(refuse_urgent());
             }
             let (sender_id, sender_name) = (sender.id.clone(), sender.name.clone());
-            let (body, summary) = (message.to_string(), summary.to_string());
+            let (body, summary) = (
+                peer_mailbox::attach_message_intent(message, kind, blocker),
+                summary.to_string(),
+            );
             let reply = tokio::task::spawn_blocking(move || {
                 let queue = crate::store::open_prompt_queue_store(&cas_root)
                     .map_err(|error| format!("could not open the prompt queue: {error}"))?;
@@ -184,8 +189,11 @@ impl CasService {
         if urgent {
             return Err(refuse_urgent());
         }
-        let (sender_id, body, summary) =
-            (sender.id.clone(), message.to_string(), summary.to_string());
+        let (sender_id, body, summary) = (
+            sender.id.clone(),
+            peer_mailbox::attach_message_intent(message, kind, blocker),
+            summary.to_string(),
+        );
         let to = peer.clone();
         let receipt = tokio::task::spawn_blocking(move || {
             peer_mailbox::send_to_peer(&cas_root, &sender_id, &to, &body, Some(&summary), None)

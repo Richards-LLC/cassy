@@ -164,6 +164,8 @@ impl Config {
             ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),
             ("factory.supervisor_only_env".to_string(), factory.worker_policy.supervisor_only_env.join(",")),
             ("factory.worker_credential_env".to_string(), factory.worker_policy.worker_credential_env.join(",")),
+            ("factory.worker_denied_clis".to_string(), factory.worker_denied_clis.join(",")),
+            ("factory.worker_denied_mcp_tools".to_string(), factory.worker_denied_mcp_tools.join(",")),
             (
                 "factory.artifacts_root".to_string(),
                 factory
@@ -190,6 +192,14 @@ impl Config {
             (
                 "factory.worker_memory_high_gib".to_string(),
                 factory.worker_memory_high_gib.to_string(),
+            ),
+            (
+                "factory.render_max_fps".to_string(),
+                factory.render_max_fps.to_string(),
+            ),
+            (
+                "factory.render_unfocused_fps".to_string(),
+                factory.render_unfocused_fps.to_string(),
             ),
             (
                 "factory.warn_stale_assignment".to_string(),

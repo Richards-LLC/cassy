@@ -535,6 +535,10 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     "factory.supervisor_only_mcp",
     "factory.supervisor_only_env",
     "factory.worker_credential_env",
+    // cas-d757 (GH #1219): emptying either list lets workers run the
+    // operator-authenticated CLIs and tools again.
+    "factory.worker_denied_clis",
+    "factory.worker_denied_mcp_tools",
     "qa.evidence_gate",
     "qa.independent_pass",
     "release.claude_account_allowlist",
@@ -1124,6 +1128,8 @@ mod tests {
             ("slack.transport", "any"),
             ("factory.supervisor_only_mcp", ""),
             ("factory.worker_credential_env", "GH_TOKEN"),
+            ("factory.worker_denied_clis", ""),
+            ("factory.worker_denied_mcp_tools", ""),
             ("qa.evidence_gate", "false"),
             ("release.claude_account_allowlist", "agent@example.com"),
         ] {

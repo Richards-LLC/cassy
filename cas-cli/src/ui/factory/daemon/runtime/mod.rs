@@ -25,6 +25,7 @@ pub(super) mod pane_size;
 mod provisioning_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
+pub(crate) mod render_scheduler;
 pub(crate) mod send_dedupe;
 #[cfg(test)]
 mod shutdown_tests;

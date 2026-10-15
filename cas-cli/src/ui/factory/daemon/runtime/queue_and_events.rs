@@ -1877,11 +1877,9 @@ pub(super) fn claude_turn_aware_retry_with_evidence(
     }
 }
 
-/// Recheck the premise once a held nudge becomes eligible for transport.
-/// Returns true when withdrawn, false when transport may proceed.
-fn process_worker_stall_nudge(
+/// Withdraw obsolete task alarms at the probe cadence, even for a busy pane.
+fn withdraw_stale_stall_nudge(
     tasks: &dyn cas_store::TaskStore,
-    events: &dyn cas_store::EventStore,
     queue: &dyn cas_store::PromptQueueStore,
     row: &cas_store::QueuedPrompt,
     agents: &[cas_types::Agent],
@@ -1907,7 +1905,18 @@ fn process_worker_stall_nudge(
         queue.mark_superseded(row.id, "worker no longer holds the stalled task")?;
         return Ok(true);
     }
-    // A held alarm's premise may have resolved while the pane was busy.
+    Ok(false)
+}
+
+/// Read activity only when the held alarm becomes eligible for transport.
+fn withdraw_resumed_stall_nudge(
+    events: &dyn cas_store::EventStore,
+    queue: &dyn cas_store::PromptQueueStore,
+    row: &cas_store::QueuedPrompt,
+    agents: &[cas_types::Agent],
+) -> anyhow::Result<bool> {
+    let worker = agents.iter().filter(|agent| agent.name == row.target)
+        .max_by_key(|agent| (agent.status == cas_types::AgentStatus::Active, agent.registered_at));
     // Read the subject's own history; fleet traffic cannot hide its progress.
     let event_activity = if let Some(worker) = worker {
         events.latest_worker_activity(&worker.id, &worker.name)?
@@ -5729,6 +5738,29 @@ impl FactoryDaemon {
         Ok(())
     }
 
+    /// Bound both store-error retries and warnings for one nudge incident.
+    fn defer_stall_nudge_error(
+        &mut self,
+        id: i64,
+        signature: (bool, bool, bool),
+        error: impl std::fmt::Display,
+    ) {
+        let attempts = self.stall_nudge_gate_checks.get(&id)
+            .map(|(_, _, attempts)| *attempts).unwrap_or(0).saturating_add(1);
+        let delay = (5u64 << attempts.saturating_sub(1).min(6)).min(300);
+        self.stall_nudge_gate_checks.insert(id,
+            (Instant::now() + Duration::from_secs(delay), signature, attempts));
+        // Three warnings per continuous incident; retries remain queryable in
+        // debug logs. A successful check resets the incident counter.
+        if attempts <= 3 {
+            tracing::warn!(message_id = id, attempts, delay_secs = delay, %error,
+                "stall nudge revalidation failed; deferring row");
+        } else {
+            tracing::debug!(message_id = id, attempts, delay_secs = delay, %error,
+                "stall nudge revalidation still unavailable; warning budget spent");
+        }
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         use cas_store::{EventStore, SqliteEventStore};
@@ -5956,7 +5988,7 @@ impl FactoryDaemon {
 
         // Open the task handle lazily once per pass, only for an eligible nudge.
         let mut nudge_tasks: Option<crate::Result<Arc<dyn cas_store::TaskStore>>> = None;
-        self.stall_nudge_gate_checks.retain(|_, (next, _)| next.elapsed().as_secs() < 300);
+        self.stall_nudge_gate_checks.retain(|_, (next, _, _)| next.elapsed().as_secs() < 300);
         for selected in prompts {
             // The assignee may have changed while earlier rows were delivered.
             for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
@@ -6346,9 +6378,8 @@ impl FactoryDaemon {
                 continue;
             }
 
-            // Keep routine inactivity alarms on the durable queue while a
-            // reader is busy; a Teams inbox write would already hand off the
-            // body and make coalescing impossible. Recheck the task premise too.
+            // Routine alarms stay on the daemon lane until their premise and
+            // pane are eligible. Cheap pane transitions bypass the probe cadence.
             if queued.kind.as_deref() == Some("worker_stall_nudge")
                 && queued.origin == Some(cas_store::QueueOrigin::Daemon)
             {
@@ -6360,8 +6391,23 @@ impl FactoryDaemon {
                         .is_some_and(|at| at.elapsed() >= SILENCE_FOR_ACTIVE_RECIPIENT_WAKE),
                 );
                 if self.stall_nudge_gate_checks.get(&queued.id)
-                    .is_some_and(|(next, prior)| now < *next && signature == *prior) {
+                    .is_some_and(|(next, prior, _)| now < *next && signature == *prior) {
                     continue;
+                }
+                // Task validity precedes the busy hold: closed/reassigned work
+                // withdraws its alarm instead of spending and parking a wake budget.
+                let tasks = nudge_tasks.get_or_insert_with(|| crate::store::open_task_store_local(self.app.cas_dir()));
+                let stale = match tasks.as_ref() {
+                    Ok(tasks) => withdraw_stale_stall_nudge(tasks.as_ref(), queue.as_ref(), &queued, current_agents),
+                    Err(error) => Err(anyhow::anyhow!("nudge task store unavailable: {error}")),
+                };
+                match stale {
+                    Ok(true) => { self.forget_row_delivery_state(queued.id); continue; }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.defer_stall_nudge_error(queued.id, signature, &error);
+                        continue;
+                    }
                 }
                 let pane = self.pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
@@ -6372,33 +6418,32 @@ impl FactoryDaemon {
                     match decline {
                         Ok(declines) => {
                             let delay = declines.map(|n| 5u64.saturating_mul(1u64 << n.min(3))).unwrap_or(15);
-                            self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(delay), signature));
+                            self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(delay), signature, 0));
                             if let Some(n) = declines.filter(|n| *n >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES) {
-                                let teams = super::delivery::choose_channel(self.app.harness_for(&queued.target), self.teams.is_some())
-                                    == super::delivery::DeliveryChannel::TeamsInbox;
-                                self.park_wake_starved_row(queue.as_ref(), &queued, &queued.target, n, teams);
+                                let claude_inbox_target = self.teams.is_some()
+                                    && self.app.harness_for(&queued.target) == cas_mux::SupervisorCli::Claude
+                                    && super::delivery::choose_channel(self.app.harness_for(&queued.target), true)
+                                        == super::delivery::DeliveryChannel::TeamsInbox;
+                                self.park_wake_starved_row(queue.as_ref(), &queued, &queued.target, n, claude_inbox_target);
                             }
                         }
-                        Err(error) => {
-                            self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(5), signature));
-                            tracing::warn!(message_id = queued.id, %error, "stall nudge gate persistence failed; skipping row");
-                        }
+                        Err(error) => self.defer_stall_nudge_error(queued.id, signature, &error),
                     }
                     continue;
                 }
-                let tasks = nudge_tasks.get_or_insert_with(|| crate::store::open_task_store_local(self.app.cas_dir()));
-                let result = match (tasks.as_ref(), event_store.as_ref()) {
-                    (Ok(tasks), Some(events)) => process_worker_stall_nudge(tasks.as_ref(), events,
-                        queue.as_ref(), &queued, current_agents),
-                    (Err(error), _) => Err(anyhow::anyhow!("nudge task store unavailable: {error}")),
-                    (_, None) => Err(anyhow::anyhow!("nudge event store unavailable")),
+                let result = match event_store.as_ref() {
+                    Some(events) => withdraw_resumed_stall_nudge(events, queue.as_ref(), &queued, current_agents),
+                    None => Err(anyhow::anyhow!("nudge event store unavailable")),
                 };
                 match result {
                     Ok(true) => { self.forget_row_delivery_state(queued.id); continue; }
-                    Ok(false) => { self.stall_nudge_gate_checks.remove(&queued.id); }
+                    // Keep the cadence if a downstream delivery/wake declines.
+                    // A successful transport removes this entry with the row.
+                    Ok(false) => {
+                        self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(5), signature, 0));
+                    }
                     Err(error) => {
-                        self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(5), signature));
-                        tracing::warn!(message_id = queued.id, %error, "stall nudge revalidation failed; skipping row");
+                        self.defer_stall_nudge_error(queued.id, signature, &error);
                         continue;
                     }
                 }
@@ -17560,6 +17605,49 @@ mod stall_nudge_rework_tests {
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         let next: Option<String> = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id = ?", [id], |r| r.get(0)).unwrap();
         assert!(next.is_some(), "exhausted hold budget must park the row");
+    }
+
+    #[tokio::test]
+    async fn stalled_nudge_store_errors_back_off_and_bound_warning_incident() {
+        use tracing::instrument::WithSubscriber;
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || Capture(captured.clone())).finish();
+        let (_root, cas_dir, _worker, id) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute("UPDATE tasks SET title=x'00' WHERE id='cas-stall'", []).unwrap();
+        async {
+            for expected in 1..=8 {
+                if let Some(entry) = daemon.stall_nudge_gate_checks.get_mut(&id) {
+                    entry.0 = Instant::now() - Duration::from_secs(1);
+                }
+                daemon.process_prompt_queue().await.unwrap();
+                for _ in 0..3 { daemon.process_prompt_queue().await.unwrap(); }
+                assert_eq!(daemon.stall_nudge_gate_checks[&id].2, expected,
+                    "an unchanged error must not retry every pass");
+            }
+        }.with_subscriber(subscriber).await;
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(log.matches("stall nudge revalidation failed; deferring row").count(), 3,
+            "persistent store failure must have a finite warning budget: {log}");
+        assert!(daemon.stall_nudge_gate_checks[&id].0.saturating_duration_since(Instant::now())
+            >= Duration::from_secs(299));
+        conn.execute("UPDATE tasks SET title='recovered' WHERE id='cas-stall'", []).unwrap();
+        daemon.stall_nudge_gate_checks.get_mut(&id).unwrap().0 = Instant::now() - Duration::from_secs(1);
+        daemon.process_prompt_queue().await.unwrap();
+        assert_eq!(daemon.stall_nudge_gate_checks[&id].2, 0, "recovery resets the warning incident");
     }
 
     #[tokio::test]

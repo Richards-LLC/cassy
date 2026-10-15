@@ -7398,11 +7398,11 @@ impl SqlitePromptQueueStore {
     /// [`PromptQueueStore::surface_unseen_for_recipient`] (cas-7a01), plus
     /// the stricter fallback variant used after a tool result (cas-9568).
     ///
-    /// The ordinary poll and hook paths differ only in the provenance they
-    /// record, so they must not drift in eligibility: a row the hook would
-    /// surface and a row the inbox poll would drain are by definition the
-    /// same row. The fallback variant opts into an additional transport-marker
-    /// exclusion because its caller is already inside the delivered turn.
+    /// Ordinary mail has the same poll/hook eligibility. Routine daemon stall
+    /// nudges are an exception: only the daemon can validate their premise, so
+    /// automatic hooks must skip them before writing any receipt. Explicit
+    /// recipient polling remains available. The fallback variant also excludes
+    /// transport markers because its caller is inside the delivered turn.
     fn drain_unseen_for_recipient(
         &self,
         recipient: &str,
@@ -7453,6 +7453,13 @@ impl SqlitePromptQueueStore {
                  AND (q.highest_stage IS NULL
                       OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
             );
+            // Filtering after the drain would already acknowledge and consume
+            // the alarm. Keep all automatic hook variants on this SQL boundary.
+            let daemon_nudge_sql = if source == SurfacingSource::HookSurfaced {
+                "AND NOT (COALESCE(q.origin_kind, '') = 'daemon' AND COALESCE(q.kind, '') = 'worker_stall_nudge')"
+            } else {
+                ""
+            };
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&tx)?);
             let receipt_sql = match transport {
@@ -7533,6 +7540,7 @@ impl SqlitePromptQueueStore {
                            {receipt_sql}
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
+                           {daemon_nudge_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {source_sql}
@@ -7579,6 +7587,7 @@ impl SqlitePromptQueueStore {
                            {receipt_sql}
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
+                           {daemon_nudge_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {source_sql}
@@ -16055,5 +16064,46 @@ mod cas_ad92_wake_named_tests {
         store.release_recipient_transport(id, "worker").unwrap();
         let report = store.message_delivery_report(id).unwrap().unwrap();
         assert_eq!(report.recipient_receipt, Some(SurfacingSource::HookSurfaced));
+    }
+}
+
+#[cfg(test)]
+mod stall_nudge_hook_exclusion_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_nudge_all_hook_drains_skip_without_receipts_and_poll_stays_available() {
+        for legacy_session in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = SqlitePromptQueueStore::open(root.path()).unwrap();
+            store.init().unwrap();
+            let outcome = store.enqueue_worker_stall_nudge("worker", "quiet", "s", "cas-task",
+                "worker-attention:hook-exclusion").unwrap();
+            let id = match outcome {
+                EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+            };
+            let ordinary = store.enqueue_with_session("supervisor", "worker", "decision", "s").unwrap();
+            if legacy_session {
+                let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+                conn.execute("UPDATE prompt_queue SET factory_session=NULL", []).unwrap();
+            }
+            let session = if legacy_session { None } else { Some("s") };
+            let surfaced = store.surface_unseen_for_recipient("worker", session, 10).unwrap();
+            assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![ordinary]);
+            assert!(store.surface_unseen_for_recipient_without_transport_delivery("worker", session, 10).unwrap().is_empty());
+            assert!(store.surface_unseen_from_sources_for_recipient("worker", session, &["director"], 10).unwrap().is_empty());
+            let turn_start = Utc::now() - chrono::Duration::seconds(1);
+            assert!(store.claim_recipient_transport(id, "worker").unwrap());
+            assert!(store.surface_wake_named_for_recipient("worker", session, &[id]).unwrap().is_empty());
+            assert!(store.surface_unseen_for_recipient_delivered_after("worker", session, 10, turn_start).unwrap().is_empty());
+            let row = store.queued_prompt(id).unwrap().unwrap();
+            assert!(row.acked_at.is_none() && row.processed_at.is_none());
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.recipient_receipt, Some(SurfacingSource::TransportClaimed),
+                "hook skips must not fabricate surfaced receipts");
+            store.release_recipient_transport(id, "worker").unwrap();
+            let polled = store.poll_unseen_for_recipient("worker", session, 10).unwrap();
+            assert_eq!(polled.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        }
     }
 }

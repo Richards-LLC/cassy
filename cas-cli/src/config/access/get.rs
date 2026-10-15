@@ -118,21 +118,9 @@ impl Config {
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 Some(factory.cargo_build_jobs.clone())
             }
-            "factory.merge_sweep" => Some(factory.merge_sweep.to_string()),
-            "factory.merge_sweep_command" => {
-                Some(factory.merge_sweep_command.clone().unwrap_or_default())
-            }
             "factory.epic_base_branch" => {
                 Some(factory.epic_base_branch.clone().unwrap_or_default())
             }
-            "factory.release_gate_home_dir" => {
-                Some(factory.release_gate_home_dir.clone().unwrap_or_default())
-            }
-            "factory.merge_sweep_cwd" => Some(factory.merge_sweep_cwd.clone().unwrap_or_default()),
-            "factory.merge_sweep_timeout_secs" => {
-                Some(factory.merge_sweep_timeout_secs.to_string())
-            }
-            "factory.merge_sweep_quiet_secs" => Some(factory.merge_sweep_quiet_secs.to_string()),
             "factory.ai_enrichment.enabled" => Some(factory.ai_enrichment.enabled.to_string()),
             "factory.ai_enrichment.endpoint" => Some(factory.ai_enrichment.endpoint.clone()),
             "factory.ai_enrichment.provider" => Some(factory.ai_enrichment.provider.clone()),

@@ -131,18 +131,6 @@ pub(crate) trait CiTransport {
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
         Ok(self.failing_job(run_id)?.map(|name| FailedJob { name, step: None }))
     }
-    /// cas-e369: the PR's changed paths, or `None` when they cannot be read.
-    /// An unknown diff never counts as "outside the diff".
-    fn pull_request_files(&self, _pr_number: u64) -> Result<Option<Vec<String>>, CiWatchError> {
-        Ok(None)
-    }
-    /// cas-e369: put the PR back in the merge queue, bound to the head that
-    /// was ejected so a newer push is never queued unreviewed.
-    fn enqueue_pull_request(&self, _pr_node_id: &str, _head_sha: &str) -> Result<(), CiWatchError> {
-        Err(CiWatchError::Unavailable(
-            "merge-queue re-enqueue is unavailable on this transport".to_string(),
-        ))
-    }
 }
 
 /// cas-e369: a failed job and the step inside it that failed.
@@ -258,9 +246,6 @@ pub(crate) struct CiRun {
     pub conclusion: Option<String>,
     #[serde(default)]
     pub event: String,
-    /// RFC 3339; for a completed run, when it finished (cas-e369).
-    #[serde(default)]
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,9 +288,6 @@ pub(crate) struct DeliveryPrObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct MergeQueuePullRequest {
-    /// GraphQL node ID, needed to re-enqueue the PR (cas-e369).
-    #[serde(default)]
-    pub id: String,
     pub number: u64,
     #[serde(rename = "headRefName")]
     pub head_branch: String,
@@ -351,14 +333,6 @@ pub(crate) struct MergeQueueEjection {
     pub pr_number: u64,
     pub failed_run_id: Option<u64>,
     pub occurrence: String,
-    /// cas-e369: the PR head that left the queue and its GraphQL node ID.
-    pub head_sha: String,
-    pub pr_node_id: String,
-    /// cas-e369: a supervisor-owned epic PR has no delivering worker to tell.
-    pub supervisor_owned: bool,
-    /// cas-e369: when the failed run finished. Only a recent failure can be
-    /// the cause of this exit, so only it is re-enqueued automatically.
-    pub failed_run_completed_at: Option<String>,
 }
 
 /// cas-e369: a supervisor-owned PR (an open epic's `epic/` branch) that the
@@ -689,11 +663,6 @@ struct CiStep {
     conclusion: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct EnqueueGraphqlResponse {
-    data: Option<serde_json::Value>,
-}
-
 /// A job conclusion that makes a run red. `cancelled` and `skipped` do not:
 /// a run whose jobs were all cancelled failed nothing (cas-c188).
 fn job_conclusion_is_failure(conclusion: Option<&str>) -> bool {
@@ -890,49 +859,6 @@ impl CiTransport for GhCiTransport {
             }))
     }
 
-    fn pull_request_files(&self, pr_number: u64) -> Result<Option<Vec<String>>, CiWatchError> {
-        let listing = self.gh_text(&[
-            "pr".to_string(),
-            "diff".to_string(),
-            pr_number.to_string(),
-            "--repo".to_string(),
-            self.repo.clone(),
-            "--name-only".to_string(),
-        ])?;
-        let files: Vec<String> = listing
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect();
-        Ok((!files.is_empty()).then_some(files))
-    }
-
-    fn enqueue_pull_request(&self, pr_node_id: &str, head_sha: &str) -> Result<(), CiWatchError> {
-        let mutation = "mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) { mergeQueueEntry { state } } }";
-        let response: EnqueueGraphqlResponse = self.gh_json(&[
-            "api".to_string(),
-            "graphql".to_string(),
-            "-f".to_string(),
-            format!("query={mutation}"),
-            "-F".to_string(),
-            format!("id={pr_node_id}"),
-            "-F".to_string(),
-            format!("head={head_sha}"),
-        ])?;
-        let entry = response
-            .data
-            .as_ref()
-            .and_then(|data| data.pointer("/enqueuePullRequest/mergeQueueEntry/state"));
-        if entry.is_some() {
-            Ok(())
-        } else {
-            Err(CiWatchError::Malformed(
-                "enqueuePullRequest returned no merge-queue entry".to_string(),
-            ))
-        }
-    }
-
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
         let repo = crate::cli::integrate::github::RepoRef::from_owner_slash_repo(&self.repo)
             .ok_or_else(|| {
@@ -940,7 +866,7 @@ impl CiTransport for GhCiTransport {
                     "invalid GitHub repository for merge-queue watcher".to_string(),
                 )
             })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { id number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
         let response: MergeQueueGraphqlResponse = self.gh_json(&[
             "api".to_string(),
             "graphql".to_string(),
@@ -1090,13 +1016,13 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     let mut poll = MergeQueuePoll::default();
     let tracked = deliveries
         .iter()
-        .map(|delivery| (&delivery.task_id, delivery.worker.as_str(), &delivery.branch, false))
+        .map(|delivery| (&delivery.task_id, delivery.worker.as_str(), &delivery.branch))
         .chain(
             supervisor_prs
                 .iter()
-                .map(|epic| (&epic.task_id, "", &epic.branch, true)),
+                .map(|epic| (&epic.task_id, "", &epic.branch)),
         );
-    for (task_id, worker, branch, supervisor_owned) in tracked {
+    for (task_id, worker, branch) in tracked {
         let Some(pr) = pulls.iter().find(|pr| &pr.head_branch == branch) else {
             // A normally merged PR leaves the open-PR listing; it is never an ejection.
             continue;
@@ -1108,8 +1034,7 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             poll.queued_prs.insert(pr.number);
             continue;
         }
-        let failed_run = failed_runs.get(&pr.number).copied();
-        let failed_run_id = failed_run.map(|run| run.id);
+        let failed_run_id = failed_runs.get(&pr.number).map(|run| run.id);
         let arm_vanished = pr.head_branch.starts_with("factory/")
             && previously_armed.contains(&pr.number)
             && !pr.auto_merge_armed()
@@ -1142,12 +1067,6 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             pr_number: pr.number,
             failed_run_id,
             occurrence,
-            head_sha: pr.head_sha.clone(),
-            pr_node_id: pr.id.clone(),
-            supervisor_owned,
-            failed_run_completed_at: failed_run
-                .map(|run| run.updated_at.clone())
-                .filter(|at| !at.is_empty()),
         });
     }
     poll.pr_lane_failures = collect_pr_lane_failures(transport, deliveries, &pulls, &runs)?;
@@ -1480,13 +1399,11 @@ mod tests {
             status: "completed".to_string(),
             conclusion: conclusion.map(str::to_string),
             event: "push".to_string(),
-            updated_at: "2026-10-14T21:15:32Z".to_string(),
         }
     }
 
     fn pull(number: u64, branch: &str, queued: bool, updated_at: &str) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
-            id: format!("PR_node_{number}"),
             number,
             head_branch: branch.to_string(),
             head_sha: "deadbeef".to_string(),
@@ -1505,7 +1422,6 @@ mod tests {
         updated_at: &str,
     ) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
-            id: format!("PR_node_{number}"),
             number,
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),

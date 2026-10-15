@@ -953,13 +953,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.supervisor_queue_retention_days", "28", "28"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
-        ("factory.merge_sweep", "false", "false"),
-        ("factory.merge_sweep_command", "pnpm test:ci", "pnpm test:ci"),
         ("factory.epic_base_branch", "staging", "staging"),
-        ("factory.release_gate_home_dir", " /home/cas-release-gate/base ", "/home/cas-release-gate/base"),
-        ("factory.merge_sweep_cwd", "web", "web"),
-        ("factory.merge_sweep_timeout_secs", "900", "900"),
-        ("factory.merge_sweep_quiet_secs", "0", "0"),
         ("factory.ai_enrichment.enabled", "true", "true"),
         ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
         ("factory.ai_enrichment.provider", "openai-compatible", "openai-compatible"),
@@ -1024,7 +1018,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
 
     // Optional keys clear back to unset with an empty value.
-    for key in ["factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch", "factory.release_gate_home_dir"] {
+    for key in ["factory.epic_base_branch"] {
         config.set(key, "").unwrap();
         assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
     }
@@ -1173,4 +1167,35 @@ fn retired_jev_section_loads_and_is_dropped_on_save_cas_4971() {
     let reloaded = Config::load(temp.path()).unwrap();
     assert!(reloaded.retired_jev.is_none());
     assert_eq!(reloaded.qa().user_facing_labels, vec!["mobile"]);
+}
+
+/// cas-fd0a: a pre-3.54.0 config carrying the retired post-merge sweep keys
+/// still loads through `Config::load`, keeps its other settings, refuses the
+/// retired keys for get/set, and loses them on the next save.
+#[test]
+fn retired_merge_sweep_keys_load_and_are_dropped_on_save_cas_fd0a() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[factory]\nmerge_sweep = true\nmerge_sweep_timeout_secs = 1800\nmerge_sweep_quiet_secs = 300\n\
+         release_gate_home_dir = \"/home/cas-release-gate/base\"\nmax_concurrent_builders = 3\n\n\
+         [factory.merge_sweep_env]\nDATABASE_URL = \"postgres://x\"\n",
+    )
+    .unwrap();
+
+    let mut loaded = Config::load(temp.path()).expect("an old config with sweep keys still loads");
+    assert_eq!(loaded.factory().max_concurrent_builders, 3);
+    assert_eq!(
+        loaded.factory().retired_keys(),
+        vec!["merge_sweep", "merge_sweep_timeout_secs", "merge_sweep_quiet_secs", "release_gate_home_dir", "merge_sweep_env"]
+    );
+    assert_eq!(loaded.get("factory.merge_sweep"), None, "a retired key is not readable");
+    assert!(loaded.set("factory.merge_sweep", "true").is_err(), "a retired key is not settable");
+    assert!(loaded.list().iter().all(|(key, _)| !key.contains("merge_sweep")));
+
+    loaded.save(temp.path()).unwrap();
+    let saved = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(!saved.contains("merge_sweep"), "the retired keys are not written back: {saved}");
+    assert!(!saved.contains("release_gate_home_dir"), "{saved}");
+    assert!(Config::load(temp.path()).unwrap().factory().retired_keys().is_empty());
 }

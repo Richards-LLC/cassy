@@ -160,50 +160,12 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.cargo_build_jobs = value.to_string();
             }
-            "factory.merge_sweep" => {
-                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                factory.merge_sweep = value
-                    .parse()
-                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
-            }
-            "factory.merge_sweep_command" => {
-                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                let command = value.trim();
-                factory.merge_sweep_command = (!command.is_empty()).then(|| command.to_string());
-            }
             // cas-8d54 (GH #1011): the runtime reads this key
             // (Config::configured_epic_base_branch); empty clears it.
             "factory.epic_base_branch" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let branch = value.trim();
                 factory.epic_base_branch = (!branch.is_empty()).then(|| branch.to_string());
-            }
-            "factory.merge_sweep_cwd" => {
-                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                let cwd = value.trim();
-                factory.merge_sweep_cwd = (!cwd.is_empty()).then(|| cwd.to_string());
-            }
-            "factory.release_gate_home_dir" => {
-                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                let directory = value.trim();
-                factory.release_gate_home_dir =
-                    (!directory.is_empty()).then(|| directory.to_string());
-            }
-            "factory.merge_sweep_timeout_secs" => {
-                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                factory.merge_sweep_timeout_secs = value.parse().map_err(|_| {
-                    MemError::Parse(format!(
-                        "Invalid integer value for factory.merge_sweep_timeout_secs: {value}"
-                    ))
-                })?;
-            }
-            "factory.merge_sweep_quiet_secs" => {
-                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
-                factory.merge_sweep_quiet_secs = value.parse().map_err(|_| {
-                    MemError::Parse(format!(
-                        "Invalid integer value for factory.merge_sweep_quiet_secs: {value}"
-                    ))
-                })?;
             }
             // cas-1a05: registered factory keys that `set` did not accept.
             "factory.artifacts_root" => {

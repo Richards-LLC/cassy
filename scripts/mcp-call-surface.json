@@ -96,7 +96,6 @@
         "server_stop",
         "shutdown_workers",
         "spawn_workers",
-        "sweep_tasks",
         "sync_all_workers",
         "worker_activity",
         "worker_status",
@@ -108,7 +107,6 @@
         "worktree_status"
       ],
       "fields": [
-        "accept",
         "action",
         "agent_type",
         "all",

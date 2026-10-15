@@ -603,7 +603,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
     )]
     pub async fn factory(
         &self,
@@ -1354,7 +1354,7 @@ impl CasService {
 
                 // ---- Factory domain ----
                 "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
-                | "worker_status" | "worker_activity" | "sweep_tasks"
+                | "worker_status" | "worker_activity"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "epic_split" | "remind" | "remind_list"
                 | "remind_cancel" | "server_start" | "server_stop" | "server_list"
@@ -1367,7 +1367,6 @@ impl CasService {
                         "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
                         "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
                         "worker_status" => this.factory_worker_status(factory_req).await,
-                        "sweep_tasks" => this.factory_sweep_tasks(factory_req).await,
                         "clear_context" => this.factory_clear_context(factory_req).await,
                         "my_context" => this.factory_my_context(factory_req).await,
                         "worker_activity" => this.factory_worker_activity(factory_req).await,
@@ -1548,7 +1547,6 @@ impl CasService {
                     | "release_worker"
                     | "worker_status"
                     | "worker_activity"
-                    | "sweep_tasks"
                     | "clear_context"
                     | "my_context"
                     | "sync_all_workers"
@@ -1596,7 +1594,6 @@ impl CasService {
             "hold_worker" => self.factory_set_worker_hold(req, true).await,
             "release_worker" => self.factory_set_worker_hold(req, false).await,
             "worker_status" => self.factory_worker_status(req).await,
-            "sweep_tasks" => self.factory_sweep_tasks(req).await,
             "clear_context" => self.factory_clear_context(req).await,
             "my_context" => self.factory_my_context(req).await,
             "worker_activity" => self.factory_worker_activity(req).await,

@@ -8,7 +8,6 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
     let listener = UnixListener::bind(cas_dir.join("test.sock")).unwrap();
     let gui_listener = UnixListener::bind(cas_dir.join("gui.sock")).unwrap();
     let session_manager = SessionManager::new();
-    let merge_sweep = super::merge_sweep::MergeSweepCoordinator::new(cas_dir, "provision-test");
     FactoryDaemon {
         session_name: "provision-test".into(),
         app,
@@ -57,7 +56,6 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,
         cancelled_spawns: std::collections::HashSet::new(),
-        merge_sweep,
         last_idle_message_times: HashMap::new(),
         lifecycle_redelivery_attempts: HashMap::new(),
         lifecycle_redelivery_counts: HashMap::new(),

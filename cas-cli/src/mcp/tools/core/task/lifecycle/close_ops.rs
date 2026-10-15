@@ -13557,6 +13557,31 @@ pub(crate) fn resolve_close_delivery_branch(
             return Ok(branch.to_string());
         }
     }
+    // GH #1180: a transferred task retains its original delivery even when
+    // the recipient already has a lane for another task. Recover the recorded
+    // parked/handoff branches here as well as when the recipient has no lane.
+    // A recycled source that now belongs only to another task is not evidence.
+    if task_changed_hands(task) {
+        let own_task = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+        for candidate in task_delivery_branch_candidates(task)
+            .into_iter()
+            .filter(|branch| branch != &own && branch != &own_task)
+        {
+            for branch in [candidate.clone(), format!("origin/{candidate}")] {
+                if !git_ref_exists(repo_path, &branch) {
+                    continue;
+                }
+                let holds_anchor = task.deliverables.factory_branch_anchor.as_deref()
+                    .is_some_and(|anchor| git_commit_is_ancestor(repo_path, anchor, &branch));
+                if holds_anchor || matches!(
+                    task_attribution::branch_task_claims(repo_path, &branch, &identity),
+                    Some((Some(_), _)) | Some((None, None))
+                ) {
+                    return Ok(branch);
+                }
+            }
+        }
+    }
     let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
     Err(format!(
         "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
@@ -26726,13 +26751,16 @@ mod merge_state_gate_tests {
             "factory/original",
         );
         let mut req = base_req(&task.id);
-        req.commit_receipt = Some(anchor.clone());
+        let merge_receipt = head_sha(p);
         let window = window_at(1_000_000_000, "latest task lease claim/transfer");
-        let out = run_factory_branch_merge_gate_with_attribution(
-            &task, &req, "main", p,
-            TaskCommitAttribution { receipt: Some(&anchor), window: Some(&window) },
-        );
-        assert!(matches!(out, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)), "{out:?}");
+        for receipt in [&anchor, &merge_receipt] {
+            req.commit_receipt = Some(receipt.clone());
+            let out = run_factory_branch_merge_gate_with_attribution(
+                &task, &req, "main", p,
+                TaskCommitAttribution { receipt: Some(receipt), window: Some(&window) },
+            );
+            assert!(matches!(out, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)), "{out:?}");
+        }
     }
 
     #[test]
@@ -26768,6 +26796,47 @@ mod merge_state_gate_tests {
         };
         validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
             .expect("transfer must preserve attribution of the merged delivery");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_rejects_foreign_handoff_gh1180() {
+        let (dir, mut task, _) = transferred_delivery_gh1180();
+        task.deliverables.factory_branch_anchor = None;
+        git(dir.path(), &["branch", "-f", "factory/original", "factory/receiver"]);
+        let error = resolve_close_delivery_branch(dir.path(), &task, "receiver")
+            .expect_err("a handoff branch recycled for another task is not this delivery");
+        assert!(error.contains("DELIVERY BRANCH UNRESOLVED"), "{error}");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_missing_branch_validates_receipt_gh1180() {
+        let (dir, mut task, receipt) = transferred_delivery_gh1180();
+        let p = dir.path();
+        git(p, &["branch", "-D", "factory/original"]);
+        task.deliverables.factory_branch_anchor = None;
+        let mut req = base_req(&task.id);
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+        let unmerged = rev_parse_local(p, "factory/receiver");
+        for (supplied, refusal) in [
+            ("not-a-commit", Some("hexadecimal")),
+            (unmerged.as_str(), Some("not an ancestor")),
+            (receipt.as_str(), None),
+        ] {
+            req.commit_receipt = Some(supplied.into());
+            let out = run_factory_branch_merge_gate_with_attribution(
+                &task, &req, "main", p,
+                TaskCommitAttribution { receipt: Some(supplied), window: Some(&window) },
+            );
+            match (refusal, out) {
+                (Some(reason), MergeStateGateOutcome::Unresolved(message)) => {
+                    assert!(message.contains(reason), "{message}");
+                }
+                (None, MergeStateGateOutcome::ProceedWithNote(note)) => {
+                    assert!(note.contains(&receipt), "{note}");
+                }
+                (expected, other) => panic!("expected {expected:?}, got {other:?}"),
+            }
+        }
     }
 
     /// cas-a44a: a task reopened and reassigned keeps the previous worker's

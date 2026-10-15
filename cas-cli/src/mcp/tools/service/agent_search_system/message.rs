@@ -4566,16 +4566,22 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect("ordinary escalation is delivered"),
         );
-        assert!(escalation.contains("Message queued"), "{escalation}");
         assert!(
             !escalation.contains("Merge already landed"),
             "an untyped escalation must not be suppressed: {escalation}"
         );
-        let queued = crate::store::open_prompt_queue_store(&cas_root)
-            .expect("prompt queue")
-            .poll_all(10)
-            .expect("queued escalation");
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let queued = queue.poll_all(10).expect("queued escalation");
         assert_eq!(queued.len(), 1, "ordinary escalation must reach the queue");
+        let report = queue
+            .message_delivery_report(queued[0].id)
+            .expect("read send stage")
+            .expect("send receipt row");
+        // pin: ordinary sends return only their current queue id, target, and stage.
+        assert_eq!(
+            escalation,
+            format!("queued #{} → {} ({})", report.id, report.target, report.stage)
+        );
         assert!(
             crate::prompt_revalidation::parse_merge_request_envelope(&queued[0].prompt).is_none(),
             "ordinary escalation must not acquire a merge envelope: {:?}",

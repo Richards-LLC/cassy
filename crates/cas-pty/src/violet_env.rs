@@ -400,6 +400,7 @@ mod tests {
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        guard.set("PATH", "/usr/bin:/bin");
         registrations(&home, "VIOLET_SLACK_TOKEN_FIXTURE");
         guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
         guard.set("VIOLET_SLACK_TOKEN_FIXTURE", "");

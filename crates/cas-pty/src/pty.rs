@@ -4532,6 +4532,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn child_path_preflight_fixture(daemon_has_cas: bool, child_has_cas: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut guard = TestEnvGuard::temp_home();
+        let home = guard.home().to_path_buf();
+        let daemon = home.join("daemon-bin");
+        let child = home.join("child-bin");
+        for dir in [&daemon, &child] { std::fs::create_dir_all(dir).unwrap(); }
+        for (dir, name) in [(&child, "codex"), (if daemon_has_cas { &daemon } else { &child }, "cas")] {
+            let path = dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if !child_has_cas { let _ = std::fs::remove_file(child.join("cas")); }
+        guard.set("PATH", &daemon);
+        let result = Pty::spawn("child-path-fixture", PtyConfig {
+            command: "codex".into(), cwd: Some(home),
+            env: vec![("PATH".into(), child.to_string_lossy().into_owned())], ..Default::default()
+        });
+        assert_eq!(result.is_ok(), child_has_cas, "daemon_has_cas={daemon_has_cas}; child_has_cas={child_has_cas}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cas_678d_round5_child_path_accepts_private_cas_without_daemon_cas() {
+        child_path_preflight_fixture(false, true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cas_678d_round5_child_path_refuses_missing_cas_despite_daemon_cas() {
+        child_path_preflight_fixture(true, false);
+    }
+
     /// cas-bbc2: `cas_binary_on_path()` returns true when an executable named
     /// `cas` lives in a PATH entry. Builds a temp dir with a fake `cas` file and
     /// points PATH at it, under TestEnvGuard to avoid racing other env-mutating tests.

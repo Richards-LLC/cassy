@@ -499,7 +499,7 @@ impl DirectorData {
             owned_event = SqliteEventStore::open(cas_dir)?;
             &owned_event
         };
-        let activity = event_store.list_recent(50)?; // Load more to find worker activities
+        let activity = event_store.list_recent(50)?; // Bounded panel feed, not health evidence
 
         // Load agents
         let owned_agent;

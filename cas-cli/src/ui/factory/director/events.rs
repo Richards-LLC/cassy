@@ -1454,20 +1454,13 @@ impl DirectorEventDetector {
     /// worker is evidently still producing output, and the checkpoint-age
     /// signal alone was a false positive.
     ///
-    /// Freshness uses the same harness-specific window as
-    /// `cas factory is-wedged` via
-    /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window)
-    /// (cas-ab80): Codex 5m, Claude/Grok 60s.
+    /// Uses the larger of the harness freshness window and the worker's
+    /// effort-adjusted stall threshold. Open tools and active child processes
+    /// are activity even when the transcript is cold; retain that evidence
+    /// through the following closed-call ticks.
     ///
-    /// Defaults to `true` (proceed with the checkpoint-only verdict, the
-    /// pre-cas-728b behavior) whenever the stronger signal is unavailable:
-    /// no `cas_root` set, the worker isn't resolvable in the agent store,
-    /// or it has no resolvable transcript path. This mirrors the existing
-    /// "when either signal is absent, stay inactive rather than guessing"
-    /// philosophy already used for the heartbeat gate above — but inverted,
-    /// since here the checkpoint-age signal is already the fallback and we
-    /// must not let a *missing* confirmation signal silently suppress every
-    /// stall alert.
+    /// An unset cas_root keeps the checkpoint-only test seam. In production,
+    /// unresolved workers or transcripts cannot positively confirm a stall.
     fn transcript_confirms_stall(
         &mut self,
         worker_name: &str,

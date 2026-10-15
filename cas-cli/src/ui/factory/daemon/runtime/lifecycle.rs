@@ -3370,22 +3370,15 @@ impl FactoryDaemon {
             }
             // A routine nudge has one queryable row and uses the queue's
             // busy-recipient gate. Never write it directly into a Teams inbox.
-            if let Some(
-                event @ crate::ui::factory::director::DirectorEvent::WorkerStalled {
-                    task_id,
-                    escalate: false,
-                    ..
-                },
-            ) = delivery_events.iter().find(|event| {
-                matches!(event,
-                crate::ui::factory::director::DirectorEvent::WorkerStalled {
-                    worker, escalate: false, ..
-                } if worker == &prompt.target)
-            }) {
-                if let Some(start) = self.app.worker_attention_episode_start(event) {
+            if let Some(task_id) = prompt.stall_nudge_task.clone() {
+                let event = delivery_events.iter().find(|event| matches!(event,
+                    crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                        worker, task_id: event_task, escalate: false, ..
+                    } if worker == &prompt.target && event_task == &task_id));
+                let episode_start = event.and_then(|event| self.app.worker_attention_episode_start(event));
+                if let Some(start) = episode_start {
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let session = self.session_name.clone();
-                    let task_id = task_id.clone();
                     store_worker.submit("worker stall nudge", move || {
                         if let Err(error) = super::delivery::enqueue_worker_stall_nudge(
                             &cas_dir,

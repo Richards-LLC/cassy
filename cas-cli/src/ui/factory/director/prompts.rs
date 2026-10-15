@@ -577,6 +577,8 @@ pub fn revalidate_event_for_delivery_with_context(
 pub struct Prompt {
     /// Target agent name (worker name or "supervisor")
     pub target: String,
+    /// Typed routing for a routine worker stall nudge; always uses the durable queue.
+    pub stall_nudge_task: Option<String>,
     /// Prompt text to inject
     pub text: String,
     /// cas-ed6c/cas-38e3: `Some(worker)` when this prompt is a taskless-worker
@@ -1452,6 +1454,7 @@ pub fn generate_prompt_at(
                 // (task, assignee) pair exactly once, so a swallowed PTY write
                 // is permanent. Make it durable so a Codex/Grok worker whose
                 // pane isn't ready still gets woken by the retrying queue lane.
+                stall_nudge_task: None,
                 durable_retry: true,
             })
         }
@@ -1530,6 +1533,7 @@ pub fn generate_prompt_at(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                stall_nudge_task: None,
                 durable_retry: false,
             })
         }
@@ -1555,6 +1559,7 @@ pub fn generate_prompt_at(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                stall_nudge_task: None,
                 durable_retry: false,
             })
         }
@@ -1702,6 +1707,7 @@ pub fn generate_prompt_at(
                     retract_task,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    stall_nudge_task: None,
                     durable_retry: false,
                 });
             }
@@ -1771,6 +1777,7 @@ pub fn generate_prompt_at(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: Some(worker.clone()),
+                stall_nudge_task: None,
                 durable_retry: false,
             })
         }
@@ -1816,6 +1823,7 @@ pub fn generate_prompt_at(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    stall_nudge_task: None,
                     durable_retry: false,
                 });
             }
@@ -1840,6 +1848,7 @@ pub fn generate_prompt_at(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    stall_nudge_task: Some(task_id.clone()),
                     durable_retry: true,
                 })
             } else {
@@ -1874,6 +1883,7 @@ pub fn generate_prompt_at(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    stall_nudge_task: None,
                     durable_retry: false,
                 })
             }
@@ -1941,6 +1951,7 @@ pub fn generate_prompt_at(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: Some(agent_name.clone()),
+                stall_nudge_task: None,
                 durable_retry: false,
             })
         }
@@ -2078,6 +2089,7 @@ pub fn generate_prompt_at(
                 retract_task: None,
                 retract_epic: Some(epic_id.clone()),
                 drop_if_worker_assigned: None,
+                stall_nudge_task: None,
                 durable_retry: false,
             })
         }
@@ -5738,6 +5750,8 @@ mod tests {
             prompt.target, "swift-fox",
             "the one-shot auto-nudge must go straight to the stalled worker"
         );
+        assert_eq!(prompt.stall_nudge_task.as_deref(), Some("cas-0b7d"));
+        assert!(prompt.durable_retry);
         assert!(prompt.text.contains("cas-0b7d"));
         assert!(prompt.text.contains("5m")); // 310s -> 5m
     }
@@ -6883,6 +6897,7 @@ mod tests {
                 retract_task: Some("cas-6883t".to_string()),
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                stall_nudge_task: None,
                 durable_retry: false,
             };
             assert!(
@@ -6913,6 +6928,7 @@ mod tests {
                 retract_task: Some("cas-6883t".to_string()),
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                stall_nudge_task: None,
                 durable_retry: false,
             };
 
@@ -7389,6 +7405,7 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         retract_task: None,
         retract_epic: None,
         drop_if_worker_assigned: None,
+        stall_nudge_task: None,
         durable_retry: false,
     };
     for state in [

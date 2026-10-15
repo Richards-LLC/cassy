@@ -541,6 +541,13 @@ impl HubProbe for UpdateBudgetProbe {
 }
 
 fn migrate_installed_hub_with_probe(probe: &dyn HubProbe) -> Result<ProfileRetirement> {
+    if let Some(refusal) = cas_pty::violet_env::warn_credentials_file_for_cli() {
+        // The CLI helper printed this path once; retain it in the receipt and
+        // refuse unsafe input before a migration can read or rewrite it.
+        let mut report = ProfileRetirement::default();
+        report.warnings.push(refusal);
+        return Ok(report);
+    }
     let private_before = cas_pty::violet_env::credential_file()
         .map(|path| cas_pty::violet_env::literal_file_values(&path))
         .unwrap_or_default();
@@ -747,7 +754,7 @@ impl<'a> UpdateMigration<'a> {
                     .map(str::to_owned)
                 {
                     let replacement = if !self.usable(&name)
-                        && Self::managed_token(&name)
+                        && name == "VIOLET_SLACK_TOKEN_CASSY_PROXY"
                         && self.candidates.len() == 1
                     {
                         let replacement = self.candidates[0].clone();
@@ -1068,10 +1075,13 @@ mod tests {
         let (env, probe) = update_fixture();
         let path = Scope::User.config_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = format!("# managed\n[servers.violet]\ntransport='http'\nurl='{}'\nauth='env:VIOLET_SLACK_TOKEN_OTHER_ACCOUNT'\n", violet_hub_url());
-        std::fs::write(&path,&original).unwrap();
+        let original = format!(
+            "# managed\n[servers.violet]\ntransport='http'\nurl='{}'\nauth='env:VIOLET_SLACK_TOKEN_OTHER_ACCOUNT'\n",
+            violet_hub_url()
+        );
+        std::fs::write(&path, &original).unwrap();
         let report = migrate_installed_hub_with_probe(&probe).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(),original);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert!(report.authenticated.is_empty());
         assert!(probe.calls.borrow().is_empty());
     }
@@ -1083,9 +1093,17 @@ mod tests {
         let path = env.home().join("credentials.env");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let report = migrate_installed_hub_with_probe(&probe).unwrap();
-        assert!(report.warnings.iter().any(|(p,w)| p == &path && w.contains("chmod 600") && w.contains("owner")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(p, w)| p == &path && w.contains("chmod 600") && w.contains("owner"))
+        );
         assert!(probe.calls.borrow().is_empty());
-        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777,0o644);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     fn update_fixture() -> (crate::test_support::TestEnvGuard, UpdateProbe) {

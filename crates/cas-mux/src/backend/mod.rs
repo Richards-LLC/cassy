@@ -133,7 +133,9 @@ pub(super) fn finish_worker_config(
             !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
         }));
     for name in &project_grants {
-        config.grant_worker_credential(name);
+        if !cas_pty::violet_env::canonical_credential(name) || !policy.denies_server("violet") {
+            config.grant_worker_credential(name);
+        }
     }
     grant_worker_github_read_token(config, &project_grants);
     config.apply_worker_credential_policy();
@@ -387,13 +389,15 @@ fn proxy_credential_environment(
         } else {
             cas_pty::violet_env::registration_references(config.effective_command(), &violet).1
         };
-        // Apply the existing role policy before native registration refs can
-        // grant credentials. Never pre-inject another account's Violet token.
-        names.retain(|name| !cas_pty::violet_env::canonical_credential(name) || registered.contains(name));
-        for name in registered.into_iter().filter(|name| cas_pty::violet_env::canonical_credential(name) && !policy.denies_env(name)) {
+        // The existing role policy authorizes the union of native refs and
+        // proxy/config grants; unrelated private-file accounts stay excluded.
+        names.extend(registered);
+        names.retain(|name| !cas_pty::violet_env::canonical_credential(name) || !policy.denies_server("violet"));
+        names.retain(|name| !policy.denies_env(name));
+        for name in &names {
+            if !cas_pty::violet_env::canonical_credential(name) { continue; }
             // Authorization does not depend on whether today's file has a value.
-            config.grant_worker_credential(&name);
-            names.insert(name);
+            config.grant_worker_credential(name);
         }
     }
     names

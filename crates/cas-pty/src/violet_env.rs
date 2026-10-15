@@ -77,29 +77,30 @@ pub fn literal_assignment(line: &str) -> Option<(String, String)> {
     Some((name.into(), value))
 }
 
+fn read_literal_file(path: &Path) -> std::io::Result<String> {
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    const LIMIT: u64 = 1024 * 1024;
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return Err(std::io::Error::other("unsafe credentials file"));
+    }
+    #[cfg(unix)]
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        return Err(std::io::Error::other("unsafe credentials file"));
+    }
+    let mut text = String::new();
+    file.take(LIMIT).read_to_string(&mut text)?;
+    Ok(text)
+}
+
 pub fn literal_file_values(path: &Path) -> BTreeMap<String, String> {
-    let read = || -> std::io::Result<String> {
-        #[cfg(unix)]
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let file = options.open(path)?;
-        let metadata = file.metadata()?;
-        const LIMIT: u64 = 1024 * 1024;
-        if !metadata.is_file() || metadata.len() > LIMIT {
-            return Err(std::io::Error::other("unsafe credentials file"));
-        }
-        #[cfg(unix)]
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return Err(std::io::Error::other("unsafe credentials file"));
-        }
-        let mut text = String::new();
-        file.take(LIMIT).read_to_string(&mut text)?;
-        Ok(text)
-    };
-    match read() {
+    match read_literal_file(path) {
         Ok(text) => text.lines().filter_map(literal_assignment).collect(),
         Err(error) => {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -110,6 +111,25 @@ pub fn literal_file_values(path: &Path) -> BTreeMap<String, String> {
             BTreeMap::new()
         }
     }
+}
+
+/// CLI launch/update diagnostics are visible even without a tracing subscriber.
+/// The daemon's private-file resolver retains its tracing-only warning path.
+pub fn warn_credentials_file_for_cli() -> Option<(PathBuf, String)> {
+    let path = credential_file()?;
+    let error = read_literal_file(&path).err()?;
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return None;
+    }
+    let quoted = path.to_string_lossy().replace('\'', "'\\''");
+    let warning = format!(
+        "Violet credentials file refused: {}; require a regular file with current-user ownership, no group/other permissions and at most 1 MiB; correct the owner if needed, then run chmod 600 '{quoted}'",
+        path.display()
+    );
+    warn_once(&format!("cli-credentials:{}", path.display()), || {
+        eprintln!("warning: {warning}")
+    });
+    Some((path, warning))
 }
 
 fn warn_once(key: &str, warn: impl FnOnce()) {
@@ -230,8 +250,18 @@ pub fn missing_references(harness: &str, env: &BTreeMap<String, String>) -> Vec<
 }
 
 pub fn hydrate(harness: &str, overrides: &mut Vec<(String, String)>, removed: &[String]) {
+    hydrate_with_grants(harness, overrides, removed, &BTreeSet::new());
+}
+
+pub(crate) fn hydrate_with_grants(
+    harness: &str,
+    overrides: &mut Vec<(String, String)>,
+    removed: &[String],
+    grants: &BTreeSet<String>,
+) {
     let env = resolved_environment(overrides, removed);
-    let (_, names) = registration_references(harness, &env);
+    let (_, mut names) = registration_references(harness, &env);
+    names.extend(grants.iter().cloned());
     for warning in missing_references(harness, &env) {
         warn_once(
             warning
@@ -254,6 +284,7 @@ pub fn hydrate(harness: &str, overrides: &mut Vec<(String, String)>, removed: &[
 }
 
 pub fn configure_command(command: &mut Command, harness: &str) {
+    warn_credentials_file_for_cli();
     let mut overrides = Vec::new();
     let mut removed = Vec::new();
     for (key, value) in command.get_envs() {

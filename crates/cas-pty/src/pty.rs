@@ -1069,8 +1069,9 @@ impl PtyConfig {
             .rev()
             .find_map(|(k, v)| (k == "CAS_FACTORY_MODE").then_some(v.as_str()))
             == Some("1");
+        let mut allowed = std::collections::BTreeSet::new();
         if role == Some("worker") || (factory && role != Some("supervisor")) {
-            let mut grants: std::collections::BTreeSet<String> = self
+            let grants: std::collections::BTreeSet<String> = self
                 .env
                 .iter()
                 .filter_map(|(k, v)| {
@@ -1093,10 +1094,10 @@ impl PtyConfig {
             );
             let resolved = crate::violet_env::resolved_environment(&self.env, &self.env_remove);
             let registered = crate::violet_env::registration_references(&harness, &resolved).1;
-            grants.retain(|name| registered.contains(name));
+            allowed = grants;
             names.extend(registered);
             for name in names {
-                if crate::violet_env::canonical_credential(&name) && !grants.contains(&name) {
+                if crate::violet_env::canonical_credential(&name) && !allowed.contains(&name) {
                     self.env.retain(|(k, _)| k != &name);
                     if !self.env_remove.contains(&name) {
                         self.env_remove.push(name);
@@ -1104,7 +1105,7 @@ impl PtyConfig {
                 }
             }
         }
-        crate::violet_env::hydrate(&harness, &mut self.env, &self.env_remove);
+        crate::violet_env::hydrate_with_grants(&harness, &mut self.env, &self.env_remove, &allowed);
     }
 
     /// Remove protected operator credentials from a worker's inherited

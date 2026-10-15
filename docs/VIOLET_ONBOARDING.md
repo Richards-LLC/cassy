@@ -9,16 +9,19 @@ and no empty bearer is sent. Custom endpoints and working
 account-specific credentials are preserved. No manual integration step is
 needed after an upgrade. Cassy's Claude/Codex CLI and factory launch paths load
 missing or empty canonical credentials referenced by that harness from the private
-credentials file directly, subject to factory role denials;
+credentials file directly. Factory workers receive the union of native registration
+references and explicit proxy/config grants, subject to server and environment denials;
 update does not edit shell profiles. Only an unavailable retired managed token
 name may move to a different label, and only when exactly one usable canonical
 token exists. A user proxy document bearing Cassy's `# managed` marker may also
-repair an unavailable canonical token name under that same rule. Every mapping
+repair an unavailable `VIOLET_SLACK_TOKEN_CASSY_PROXY` reference under that same
+rule. Every mapping
 is printed. `PASS (Cassy launches)` covers `cas claude` and `cas codex`; the
 receipt names references absent from the updater's exported environment. Export
 those names before using bare `claude` or `codex`. The private file must be a
 regular file owned by the current user, have no group/other permissions, and be
-at most 1 MiB; symlinks are refused. Probes share that launch resolver
+at most 1 MiB; symlinks are refused. CLI launches and update print the refused path
+and the ownership/`chmod 600` remedy; update leaves an unsafe file untouched. Probes share that launch resolver
 and have a 30-second total budget (at most 10 seconds per profile).
 
 Violet is the hosted hub that holds the Slack bot credential. Cassy sends

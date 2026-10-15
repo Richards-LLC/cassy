@@ -3703,7 +3703,8 @@ mod related_recall_response_tests {
         );
         assert_eq!(
             crate::mcp::tools::core::task::repo_context::inherited_work_target_from_epic(&epic)
-                .map(|target| target.target_branch),
+                .map(|target| target.target_branch)
+                .as_deref(),
             Some("epic/violet-log-hygiene"),
             "spawn and worktree_merge follow epic.branch"
         );

@@ -14,6 +14,18 @@ fn cas_8405_peers_accepts_string_booleans() {
 }
 
 #[test]
+fn cas_8405_hidden_legacy_bool_alias_keeps_string_coercion() {
+    for (wire, expected) in [("true", true), ("false", false)] {
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "bypass_code_review": wire
+        }))
+        .unwrap();
+        assert_eq!(request.legacy_bypass_code_review, Some(expected));
+        assert_eq!(request.effective_supervisor_override(), Some(expected));
+    }
+}
+
+#[test]
 fn cas_8405_all_mcp_boolean_parameters_accept_string_forms() {
     use serde_json::{Value, json};
 

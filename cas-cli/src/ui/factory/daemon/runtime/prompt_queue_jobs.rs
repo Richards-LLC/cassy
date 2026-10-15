@@ -1513,7 +1513,7 @@ fn accepted(submitted: &Submitted) -> bool {
     matches!(
         submitted,
         Submitted::Queued
-            | Submitted::Coalesced
+            | Submitted::Coalesced { .. }
             | Submitted::QueuedBehindKey
             | Submitted::QueuedDroppedOldest { .. }
     )

@@ -735,7 +735,9 @@ fn a_dropped_job_is_reported_to_its_owner() {
     assert_eq!(
         displaced,
         super::super::jobs::Submitted::QueuedDroppedOldest {
-            dropped_key: "WorkerHealthProbe:worker-a".into()
+            dropped_key: "WorkerHealthProbe:worker-a".into(),
+            dropped_generation: 2,
+            key_still_queued: false,
         }
     );
     jobs.apply_completions();
@@ -811,7 +813,7 @@ fn a_dropped_key_with_a_requeued_rerun_reports_only_its_rerun() {
         jobs.submit_external(refresh_spec("WorkerHealthProbe", probe, Lane::Blocking, 11), || {
             Box::new(11_u64)
         }),
-        super::super::jobs::Submitted::Coalesced
+        super::super::jobs::Submitted::Coalesced { replaced_generation: None }
     );
     jobs.submit_external(refresh_spec("DirectorSnapshot", "DirectorSnapshot", Lane::Blocking, 12), || {
         Box::new(12_u64)

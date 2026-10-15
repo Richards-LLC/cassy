@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use super::factory_jobs::{self, DeliverabilityBatch, FactoryJobOutput};
 use super::jobs::{JobResult, Submitted};
-use super::prompt_queue_jobs::QueueJobs;
+use super::prompt_queue_jobs::{ExternalOutcome, QueueJobs};
 use crate::ui::factory::app::delivery_evidence::GitEvidenceMap;
 use crate::ui::factory::app::{
     DeliverabilityRequest, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad,
@@ -216,7 +216,7 @@ impl DirectorRefresh {
         self.expire();
     }
 
-    fn accept(&mut self, result: JobResult<Box<dyn std::any::Any + Send>>) {
+    fn accept(&mut self, result: JobResult<ExternalOutcome>) {
         let JobResult {
             kind,
             key,
@@ -225,7 +225,16 @@ impl DirectorRefresh {
             ..
         } = result;
         let output = match outcome {
-            Ok(value) => match value.downcast::<FactoryJobOutput>() {
+            // A full lane dropped the job before it ran (only refresh jobs):
+            // free its slot and retry next pass. A coalesced rerun of the
+            // same key may still report Done later; the generation check
+            // below ignores it unless it is the one in flight.
+            Ok(ExternalOutcome::Dropped) => {
+                tracing::debug!(kind, key = %key, generation, "factory refresh job dropped by a full lane");
+                self.fail(&key, generation);
+                return;
+            }
+            Ok(ExternalOutcome::Done(value)) => match value.downcast::<FactoryJobOutput>() {
                 Ok(output) => *output,
                 Err(_) => {
                     tracing::debug!(kind, key = %key, "another child's external job result ignored");

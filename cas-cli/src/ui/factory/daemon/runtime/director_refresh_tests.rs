@@ -334,3 +334,40 @@ fn c2_ci_status_runs_on_the_external_lane() {
         assert_eq!(read.lane, super::super::jobs::Lane::Read, "{}", read.key);
     }
 }
+
+/// C3 round-3 review: a lane can drop a queued snapshot and then still run
+/// the key's coalesced rerun. C2 frees its slot on Dropped and applies a
+/// later Done only when its generation is the one in flight.
+#[test]
+fn c2_dropped_then_done_applies_only_the_current_generation() {
+    use super::super::jobs::JobResult;
+    use super::super::prompt_queue_jobs::ExternalOutcome;
+    let result = |generation, outcome| JobResult {
+        kind: super::super::factory_jobs::DIRECTOR_SNAPSHOT,
+        key: super::super::factory_jobs::DIRECTOR_SNAPSHOT_KEY.to_string(),
+        generation,
+        outcome: Ok(outcome),
+        elapsed: Duration::ZERO,
+        writer_wait: Duration::ZERO,
+        over_budget: false,
+    };
+    let mut refresh = DirectorRefresh::new();
+    refresh.director.start(1);
+    refresh.accept(result(1, ExternalOutcome::Dropped));
+    assert!(!refresh.director.busy(), "Dropped frees the slot");
+
+    // A later rerun for generation 1 reports Done while generation 2 runs.
+    refresh.director.start(2);
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let load = || {
+        Box::new(super::super::factory_jobs::FactoryJobOutput::DirectorSnapshot(
+            daemon.app.director_refresh_request().read(None),
+        )) as Box<dyn std::any::Any + Send>
+    };
+    refresh.accept(result(1, ExternalOutcome::Done(load())));
+    assert!(refresh.director.ready.is_none(), "a stale generation is ignored");
+    refresh.accept(result(2, ExternalOutcome::Done(load())));
+    assert!(refresh.director.ready.is_some(), "the current generation applies");
+}

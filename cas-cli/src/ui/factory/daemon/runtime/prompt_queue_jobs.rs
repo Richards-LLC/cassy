@@ -1217,11 +1217,14 @@ impl QueueJobs {
             && let Some(owner) = self.job_owners.get_mut(dropped_key)
             && let Some(generation) = owner.outstanding.pop_front()
         {
-            let (kind, external) = (owner.kind, owner.external);
+            // The lane requeues a coalesced rerun of the dropped key (jobs.rs
+            // release_key), which still runs and reports. Only a key with
+            // nothing left to run is reported Dropped (cas-4272 review 1).
             if owner.outstanding.is_empty() {
+                let (kind, external) = (owner.kind, owner.external);
                 self.job_owners.remove(dropped_key);
+                self.report_dropped(dropped_key.clone(), kind, generation, external);
             }
-            self.report_dropped(dropped_key.clone(), kind, generation, external);
         }
     }
 
@@ -1454,12 +1457,26 @@ pub(crate) fn defer_stamp(
     persisted
 }
 
+/// Tests: fail the next N stamp attempts on the job lane, before the store
+/// is touched, to drive the exhausted-retries path for real.
+#[cfg(test)]
+pub(crate) static INJECTED_STAMP_FAILURES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Run one stamp, retrying a busy store a few times on the writer. Returns
 /// the last error when every attempt failed.
 fn apply_stamp_with_retry(cas_dir: &Path, row: i64, recipient: &str, stamp: &QueueStamp) -> Option<String> {
     let mut pause = Duration::from_millis(100);
     let mut last = None;
     for attempt in 1..=4 {
+        #[cfg(test)]
+        if INJECTED_STAMP_FAILURES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1))
+            .is_ok()
+        {
+            last = Some("injected stamp failure".to_string());
+            continue;
+        }
         let result = job_thread_prompt_queue(cas_dir)
             .map_err(|error| error.to_string())
             .and_then(|queue| stamp.apply(queue.as_ref(), row, recipient).map_err(|error| error.to_string()));

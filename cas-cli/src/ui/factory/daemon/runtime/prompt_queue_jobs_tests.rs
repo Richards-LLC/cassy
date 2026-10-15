@@ -663,19 +663,25 @@ fn an_exhausted_stamp_is_deferred_not_dropped() {
     let (_root, cas_dir) = project();
     let row_id = enqueue(&cas_dir, "worker-a", "deferred");
     let token = store_claim(&cas_dir, row_id, "worker-a").unwrap().unwrap();
-    let persisted = defer_stamp(
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    // Every retry on the job lane fails; the stamp must still land.
+    INJECTED_STAMP_FAILURES.store(4, Ordering::Release);
+    jobs.stamp(
         &cas_dir,
         row_id,
         "worker-a",
-        &QueueStamp::ReleaseClaim { claim_token: token },
-        "store busy",
+        QueueStamp::ReleaseClaim { claim_token: token },
     );
-    assert_ne!(persisted, super::super::store_worker::Persisted::Dropped);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while claim_source(&cas_dir, row_id, "worker-a").is_some() {
-        assert!(Instant::now() < deadline, "the deferred release never landed");
-        std::thread::sleep(Duration::from_millis(5));
+        jobs.apply_completions();
+        assert!(Instant::now() < deadline, "the exhausted release never landed");
+        std::thread::sleep(Duration::from_millis(10));
     }
+    assert_eq!(INJECTED_STAMP_FAILURES.load(Ordering::Acquire), 0, "all four retries failed");
+    settle(&mut jobs, |_| writer.ran().len() == 1);
+    assert_eq!(writer.ran()[0].0, "QueueStamp", "the job ran once on the lane; the StoreWorker landed it");
 }
 
 fn refresh_spec(kind: &'static str, key: &str, lane: Lane, generation: u64) -> super::super::jobs::JobSpec {
@@ -762,11 +768,11 @@ fn a_dropped_job_is_reported_to_its_owner() {
     release.send(()).unwrap();
 }
 
-/// cas-4272: a drop is reported with the dropped job's own generation, a
-/// coalesced rerun of the same key still reports Done with its generation
-/// afterwards, and the owner map forgets keys with nothing outstanding.
+/// cas-4272: a dropped key whose coalesced rerun is requeued is not
+/// reported Dropped; the rerun reports Done with its own generation, and the
+/// owner map forgets keys with nothing outstanding.
 #[test]
-fn a_drop_names_its_own_generation_and_a_later_rerun_still_reports() {
+fn a_dropped_key_with_a_requeued_rerun_reports_only_its_rerun() {
     let writer = TestWriter::start(false);
     let mut jobs = QueueJobs::start_with_capacity(
         LaneWiring {
@@ -796,10 +802,10 @@ fn a_drop_names_its_own_generation_and_a_later_rerun_still_reports() {
         Box::new(12_u64)
     });
     jobs.apply_completions();
-    let dropped = jobs.take_external_completions();
-    assert_eq!(dropped.len(), 1);
-    assert_eq!((dropped[0].key.as_str(), dropped[0].generation), (probe, 10));
-    assert!(matches!(dropped[0].outcome, Ok(ExternalOutcome::Dropped)));
+    assert!(
+        jobs.take_external_completions().is_empty(),
+        "the dropped key's coalesced rerun is requeued, so no Dropped is reported"
+    );
 
     release.send(()).unwrap();
     let mut done = Vec::new();

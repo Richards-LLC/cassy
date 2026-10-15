@@ -126,6 +126,8 @@ pub fn warn_credentials_file_for_cli() -> Option<(PathBuf, String)> {
         "Violet credentials file refused: {}; require a regular file with current-user ownership, no group/other permissions and at most 1 MiB; correct the owner if needed, then run chmod 600 '{quoted}'",
         path.display()
     );
+    // Avoid an additional tracing notice after printing the CLI remedy.
+    warn_once(&format!("credentials:{}", path.display()), || {});
     warn_once(&format!("cli-credentials:{}", path.display()), || {
         eprintln!("warning: {warning}")
     });

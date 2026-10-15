@@ -133,8 +133,11 @@ fn cas_678d_round4_proxy_and_explicit_grants_survive_native_scope() {
         for (denial, allowed) in [("", true), ("supervisor_only_mcp=['violet']", false), ("supervisor_only_env=['VIOLET_SLACK_TOKEN_PROXY_FIXTURE']",false)] {
             std::fs::write(root.join("config.toml"), format!("[factory]\n{denial}\n{}", if source == "explicit" { "worker_credential_env=['VIOLET_SLACK_TOKEN_PROXY_FIXTURE']\n" } else { "" })).unwrap();
             for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+                std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_SELECTED=selected-value\n").unwrap();
                 let configs = Mux::factory_pane_configs(&MuxConfig { cwd: home.join("project"), cas_root: Some(root.clone()), workers:1, worker_cli: cli, include_director:false, ..Default::default() });
                 let mut pane = configs.into_iter().find(|(name,_)| name == "worker-1").unwrap().1;
+                // Authorized proxy values may arrive after config materialization.
+                std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_PROXY_FIXTURE=proxy-value\nVIOLET_SLACK_TOKEN_SELECTED=selected-value\n").unwrap();
                 pane.hydrate_violet_environment();
                 assert_eq!(env_value(&pane,"VIOLET_SLACK_TOKEN_PROXY_FIXTURE"), if allowed {Some("proxy-value")} else {None}, "{source} {denial} {cli:?}");
                 if !allowed { assert!(pane.env_remove.contains(&"VIOLET_SLACK_TOKEN_PROXY_FIXTURE".into())); }

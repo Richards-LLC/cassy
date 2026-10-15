@@ -264,9 +264,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         deployed_origins: &qa.deployed_origins,
     };
     let tier = evidence_tier(&reasons, terminal_render);
-    // Waivers authorize missing implementer ledger evidence only at the exact
-    // delivered commit. Independent QA PASS and ancestor waivers do not do so.
-    let waiver = if matches!(tier, EvidenceTier::Ledger { .. }) {
+    // A supervisor waiver covers implementer evidence at this exact delivered
+    // commit, including bundles (GH #1199). Independent QA PASS and ancestor
+    // waivers do not do so; skip/focus markers still run below.
+    let waiver = if !matches!(tier, EvidenceTier::None) {
         cas_store::satisfying_qa_passes(cas_root, &task.id)
             .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
             .into_iter()
@@ -286,8 +287,9 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         &paths.task_dirs(&task.id)[0],
     )?;
     if let Some(waiver) = waiver {
+        let evidence = if matches!(tier, EvidenceTier::Bundle) { "bundle" } else { "ledger" };
         pass.notes.push(format!(
-            "QA evidence ledger waived: head={} waiver={} supervisor={} reason={}",
+            "QA evidence {evidence} waived: head={} waiver={} supervisor={} reason={}",
             head,
             waiver.id,
             waiver.issuer_agent_id.as_deref().unwrap_or(""),

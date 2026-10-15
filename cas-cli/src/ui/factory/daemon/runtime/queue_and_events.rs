@@ -1,6 +1,10 @@
 use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
 
+#[path = "message_attention.rs"]
+mod message_attention;
+use message_attention::MessageAttention;
+
 #[cfg(test)]
 #[path = "message_attention_tests.rs"]
 mod message_attention_tests;
@@ -3117,6 +3121,10 @@ impl FactoryDaemon {
                 return;
             }
         };
+        let decisions = self.message_attention_decisions(queue, &candidates);
+        let candidates: Vec<_> = candidates.into_iter()
+            .filter(|row| decisions.get(&row.id) == Some(&MessageAttention::Needed))
+            .collect();
 
         // cas-d9a8: the same scan already knows which supervisor-addressed
         // messages have gone unread past their threshold. Bouncing to the
@@ -3139,6 +3147,10 @@ impl FactoryDaemon {
                     && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(
                         &queued.source,
                     )
+                    && !crate::prompt_revalidation::is_supervisor_wake_envelope(&queued.prompt)
+                    && crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt).is_none()
+                    && crate::prompt_revalidation::parse_blocker_envelope(&queued.prompt).is_none()
+                    && crate::prompt_revalidation::parse_verification_dispatch_envelope(&queued.prompt).is_none()
             })
             .collect();
         if let Some(oldest) = unread_for_supervisor.iter().min_by_key(|queued| queued.id) {
@@ -3251,7 +3263,11 @@ impl FactoryDaemon {
             };
         let supervisor_name = self.app.supervisor_name().to_string();
         let now = chrono::Utc::now();
+        let decisions = self.message_attention_decisions(queue, &candidates);
         for queued in candidates {
+            if decisions.get(&queued.id) != Some(&MessageAttention::Needed) {
+                continue;
+            }
             let target = queued.target.as_str();
             if target == "supervisor" || target.eq_ignore_ascii_case(&supervisor_name) {
                 continue;
@@ -3527,6 +3543,21 @@ impl FactoryDaemon {
                     );
                 }
                 NormalDeliveryProbeAction::FlagSupervisor => {
+                    if let Ok(Some(row)) = queue.queued_prompt(row_id) {
+                        match self.message_attention_decisions(queue, &[row]).get(&row_id) {
+                            Some(MessageAttention::Satisfied) => {
+                                self.normal_delivery_probes.remove(&row_id);
+                                continue;
+                            }
+                            Some(MessageAttention::Needed) => {}
+                            _ => {
+                                if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
+                                    probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     // A supervisor pane is not a worker-health incident. The
                     // probe was created via an alias, so guard both the pane
                     // and addressed target before emitting worker wording.

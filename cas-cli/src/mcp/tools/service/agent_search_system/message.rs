@@ -3700,14 +3700,18 @@ fn pending_deadline_narrative(
         );
     }
     // cas-a1ed: a row the daemon selected and then held behind a declined
-    // wake is not on the never-selected deadline either; the selection sweep
-    // does not touch it while its recipient is in the session.
+    // wake is not on the never-selected deadline; no sweep abandons it while
+    // its recipient stays in the session. The same reason also marks a
+    // delivery the daemon is retrying (an operator draft in the composer),
+    // and that retry budget can still abandon the row, so say both.
     if stage == DeliveryStage::Gated
         && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
     {
         return format!(
-            "held for a busy recipient: still pending while it stays in the session — the pane nudge waits; \
-             the message surfaces at the recipient's next tool call or turn start — {}\n",
+            "held: still pending — a wake held for a busy recipient surfaces at its next tool \
+             call or turn start and does not expire while it stays in the session; a delivery \
+             being retried (for example behind an operator draft) is abandoned once its \
+             {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {}\n",
             pending_detail.unwrap_or("no detail was recorded")
         );
     }
@@ -3840,9 +3844,12 @@ mod pending_deadline_tests {
                 Some(waited),
             );
             assert!(line.contains("still pending"), "{line}");
-            assert!(line.contains("next tool call"), "{line}");
+            assert!(line.contains("next tool"), "{line}");
             assert!(!line.contains("abandoned as undeliverable"), "{line}");
             assert!(!line.contains("PAST"), "{line}");
+            // Review M2: the composer-draft retry shares the reason and can
+            // still be abandoned; the line must not promise otherwise.
+            assert!(line.contains("retry budget"), "{line}");
         }
     }
 

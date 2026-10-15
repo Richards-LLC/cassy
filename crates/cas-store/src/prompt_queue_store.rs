@@ -253,6 +253,22 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.processed_at DESC,
                                    q.id DESC";
 
+/// cas-a1ed: the transport claim a tool boundary may take over. The daemon
+/// stamps `deferred_inbox_at` only after it wrote the Teams copy and left the
+/// row pending because the wake was declined; that handoff will not finish
+/// until the recipient's turn ends. A PTY inject (a Codex or OpenCode
+/// recipient, the Teams ENOENT fallback, any urgent interrupt) never stamps
+/// it, so its claim stays with the transport even while its Delivered stamp
+/// lands late (cas-9568: a tool boundary never replays an injected turn).
+macro_rules! held_teams_claim_sql {
+    () => {
+        "seen.source = 'transport_claimed'
+         AND q.transport_delivered_at IS NULL
+         AND q.deferred_inbox_at IS NOT NULL
+         AND q.urgent = 0"
+    };
+}
+
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
 ///
 /// cas-b5ad: a row the daemon claimed for its transport, but whose handoff it
@@ -264,15 +280,19 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
 ///
 /// cas-a1ed: the claim may predate the current turn. Messages 4189870 and
 /// 4189924 were claimed in one turn, the next turn began without their Teams
-/// copies, and a claim-after-turn-start condition hid both for good. The hook
-/// leaves out a row whose body is the turn's own prompt, and a Teams copy
-/// rendered as a turn is receipted when that turn starts.
-const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
+/// copies, and a claim-after-turn-start condition hid both for good. Only a
+/// claim the daemon parked behind a declined wake is eligible
+/// (`held_teams_claim_sql!`); a claim whose body is being typed into the pane
+/// is not. The hook leaves out a row whose body is the turn's own prompt, and
+/// a Teams copy rendered as a turn is receipted when that turn starts.
+const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str = concat!(
     "AND (((seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
            AND (q.transport_delivered_at IS NULL
                 OR julianday(q.transport_delivered_at) > julianday(?)))
-          OR (seen.source = 'transport_claimed'
-              AND q.transport_delivered_at IS NULL))";
+          OR (",
+    held_teams_claim_sql!(),
+    "))"
+);
 
 /// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
 /// The daemon's claim (`transport_claimed`) hides a handed-off row from every
@@ -287,13 +307,15 @@ const WAKE_NAMED_RECEIPT_SQL: &str = "AND (seen.prompt_id IS NULL
 /// already recorded: the preceding injected turn is precisely the delivery
 /// being recovered from. (cas-9568)
 ///
-/// cas-a1ed: an unfinished transport claim is not a handoff. When the hook
-/// cannot place the current turn (its first line is deep in a long
-/// transcript), a row the daemon claimed and then held behind a declined wake
-/// must still reach the busy recipient.
-const UNSEEN_RECIPIENT_RECEIPT_SQL: &str =
-    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_claimed')
-     AND q.transport_delivered_at IS NULL";
+/// cas-a1ed: a claim held behind a declined wake (`held_teams_claim_sql!`)
+/// is not a handoff. When the hook cannot place the current turn (its first
+/// line is deep in a long transcript), such a row must still reach the busy
+/// recipient.
+const UNSEEN_RECIPIENT_RECEIPT_SQL: &str = concat!(
+    "AND ((seen.prompt_id IS NULL AND q.transport_delivered_at IS NULL) OR (",
+    held_teams_claim_sql!(),
+    "))"
+);
 
 /// cas-dcf2 (GH #390): may later activity be recorded as a weak, visibly
 /// non-confirming indication that a delivered message might have been seen?
@@ -8523,6 +8545,8 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-1", "the turn's own prompt", session)
             .unwrap();
         assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
+        // The daemon wrote the Teams copy and deferred the wake (cas-a1ed).
+        store.record_deferred_inbox(before, 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let turn_started_at = Utc::now();
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8530,6 +8554,7 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
             .unwrap();
         assert!(store.claim_recipient_transport(decision, "worker-1").unwrap());
+        store.record_deferred_inbox(decision, 0).unwrap();
 
         let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
         assert_eq!(
@@ -8581,6 +8606,7 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
             .unwrap();
         assert!(store.claim_recipient_transport(claimed, "worker-1").unwrap());
+        store.record_deferred_inbox(claimed, 0).unwrap();
         let handed_off = store
             .enqueue_with_session("supervisor", "worker-1", "typed into the pane", session)
             .unwrap();
@@ -8599,6 +8625,89 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "surfaced once"
+        );
+    }
+
+    /// cas-a1ed review H1: a claim whose body is being typed into the pane is
+    /// not a held Teams copy. The daemon claims, PTY-injects (a Codex
+    /// recipient, or an urgent interrupt to Claude) and stamps Delivered
+    /// afterwards, possibly late. No tool boundary may take that claim over,
+    /// with or without a known turn, or the body is shown twice (cas-9568).
+    #[test]
+    fn a_claim_held_during_a_pty_inject_is_never_surfaced_by_a_tool_boundary_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let turn_started_at = Utc::now() - chrono::Duration::minutes(5);
+        let injecting = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into a Codex pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(injecting, "worker-1").unwrap());
+        let urgent = store
+            .enqueue_urgent("supervisor", "worker-1", "urgent redirect", Some(session), None, None, true)
+            .unwrap();
+        assert!(store.claim_recipient_transport(urgent, "worker-1").unwrap());
+        // Even a stray deferral stamp cannot hand an urgent row to the hook.
+        store.record_deferred_inbox(urgent, 0).unwrap();
+
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty(),
+            "the no-turn drain leaves injecting claims to the transport"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "the per-turn drain leaves injecting claims to the transport"
+        );
+        for id in [injecting, urgent] {
+            assert_eq!(
+                store.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+                Some(SurfacingSource::TransportClaimed)
+            );
+        }
+        // The late stamp then lands; the row stays out of every hook drain.
+        store.mark_transport_delivered(injecting).unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// cas-a1ed review L1: once the cas-1f0c time fallback re-sent a held
+    /// row's body as a Teams copy, neither tool-boundary drain renders it.
+    #[test]
+    fn a_held_claim_whose_body_fallback_was_sent_is_not_surfaced_again_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+        store.record_deferred_inbox(id, 0).unwrap();
+        assert!(store.claim_teams_body_fallback(id, "worker-1").unwrap());
+
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after(
+                    "worker-1",
+                    Some(session),
+                    10,
+                    Utc::now() - chrono::Duration::minutes(5),
+                )
+                .unwrap()
+                .is_empty()
         );
     }
 

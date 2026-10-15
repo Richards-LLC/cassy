@@ -4,7 +4,7 @@
 //! receipts between hook processes and the MCP server. Prompt bodies are never
 //! persisted here or sent to attribution/memory ingestion.
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use fs2::FileExt;
@@ -34,6 +34,9 @@ struct TurnState {
     /// their later tool boundaries stop re-checking the named rows.
     #[serde(default)]
     pointers_resolved: Vec<String>,
+    /// cas-a1ed: resume point of the deep turn-start scan.
+    #[serde(default)]
+    turn_scan: Option<TurnScanCache>,
 }
 
 struct Receipt {
@@ -120,14 +123,34 @@ fn latest_turn_with_start(path: &Path, session: &str) -> Option<TranscriptTurn> 
     latest_turn_within(path, session, TAIL_BYTES)
 }
 
-/// The newest turn start in the transcript's last `limit` bytes, read
-/// backwards a [`TAIL_BYTES`] block at a time so a turn near the end costs one
-/// block (cas-a1ed).
+/// The newest turn start in the transcript's last `limit` bytes (cas-a1ed).
 fn latest_turn_within(path: &Path, session: &str, limit: u64) -> Option<TranscriptTurn> {
+    scan_turn_starts(path, session, |size| size.saturating_sub(limit))
+        .and_then(|scan| scan.hit)
+        .map(|(turn, _)| turn)
+}
+
+/// One backwards scan for the newest turn start at or after a floor.
+struct TurnStartScan {
+    /// The newest turn start found, with the byte offset of its line.
+    hit: Option<(TranscriptTurn, u64)>,
+    /// Where a later scan may resume: the start of the last line, which may
+    /// still have been mid-write.
+    resume_from: u64,
+}
+
+/// Read backwards from the end of the transcript to `floor(size)`, a
+/// [`TAIL_BYTES`] block at a time, so a turn near the end costs one block.
+fn scan_turn_starts(
+    path: &Path,
+    session: &str,
+    floor: impl FnOnce(u64) -> u64,
+) -> Option<TurnStartScan> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
-    let floor = size.saturating_sub(limit);
+    let floor = floor(size).min(size);
     let mut end = size;
+    let mut resume_from = None;
     // The start of a line that began in an earlier, not yet read, block.
     let mut carry: Vec<u8> = Vec::new();
     while end > floor {
@@ -142,6 +165,7 @@ fn latest_turn_within(path: &Path, session: &str, limit: u64) -> Option<Transcri
             block.remove(0);
         }
         block.extend_from_slice(&carry);
+        // `block` now holds the bytes from `start` on.
         let complete_from = if starts_line {
             0
         } else {
@@ -154,23 +178,108 @@ fn latest_turn_within(path: &Path, session: &str, limit: u64) -> Option<Transcri
                 }
             }
         };
-        for line in block[complete_from..].split(|byte| *byte == b'\n').rev() {
-            if let Some(turn) = turn_start_line(line, session) {
-                return Some(turn);
+        let mut line_end = block.len();
+        loop {
+            let line_start = block[complete_from..line_end]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(complete_from, |newline| complete_from + newline + 1);
+            let at = start + line_start as u64;
+            resume_from.get_or_insert(at);
+            if let Some(turn) = turn_start_line(&block[line_start..line_end], session) {
+                return Some(TurnStartScan {
+                    hit: Some((turn, at)),
+                    resume_from: resume_from.unwrap_or(at),
+                });
             }
+            if line_start == complete_from {
+                break;
+            }
+            line_end = line_start - 1;
         }
         carry = block[..complete_from.saturating_sub(1)].to_vec();
         end = start;
     }
-    None
+    Some(TurnStartScan {
+        hit: None,
+        resume_from: resume_from.unwrap_or(floor),
+    })
+}
+
+/// cas-a1ed review M1: where the last deep turn-start scan of this session's
+/// transcript stopped, so the next one reads only the bytes added since.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct TurnScanCache {
+    path: String,
+    /// Bytes before this offset have been scanned.
+    scanned_to: u64,
+    /// Offset of the newest turn-start line found so far.
+    turn_at: Option<u64>,
+}
+
+/// The current turn when its first line is outside the tail: scan back up to
+/// [`TURN_START_SCAN_LIMIT_BYTES`] once, then only what was appended since.
+fn deep_turn_start(
+    path: &Path,
+    session: &str,
+    cache: &mut Option<TurnScanCache>,
+) -> Option<TranscriptTurn> {
+    let key = path.to_string_lossy().into_owned();
+    let size = fs::metadata(path).ok()?.len();
+    let previous = cache
+        .as_ref()
+        .filter(|scan| scan.path == key && scan.scanned_to <= size)
+        .cloned();
+    let scan = scan_turn_starts(path, session, |size| match &previous {
+        Some(scan) => scan.scanned_to,
+        None => size.saturating_sub(TURN_START_SCAN_LIMIT_BYTES),
+    })?;
+    let (turn, turn_at) = match scan.hit {
+        Some((turn, at)) => (Some(turn), Some(at)),
+        None => {
+            let at = previous.as_ref().and_then(|scan| scan.turn_at);
+            (at.and_then(|at| turn_line_at(path, session, at)), at)
+        }
+    };
+    *cache = Some(TurnScanCache {
+        path: key,
+        scanned_to: scan.resume_from,
+        turn_at,
+    });
+    turn
+}
+
+/// Re-read the turn-start line at `at`; prompt text is never cached.
+fn turn_line_at(path: &Path, session: &str, at: u64) -> Option<TranscriptTurn> {
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(at)).ok()?;
+    let mut line = Vec::new();
+    std::io::BufReader::new(file.take(TURN_START_SCAN_LIMIT_BYTES))
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    turn_start_line(&line, session)
+}
+
+/// Whether a line can be a turn start: its message content is a string. Tool
+/// results are user entries too, but their content is an array, so they are
+/// skipped without being parsed.
+fn may_be_turn_start(line: &str) -> bool {
+    const CONTENT: &str = "\"content\":";
+    line.find("\"message\":")
+        .and_then(|message| {
+            let rest = &line[message..];
+            rest.find(CONTENT).map(|content| &rest[content + CONTENT.len()..])
+        })
+        .is_some_and(|value| value.trim_start().starts_with('"'))
 }
 
 /// Whether one transcript line is a real external user message of `session`.
 fn turn_start_line(line: &[u8], session: &str) -> Option<TranscriptTurn> {
     let line = String::from_utf8_lossy(line);
-    // Most of a long turn is tool output; skip lines that cannot be a user entry
-    // before parsing them.
-    if !line.contains("\"user\"") {
+    if !may_be_turn_start(&line) {
         return None;
     }
     let line = line.trim_end_matches('\r');
@@ -287,7 +396,7 @@ pub(crate) fn fallback_context_within(
             turn.as_ref()
         } else {
             deep = input.transcript_path.as_deref().and_then(|path| {
-                latest_turn_within(Path::new(path), &input.session_id, TURN_START_SCAN_LIMIT_BYTES)
+                deep_turn_start(Path::new(path), &input.session_id, &mut receipt.state.turn_scan)
             });
             deep.as_ref()
         };
@@ -413,6 +522,62 @@ mod tests {
         }
     }
 
+    /// cas-a1ed review M1: the deep scan reads the transcript back once and
+    /// afterwards only the bytes appended since; tool results are skipped
+    /// without being parsed.
+    #[test]
+    fn the_deep_turn_scan_resumes_where_it_stopped_cas_a1ed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let line = |key: &str, content: &str| {
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"s\",\"promptId\":\"{key}\",\"timestamp\":\"2026-10-15T22:00:00Z\",\"message\":{{\"content\":{content}}}}}\n"
+            )
+        };
+        let tool = line("tool", &format!("[{{\"type\":\"tool_result\",\"content\":\"{}\"}}]", "x".repeat(4000)));
+        // A turn start padded to exactly one tool line, to overwrite one in place.
+        let stale_prefix = line("stale", "\"\"");
+        let stale = line("stale", &format!("\"{}\"", " ".repeat(tool.len() - stale_prefix.len())));
+        assert_eq!(stale.len(), tool.len());
+        let mut body = line("deep", "\"start cas-223f\"");
+        let first_tool = body.len();
+        body.push_str(&tool.repeat(200));
+        fs::write(&path, &body).unwrap();
+
+        let mut cache = None;
+        let found = deep_turn_start(&path, "s", &mut cache).unwrap();
+        assert_eq!(found.0, "deep");
+        let scan = cache.clone().unwrap();
+        assert_eq!(scan.scanned_to, body.len() as u64);
+        assert_eq!(scan.turn_at, Some(0));
+
+        // Rewrite an already-scanned line into a newer turn start, then append.
+        {
+            use std::io::Write as _;
+            let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(first_tool as u64)).unwrap();
+            file.write_all(stale.as_bytes()).unwrap();
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(tool.repeat(10).as_bytes()).unwrap();
+        }
+        let resumed = deep_turn_start(&path, "s", &mut cache).unwrap();
+        assert_eq!(resumed.0, "deep", "only appended bytes are read again");
+        assert_eq!(resumed.1, "start cas-223f", "the prompt is re-read from its line");
+        assert!(cache.as_ref().unwrap().scanned_to > scan.scanned_to);
+        let mut fresh = None;
+        assert_eq!(deep_turn_start(&path, "s", &mut fresh).unwrap().0, "stale");
+
+        // A turn appended later is found in the new bytes.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line("newer", "\"next\"").as_bytes())
+            .unwrap();
+        assert_eq!(deep_turn_start(&path, "s", &mut cache).unwrap().0, "newer");
+        assert!(!may_be_turn_start(&tool), "a tool result is not parsed");
+    }
+
     #[test]
     fn prompt_hook_receipt_recovers_silence_and_deduplicates() {
         let _guard = crate::hooks::test_env_lock();
@@ -492,6 +657,7 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-7bfa", "P0: rebase now", "sess-7bfa")
             .unwrap();
         assert!(queue.claim_recipient_transport(id, "worker-7bfa").unwrap());
+        queue.record_deferred_inbox(id, 0).unwrap();
         queue
             .record_pending_reason(
                 id,
@@ -526,6 +692,7 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-7bfa", "P1: and re-run", "sess-7bfa")
             .unwrap();
         assert!(queue.claim_recipient_transport(second, "worker-7bfa").unwrap());
+        queue.record_deferred_inbox(second, 0).unwrap();
         let mut type_only = teams_input(&transcript, "unused");
         type_only.agent_id = None;
         let mail = fallback_context(dir.path(), &type_only)
@@ -625,6 +792,7 @@ mod tests {
             .enqueue_with_session("worker-7bfa", "supervisor", "ready: cas-x", "sess-7bfa")
             .unwrap();
         assert!(queue.claim_recipient_transport(id, "supervisor").unwrap());
+        queue.record_deferred_inbox(id, 0).unwrap();
 
         assert!(
             fallback_context(dir.path(), &teams_input(&transcript, "b81f0c2e9d4a7735e")).is_none(),

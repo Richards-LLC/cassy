@@ -1262,9 +1262,7 @@ fn cas_1f0c_a_broadcast_pointer_turn_without_a_tool_call_still_delivers_once() {
 
     let pointer_turn = worker.next_teammate_turn_without_tool_call().unwrap();
     assert!(!pointer_turn.contains(body), "{pointer_turn}");
-    // cas-a1ed: a later tool call would surface the claimed row; this turn
-    // makes none, so only the time fallback can reach it.
-    let quiet = worker.start_turn("continuing my work");
+    let quiet = worker.take_turn("continuing my work");
     assert!(!quiet.contains(body), "no hook path reaches the row: {quiet}");
 
     let candidates = store
@@ -1365,6 +1363,7 @@ fn a_never_silent_worker_sees_a_claimed_message_at_its_next_tool_boundary_cas_b5
     store
         .record_wake_gate_decline(id, "pane has not been silent long enough")
         .unwrap();
+    store.record_deferred_inbox(id, 0).unwrap();
 
     let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
     let Some(HookSpecificOutput::PostToolUse {
@@ -1399,6 +1398,7 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         .enqueue_with_session("supervisor", WORKER, "Take (B), but keep the flag operator-only.", SESSION)
         .unwrap();
     assert!(store.claim_recipient_transport(shown, WORKER).unwrap());
+    store.record_deferred_inbox(shown, 0).unwrap();
     // The tool boundary surfaced it mid-turn (cas-b5ad).
     let surfaced = store
         .surface_unseen_for_recipient_delivered_after(
@@ -1409,21 +1409,23 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         )
         .unwrap();
     assert_eq!(surfaced.len(), 1);
-    // Claimed for the teams transport and never surfaced by a hook.
-    let unseen = store
-        .enqueue_with_session("supervisor", WORKER, "Also rebase onto the new tip.", SESSION)
-        .unwrap();
-    assert!(store.claim_recipient_transport(unseen, WORKER).unwrap());
 
     worker.teams_inbox.push_back(format!(
         "[cas #{shown} supervisor-authored 40s first]\n\nTake (B), but keep the flag operator-only."
     ));
-    // cas-a1ed: no tool call in this turn; one would surface `unseen` (an
-    // unfinished claim), and its copy would then rightly read as shown.
-    let repeat = worker.next_teammate_turn_without_tool_call().unwrap();
+    let repeat = worker.next_teammate_turn().unwrap();
     assert!(repeat.contains(&format!("#{shown}")), "{repeat}");
     assert!(repeat.contains("already shown"), "{repeat}");
     assert_eq!(repeat.matches("Take (B), but keep the flag operator-only.").count(), 1, "{repeat}");
+
+    // Claimed for the teams transport and never surfaced by a hook. It is
+    // claimed after the last tool call: since cas-a1ed a tool call would
+    // surface a held claim, and its copy would then rightly read as shown.
+    let unseen = store
+        .enqueue_with_session("supervisor", WORKER, "Also rebase onto the new tip.", SESSION)
+        .unwrap();
+    assert!(store.claim_recipient_transport(unseen, WORKER).unwrap());
+    store.record_deferred_inbox(unseen, 0).unwrap();
 
     worker.teams_inbox.push_back(format!(
         "[cas #{unseen} supervisor-authored 5s first]\n\nAlso rebase onto the new tip."
@@ -1518,6 +1520,7 @@ impl BusyClaudeWorker {
         let id = self.store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
         assert!(self.store.claim_recipient_transport(id, WORKER).unwrap());
         self.store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
+        self.store.record_deferred_inbox(id, 0).unwrap();
         id
     }
 
@@ -1617,4 +1620,31 @@ fn a_teams_copy_rendered_as_a_turn_is_recorded_and_not_shown_again_cas_a1ed() {
     worker.start_turn("turn-3", chrono::Utc::now(), "continue");
     let later = worker.call_tool(1024).unwrap_or_default();
     assert!(!later.contains(body), "a rendered copy is not shown a second time: {later}");
+}
+
+/// cas-a1ed review H1: a row whose body the daemon is typing into the pane
+/// (claimed, not yet stamped Delivered) is not a held Teams copy. A tool call
+/// deep in a long turn, where the hook cannot place the turn, must not show it
+/// a second time.
+#[test]
+fn a_tool_call_does_not_replay_a_body_being_typed_into_the_pane_cas_a1ed() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let mut worker = BusyClaudeWorker::new();
+    worker.start_turn("turn-1", chrono::Utc::now() - chrono::Duration::minutes(25), "resume cas-d757");
+    assert!(worker.call_tool(512 * 1024).is_none());
+
+    let body = "Urgent: stop and rebase now.";
+    let id = worker
+        .store
+        .enqueue_urgent("supervisor", WORKER, body, Some(SESSION), None, None, true)
+        .unwrap();
+    assert!(worker.store.claim_recipient_transport(id, WORKER).unwrap());
+    let plain = worker.store.enqueue_with_session("supervisor", WORKER, "typed via PTY", SESSION).unwrap();
+    assert!(worker.store.claim_recipient_transport(plain, WORKER).unwrap());
+
+    let shown = worker.call_tool(16 * 1024).unwrap_or_default();
+    assert!(!shown.contains(body) && !shown.contains("typed via PTY"), "{shown}");
+    assert_eq!(worker.receipt(id), Some(cas_store::SurfacingSource::TransportClaimed));
+    assert_eq!(worker.receipt(plain), Some(cas_store::SurfacingSource::TransportClaimed));
 }

@@ -408,6 +408,7 @@ fn is_worker_activity_event(event: &cas_types::Event) -> bool {
             | EventType::WorkerGitCommit
             | EventType::WorkerVerificationBlocked
             | EventType::WorkerPushBlocked
+            | EventType::WorkerActivity
             | EventType::VerificationStarted
             | EventType::VerificationAdded
             | EventType::TaskNoteAdded

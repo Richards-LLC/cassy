@@ -100,7 +100,7 @@ pub fn event_type_color(event_type: &cas_types::EventType, palette: &Palette) ->
         // Worker activity events
         EventType::WorkerSubagentSpawned => palette.status_info,
         EventType::WorkerSubagentCompleted => palette.status_success,
-        EventType::WorkerFileEdited => palette.text_primary,
+        EventType::WorkerFileEdited | EventType::WorkerActivity => palette.text_primary,
         EventType::WorkerGitCommit => palette.accent,
         EventType::WorkerVerificationBlocked => palette.status_warning,
         EventType::WorkerPushBlocked => palette.status_error,

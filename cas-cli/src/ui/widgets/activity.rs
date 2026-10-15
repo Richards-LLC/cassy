@@ -331,7 +331,7 @@ fn event_category_style(event_type: &EventType, styles: &crate::ui::theme::Style
         | EventType::AuditTrailGap => {
             styles.text_error
         }
-        EventType::WorkerFileEdited | EventType::WorkerGitCommit => styles.text_accent,
+        EventType::WorkerFileEdited | EventType::WorkerGitCommit | EventType::WorkerActivity => styles.text_accent,
     }
 }
 

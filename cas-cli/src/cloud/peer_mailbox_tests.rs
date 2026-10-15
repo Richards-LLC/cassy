@@ -230,6 +230,43 @@ fn peer_wake_intent_is_narrow_and_round_trips_cas_1f25() {
 }
 
 #[test]
+fn existing_split_proposal_remains_an_actionable_peer_ask_cas_1f25() {
+    use crate::cloud::epic_split::{SplitKind, SplitMessage};
+    let split = SplitMessage {
+        kind: SplitKind::Proposal,
+        id: "split-1".into(),
+        epic: "cas-epic".into(),
+        proposer_takes: vec!["cas-mine".into()],
+        peer_takes: vec!["cas-yours".into()],
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+        at: chrono::Utc::now(),
+        reason: None,
+    };
+    let body = split.render();
+    let prompt = render_prompt(&message("pm-split", "supervisor", REPO, &body));
+    assert_eq!(
+        parse_envelope(&prompt).unwrap().kind,
+        Some(PeerMessageKind::Ask)
+    );
+    assert!(
+        prompt.ends_with(&body),
+        "split ingestion still sees its original first line"
+    );
+    let mut fyi = split;
+    fyi.kind = SplitKind::Cancel;
+    assert!(
+        !parse_envelope(&render_prompt(&message(
+            "pm-cancel",
+            "supervisor",
+            REPO,
+            &fyi.render()
+        )))
+        .unwrap()
+        .wakes_idle()
+    );
+}
+
+#[test]
 fn delivery_admits_in_order_once_daemon_stamped_and_never_urgent() {
     let machine = Machine::new();
     machine.register(

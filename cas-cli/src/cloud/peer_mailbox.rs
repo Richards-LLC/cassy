@@ -324,6 +324,13 @@ pub fn parse_envelope(prompt: &str) -> Option<PeerEnvelope> {
 pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let machine = machine_of(message);
     let (kind, body) = split_message_intent(&message.body);
+    // Existing first-line split proposals are typed asks too. Preserve their
+    // protocol body for epic_split::ingest instead of wrapping it in a new tag.
+    let kind = kind.or_else(|| {
+        crate::cloud::epic_split::SplitMessage::parse(body)
+            .filter(|split| split.kind == crate::cloud::epic_split::SplitKind::Proposal)
+            .map(|_| PeerMessageKind::Ask)
+    });
     let envelope = render_envelope(&PeerEnvelope {
         id: message.id.clone(),
         sender_name: message.sender_name.clone(),

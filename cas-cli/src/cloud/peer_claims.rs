@@ -1152,73 +1152,82 @@ mod tests {
     async fn cas_50713_stale_recovery_bounds_reads_by_remaining_budget() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        let server = MockServer::start().await;
-        let key = claim_key("repo", "cas-slow");
-        let mut lock = TaskLease::new(key.clone(), "old".into(), 600);
-        lock.renewed_at = Utc::now() - chrono::Duration::seconds(301);
-        let mut wire_lock = serde_json::to_value(&lock).unwrap();
-        wire_lock["id"] = serde_json::json!("fixture-lock");
-        Mock::given(method("GET"))
-            .and(path(format!("/api/agents/tasks/{key}/lock")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"lock": wire_lock}))
-                    .set_delay(Duration::from_millis(400)),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
+        for slow_pages in [false, true] {
+            let server = MockServer::start().await;
+            let key = claim_key("repo", "cas-slow");
+            let mut lock = TaskLease::new(key.clone(), "old".into(), 600);
+            lock.renewed_at = Utc::now() - chrono::Duration::seconds(301);
+            let mut wire_lock = serde_json::to_value(&lock).unwrap();
+            wire_lock["id"] = serde_json::json!("fixture-lock");
+            Mock::given(method("GET"))
+                .and(path(format!("/api/agents/tasks/{key}/lock")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"lock": wire_lock}))
+                        .set_delay(if slow_pages {
+                            Duration::ZERO
+                        } else {
+                            Duration::from_millis(400)
+                        }),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
             .and(path("/api/agents"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": []})),
+                ResponseTemplate::new(200).set_body_json(if slow_pages {
+                    serde_json::json!({"agents": [], "next_cursor": "2026-10-15T00:00:00Z", "next_cursor_id": "more"})
+                } else { serde_json::json!({"agents": []}) })
+                    .set_delay(if slow_pages { Duration::from_millis(40) } else { Duration::ZERO }),
             )
             .mount(&server)
             .await;
-        let claims = PeerClaims {
-            config: CloudConfig {
-                endpoint: server.uri(),
-                token: Some("test-token".into()),
-                ..Default::default()
-            },
-            project: "repo".into(),
-            label: "here".into(),
-            retired_local: HashMap::new(),
-            budget: None,
-        };
-        let started = Instant::now();
-        let answer = tokio::task::spawn_blocking(move || {
-            let observed = PeerHold {
-                agent_id: "old".into(),
-                holder: None,
-                expires_at: None,
-                live: Some(false),
+            let claims = PeerClaims {
+                config: CloudConfig {
+                    endpoint: server.uri(),
+                    token: Some("test-token".into()),
+                    ..Default::default()
+                },
+                project: "repo".into(),
+                label: "here".into(),
+                retired_local: HashMap::new(),
+                budget: None,
             };
-            claims.take_stale_peer(
-                "cas-slow",
-                ClaimKind::Task,
-                &observed,
-                "new",
-                "new",
-                600,
-                Instant::now() + Duration::from_millis(80),
-            )
-        })
-        .await
-        .unwrap();
-        assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
-        assert!(
-            started.elapsed() < Duration::from_millis(300),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(
-            server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .all(|request| !request.url.path().ends_with("/release"))
-        );
+            let started = Instant::now();
+            let answer = tokio::task::spawn_blocking(move || {
+                let observed = PeerHold {
+                    agent_id: "old".into(),
+                    holder: None,
+                    expires_at: None,
+                    live: Some(false),
+                };
+                claims.take_stale_peer(
+                    "cas-slow",
+                    ClaimKind::Task,
+                    &observed,
+                    "new",
+                    "new",
+                    600,
+                    Instant::now() + Duration::from_millis(80),
+                )
+            })
+            .await
+            .unwrap();
+            assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
+            assert!(
+                started.elapsed() < Duration::from_millis(300),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| !request.url.path().ends_with("/release"))
+            );
+        }
     }
 
     #[test]

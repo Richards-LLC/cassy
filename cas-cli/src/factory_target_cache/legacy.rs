@@ -4,6 +4,9 @@ use super::*;
 pub(super) struct Guard {
     _lane: crate::factory_worker_check::LaneLock,
     locks: Vec<(PathBuf, fs::File)>,
+    worktree: PathBuf,
+    worktree_identity: (u64, u64),
+    target_identity: (u64, u64),
     #[cfg(unix)]
     lease: Option<owner::Lease>,
 }
@@ -28,6 +31,11 @@ impl Guard {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            if identity(cache).ok() != Some(self.target_identity)
+                || identity(&self.worktree).ok() != Some(self.worktree_identity)
+            {
+                return false;
+            }
             let mut count = 0;
             for entry in WalkDir::new(cache).follow_links(false) {
                 let Ok(entry) = entry else { return false };
@@ -72,6 +80,23 @@ impl Drop for Guard {
     }
 }
 
+fn identity(path: &Path) -> io::Result<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(io::Error::other("target/worktree identity changed"));
+        }
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(io::Error::other("unavailable filesystem identity"))
+    }
+}
+
 pub(crate) fn fingerprint_alive(agent: &cas_types::Agent) -> bool {
     crate::mcp::tools::service::agent_liveness::agent_process_is_alive_with(
         agent,
@@ -105,7 +130,10 @@ fn registry(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
         })
         .collect();
     if owners.iter().any(|agent| registered_live(agent)) {
-        return Ok(false);
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "fresh fingerprinted registered owner",
+        ));
     }
     // With a surviving owner, every associated task must be terminal. A gone
     // owner needs no task receipt; stale registry rows are not live authority.
@@ -166,7 +194,7 @@ fn acquire_with(
         ));
     }
     let lane = crate::factory_worker_check::try_lock_lane(cas_root, worktree)?
-        .ok_or_else(|| io::Error::other("worker build owns lane lock"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "worker build owns lane lock"))?;
     #[cfg(unix)]
     let lease = if cache.join(owner::MARKER).exists() {
         Some(
@@ -179,6 +207,9 @@ fn acquire_with(
     let mut guard = Guard {
         _lane: lane,
         locks: Vec::new(),
+        worktree: worktree.to_path_buf(),
+        worktree_identity: identity(worktree)?,
+        target_identity: identity(cache)?,
         #[cfg(unix)]
         lease,
     };
@@ -351,6 +382,22 @@ mod tests {
             "new Cargo locks must invalidate rename admission"
         );
         drop(guard);
+        let guard = acquire_with(&root, &worker, &target, |_, _| Ok(true)).unwrap();
+        fs::rename(&deep, deep.with_file_name("old-lock")).unwrap();
+        fs::write(&deep, "").unwrap();
+        assert!(
+            !guard.unchanged(&target),
+            "replaced lock inode must invalidate admission"
+        );
+        drop(guard);
+        let guard = acquire_with(&root, &worker, &target, |_, _| Ok(true)).unwrap();
+        fs::rename(&target, worker.join("old-target")).unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(
+            !guard.unchanged(&target),
+            "replaced target inode must invalidate admission"
+        );
+        drop(guard);
         symlink("/tmp", target.join("outside")).unwrap();
         assert!(acquire_with(&root, &worker, &target, |_, _| Ok(true)).is_err());
         fs::remove_file(target.join("outside")).unwrap();
@@ -378,6 +425,39 @@ mod tests {
     }
 
     #[test]
+    fn surviving_owner_needs_terminal_tasks_and_fresh_owner_blocks_cas_cd3e() {
+        let (_temp, root, worker, target) = fixture();
+        let proc = opaque_proc(&root);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut owner = cas_types::Agent::new("owner".into(), "retired-worker".into());
+        owner.pid = Some(std::process::id());
+        owner.pid_starttime = crate::mcp::daemon::read_pid_starttime(std::process::id());
+        owner
+            .metadata
+            .insert("clone_path".into(), worker.display().to_string());
+        agents.register(&owner).unwrap();
+        assert_eq!(
+            linux_cache_admission(&root, &worker, &target, &proc)
+                .err()
+                .unwrap()
+                .0,
+            CacheDisposition::LiveProcess
+        );
+        owner.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(3);
+        agents.update(&owner).unwrap();
+        assert!(!registry_allows(&root, &worker));
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-fixture".into(), "owner task".into());
+        task.assignee = Some(owner.name.clone());
+        tasks.add(&task).unwrap();
+        assert!(!registry_allows(&root, &worker));
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        assert!(registry_allows(&root, &worker));
+        assert!(linux_cache_admission(&root, &worker, &target, &proc).is_ok());
+    }
+
+    #[test]
     fn cleanup_rechecks_recency_locks_registry_and_real_cwd_cas_cd3e() {
         let (_temp, root, worker, target) = fixture();
         let policy = TargetCachePolicy {
@@ -395,12 +475,10 @@ mod tests {
             .unwrap();
         lock.try_lock_exclusive().unwrap();
         cleanup_selected(&root, &mut report, policy, &[]).unwrap();
-        assert_eq!(
-            report.caches[0].disposition,
-            CacheDisposition::Indeterminate
-        );
+        assert_eq!(report.caches[0].disposition, CacheDisposition::LiveProcess);
         assert!(target.exists());
         FileExt::unlock(&lock).unwrap();
+        drop(lock);
         let mut report = inspect(&root, policy, &[], &[], false).unwrap();
         cleanup_selected(
             &root,

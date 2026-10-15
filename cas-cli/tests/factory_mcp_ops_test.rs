@@ -5886,9 +5886,9 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_ne!(native.caches[0].worktree, worker.canonicalize().unwrap());
     let reclaim = match native.caches[0].disposition {
         CacheDisposition::Selected => true,
-        CacheDisposition::LiveProcess => {
+        CacheDisposition::Indeterminate => {
             eprintln!(
-                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. LiveProcess does not prove an observed process."
+                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. Indeterminate is distinct from positive process evidence."
             );
             false
         }
@@ -5897,7 +5897,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_eq!(native.selected_bytes, if reclaim { 1 } else { 0 });
     assert_eq!(native.reclaimed_bytes, 0);
     assert_eq!(std::fs::read(baseline_cache.join("probe")).unwrap(), b"x");
-    let disposition = if reclaim { "selected" } else { "live_process" };
+    let disposition = if reclaim { "selected" } else { "indeterminate" };
     let cache_path = worker.join("target").canonicalize().unwrap();
     let assert_preserved = || {
         assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
@@ -5946,7 +5946,11 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
-    let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
+    let preview = env
+        .service
+        .factory_request(Parameters(preview))
+        .await
+        .unwrap();
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
     let preview_status = status(&preview_text);
@@ -5964,7 +5968,11 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    let cleanup = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
     let cleanup_text = get_text(&cleanup);
     assert!(cleanup_text.contains("mode=cleanup"), "{cleanup_text}");
     let cleaned = status(&cleanup_text);
@@ -5981,16 +5989,20 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     assert_eq!(cleaned["caches"][0]["bytes"], 64);
     assert_eq!(
         cleaned["caches"][0]["disposition"],
-        if reclaim { "reclaimed" } else { "live_process" }
+        if reclaim {
+            "reclaimed"
+        } else {
+            "indeterminate"
+        }
     );
     assert_eq!(worker.join("target").exists(), !reclaim);
     if !reclaim {
         assert_preserved();
-        assert!(cleanup_text.contains("state=LiveProcess"), "{cleanup_text}");
-        assert_eq!(
-            cleaned["caches"][0]["reason"],
-            "registered or OS-visible live process uses this worktree"
+        assert!(
+            cleanup_text.contains("state=Indeterminate"),
+            "{cleanup_text}"
         );
+        assert!(!cleaned["caches"][0]["reason"].as_str().unwrap().is_empty());
         eprintln!(
             "RECLAIM PROOF UNAVAILABLE: raw actual-fixture status (ambiguous live/unknown reason, not an observed-process claim): {cleanup_text}"
         );

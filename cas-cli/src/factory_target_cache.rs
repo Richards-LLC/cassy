@@ -919,7 +919,11 @@ fn linux_cache_admission(
     if legacy::lane_target(cas_root, worktree, cache) {
         let guard = legacy::acquire(cas_root, worktree, cache).map_err(|error| {
             (
-                CacheDisposition::Indeterminate,
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    CacheDisposition::LiveProcess
+                } else {
+                    CacheDisposition::Indeterminate
+                },
                 format!("legacy lane guard refused: {error}"),
             )
         })?;
@@ -1449,7 +1453,7 @@ mod tests {
                 report
                     .caches
                     .iter()
-                    .all(|cache| cache.disposition == CacheDisposition::LiveProcess)
+                    .all(|cache| cache.disposition == CacheDisposition::Indeterminate)
             );
             assert_eq!(report.selected_bytes, 0);
         }
@@ -1668,7 +1672,7 @@ mod tests {
                     == if reclaim {
                         CacheDisposition::Selected
                     } else {
-                        CacheDisposition::LiveProcess
+                        CacheDisposition::Indeterminate
                     }
         }));
         assert_eq!(report.candidate_bytes, 8);
@@ -1697,7 +1701,6 @@ mod tests {
     #[test]
     fn live_and_recent_caches_are_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
-        let reclaim = reclamation_available();
         let cas_root = temp.path().join(".cas");
         let worker = cas_root.join("worktrees/live-worker");
         fs::create_dir_all(worker.join("target")).unwrap();
@@ -1736,11 +1739,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             recent_report.caches[0].disposition,
-            if reclaim {
-                CacheDisposition::RecentWrite
-            } else {
-                CacheDisposition::LiveProcess
-            }
+            CacheDisposition::RecentWrite
         );
         assert_eq!(recent_report.caches.len(), 1);
         assert_eq!(recent_report.candidate_bytes, 8);
@@ -1798,7 +1797,6 @@ mod tests {
         fs::write(worker.join("target/deps/artifact.rlib"), vec![0u8; 32]).unwrap();
         fs::write(worker.join("source.rs"), b"source").unwrap();
         let source = fs::read(worker.join("source.rs")).unwrap();
-        let artifact = fs::read(worker.join("target/deps/artifact.rlib")).unwrap();
 
         let policy = TargetCachePolicy {
             high_watermark_percent: 1,
@@ -1808,32 +1806,12 @@ mod tests {
         };
         let mut report = inspect(&cas_root, policy, &[], &[], false).unwrap();
         assert_eq!(report.caches[0].bytes, 32);
-        assert_eq!(
-            report.caches[0].disposition,
-            if reclaim {
-                CacheDisposition::Selected
-            } else {
-                CacheDisposition::LiveProcess
-            }
-        );
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected);
         cleanup_selected(&cas_root, &mut report, policy, &[]).unwrap();
-        assert_eq!(
-            report.caches[0].disposition,
-            if reclaim {
-                CacheDisposition::Reclaimed
-            } else {
-                CacheDisposition::LiveProcess
-            }
-        );
-        assert_eq!(worker.join("target").exists(), !reclaim);
-        assert_eq!(report.reclaimed_bytes, if reclaim { 32 } else { 0 });
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Reclaimed);
+        assert!(!worker.join("target").exists());
+        assert_eq!(report.reclaimed_bytes, 32);
         assert_eq!(fs::read(worker.join("source.rs")).unwrap(), source);
-        if !reclaim {
-            assert_eq!(
-                fs::read(worker.join("target/deps/artifact.rlib")).unwrap(),
-                artifact
-            );
-        }
 
         let quarantine = worker.join(format!("{QUARANTINE_PREFIX}interrupted"));
         fs::create_dir_all(&quarantine).unwrap();
@@ -1849,13 +1827,13 @@ mod tests {
             .position(|cache| cache.interrupted_cleanup)
             .unwrap();
         assert_eq!(resumed.caches[interrupted].bytes, 7);
-        assert_eq!(resumed.candidate_bytes, if reclaim { 7 } else { 39 });
+        assert_eq!(resumed.candidate_bytes, 7);
         assert_eq!(
             resumed.caches[interrupted].disposition,
             if reclaim {
                 CacheDisposition::Selected
             } else {
-                CacheDisposition::LiveProcess
+                CacheDisposition::Indeterminate
             }
         );
         cleanup_selected(&cas_root, &mut resumed, resume_policy, &[]).unwrap();
@@ -1863,15 +1841,11 @@ mod tests {
         assert_eq!(resumed.reclaimed_bytes, if reclaim { 7 } else { 0 });
         if !reclaim {
             assert_eq!(fs::read(quarantine.join("partial")).unwrap(), b"partial");
-            assert_eq!(
-                fs::read(worker.join("target/deps/artifact.rlib")).unwrap(),
-                artifact
-            );
             assert!(
                 resumed
                     .caches
                     .iter()
-                    .all(|cache| cache.disposition == CacheDisposition::LiveProcess)
+                    .all(|cache| cache.disposition == CacheDisposition::Indeterminate)
             );
         }
         assert_eq!(fs::read(worker.join("source.rs")).unwrap(), source);

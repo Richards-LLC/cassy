@@ -2066,6 +2066,45 @@ fn no_active_epic_guidance(why: &str) -> String {
     )
 }
 
+enum FactoryProvisionBuildCheck {
+    Compatible,
+    Mismatch(String),
+    Skipped(&'static str),
+}
+
+fn known_factory_build_id(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+}
+
+fn factory_provision_build_compatibility(
+    session: &str,
+    provisioner_build: Option<&str>,
+) -> FactoryProvisionBuildCheck {
+    let metadata_path = crate::ui::factory::metadata_path(session);
+    let raw = match std::fs::read_to_string(&metadata_path) {
+        Ok(raw) => raw,
+        Err(_) => return FactoryProvisionBuildCheck::Skipped("session build metadata unavailable"),
+    };
+    let metadata = match serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw) {
+        Ok(metadata) => metadata,
+        Err(_) => return FactoryProvisionBuildCheck::Skipped("session build metadata invalid"),
+    };
+    let Some(daemon_build) = known_factory_build_id(metadata.daemon_build_hash.as_deref()) else {
+        return FactoryProvisionBuildCheck::Skipped("daemon build ID unavailable");
+    };
+    let Some(provisioner_build) = known_factory_build_id(provisioner_build) else {
+        return FactoryProvisionBuildCheck::Skipped("provisioner build ID unavailable");
+    };
+    if daemon_build != provisioner_build {
+        return FactoryProvisionBuildCheck::Mismatch(format!(
+            "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from installed provisioner build {provisioner_build}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+        ));
+    }
+    FactoryProvisionBuildCheck::Compatible
+}
+
 impl CasService {
 
     pub(super) async fn factory_spawn_workers(
@@ -2083,10 +2122,42 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let provisioner_build = ctx
+            .factory_session
+            .as_ref()
+            .and_then(|_| crate::ui::factory::installed_provisioner_build_hash().ok());
+        self.factory_spawn_workers_in_with_provisioner_build(
+            ctx,
+            req,
+            provisioner_build.as_deref(),
+        )
+        .await
+    }
+
+    async fn factory_spawn_workers_in_with_provisioner_build(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        provisioner_build: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
+
+        let build_check_notice = if let Some(session) = ctx.factory_session.as_deref() {
+            match factory_provision_build_compatibility(session, provisioner_build) {
+                FactoryProvisionBuildCheck::Compatible => String::new(),
+                FactoryProvisionBuildCheck::Mismatch(message) => {
+                    return Err(Self::error(ErrorCode::INVALID_REQUEST, message));
+                }
+                FactoryProvisionBuildCheck::Skipped(reason) => format!(
+                    "\nBuild check: skipped ({reason}); the provisioner still checks at spawn time"
+                ),
+            }
+        } else {
+            String::new()
+        };
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -2789,11 +2860,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -11452,6 +11523,167 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn spawn_build_check_case(
+        session: &str,
+        daemon_build_hash: Option<&str>,
+        provisioner_build: Option<&str>,
+    ) -> (String, Vec<cas_store::SpawnRequest>) {
+        use cas_store::SpawnQueueStore;
+        use cas_types::TaskType;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
+        tasks.init().expect("initialize task store");
+        let mut epic = cas_types::Task::new("cas-1174-epic".into(), "worker build check".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).expect("add active epic");
+
+        if let Some(daemon_build_hash) = daemon_build_hash {
+            let sessions = crate::ui::factory::SessionManager::new();
+            sessions.ensure_dir().expect("create session directory");
+            let mut metadata = crate::ui::factory::create_metadata(
+                session,
+                std::process::id(),
+                "supervisor",
+                &[],
+                None,
+                Some(cas_root.to_string_lossy().as_ref()),
+                None,
+            );
+            metadata.daemon_build_hash = Some(daemon_build_hash.to_string());
+            std::fs::write(
+                crate::ui::factory::metadata_path(session),
+                serde_json::to_vec(&metadata).expect("encode session metadata"),
+            )
+            .expect("write session metadata");
+        }
+
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "grok"
+        }))
+        .expect("valid spawn request");
+        let response = service
+            .factory_spawn_workers_in_with_provisioner_build(
+                &crate::ops::fleet::FleetContext::operator(session),
+                req,
+                provisioner_build,
+            )
+            .await
+            .expect("spawn is queued when build identity is inconclusive");
+        let receipt = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
+        (receipt, queue.peek(10).expect("read spawn queue"))
+    }
+
+    #[tokio::test]
+    async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
+        let (receipt, queue) =
+            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"))
+                .await;
+
+        assert!(
+            receipt.contains(
+                "Build check: skipped (session build metadata unavailable); the provisioner still checks at spawn time"
+            ),
+            "receipt should explain why the early check was skipped: {receipt}"
+        );
+        assert_eq!(queue.len(), 1, "an unknown daemon build must not refuse spawn");
+    }
+
+    #[tokio::test]
+    async fn unprobeable_provisioner_identity_skips_build_check_and_queues_spawn() {
+        let (receipt, queue) =
+            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None).await;
+
+        assert!(
+            receipt.contains(
+                "Build check: skipped (provisioner build ID unavailable); the provisioner still checks at spawn time"
+            ),
+            "receipt should explain why the early check was skipped: {receipt}"
+        );
+        assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+    }
+
+    #[tokio::test]
+    async fn older_factory_daemon_build_is_reported_before_spawn_is_queued_gh_1174() {
+        use cas_store::SpawnQueueStore;
+        use cas_types::TaskType;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
+        tasks.init().expect("initialize task store");
+        let mut epic = cas_types::Task::new("cas-1174-epic".into(), "worker build check".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).expect("add active epic");
+        let session = "older-daemon-1174";
+        let metadata = crate::ui::factory::create_metadata(
+            session,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some(cas_root.to_string_lossy().as_ref()),
+            None,
+        );
+        let mut metadata = serde_json::to_value(metadata).expect("serialize metadata");
+        assert!(metadata["daemon_build_hash"].is_string());
+        metadata["daemon_build_hash"] = serde_json::json!("older-daemon-build");
+        let provisioner_build = crate::ui::factory::installed_provisioner_build_hash()
+            .expect("read the provisioner build id");
+        let sessions = crate::ui::factory::SessionManager::new();
+        sessions.ensure_dir().expect("create session directory");
+        std::fs::write(
+            crate::ui::factory::metadata_path(session),
+            serde_json::to_vec(&metadata).expect("encode metadata"),
+        )
+        .expect("write old daemon identity");
+
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "grok"
+        }))
+        .expect("valid spawn request");
+
+        let error = service
+            .factory_spawn_workers_in(&crate::ops::fleet::FleetContext::operator(session), req)
+            .await
+            .expect_err("stale daemon must be rejected before queueing a worker");
+        let message = error.to_string();
+        assert!(message.contains("provision_build_mismatch"), "{message}");
+        assert!(message.contains("older-daemon-build"), "{message}");
+        assert!(message.contains(&provisioner_build), "{message}");
+        assert!(message.contains("cas factory kill"), "{message}");
+        assert!(message.contains(session), "{message}");
+
+        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
+        assert!(queue.peek(10).expect("read spawn queue").is_empty());
+    }
 
     #[test]
     fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {

@@ -744,6 +744,9 @@ pub struct SessionMetadata {
     pub created_at: String,
     /// Daemon process ID
     pub daemon_pid: u32,
+    /// Build identifier embedded in the daemon when this session started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_build_hash: Option<String>,
     /// OS process-start fingerprint paired with `daemon_pid` to reject reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_pid_starttime: Option<u64>,

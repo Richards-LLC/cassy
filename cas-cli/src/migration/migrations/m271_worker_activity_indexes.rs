@@ -2,7 +2,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 269,
+    id: 271,
     name: "worker_activity_indexes",
     subsystem: Subsystem::Events,
     description: "Index per-worker activity without fleet-window eviction",

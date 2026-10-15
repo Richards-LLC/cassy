@@ -727,7 +727,10 @@ mod tests {
     /// the bug invisible for a full release.
     #[test]
     fn stalled_nudge_hooks_skip_routine_alarm_at_turn_and_tool_boundaries() {
-        let _guard = crate::hooks::test_env_lock();
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("worker-stall-hook")),
+            ("CAS_FACTORY_SESSION", Some("stall-hook-session")),
+        ]);
         let temp = TempDir::new().unwrap();
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
@@ -736,11 +739,6 @@ mod tests {
         let id = match outcome {
             cas_store::EnqueueIdempotentResult::Created(id) | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
         };
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::set_var("CAS_AGENT_NAME", "worker-stall-hook");
-            std::env::set_var("CAS_FACTORY_SESSION", "stall-hook-session");
-        }
         let mut input: HookInput = serde_json::from_str(r#"{
             "session_id":"hook-stall", "cwd":"/tmp", "hook_event_name":"UserPromptSubmit", "prompt":"continue"
         }"#).unwrap();
@@ -749,11 +747,6 @@ mod tests {
         let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None);
         let in_turn = surface_factory_inbox_after_tool_result(Some(temp.path()), &input,
             Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }));
-        // SAFETY: guarded by the process-wide hook test env lock.
-        unsafe {
-            std::env::remove_var("CAS_AGENT_NAME");
-            std::env::remove_var("CAS_FACTORY_SESSION");
-        }
         assert!(at_turn.is_none() && at_tool.is_none() && in_turn.is_none(),
             "automatic hook surfacing must leave premise-sensitive nudges to the daemon");
         let queued = store.queued_prompt(id).unwrap().unwrap();

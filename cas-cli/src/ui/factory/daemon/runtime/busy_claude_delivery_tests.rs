@@ -38,6 +38,7 @@ async fn busy_claude_worker_pane(daemon: &mut FactoryDaemon) {
         cas_mux::SupervisorCli::Claude,
     )
     .unwrap();
+    daemon.app.mux.set_worker_cli(cas_mux::SupervisorCli::Claude);
     daemon.app.adopt_worker_pane_for_test(pane);
     tokio::time::sleep(Duration::from_millis(5100)).await;
     for pane in daemon.app.mux.panes_mut() {
@@ -47,6 +48,7 @@ async fn busy_claude_worker_pane(daemon: &mut FactoryDaemon) {
     daemon.last_pane_output_bytes.insert(WORKER.into(), bytes);
     daemon.pane_silent_since.insert(WORKER.into(), Instant::now());
     assert!(daemon.app.mux.pane_ready_for_injection(WORKER));
+    assert_eq!(daemon.app.harness_for(WORKER), cas_mux::SupervisorCli::Claude);
 }
 
 /// The 22:08:30Z case, through the real `process_prompt_queue`: the wake is

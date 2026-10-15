@@ -1418,7 +1418,8 @@ async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
     let err = env.service.coordination(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
     assert!(err.message.contains("loop_start"), "{err:?}");
-    assert!(err.message.contains("action=message"), "{err:?}");
+    // pin: the refusal names spawn_brief, the path that reaches the worker before task start (cas-ee68).
+    assert!(err.message.contains("spawn_brief"), "{err:?}");
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
 

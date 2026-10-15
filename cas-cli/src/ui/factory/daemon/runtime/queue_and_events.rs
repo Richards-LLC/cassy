@@ -14744,6 +14744,83 @@ mod tests {
         );
     }
 
+    /// GH #1173: a Claude worker can register and then spend the documented
+    /// 20-second startup wait for the CAS server. A registered MCP child that
+    /// is temporarily unavailable must not make boot verification reap the
+    /// still-starting harness before its post-registration window expires.
+    #[tokio::test]
+    async fn post_registration_verification_tolerates_cas_server_wait_gh_1173() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let worker = "gh-1173-waiting-worker";
+        daemon.session_name = "gh-1173-factory-session".into();
+
+        let launched_wall = std::time::SystemTime::now() - Duration::from_secs(40);
+        crate::factory_hook_canary::record_session_start(&cas_dir, worker, "gh-1173-session")
+            .unwrap();
+
+        // A registered MCP child can be unavailable while the Claude harness
+        // is still in its CAS-server startup wait. The pane has not exited;
+        // this stale child PID is only the liveness observation that currently
+        // short-circuits the 60-second post-registration verification window.
+        let mut agent = cas_types::Agent::new("gh-1173-agent".into(), worker.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.status = AgentStatus::Active;
+        agent.factory_session = Some(daemon.session_name.clone());
+        let unavailable_pid = (2_000_000..2_000_100)
+            .find(|pid| !crate::mcp::daemon::pid_alive(*pid))
+            .expect("the fixture needs an unavailable MCP child pid");
+        agent.pid = Some(unavailable_pid);
+        assert!(
+            !crate::mcp::tools::service::factory_ops::agent_process_is_alive(&agent),
+            "the fixture must represent an unavailable server child"
+        );
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
+
+        let now = Instant::now();
+        daemon.spawn_verifications.insert(
+            worker.into(),
+            SpawnVerification {
+                request_id: Some(1173),
+                launched_at: now - Duration::from_secs(40),
+                registered_at: Some(now - Duration::from_secs(20)),
+                task_id: None,
+                launched_wall,
+            },
+        );
+
+        daemon.reconcile_spawn_verifications().await;
+
+        assert!(
+            daemon.spawn_verifications.contains_key(worker),
+            "a dead MCP-child observation at 20 seconds must stay inside the boot window"
+        );
+        assert!(
+            !daemon.dead_workers.contains(worker),
+            "a worker still waiting for CAS must not be killed as boot-failed"
+        );
+
+        daemon
+            .spawn_verifications
+            .get_mut(worker)
+            .expect("the worker remains in the boot-verification window")
+            .registered_at = Some(Instant::now() - Duration::from_secs(60));
+        daemon.reconcile_spawn_verifications().await;
+
+        assert!(
+            daemon.dead_workers.contains(worker),
+            "a dead registered worker must still fail after the 60-second boot window"
+        );
+        assert!(
+            !daemon.spawn_verifications.contains_key(worker),
+            "completed failure must remove the spawn verification"
+        );
+    }
+
     #[test]
     fn spawn_stage_audit_writes_both_daemon_logs() {
         let temp = tempfile::TempDir::new().unwrap();

@@ -897,6 +897,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cas_678d_round3_managed_proxy_rebinds_only_unique_candidate() {
+        for (managed, ambiguous) in [(true, false), (true, true), (false, false)] {
+            let (mut env, probe) = update_fixture();
+            if ambiguous { env.set("VIOLET_SLACK_TOKEN_SECOND", "second-fixture"); }
+            let path = Scope::User.config_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = format!("{}# preserve\nallowlist = ['violet.violet_read']\n[servers.violet]\ntransport = 'http'\nurl = '{}'\nauth = 'env:VIOLET_SLACK_TOKEN_CASSY_PROXY'\n", if managed { "# managed\n" } else { "" }, violet_hub_url());
+            std::fs::write(&path, &original).unwrap();
+            let report = migrate_installed_hub_with_probe(&probe).unwrap();
+            let written = std::fs::read_to_string(&path).unwrap();
+            if managed && !ambiguous {
+                assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
+                assert!(written.contains("# preserve"));
+                assert!(report.authenticated.contains(&path));
+                assert!(report.credential_warnings.iter().any(|w| w.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE")));
+            } else {
+                assert_eq!(written, original);
+                assert!(!report.authenticated.contains(&path));
+                if managed { assert!(report.warnings.iter().any(|(_,w)| w.contains("ambiguous"))); }
+            }
+        }
+    }
+
     fn update_fixture() -> (crate::test_support::TestEnvGuard, UpdateProbe) {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         // Do not inherit the runner's real credentials, even as fallback candidates.

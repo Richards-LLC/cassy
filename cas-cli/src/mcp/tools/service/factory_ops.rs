@@ -2066,38 +2066,43 @@ fn no_active_epic_guidance(why: &str) -> String {
     )
 }
 
+enum FactoryProvisionBuildCheck {
+    Compatible,
+    Mismatch(String),
+    Skipped(&'static str),
+}
+
+fn known_factory_build_id(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+}
+
 fn factory_provision_build_compatibility(
     session: &str,
     provisioner_build: Option<&str>,
-) -> Result<(), String> {
+) -> FactoryProvisionBuildCheck {
     let metadata_path = crate::ui::factory::metadata_path(session);
-    let raw = std::fs::read_to_string(&metadata_path).map_err(|_| {
-        format!(
-            "provision_build_identity_missing: factory session {session} has no readable build metadata. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
-        )
-    })?;
-    let metadata =
-        serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).map_err(|_| {
-            format!(
-                "provision_build_identity_missing: factory session {session} has invalid build metadata. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
-            )
-        })?;
-    let Some(daemon_build) = metadata.daemon_build_hash.as_deref() else {
-        return Err(format!(
-            "provision_build_identity_missing: factory session {session} has no recorded daemon build ID. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
-        ));
+    let raw = match std::fs::read_to_string(&metadata_path) {
+        Ok(raw) => raw,
+        Err(_) => return FactoryProvisionBuildCheck::Skipped("session build metadata unavailable"),
     };
-    let Some(provisioner_build) = provisioner_build else {
-        return Err(format!(
-            "provision_build_identity_unavailable: cannot inspect the installed provisioner for factory session {session}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
-        ));
+    let metadata = match serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw) {
+        Ok(metadata) => metadata,
+        Err(_) => return FactoryProvisionBuildCheck::Skipped("session build metadata invalid"),
+    };
+    let Some(daemon_build) = known_factory_build_id(metadata.daemon_build_hash.as_deref()) else {
+        return FactoryProvisionBuildCheck::Skipped("daemon build ID unavailable");
+    };
+    let Some(provisioner_build) = known_factory_build_id(provisioner_build) else {
+        return FactoryProvisionBuildCheck::Skipped("provisioner build ID unavailable");
     };
     if daemon_build != provisioner_build {
-        return Err(format!(
+        return FactoryProvisionBuildCheck::Mismatch(format!(
             "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from installed provisioner build {provisioner_build}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
         ));
     }
-    Ok(())
+    FactoryProvisionBuildCheck::Compatible
 }
 
 impl CasService {
@@ -2117,28 +2122,15 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        let provisioner_build = if ctx.factory_session.is_some() {
-            #[cfg(test)]
-            {
-                crate::ui::factory::installed_provisioner_build_hash()
-                    .expect("test provisioner build ID")
-            }
-            #[cfg(not(test))]
-            {
-                crate::ui::factory::installed_provisioner_build_hash().map_err(|error| {
-                    let session = ctx.factory_session.as_deref().unwrap_or("<unknown>");
-                    Self::error(
-                        ErrorCode::INVALID_REQUEST,
-                        format!(
-                            "provision_build_identity_unavailable: cannot inspect the installed provisioner for factory session {session}: {error:#}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
-                        ),
-                    )
-                })?
-            }
-        } else {
-            option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string()
-        };
-        self.factory_spawn_workers_in_with_provisioner_build(ctx, req, Some(&provisioner_build))
+        let provisioner_build = ctx
+            .factory_session
+            .as_ref()
+            .and_then(|_| crate::ui::factory::installed_provisioner_build_hash().ok());
+        self.factory_spawn_workers_in_with_provisioner_build(
+            ctx,
+            req,
+            provisioner_build.as_deref(),
+        )
         .await
     }
 
@@ -2153,10 +2145,19 @@ impl CasService {
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
 
-        if let Some(session) = ctx.factory_session.as_deref() {
-            factory_provision_build_compatibility(session, provisioner_build)
-                .map_err(|message| Self::error(ErrorCode::INVALID_REQUEST, message))?;
-        }
+        let build_check_notice = if let Some(session) = ctx.factory_session.as_deref() {
+            match factory_provision_build_compatibility(session, provisioner_build) {
+                FactoryProvisionBuildCheck::Compatible => String::new(),
+                FactoryProvisionBuildCheck::Mismatch(message) => {
+                    return Err(Self::error(ErrorCode::INVALID_REQUEST, message));
+                }
+                FactoryProvisionBuildCheck::Skipped(reason) => format!(
+                    "\nBuild check: skipped ({reason}); the provisioner still checks at spawn time"
+                ),
+            }
+        } else {
+            String::new()
+        };
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -2859,11 +2860,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )

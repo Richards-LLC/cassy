@@ -8859,6 +8859,35 @@ mod tests {
         );
     }
 
+    /// cas-a1ed review L1: the C3 prompt-queue job claims with a token and
+    /// releases by that token. A tool boundary that took a held claim over
+    /// races that release; the release must not drop the hook's receipt, and
+    /// the job cannot claim the row again.
+    #[test]
+    fn a_token_release_after_the_hook_took_a_held_claim_keeps_the_receipt_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
+            .unwrap();
+        let token = store.claim_recipient_transport_token(id, "worker-1").unwrap().unwrap();
+        store.record_deferred_inbox(id, 0).unwrap();
+
+        let surfaced = store
+            .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+            .unwrap();
+        assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        assert!(
+            !store.release_recipient_transport_claim(id, "worker-1", token).unwrap(),
+            "the job's release finds no claim left to release"
+        );
+        assert_eq!(
+            store.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+            Some(SurfacingSource::HookSurfaced)
+        );
+        assert!(store.claim_recipient_transport_token(id, "worker-1").unwrap().is_none());
+    }
+
     /// cas-a1ed review L1: once the cas-1f0c time fallback re-sent a held
     /// row's body as a Teams copy, neither tool-boundary drain renders it.
     #[test]

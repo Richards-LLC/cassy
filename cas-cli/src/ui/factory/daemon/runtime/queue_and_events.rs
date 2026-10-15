@@ -68,6 +68,9 @@ fn registration_timeout_detail(
 /// stay small enough for the spawn-lifecycle row and supervisor relay.
 const WORKER_EXIT_TAIL_MAX_CHARS: usize = 2_000;
 
+/// Cap for the pane tail embedded in a worker-death relay (cas-b06f, P2.8).
+const WORKER_DEATH_TAIL_MAX_CHARS: usize = 2_000;
+
 fn bounded_tail_text(text: &str) -> String {
     let tail: String = text
         .chars()
@@ -10467,6 +10470,35 @@ mod tests {
         let signalled = worker_exit_cause(Some(1), Some("Killed"), None);
         assert_eq!(signalled.status(), "terminated by signal Killed");
         assert_eq!(signalled.output_tail, None);
+    }
+
+    /// cas-b06f (spec-6194 P2.8): a death relay's pane tail carries the
+    /// worker's last words, not the TUI. Spinner frames, box drawing and
+    /// status-bar chrome are stripped and the tail is capped well below the
+    /// ~2.9K-char bodies seen in the cas-447d storm.
+    #[test]
+    fn ct2_p2_pane_tail_clean_and_capped_cas_b06f() {
+        let mut pane = String::from("╭──────────────────────────╮\n│ > Try \"fix the bug\"     │\n╰──────────────────────────╯\n");
+        for frame in ["✻", "✶", "✳", "✢", "·", "✽", "⠋", "⠙", "⠹"] {
+            pane.push_str(&format!("{frame} Hullaballooing… (12s · esc to interrupt)\n"));
+        }
+        pane.push_str("Error: connection reset by peer\nworker exiting\n");
+        pane.push_str(&"⠋ Thinking…\n".repeat(200));
+        let tail = worker_exit_cause(Some(1), None, Some(&pane))
+            .output_tail
+            .expect("the real output survives");
+        assert!(tail.contains("Error: connection reset by peer"), "{tail}");
+        assert!(tail.contains("worker exiting"), "{tail}");
+        for glyph in ['✻', '✶', '✳', '✢', '✽', '⠋', '⠙', '⠹', '╭', '│', '╰', '─'] {
+            assert!(!tail.contains(glyph), "{glyph:?} survived: {tail}");
+        }
+        assert!(!tail.contains("Hullaballooing"), "spinner status lines are dropped: {tail}");
+        assert!(!tail.contains("Thinking…"), "spinner status lines are dropped: {tail}");
+        assert!(
+            tail.chars().count() <= WORKER_DEATH_TAIL_MAX_CHARS,
+            "capped: {} chars",
+            tail.chars().count()
+        );
     }
 
     /// cas-2ffe (GH #915): the reported shape. Three exits within 1.2 s are

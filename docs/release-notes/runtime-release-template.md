@@ -32,11 +32,9 @@ Live on production — **Dev** — {{DEV_IMPACT_PUNCH}}
 ## Posting sequence
 
 1. Replace the narrative placeholders after the release PR is merged.
-2. The supervisor/operator runs `./scripts/release.sh --publish-tag` from an
-   unguarded release worktree at the fetched `origin/main` landing. A worker
-   can prepare the annotated local tag and hand off its exact commit; the
-   worker's push guard forbids publishing it. A bare `release.sh` is a local
-   audit and does not touch the remote.
+2. `scripts/release.sh` committed this draft with the version bump in the
+   epic PR. When that PR lands, `release.yml` tags and publishes both assets;
+   nobody pushes a tag.
 3. Run `release-published-receipt.sh --write-draft` against this draft. It
    downloads and hashes both published assets before replacing every digest
    placeholder; never type a digest from a local audit archive.

@@ -382,26 +382,6 @@ chmod +x "$3/node_modules/.bin/markdownlint-cli2"
         bash = shutil.which('bash')
         return subprocess.run([bash, '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
 
-    def test_release_shared_rustup_wiring_rejects_unsafe_route_mutations(self):
-        self.assertEqual(policy.validate(self.root, verbose=False), [])
-        for file, job in [('.github/workflows/release.yml', 'verify'),
-                          ('.github/workflows/release.yml', 'build'),
-                          ('.github/workflows/release-prebuild.yml', 'build')]:
-            original = copy.deepcopy(policy.load(self.root / file))
-            for mutation in ['remove-helper', 'unguarded-action', 'wrong-helper-route']:
-                with self.subTest(job=job, mutation=mutation):
-                    data = copy.deepcopy(original)
-                    steps = data['jobs'][job]['steps']
-                    helper = next(s for s in steps if s.get('run') == './scripts/setup-cassy-actions-rust.sh')
-                    action = next(s for s in steps if s.get('uses') == 'dtolnay/rust-toolchain@stable')
-                    if mutation == 'remove-helper': steps.remove(helper)
-                    elif mutation == 'unguarded-action': action.pop('if')
-                    else: helper['if'] = helper['if'].replace("'self-hosted'", "'hosted'")
-                    self.write(file, data)
-                    failures = policy.validate(self.root, verbose=False)
-                    self.assertTrue(any('shared Rust' in e['consumer'] for e, _ in failures))
-            self.write(file, original)
-
     def rustup_fixture(self, state):
         fixture = self.root / state
         fixture.mkdir()

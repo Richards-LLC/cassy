@@ -3444,23 +3444,27 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
         },
         {
-          "text": "`manual:*` entries in `references/failure-log.md`",
+          "text": "scripts/release.sh --next-version",
+          "reason": "The one-command release names the version and draft path before any change (cas-f95b)."
+        },
+        {
+          "text": "scripts/release.sh --hotfix",
+          "reason": "Hotfixes use the same one-command release (cas-f95b)."
+        },
+        {
+          "text": "--no-watch",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
         },
         {
-          "text": "release-gate.sh --learn",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+          "text": "macOS: compile-checked and launch-tested; suite runs on Linux",
+          "reason": "Operator decision Q5: the stated macOS support level (cas-f95b)."
         },
         {
-          "text": "`memory action=remember",
-          "reason": "Name the supported tool/action contract used by builtin skills contains cas cut release."
+          "text": "scripts/install-on-publish.sh --install",
+          "reason": "Install on publish has no agent hop; the host timer is set up once (cas-f95b)."
         },
         {
-          "text": "--check-lane",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
-        },
-        {
-          "text": "Scoped Validation",
+          "text": "9.99.x",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
         },
         {
@@ -3468,86 +3472,30 @@
           "reason": "Preserve the operational safety boundary documented by builtin skills contains cas cut release."
         },
         {
-          "text": "ledger is the last prep step",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+          "text": "remind_event=ci_completed",
+          "reason": "CI waits are event reminders, not delay reminders (cas-0f05)."
         },
         {
-          "text": "scratch-base",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "detached process group",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "--only <row,row>",
+          "text": "release-published-receipt.sh --write-draft",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
         },
         {
-          "text": "runtime_fixture_parent",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
-        },
-        {
-          "text": "reviewed snapshot update",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "9.99.x",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "cause class",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "green-to-published latency",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "competing release",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "merge-queue GraphQL query",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "CAS_RELEASE_ENV_FILE",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
-        },
-        {
-          "text": "annotated tag peels",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "four Slack POSTED",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "refresh_binary_version",
+          "text": "cas --version",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
         },
         {
           "text": "stranded_branch_override",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
-        },
-        {
-          "text": "release.tag-complete.epoch",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "release-published.receipt",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
-        },
-        {
-          "text": "remind_event=ci_completed",
-          "reason": "CI waits are event reminders, not delay reminders (cas-0f05)."
         }
       ],
       "absent": [
         {
-          "text": "failure-log.md in full",
-          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas cut release."
+          "text": "release-train.sh",
+          "reason": "The release train is retired from the release path (cas-f95b); its scripts go in a later release."
+        },
+        {
+          "text": "--publish-tag",
+          "reason": "Tags are created by release.yml on landing, never pushed by hand (cas-f95b)."
         }
       ],
       "any_of": []

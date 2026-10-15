@@ -805,9 +805,10 @@ runs `assembly-proof.py check-row` before the row cache: a hit records the row
 row as before. `--only` and a no-reuse full gate never consume a row proof.
 A `release-binary-isa` hit, from either source, counts only while
 `scripts/release-binary-artifact.py verify` finds this tree's audited archive
-(cas-c096). release.sh reuses that archive instead of rebuilding the tree, so
-without it the row rebuilds in its persistent release target
-(`<main checkout>/.cas/release-binary/target`).
+(cas-c096); without it the row rebuilds in its persistent release target
+(`<main checkout>/.cas/release-binary/target`). Releases no longer ship this
+archive: since cas-f95b the merge queue's build ships (see Steps to cut a
+release).
 There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
 `CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
 `CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.
@@ -1320,65 +1321,59 @@ These require a major version bump:
 
 ### Steps to cut a release
 
-1. Update version in `cas-cli/Cargo.toml`.
-2. Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` (Keep a Changelog format).
-3. Update the comparison links at the bottom of `CHANGELOG.md`.
-4. Commit: `chore(release): bump to vX.Y.Z`.
-5. Before creating a tag, run the release migration-snapshot guard:
+One command cuts a release (cas-f95b). The version bump rides in the epic PR,
+the merge queue proves the exact tree that ships and builds it once, and the
+version change landing on `main` publishes it with no agent in between.
+Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
 
-   ```bash
-   ./scripts/check-release-migration-snapshots.sh
-   ```
+1. On the code-done epic branch, write the release entries under
+   `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog format).
+2. Run `scripts/release.sh --next-version`. It prints the next version (one
+   minor step above `main`) and the release-notes draft path
+   `docs/release-notes/<date>-v<x.y.z>-slack.md`. Write the Slack draft there
+   (`docs/release-notes/RUBRIC.md`), or anywhere and pass `--notes <file>`;
+   `{{VERSION}}` in it becomes the version.
+3. Run `scripts/release.sh` (in the background with a log: it watches the PR
+   until it merges). It merges `main` in when the branch is behind, bumps the
+   release crates and `Cargo.lock`, promotes `[Unreleased]` to
+   `## [x.y.z] - <date>`, names the draft, commits `release: vx.y.z`, pushes,
+   opens the PR to `main` and enables auto-merge. When another release lands
+   first it merges it, takes the next version and re-enables auto-merge
+   itself. Exit 4 is a code conflict with `main`; exit 3 is a merge-queue
+   ejection. Repair, push, then rerun the command.
+4. Hotfix: branch from `main`, commit the fix and its `[Unreleased]` entry,
+   then `scripts/release.sh --hotfix` (the next patch version). It takes the
+   same PR, queue and workflow path.
+5. The merge-queue run also runs `release-prebuild.yml` for a PR that changes
+   the version: Linux `release-fast` and macOS ARM64 (LTO off) start at
+   enqueue, in parallel with the tests, on hosted runners. They are not
+   required checks, and the queue lands its tested merge commit as `main`.
+6. `release.yml` runs when the version change reaches `main`. It adopts the
+   queue run's archives by commit or tree id (`find-release-prebuild.sh`) and
+   builds them only when none exist. It runs the ISA audit and the operator
+   launch smoke on the packaged Linux archive, and the signature check and
+   launch smoke on the packaged macOS archive. It then creates the annotated
+   tag `vx.y.z` and the GitHub release (`release-publish.sh`), whose notes end
+   with the release timer, and dispatches the install-path proof.
+7. The supervisor host installs on publish: `scripts/install-on-publish.sh
+   --install` sets up a systemd user timer once per host. Every minute it
+   compares the latest release with `cas --version`, runs
+   `cas update --yes --version x.y.z` when it is newer, and completes the
+   release timer in the notes: PR opened to installed, the one latency figure.
+8. Derive announcement digests from the published bytes with
+   `./scripts/release-published-receipt.sh vx.y.z`; it fails closed while
+   either asset is missing or a digest disagrees with GitHub.
 
-   When `cas-cli/src/migration/migrations/mod.rs` changed since the last tag,
-   this runs the required command
-   `cargo nextest run -p cas --test component_output_test`.
-   That snapshot suite checks the doctor/status schema and ledger counts that a
-   migration moves; the scoped release suites do not build it. If no previous
-   tag is reachable, the guard runs the snapshots conservatively.
-6. Run `./scripts/release.sh` to produce local audit evidence without touching
-   the remote. The tag-triggered GitHub Release workflow—not the local
-   `dist/local-audit/` archives—creates the normal release. A local archive is
-   evidence that the tagged source builds; it is never evidence of the shipped
-   bytes or an announcement digest. The emergency
-   `--publish-tag --manual-publish --acknowledge-workflow-conflict` path is
-   only for a disabled/unavailable workflow and still requires the published
-   receipt in step 9 before any digest is announced.
-7. Create an annotated tag, then run the fast release preflight **before pushing it**:
+Recovery and dry runs: `gh workflow run release.yml -f dry_run=false` on
+`main` republishes after a failed run and refuses an existing release. On any
+branch, `gh workflow run release-prebuild.yml --ref <branch>` followed by
+`gh workflow run release.yml --ref <branch>` runs the whole path against a
+throwaway `dryrun-` prerelease that it deletes at the end; `cas update` never
+sees a prerelease.
 
-   ```bash
-   git tag -a vX.Y.Z -m "vX.Y.Z"
-   ./scripts/check-release-preflight.sh --local vX.Y.Z
-   ```
-
-   This rejects a dirty tree, a lightweight/stale tag, mismatched release-train
-   crate versions, a missing changelog heading, or lockfile drift before the
-   expensive release builds begin. `release.sh` runs the same `--local` guard
-   before its local audit and tag push.
-
-   `--local` inspects the local tag object. Omit it only on the CI side, where
-   the tag is already pushed: the default lane re-fetches the exact remote tag
-   object first, so `actions/checkout` handing back a peeled ref cannot turn the
-   annotated-tag check into a check of checkout's local ref shape. Running the
-   default lane before the push always fails with
-   `couldn't find remote ref refs/tags/vX.Y.Z`.
-8. After reviewing the audit, `release.sh --publish-tag` pushes the tag and
-   starts the workflow. Publishing is deliberately explicit: a bare
-   `release.sh` invocation never touches the remote. It builds Linux on its
-   host and, on macOS, also builds the Darwin audit target; this host-dependent
-   audit coverage does not change what ships. CI always builds and publishes
-   both Linux x86_64 and macOS ARM64 assets.
-9. Wait for the workflow-created release to be published, then derive every
-   announcement digest from freshly downloaded published bytes:
-
-   ```bash
-   ./scripts/release-published-receipt.sh vX.Y.Z
-   ```
-
-   The command fails closed while the release object is draft, either required
-   asset is still uploading, or a downloaded byte hash disagrees with GitHub.
-   Copy its emitted fields into the release-note draft; never transcribe a
-   digest from `dist/local-audit/`.
+The release train and gate scripts (`release-train.sh`, `release-gate.sh`) stay
+on disk while hosts still run binaries that call them; the release path above
+does not call them.
 
 ### Task close delivery attribution
 

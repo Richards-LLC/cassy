@@ -655,40 +655,18 @@ else
     fail=$((fail + 1))
 fi
 
-release_create_body="$(python3 "$policy_parser" release-run | sed -E 's/\$\{\{[^}]+\}\}/workflow-expression/g')"
+# cas-f95b: release creation lives in scripts/release-publish.sh, whose own
+# self-test (scripts/test-release-publish.sh) proves the refuse-existing,
+# annotated-tag and notes contracts this block used to replay from the YAML.
 retry_tmp="$(mktemp -d)"
 trap 'rm -rf "$retry_tmp"' EXIT
-mkdir -p "$retry_tmp/bin"
-git -C "$repo_root" log --pretty=format:'- %s' 42219dce^..42219dce > "$retry_tmp/notes.md"
-if grep -qFx -- '- Revert "docs(cas-a073): sweep Grok changelog through 1.0.40"' "$retry_tmp/notes.md"; then
-    echo 'ok   quoted v3.28.0 commit subject remains literal release-note data'
+if [[ -x "$repo_root/scripts/release-publish.sh" && -x "$repo_root/scripts/test-release-publish.sh" ]]; then
+    printf 'ok   release publication script and its self-test are executable\n'
+    pass=$((pass + 1))
 else
-    echo 'FAIL quoted v3.28.0 commit subject changed during note generation'
+    printf 'FAIL release publication script and its self-test must be executable\n'
     fail=$((fail + 1))
 fi
-cat >"$retry_tmp/bin/gh" <<'EOF'
-#!/usr/bin/env bash
-case "$1 $2" in
-  "release view") exit "${FAKE_RELEASE_EXISTS:?}" ;;
-  "release create") printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}" ;;
-  *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
-esac
-EOF
-chmod +x "$retry_tmp/bin/gh"
-
-set +e
-existing_output="$(GITHUB_REF=refs/tags/v9.9.9 RUNNER_TEMP="$retry_tmp" FAKE_RELEASE_EXISTS=0 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body" 2>&1)"
-existing_status=$?
-set -e
-test "$existing_status" -eq 1
-grep -qF 'Release v9.9.9 already exists; refusing to replace its assets' <<<"$existing_output"
-test ! -e "$retry_tmp/creates"
-echo 'ok   partial-release retry refuses loudly and does not upload replacement bytes'
-
-GITHUB_REF=refs/tags/v9.9.9 RUNNER_TEMP="$retry_tmp" FAKE_RELEASE_EXISTS=1 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body"
-grep -qF 'release create v9.9.9' "$retry_tmp/creates"
-grep -qF -- "--notes-file $retry_tmp/notes.md" "$retry_tmp/creates"
-echo 'ok   first release run creates the release when no object exists'
 
 
 latency_receipt="$repo_root/scripts/release-latency-receipt.sh"

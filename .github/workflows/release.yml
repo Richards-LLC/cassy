@@ -1,42 +1,125 @@
 name: Release
 
+# Publish a release when its version change lands on main (cas-f95b).
+#
+# scripts/release.sh commits the version bump, the CHANGELOG promotion and the
+# release-notes draft into the epic PR, so the merge queue proves the exact
+# tree that ships, and release-prebuild.yml builds both platform archives on
+# that queue run. When the queue lands the version change on main, this
+# workflow, with no agent in between:
+#   1. detects the version change (scripts/detect-pending-release.sh);
+#   2. adopts the queue run's archives by exact commit or tree id
+#      (scripts/find-release-prebuild.sh), and builds them only on a miss, by
+#      calling release-prebuild.yml;
+#   3. runs the ISA audit and the operator launch smoke on the packaged Linux
+#      archive, and the signature check and launch smoke on the packaged macOS
+#      archive: the bytes that ship;
+#   4. creates the annotated tag v<version> and the GitHub release
+#      (scripts/release-publish.sh), whose notes carry the PR-opened timer;
+#   5. dispatches the install-path proof.
+# The supervisor host installs on publish (scripts/install-on-publish.sh).
+#
+# workflow_dispatch with dry_run=true (the default) runs every step for the
+# dispatched ref against a throwaway prerelease named dryrun-v<version>-<run>,
+# then deletes it. With dry_run=false it is the recovery path for a release
+# whose push run failed; it still refuses an existing release.
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - cas-cli/Cargo.toml
   workflow_dispatch:
     inputs:
-      macos_artifact_url:
-        description: Published Darwin tarball URL to inspect with codesign
-        required: true
-        type: string
+      dry_run:
+        description: Publish a throwaway prerelease and delete it (no real release)
+        required: false
+        type: boolean
+        default: true
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
-  SCCACHE_GHA_VERSION: "cas-v2"
-  # Thin LTO preserves cross-crate optimization while allowing parallel codegen.
-  # The packaged binaries are explicitly stripped below, matching the shipped
-  # size behavior of the full release profile.
-  RELEASE_PROFILE: release-fast
-  RELEASE_DIR: release-fast
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
-  # Have the release artifacts already been built? (cas-3b7c0)
-  #
-  # release-prebuild.yml builds them when the version-bump PR merges, so the
-  # tag usually only has to publish bytes that already exist. This lookup is
-  # Fixes #603: tagging while that run is still in flight now waits for it.
-  # deliberately FAIL-SAFE: it waits briefly for a matching queued/in-progress
-  # prebuild, then makes any miss, partial prebuild, expired artifact or API
-  # failure loud before the tag falls back to inline builds.
-  prebuilt-lookup:
+  detect:
+    name: Detect release version change
+    if: github.repository == 'Richards-LLC/cassy' && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    outputs:
+      pending: ${{ steps.decide.outputs.pending }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      dry-run: ${{ steps.decide.outputs.dry-run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+
+      - id: detect
+        name: Detect a version change against the previous main
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$GITHUB_EVENT_NAME" == push && -n "$BEFORE" && "$BEFORE" != 0000000000000000000000000000000000000000 ]]; then
+            git fetch --quiet --depth=1 origin "$BEFORE"
+            base_version="$(git show "$BEFORE:cas-cli/Cargo.toml" \
+              | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -n 1)"
+            args=(--base-version "$base_version")
+          fi
+          ./scripts/detect-pending-release.sh "${args[@]}" | tee -a "$GITHUB_OUTPUT"
+
+      - id: decide
+        name: Decide what to publish
+        shell: bash
+        env:
+          PENDING: ${{ steps.detect.outputs.pending }}
+          CHANGED: ${{ steps.detect.outputs.changed }}
+          VERSION: ${{ steps.detect.outputs.version }}
+          TAG: ${{ steps.detect.outputs.tag }}
+          REASON: ${{ steps.detect.outputs.reason }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == true ]]; then
+            # A dry run exercises the whole path for any tree, released or not.
+            [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::dry run needs a release version; $REASON"; exit 1; }
+            {
+              echo "pending=true"
+              echo "version=$VERSION"
+              echo "tag=dryrun-v$VERSION-$GITHUB_RUN_ID"
+              echo "dry-run=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "Dry run for $VERSION at $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ "$PENDING" != true && "$CHANGED" == true ]]; then
+            # The version moved on main but cannot publish: reused or lowered.
+            echo "::error::the version change on main cannot publish: $REASON"
+            exit 1
+          fi
+          {
+            echo "pending=$PENDING"
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "dry-run=false"
+          } >> "$GITHUB_OUTPUT"
+          echo "pending=$PENDING tag=$TAG reason=$REASON" >> "$GITHUB_STEP_SUMMARY"
+
+  # Adopt the archives the merge queue built for this tree (cas-28eb finder).
+  # The queue may land before its non-required release builds finish, so the
+  # finder waits for an in-flight matching run before declaring a miss.
+  lookup:
     name: Look up prebuilt release artifacts
-    # Fixes #603: tagging while the matching prebuild is still in flight waits
-    # for its receipt instead of silently selecting the cold-build path.
-    if: github.event_name == 'push'
+    needs: detect
+    if: needs.detect.outputs.pending == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,500 +133,152 @@ jobs:
           ref: ${{ github.sha }}
 
       - id: lookup
-        name: Find a successful prebuild for this exact commit
+        name: Find a successful prebuild for this exact commit or tree
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PREBUILD_WAIT_SECONDS: 900
+          RELEASE_PREBUILD_WAIT_SECONDS: 1800
           RELEASE_PREBUILD_POLL_SECONDS: 15
         run: ./scripts/find-release-prebuild.sh | tee -a "$GITHUB_OUTPUT"
 
-  # GitHub Actions cannot fall back after assigning an offline self-hosted
-  # runner, so select the label before assignment (same contract as ci.yml's
-  # merge-queue route). Absent/disabled repository variable = hosted, which is
-  # the historical release path unchanged.
-  release-runner-route:
-    name: Release — runner route
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.route.outputs.runner }}
-      mode: ${{ steps.route.outputs.mode }}
-    steps:
-      - id: route
-        env:
-          SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
-        run: |
-          if [[ "$SELF_HOSTED_ENABLED" == enabled ]]; then
-            echo 'runner=["self-hosted","Linux","X64","cas-ci-32core"]' >> "$GITHUB_OUTPUT"
-            echo 'mode=self-hosted' >> "$GITHUB_OUTPUT"
-          else
-            echo 'runner=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
-            echo 'mode=hosted' >> "$GITHUB_OUTPUT"
-          fi
-
-  verify:
-    name: Verify Release Inputs
-    needs: release-runner-route
-    if: >-
-      github.event_name == 'push'
-      && (needs.release-runner-route.outputs.mode != 'self-hosted'
-      || (github.repository == 'Richards-LLC/cassy'
-      && github.event.repository.fork == false
-      && startsWith(github.ref, 'refs/tags/v')
-      && vars.CASSY_RELEASE_SELF_HOSTED == 'enabled'))
-    runs-on: ${{ fromJSON(needs.release-runner-route.outputs.runner) }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Verify release self-hosted trust boundary
-        if: needs.release-runner-route.outputs.mode == 'self-hosted'
-        env:
-          SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
-        run: ./scripts/check-release-runner-trust.sh
-
-      # Runner slots share RUSTUP_HOME. Reuse the preprovisioned toolchain;
-      # exceptional installs must use the same lock as the CI lanes.
-      - name: Set up shared self-hosted Rust toolchain
-        if: needs.release-runner-route.outputs.mode == 'self-hosted'
-        run: ./scripts/setup-cassy-actions-rust.sh
-
-      - name: Install Rust
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux linker
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        run: |
-          sudo apt-get update
-          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y gcc mold
-
-      - name: Setup sccache
-        id: setup-sccache
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.11
-
-      - name: Probe sccache backend
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        env:
-          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
-        shell: bash
-        run: |
-          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
-            echo "::warning::sccache backend unavailable — building uncached"
-            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
-              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          fi
-
-      # cas-065a: on the box the warm persistent target directory is what makes
-      # this lane fast, and its private cache server has an open TCP defect. A
-      # cache must never be able to fail a release gate.
-      - name: Use the isolated runner cache settings
-        if: needs.release-runner-route.outputs.mode == 'self-hosted'
-        run: |
-          echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
-          echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
-
-      # Keep Cargo's registry and dependency artifacts warm across releases.
-      # The explicit lockfile key prevents a dependency update from restoring
-      # incompatible artifacts, while source changes still rebuild workspace crates.
-      - name: Cache release dependencies
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-verify-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          cache-on-failure: true
-
-      - name: Install Zig
-        run: ./scripts/bootstrap-zig.sh
-
-      - name: Fail fast on release inputs
-        run: ./scripts/check-release-preflight.sh "${GITHUB_REF_NAME}"
-
-      # Same compiler cache contract as ci.yml: every compiling lane publishes
-      # its hit rate. Observability only — this step can never fail a release.
-      - name: Report sccache stats
-        if: always()
-        run: |
-          # Version skew (cas-3e14): the workflow can come from a newer main
-          # while the checkout is an older head that predates this script.
-          # Observability must never fail a lane that compiled and tested fine.
-          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
-            ./scripts/ci-sccache-summary.sh "Verify Release Inputs"
-          else
-            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
-          fi
-
-  # FALLBACK PATH. This only runs when no prebuild exists for the tagged
-  # commit. It is the pre-cas-3b7c0 behaviour, kept intact so a release can
-  # always ship without the prebuild workflow having succeeded.
+  # FALLBACK ONLY: no prebuild exists for this tree. The same build steps as
+  # the queue run, called rather than copied.
   build:
-    name: Build Linux x86_64
-    needs: [prebuilt-lookup, release-runner-route]
-    if: >-
-      github.event_name == 'push'
-      && needs.prebuilt-lookup.outputs.found != 'true'
-      && (needs.release-runner-route.outputs.mode != 'self-hosted'
-      || (github.repository == 'Richards-LLC/cassy'
-      && github.event.repository.fork == false
-      && startsWith(github.ref, 'refs/tags/v')
-      && vars.CASSY_RELEASE_SELF_HOSTED == 'enabled'))
-    runs-on: ${{ fromJSON(needs.release-runner-route.outputs.runner) }}
+    name: Build release artifacts (fallback)
+    needs: lookup
+    if: needs.lookup.result == 'success' && needs.lookup.outputs.found != 'true'
+    uses: ./.github/workflows/release-prebuild.yml
 
+  audit-linux:
+    name: Audit packaged Linux asset
+    needs: [detect, lookup, build]
+    if: >-
+      !cancelled()
+      && needs.lookup.result == 'success'
+      && ((needs.lookup.outputs.found == 'true' && needs.build.result == 'skipped')
+      || (needs.lookup.outputs.found != 'true' && needs.build.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          ref: ${{ github.sha }}
 
-      - name: Verify release self-hosted trust boundary
-        if: needs.release-runner-route.outputs.mode == 'self-hosted'
-        env:
-          SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
-        run: ./scripts/check-release-runner-trust.sh
-
-      # Runner slots share RUSTUP_HOME. Reuse the preprovisioned toolchain;
-      # exceptional installs must use the same lock as the CI lanes.
-      - name: Set up shared self-hosted Rust toolchain
-        if: needs.release-runner-route.outputs.mode == 'self-hosted'
-        run: ./scripts/setup-cassy-actions-rust.sh
-
-      - name: Install Rust
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Install Linux linker
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        run: |
-          sudo apt-get update
-          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y binutils file gcc mold
-          gcc --version
-          mold --version
-
-      - name: Setup sccache
-        id: setup-sccache
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.11
-
-      - name: Probe sccache backend
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        env:
-          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
-        shell: bash
-        run: |
-          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
-            echo "::warning::sccache backend unavailable — building uncached"
-            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
-              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          fi
-
-      - name: Use the isolated runner cache settings
-        if: needs.release-runner-route.outputs.mode == 'self-hosted'
-        run: |
-          echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
-          echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
-
-      - name: Cache release dependencies
-        if: needs.release-runner-route.outputs.mode == 'hosted'
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-linux-x86_64-${{ hashFiles('Cargo.lock') }}
-          cache-on-failure: true
-
-      - name: Install Zig
-        run: ./scripts/bootstrap-zig.sh
-
-      - name: Build
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: |
-          # The subsequent build-input audit must inspect this build, never a
-          # stale BLAKE3 output restored from the target cache.
-          cargo clean -p blake3 --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu
-          cargo build -p cas --profile "$RELEASE_PROFILE" --target x86_64-unknown-linux-gnu --locked
-
-      - name: Stage package
-        run: |
-          mkdir -p package
-          cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/cas" package/
-          strip package/cas
-          cp LICENSE package/
-
-      - name: Audit exact packaged Linux executable
-        run: |
-          ./scripts/check-blake3-no-avx512-build.sh "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-gnu/$RELEASE_DIR/build"
-          ./scripts/test-check-portable-x86_64-isa.sh package/cas
-
-      - name: Package
-        run: |
-          cd package
-          tar -czvf cas-x86_64-unknown-linux-gnu.tar.gz cas LICENSE
-          mv cas-x86_64-unknown-linux-gnu.tar.gz ../
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Download the Linux archive
+        uses: actions/download-artifact@v4
         with:
           name: cas-x86_64-unknown-linux-gnu
-          path: cas-x86_64-unknown-linux-gnu.tar.gz
+          path: release
+          run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Report sccache stats
-        if: always()
+      - name: ISA audit of the packaged executable
         run: |
-          # Version skew (cas-3e14): the workflow can come from a newer main
-          # while the checkout is an older head that predates this script.
-          # Observability must never fail a lane that compiled and tested fine.
-          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
-            ./scripts/ci-sccache-summary.sh "Build Linux x86_64"
-          else
-            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
-          fi
+          set -euo pipefail
+          mkdir -p asset
+          tar -xzf release/cas-x86_64-unknown-linux-gnu.tar.gz -C asset
+          ./scripts/check-portable-x86_64-isa.sh asset/cas
+          sha256sum release/cas-x86_64-unknown-linux-gnu.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # FALLBACK PATH. Historically the slowest job in every release (12-21 min
-  # cold). It is skipped entirely when release-prebuild.yml already produced a
-  # signed Darwin artifact for this exact commit.
-  build-macos:
-    name: Build macOS ARM64
-    needs: prebuilt-lookup
-    if: github.event_name == 'push' && needs.prebuilt-lookup.outputs.found != 'true'
-    # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
-    # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
+      - name: Operator launch smoke of the packaged executable
+        run: ./scripts/check-operator-launch.sh asset/cas
+
+  audit-macos:
+    name: Audit packaged macOS asset
+    needs: [detect, lookup, build]
+    if: >-
+      !cancelled()
+      && needs.lookup.result == 'success'
+      && ((needs.lookup.outputs.found == 'true' && needs.build.result == 'skipped')
+      || (needs.lookup.outputs.found != 'true' && needs.build.result == 'success'))
     runs-on: macos-26
+    permissions:
+      contents: read
+      actions: read
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-      # cas-d8ec: the macOS asset ships without LTO. Measured cold on macos-26
-      # (run 38613693971): 1686 s thin vs 912 s off, +3% size, same startup.
-      # Job-level so the rust-cache key changes with it. Linux keeps thin LTO.
-      CARGO_PROFILE_RELEASE_FAST_LTO: "off"
-
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          ref: ${{ github.sha }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: Install Zig
-        run: ./scripts/bootstrap-zig.sh
-
-      - name: Setup sccache
-        id: setup-sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.11
-
-      - name: Probe sccache backend
-        env:
-          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
-        shell: bash
-        run: |
-          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
-            echo "::warning::sccache backend unavailable — building uncached"
-            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
-              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          fi
-
-      - name: Cache release dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-macos-aarch64-${{ hashFiles('Cargo.lock') }}
-          cache-on-failure: true
-
-      - name: Build
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --profile "$RELEASE_PROFILE" --target aarch64-apple-darwin --locked
-
-      - name: Package
-        run: |
-          mkdir -p package
-          cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
-          strip package/cas
-          # `strip` invalidates an ad-hoc Mach-O signature. Re-sign the exact
-          # executable we publish, then fail before packaging if it is invalid.
-          codesign --sign - --force package/cas
-          codesign --verify --verbose=4 package/cas
-          cp LICENSE package/
-          cd package
-          tar -czvf cas-aarch64-apple-darwin.tar.gz cas LICENSE
-          mv cas-aarch64-apple-darwin.tar.gz ../
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Download the macOS archive
+        uses: actions/download-artifact@v4
         with:
           name: cas-aarch64-apple-darwin
-          path: cas-aarch64-apple-darwin.tar.gz
+          path: release
+          run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Report sccache stats
-        if: always()
+      # Mach-O signatures can be verified only on macOS; this is the archive
+      # that ships, not the one the build job signed before upload.
+      - name: Signature check of the packaged executable
         run: |
-          # Version skew (cas-3e14): the workflow can come from a newer main
-          # while the checkout is an older head that predates this script.
-          # Observability must never fail a lane that compiled and tested fine.
-          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
-            ./scripts/ci-sccache-summary.sh "Build macOS ARM64"
-          else
-            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
-          fi
+          set -euo pipefail
+          mkdir -p asset
+          tar -xzf release/cas-aarch64-apple-darwin.tar.gz -C asset
+          codesign --verify --verbose=4 asset/cas
+          shasum -a 256 release/cas-aarch64-apple-darwin.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # A dispatch-only receipt path lets an operator inspect a published asset on
-  # the macOS tooling that actually enforces Mach-O signatures. It never builds
-  # or publishes a release, so it is safe to run against historical archives.
-  verify-published-macos-signature:
-    name: Verify published macOS signature
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-26
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-    steps:
-      - name: Download published Darwin asset
-        env:
-          MACOS_ARTIFACT_URL: ${{ inputs.macos_artifact_url }}
-        run: |
-          archive="$RUNNER_TEMP/cas-aarch64-apple-darwin.tar.gz"
-          package="$RUNNER_TEMP/package"
-          curl --fail --location --retry 3 "$MACOS_ARTIFACT_URL" --output "$archive"
-          mkdir -p "$package"
-          tar -xzf "$archive" -C "$package"
-          test -x "$package/cas"
-
-      - name: Record and verify Mach-O signature
-        run: |
-          package="$RUNNER_TEMP/package"
-          codesign -dv "$package/cas"
-          codesign --verify --verbose=4 "$package/cas"
+      - name: Operator launch smoke of the packaged executable
+        run: bash ./scripts/check-operator-launch.sh asset/cas
 
   release:
     name: Create Release
-    # Exactly one of the two supply paths must have completed: either the
-    # prebuild was adopted and both platform builds were skipped, or no
-    # prebuild existed and both platform builds succeeded here. Anything else —
-    # a failed build, a half-skipped pair, a failed lookup — publishes nothing.
-    # `always()` is only what lets this job see a *skipped* dependency at all;
-    # every real condition below is explicit and fail-closed.
+    # Both packaged assets passed their audit and launch smoke. `!cancelled()`
+    # lets this job see a skipped fallback build; every real condition below
+    # is explicit and fail-closed.
+    needs: [detect, lookup, audit-linux, audit-macos]
     if: >-
-      always()
-      && github.event_name == 'push'
-      && needs.verify.result == 'success'
-      && needs.prebuilt-lookup.result == 'success'
-      && ((needs.prebuilt-lookup.outputs.found == 'true'
-      && needs.build.result == 'skipped'
-      && needs.build-macos.result == 'skipped')
-      || (needs.prebuilt-lookup.outputs.found != 'true'
-      && needs.build.result == 'success'
-      && needs.build-macos.result == 'success'))
-    needs: [prebuilt-lookup, verify, build, build-macos]
-    # Deliberately hosted, never the persistent box: this is the only job that
-    # holds a `contents: write` token, and it must not execute on a machine
-    # shared with the operator's factory worktrees.
+      !cancelled()
+      && needs.detect.outputs.pending == 'true'
+      && needs.audit-linux.result == 'success'
+      && needs.audit-macos.result == 'success'
+    # This is the only job that holds a `contents: write` token.
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: write
-
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
-      # Adoption is keyed on the prebuild run's head_sha, which the lookup
-      # matched to this tagged commit, so the adopted bytes are always the
-      # tagged tree's bytes.
-      - name: Adopt prebuilt release artifacts
-        if: needs.prebuilt-lookup.outputs.found == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREBUILD_RUN_ID: ${{ needs.prebuilt-lookup.outputs.run-id }}
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          gh run download "$PREBUILD_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir artifacts \
-            --name cas-x86_64-unknown-linux-gnu \
-            --name cas-aarch64-apple-darwin
-          echo "Adopted prebuilt artifacts from run $PREBUILD_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Download all artifacts
-        if: needs.prebuilt-lookup.outputs.found != 'true'
+      - name: Download both archives
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release
-          find artifacts -name "*.tar.gz" -exec mv {} release/ \;
-          ls -la release/
-
-      # Publishing must never be a blind copy. Re-audit the exact Linux
-      # executable that is about to be published — cheap (seconds), and it
-      # closes the gap that a prebuilt artifact was audited on a different
-      # machine at a different time.
-      - name: Audit the exact assets being published
-        run: |
-          set -euo pipefail
-          test -f release/cas-x86_64-unknown-linux-gnu.tar.gz
-          test -f release/cas-aarch64-apple-darwin.tar.gz
-          rm -rf publish-audit && mkdir -p publish-audit
-          tar -xzf release/cas-x86_64-unknown-linux-gnu.tar.gz -C publish-audit
-          ./scripts/check-portable-x86_64-isa.sh publish-audit/cas
-          # Mach-O signatures cannot be verified from Linux; the signing gate
-          # runs in whichever job produced the Darwin bytes, and the published
-          # asset is inspected by the `Verify published macOS signature`
-          # dispatch. Record its digest here so that receipt names exact bytes.
-          sha256sum release/*.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Generate release notes
-        run: |
-          set -euo pipefail
-          # Get the previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
-          if [ -n "$PREV_TAG" ]; then
-            git log --pretty=format:'- %s' "$PREV_TAG..HEAD" > "$RUNNER_TEMP/notes.md"
-          else
-            git log --pretty=format:'- %s' -10 > "$RUNNER_TEMP/notes.md"
-          fi
+          pattern: cas-*
+          merge-multiple: true
+          path: release
+          run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          TAG: ${{ needs.detect.outputs.tag }}
+          DRY_RUN: ${{ needs.detect.outputs.dry-run }}
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-
-          # A published release is immutable for announcement purposes. Do not
-          # delete/recreate it on a re-tag: that would replace bytes after a
-          # receipt had already verified and announced their digests. A retry
-          # after a partial creation must fail loudly for deliberate recovery,
-          # never silently attach or replace assets.
-          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::Release $VERSION already exists; refusing to replace its assets. See docs/RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release before rerunning."
-            exit 1
-          fi
-
-          gh release create "$VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "CAS $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            release/*
+          set -euo pipefail
+          ls -la release/
+          args=(--version "$VERSION" --sha "$GITHUB_SHA" --assets release --tag "$TAG" --notes-out "$RUNNER_TEMP/notes.md")
+          [[ "$DRY_RUN" != true ]] || args+=(--prerelease)
+          ./scripts/release-publish.sh "${args[@]}"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
       # GITHUB_TOKEN-created releases do not fan out a release.published event
       # to other workflows. Dispatch the proof explicitly after all assets are
       # published, and record the run id so the release receipt can verify it.
       - name: Dispatch install path proof
+        if: needs.detect.outputs.dry-run != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ needs.detect.outputs.tag }}
         run: |
           set -euo pipefail
           DISPATCH_STARTED_AT="$(date -u +%s)"
@@ -576,3 +311,20 @@ jobs:
             echo "- tag: $VERSION"
             echo "- run id: $proof_run_id"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # A dry run proves tag and release creation, then removes both so no
+      # throwaway object outlives the run.
+      - name: Delete the dry-run prerelease
+        if: always() && needs.detect.outputs.dry-run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in dryrun-*) ;; *) echo "::error::refusing to delete non-dry-run tag $TAG"; exit 1 ;; esac
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git push origin --delete "refs/tags/$TAG"
+          fi
+          echo "deleted dry-run prerelease $TAG" >> "$GITHUB_STEP_SUMMARY"

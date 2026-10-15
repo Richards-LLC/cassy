@@ -87,6 +87,27 @@ printf '[package]\nname = "cas"\nversion.workspace = true\n' >"$tree/cas-cli/Car
 out="$(RELEASE_TREE_ROOT="$tree" RELEASE_REMOTE="$remote" "$detect")"
 expect_field "$out" pending false 'an unreadable version is not a release tree'
 
+# 6. --base-version: only a version change against the landing tree is a
+#    release. An ordinary PR on top of a released-but-untagged tree must not
+#    rebuild, and a lowered or reused version is reported as changed+broken.
+make_tree "$tree" 2.0.0 2.0.0
+out="$(RELEASE_TREE_ROOT="$tree" RELEASE_REMOTE="$remote" "$detect" --base-version 1.0.0)"
+expect_field "$out" pending true 'a version bump against the base opens the release lanes'
+expect_field "$out" changed true 'a version bump reports changed=true'
+out="$(RELEASE_TREE_ROOT="$tree" RELEASE_REMOTE="$remote" "$detect" --base-version 2.0.0)"
+expect_field "$out" pending false 'an unchanged version against the base is not a release'
+expect_field "$out" changed false 'an unchanged version reports changed=false'
+out="$(RELEASE_TREE_ROOT="$tree" RELEASE_REMOTE="$remote" "$detect" --base-version 2.1.0)"
+expect_field "$out" pending false 'a lowered version is not a release'
+expect_field "$out" changed true 'a lowered version is reported as a broken change'
+make_tree "$tree" 1.0.0 1.0.0
+out="$(RELEASE_TREE_ROOT="$tree" RELEASE_REMOTE="$remote" "$detect" --base-version 0.9.0)"
+expect_field "$out" pending false 'a bump to an already-tagged version is not a release'
+expect_field "$out" changed true 'a bump to an already-tagged version is a broken change'
+make_tree "$tree" 2.10.0 2.10.0
+out="$(RELEASE_TREE_ROOT="$tree" RELEASE_REMOTE="$remote" "$detect" --base-version 2.9.0)"
+expect_field "$out" pending true 'versions compare numerically, not as text'
+
 # Every path must exit 0: this gate reports a decision, it never fails a push.
 for version in 2.0.0 1.0.0; do
     make_tree "$tree" "$version" "$version"

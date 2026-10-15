@@ -248,6 +248,7 @@ async fn cas_13c7_daemon_recovers_when_login_arrives_after_startup() {
     );
     let report = daemon_poll(&mut poller, start + std::time::Duration::from_secs(5)).await;
     assert_eq!(report.delivered, 1, "{report:?}");
+    // pin: a retried peer delivery must retain its original message body.
     assert!(inbox(&b)[0].prompt.ends_with("late login delivery"));
     assert!(mailbox_status_section(&b, Some("factory-b")).contains(": receiving."));
     let service = service_for(&b, "b");
@@ -341,11 +342,14 @@ async fn a_supervisor_messages_a_peer_on_another_machine_and_gets_the_reply() {
         assert_eq!((report.claimed, report.delivered), (2, 2));
         let rows = inbox(&b);
         assert_eq!(rows.len(), 2);
+        // pin: the first queued body must remain first after mailbox delivery.
         assert!(rows[0].prompt.ends_with("can you take cas-1234?"));
+        // pin: the second queued body must remain second after mailbox delivery.
         assert!(rows[1].prompt.ends_with("and cas-5678 after"));
         let envelope = parse_envelope(&rows[0].prompt).unwrap();
         assert_eq!(envelope.sender_name, "sup-a");
         assert_eq!(envelope.machine, "machine-alpha");
+        // pin: the reply address must retain the sender and machine qualification.
         assert!(rows[0].prompt.contains("sup-a@machine-alpha"));
         assert_eq!(rows[0].target, "sup-b");
         assert!(!rows[0].urgent);
@@ -383,6 +387,7 @@ async fn a_supervisor_messages_a_peer_on_another_machine_and_gets_the_reply() {
         assert_eq!(report.delivered, 1);
         let replies = inbox(&a);
         assert_eq!(replies.len(), 1);
+        // pin: reply delivery must retain the original reply body.
         assert!(replies[0].prompt.ends_with("yes, taking it"));
         assert!(
             replies[0]
@@ -513,7 +518,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
 
     let sent = coordinate(
         &service_a,
-        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?"}),
+        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?", "kind": "ask"}),
     )
     .await
     .unwrap();
@@ -531,6 +536,9 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .await
     .unwrap();
     assert_eq!(rows.len(), 1);
+
+    // pin: the receiver's peer envelope carries the typed ask attribute for the wake gate.
+    assert!(rows[0].prompt.lines().next().unwrap().contains("kind=\"ask\""), "peer kind must survive the actual Cloud route: {}", rows[0].prompt);
 
     let replied = coordinate(
         &service_b,
@@ -560,6 +568,17 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .unwrap();
     assert_eq!(replies.len(), 1);
     assert!(replies[0].prompt.ends_with("yes"));
+    // pin: pm_1 is the fixture's Cloud parent id and must survive as reply correlation.
+    assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
+    for (kind, blocker, wakes) in [(Some("blocker"), false, true), (None, true, true), (Some("status"), false, false)] {
+        let body = format!("peer intent {kind:?} blocker={blocker}");
+        coordinate(&service_a, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"peer intent", "message":body, "kind":kind, "blocker":blocker})).await.unwrap();
+        let bb = b.clone();
+        let rows = tokio::task::spawn_blocking(move || { tick(&bb, "b"); inbox(&bb) }).await.unwrap();
+        let row = rows.iter().find(|row| row.prompt.ends_with(&body)).unwrap();
+        let envelope = parse_envelope(&row.prompt).unwrap();
+        assert_eq!(envelope.wakes_idle(), wakes, "{envelope:?}");
+    }
 }
 
 fn public_outbox_status(root: &Path, id: &str) -> String {
@@ -742,6 +761,7 @@ async fn cas_13c7_outbox_expires_once_and_notifies_sender_after_restart() {
             "restart must not duplicate sender abandonment notice"
         );
         assert_eq!(notices[0].target, "sup-a");
+        // pin: abandonment must identify the durable outbox receipt for status lookup.
         assert!(notices[0].prompt.contains("peer-outbox:1"));
     })
     .await
@@ -1325,8 +1345,11 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
         .unwrap();
     assert_eq!(notices.len(), 1);
     assert!(
+        // pin: abandonment must retain its durable outbox receipt across sessions.
         notices[0].prompt.contains("peer-outbox:42")
+            // pin: the failure reason must survive rerouting to the successor session.
             && notices[0].prompt.contains("retry deadline expired")
+            // pin: the notice must name the original sender after that sender exits.
             && notices[0].prompt.contains("calm-puma-54"),
         "{}",
         notices[0].prompt
@@ -1347,5 +1370,6 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
         .poll_unseen_for_recipient("supervisor", Some("future-session"), 10)
         .unwrap();
     assert_eq!(future.len(), 1);
+    // pin: the future-session notice must identify its own durable outbox receipt.
     assert!(future[0].prompt.contains("peer-outbox:43"));
 }

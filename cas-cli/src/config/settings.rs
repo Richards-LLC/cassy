@@ -156,7 +156,9 @@ impl IssueRepoRegistry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuesConfig {
-    /// GitHub repository in `owner/repo` form used by Cassy-system bug filing.
+    /// Explicit project GitHub issue repository in `owner/repo` form. CLI
+    /// reads may infer origin; legacy Cassy-system bug filing uses only this
+    /// stored override or the Cassy component destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 
@@ -899,7 +901,7 @@ fn default_target_cache_low_watermark_percent() -> u8 {
 }
 
 fn default_target_cache_min_idle_secs() -> u64 {
-    60 * 60
+    2 * 60 * 60
 }
 
 fn default_target_cache_retention_count() -> usize {
@@ -1928,7 +1930,7 @@ mod tests {
         assert_eq!(fc.epic_base_branch, None);
         assert_eq!(fc.target_cache_high_watermark_percent, 85);
         assert_eq!(fc.target_cache_low_watermark_percent, 75);
-        assert_eq!(fc.target_cache_min_idle_secs, 3600);
+        assert_eq!(fc.target_cache_min_idle_secs, 7200);
         assert_eq!(fc.target_cache_retention_count, 1);
         assert_eq!(fc.message_max_chars, 1200);
         assert_eq!(fc.message_max_chars_escalation, 2500);

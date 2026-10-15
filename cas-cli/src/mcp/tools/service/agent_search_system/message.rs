@@ -4629,9 +4629,16 @@ mod cas_89e1_post_merge_message_type_tests {
         git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
         let branch = "factory/worker-a-cas-874e";
         git(repo, &["checkout", "-qb", branch]);
+        std::fs::write(repo.join("earlier.txt"), "integrated predecessor\n").unwrap();
+        git(repo, &["add", "earlier.txt"]);
+        git(repo, &["commit", "-qm", "earlier delivery"]);
         let sha = |reference: &str| crate::git_evidence::resolve_branch_sha(repo, reference).unwrap();
         let stale_tip = sha("HEAD");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", branch, "-m", "merge predecessor"]);
+        let target_tip = sha("main");
         git(repo, &["push", "-q", "origin", "main", branch]);
+        git(repo, &["checkout", "-q", branch]);
         std::fs::write(repo.join("delivery.txt"), "unmerged delivery\n").unwrap();
         git(repo, &["add", "delivery.txt"]);
         git(repo, &["commit", "-qm", "fix(cas-874e): live published delivery"]);
@@ -4684,7 +4691,7 @@ mod cas_89e1_post_merge_message_type_tests {
                 crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
             ).expect("live source merge request reaches supervisor queue");
             assert_eq!(envelope.branch_tip, published_tip);
-            assert_eq!(envelope.target_branch_tip, stale_tip);
+            assert_eq!(envelope.target_branch_tip, target_tip);
         }
     }
 

@@ -649,6 +649,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         let verified = include_str!("../../scripts/run-verified-tests.sh");
         let mut command = if repo.join("scripts/worker-proof-guards.py").is_file() {
             let mut guarded = Command::new("python3");
+            guarded.env("PYTHONDONTWRITEBYTECODE", "1");
             guarded.arg("-c").arg(include_str!("../../scripts/worker-proof-guards.py"))
                 .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
                 .arg("--verified-script").arg(verified)

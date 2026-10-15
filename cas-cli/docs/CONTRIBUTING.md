@@ -1387,6 +1387,11 @@ A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
 Named task commits and unclaimed unmerged changes still require delivery proof.
+QA classification of an integrated merge receipt uses that merge's own
+first-parent diff. Later PR merges cannot add their UI paths to the receipt's
+evidence requirements or hide UI that the receipt itself delivered.
+A worker tip that merged the epic into its lane uses its later integration
+merge's diff; only a merge on the target's first-parent chain is the receipt.
 
 Typed merge requests refresh the published source before deciding it already
 landed. If that bounded fetch fails, the typed request is still queued with a

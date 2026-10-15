@@ -441,6 +441,83 @@ mod tests {
         assert!(refusal.contains("app.css"), "{refusal}");
     }
 
+    fn merged_receipt_fixture_gh1181(first: &str, later: Option<&str>) -> (tempfile::TempDir, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        commit_file(&repo, "README.md", "base\n");
+        git(&repo, &["switch", "-q", "-c", "factory/worker"]);
+        commit_file(&repo, first, "first delivery\n");
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Merge first PR"]);
+        let receipt = git(&repo, &["rev-parse", "HEAD"]);
+        if let Some(later) = later {
+            git(&repo, &["switch", "-q", "-c", "later-pr"]);
+            commit_file(&repo, later, "later delivery\n");
+            git(&repo, &["switch", "-q", "main"]);
+            git(&repo, &["merge", "-q", "--no-ff", "later-pr", "-m", "Merge later PR"]);
+        }
+        std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
+        (temp, receipt)
+    }
+
+    #[test]
+    fn backend_merge_receipt_does_not_require_qa_for_later_ui_merge_gh1181() {
+        let (temp, receipt) = merged_receipt_fixture_gh1181(
+            "src/service.ts", Some("hub-web/dist/CoachReportPreview.vue"),
+        );
+        let repo = temp.path().join("repo");
+        let mut task = Task::new("cas-8103".into(), "Backend delivery".into());
+        task.assignee = Some("worker".into());
+        qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&receipt))
+            .expect("the earlier backend merge must not own the later UI merge");
+        let (from, to) = delivery_range(&repo, &receipt, "main").unwrap();
+        assert_eq!(to, receipt);
+        assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+    }
+
+    #[test]
+    fn ui_merge_receipt_keeps_its_own_qa_requirement_after_later_backend_merge_gh1181() {
+        for later in [None, Some("src/service.ts")] {
+            let (temp, receipt) = merged_receipt_fixture_gh1181("hub-web/dist/own.vue", later);
+            let repo = temp.path().join("repo");
+            let mut task = Task::new("cas-8104".into(), "UI delivery".into());
+            task.assignee = Some("worker".into());
+            let refusal = qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&receipt))
+                .expect_err("the receipt's own UI still requires QA, even at the current target");
+            assert!(refusal.contains("own.vue"), "{refusal}");
+            assert!(!refusal.contains("src/service.ts"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn worker_tip_merge_uses_its_integration_merge_range_gh1181() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        commit_file(&repo, "README.md", "base\n");
+        git(&repo, &["switch", "-q", "-c", "factory/worker"]);
+        commit_file(&repo, "src/service.ts", "backend delivery\n");
+        git(&repo, &["switch", "-q", "main"]);
+        commit_file(&repo, "hub-web/dist/epic.vue", "incoming epic UI\n");
+        git(&repo, &["switch", "-q", "factory/worker"]);
+        git(&repo, &["merge", "-q", "--no-ff", "main", "-m", "Sync epic into worker"]);
+        let worker_tip = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Integrate worker delivery"]);
+        let integration = git(&repo, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
+        let mut task = Task::new("cas-8105".into(), "Backend delivery after sync".into());
+        task.assignee = Some("worker".into());
+        qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&worker_tip))
+            .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
+        let (from, to) = delivery_range(&repo, &worker_tip, "main").unwrap();
+        assert_eq!(to, integration);
+        assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+    }
+
     /// cas-bde8 (GH #978): task A's UI commits on a reused factory branch were
     /// merged by PR, but the local `main` was never refreshed. Backend-only
     /// task B, next on the same branch, is judged against `origin/main`, where

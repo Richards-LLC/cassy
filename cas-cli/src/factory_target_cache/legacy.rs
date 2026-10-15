@@ -36,6 +36,13 @@ impl Guard {
             {
                 return false;
             }
+            if self
+                .lease
+                .as_ref()
+                .is_some_and(|lease| !lease.revalidate(cache).unwrap_or(false))
+            {
+                return false;
+            }
             let mut count = 0;
             for entry in WalkDir::new(cache).follow_links(false) {
                 let Ok(entry) = entry else { return false };
@@ -422,6 +429,19 @@ mod tests {
         );
         owner.pid_starttime = None;
         assert!(!registered_live(&owner), "bare PID cannot vouch for owner");
+    }
+
+    #[test]
+    fn owned_target_keeps_lifetime_lease_and_provenance_gate_cas_cd3e() {
+        let (_temp, root, worker, target) = fixture();
+        fs::remove_dir_all(&target).unwrap();
+        let lease = owner::acquire(&root, &worker).unwrap().unwrap();
+        assert!(acquire_with(&root, &worker, &target, |_, _| Ok(true)).is_err());
+        drop(lease);
+        let guard = acquire_with(&root, &worker, &target, |_, _| Ok(true)).unwrap();
+        assert!(guard.unchanged(&target));
+        fs::write(target.join(owner::MARKER), "changed provenance").unwrap();
+        assert!(!guard.unchanged(&target));
     }
 
     #[test]

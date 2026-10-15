@@ -372,13 +372,13 @@ pub fn cleanup_selected(
         let descriptors = guard
             .as_ref()
             .map_or_else(Vec::new, legacy::Guard::descriptors);
-        if guarded_process_uses(
+        if let Some(disposition) = process_block(
             &record.worktree,
             &record.path,
             &descriptors,
             guard.is_some(),
         ) {
-            record.disposition = CacheDisposition::LiveProcess;
+            record.disposition = disposition;
             record.reason = "process evidence changed before rename".into();
             continue;
         }
@@ -403,16 +403,18 @@ pub fn cleanup_selected(
         // started against the worktree root is visible by cwd/cmdline. If a
         // live user appeared, restore the original name when possible and
         // leave the cache intact either way.
+        let process_block =
+            process_block(&record.worktree, &quarantine, &descriptors, guard.is_some());
         if guard
             .as_ref()
             .is_some_and(|guard| !guard.unchanged(&quarantine))
-            || guarded_process_uses(&record.worktree, &quarantine, &descriptors, guard.is_some())
+            || process_block.is_some()
         {
             if !record.interrupted_cleanup && !record.path.exists() {
                 let _ = fs::rename(&quarantine, &record.path);
             }
-            record.disposition = CacheDisposition::LiveProcess;
-            record.reason = "liveness appeared after atomic quarantine rename".to_string();
+            record.disposition = process_block.unwrap_or(CacheDisposition::Indeterminate);
+            record.reason = "guards changed after atomic quarantine rename".to_string();
             continue;
         }
 
@@ -927,16 +929,12 @@ fn linux_cache_admission(
                 format!("legacy lane guard refused: {error}"),
             )
         })?;
-        if process_probe::linux_uses_many_owned(
-            proc_root,
-            worktree,
-            cache,
-            &guard.descriptors(),
-            true,
-        ) {
+        if let Some(disposition) =
+            linux_process_block(proc_root, worktree, cache, &guard.descriptors(), true)
+        {
             return Err((
-                CacheDisposition::Indeterminate,
-                "unverifiable process table or new positive process evidence".into(),
+                disposition,
+                "process evidence changed under legacy lane guard".into(),
             ));
         }
         return Ok(Some(guard));
@@ -950,21 +948,36 @@ fn linux_cache_admission(
     Ok(None)
 }
 
-fn guarded_process_uses(worktree: &Path, cache: &Path, descriptors: &[i32], guarded: bool) -> bool {
+#[cfg(target_os = "linux")]
+fn linux_process_block(
+    proc_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    descriptors: &[i32],
+    guarded: bool,
+) -> Option<CacheDisposition> {
+    match process_probe::linux_evidence_many(proc_root, worktree, cache, descriptors) {
+        process_probe::Evidence::Idle => None,
+        process_probe::Evidence::Live { .. } => Some(CacheDisposition::LiveProcess),
+        process_probe::Evidence::Opaque { pid: Some(_) } if guarded => None,
+        process_probe::Evidence::Opaque { .. } => Some(CacheDisposition::Indeterminate),
+    }
+}
+
+fn process_block(
+    worktree: &Path,
+    cache: &Path,
+    descriptors: &[i32],
+    guarded: bool,
+) -> Option<CacheDisposition> {
     #[cfg(target_os = "linux")]
     {
-        process_probe::linux_uses_many_owned(
-            Path::new("/proc"),
-            worktree,
-            cache,
-            descriptors,
-            guarded,
-        )
+        linux_process_block(Path::new("/proc"), worktree, cache, descriptors, guarded)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = guarded;
-        process_uses_many(worktree, cache, descriptors)
+        process_uses_many(worktree, cache, descriptors).then_some(CacheDisposition::Indeterminate)
     }
 }
 

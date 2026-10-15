@@ -48,6 +48,13 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", reason));
     }
 
+    // cas-d757 (GH #1219): operator-authenticated CLIs (vercel) and their
+    // MCP tools are the supervisor's. Workers only; before auto-approval and
+    // the missing-root early return.
+    if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root) {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     // cas-3147 (GH #1169): write roots and grants are operator-only. Every
     // harness tool call is an agent's, so the operator-only CLI is refused
     // here for every role, before any auto-approval or root early return.
@@ -4096,12 +4103,24 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
 /// substitutions count as `cas`, and `sh -c` / `eval` payloads are inspected
 /// recursively.
 fn cas_invocations(command: &str) -> Vec<Vec<String>> {
+    shell_invocations(&normalize_cas_substitutions(command))
+        .into_iter()
+        .filter(|(name, _)| name == "cas")
+        .map(|(_, args)| args)
+        .collect()
+}
+
+/// cas-d757: every command a shell command line runs, as `(basename, args)`,
+/// through the same unwrapping as [`cas_invocations`]: wrappers and leading
+/// `VAR=val`, and `sh -c` / `eval` payloads recursively. Shared with the
+/// worker-denied CLI guard (GH #1219).
+pub(super) fn shell_invocations(command: &str) -> Vec<(String, Vec<String>)> {
     let mut found = Vec::new();
-    collect_cas_invocations(&normalize_cas_substitutions(command), 0, &mut found);
+    collect_shell_invocations(command, 0, &mut found);
     found
 }
 
-fn collect_cas_invocations(command: &str, depth: usize, found: &mut Vec<Vec<String>>) {
+fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(String, Vec<String>)>) {
     if depth > 3 {
         return;
     }
@@ -4110,7 +4129,8 @@ fn collect_cas_invocations(command: &str, depth: usize, found: &mut Vec<Vec<Stri
             continue;
         };
         let args = &words[index + 1..];
-        match shell_word_basename(&words[index]) {
+        let name = shell_word_basename(&words[index]);
+        match name {
             // Wrappers whose option value is itself a shell command.
             "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
                 for (position, arg) in args.iter().enumerate() {
@@ -4118,14 +4138,14 @@ fn collect_cas_invocations(command: &str, depth: usize, found: &mut Vec<Vec<Stri
                     if (flags_c || arg == "--command")
                         && let Some(payload) = args.get(position + 1)
                     {
-                        collect_cas_invocations(payload, depth + 1, found);
+                        collect_shell_invocations(payload, depth + 1, found);
                     }
                 }
             }
-            "eval" => collect_cas_invocations(&args.join(" "), depth + 1, found),
-            "cas" => found.push(args.to_vec()),
+            "eval" => collect_shell_invocations(&args.join(" "), depth + 1, found),
             _ => {}
         }
+        found.push((name.to_string(), args.to_vec()));
     }
 }
 

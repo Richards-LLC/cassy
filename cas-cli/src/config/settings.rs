@@ -521,6 +521,15 @@ pub struct FactoryConfig {
     /// Resource denials applied to every factory worker, across harnesses.
     #[serde(flatten)]
     pub worker_policy: cas_types::factory_worker_policy::FactoryWorkerPolicy,
+    /// cas-d757 (GH #1219): operator-authenticated CLIs a factory worker's
+    /// shell may not run. Without credentials they start a login that pops
+    /// up on the operator's screen. Matched on the executable's basename.
+    #[serde(default = "default_worker_denied_clis")]
+    pub worker_denied_clis: Vec<String>,
+    /// cas-d757 (GH #1219): MCP/connector tool-name patterns a factory worker
+    /// may not call. Case-insensitive; `*` matches any run of characters.
+    #[serde(default = "default_worker_denied_mcp_tools")]
+    pub worker_denied_mcp_tools: Vec<String>,
     /// Durable, per-task proof/artifact directory. Factory workers may write
     /// under this root/project-key in addition to their worktree. If unset, the hook
     /// resolves a real-disk fallback under `~/.cas/artifacts`.
@@ -908,6 +917,14 @@ fn default_target_cache_retention_count() -> usize {
     1
 }
 
+fn default_worker_denied_clis() -> Vec<String> {
+    vec!["vercel".to_string()]
+}
+
+fn default_worker_denied_mcp_tools() -> Vec<String> {
+    vec!["*vercel*".to_string()]
+}
+
 fn default_render_max_fps() -> u32 {
     15
 }
@@ -920,6 +937,8 @@ impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
             worker_policy: Default::default(),
+            worker_denied_clis: default_worker_denied_clis(),
+            worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),

@@ -7,6 +7,80 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)
+
+- External reminder probes (`branch_contained_in`, `tag_exists`, `ci_completed`)
+  run off the daemon loop. They fetch each ref once per pass and back off, so
+  typing and rendering no longer wait on `git fetch` or `gh`. Undelivered stale
+  reminders expire.
+
+### Fixed — messages to Claude workers are no longer gated forever (#1209, cas-7bfa)
+
+- A Claude Agent Teams member owns its own `<name>@<session>` inbox, so mail is
+  surfaced at tool boundaries and turn start. A teammate turn confirms only the
+  rows it carried (addressed to it, body in the prompt, with a transport receipt).
+
+### Fixed — operator and Commander relays (cas-d88c, cas-f7b0, cas-0028, cas-7704, cas-5c89)
+
+- A Commander-paired operator is no longer reported as abandoned, and liveness
+  false positives no longer fire.
+- Supervisor replies are mirrored to Commander without waiting for verified
+  operator activity. `factory.commander_mirror_enabled=false` is an
+  operator-only opt-out with a resume floor.
+- The phone conversation shows a terminal question together with its reply.
+
+### Fixed — spawning workers (#1173, #1174, cas-e037, cas-0feb, cas-ee68, cas-082c)
+
+- Claude workers waiting for the CAS server are no longer killed by the
+  post-registration boot check.
+- `spawn_workers` refuses before queueing when the session's recorded daemon
+  build and the installed provisioner build are both known and differ, naming
+  `cas factory kill <session>` and a relaunch. When either build is unknown, the
+  receipt says "Build check: skipped" and the spawn proceeds.
+- `spawn_brief` with `task_id` delivers the supervisor brief in the spawn
+  message, so the worker reads it before task start. The spawn message is no
+  longer sent twice, and a stale broadcast no longer blocks task start.
+- The spawn prompt states that running the affected tests is required.
+
+### Fixed — close, QA and merge gates (#1175, #1177, #1179, #1180, #1181, #1199, #1200, #1202)
+
+- QA waivers bind to the task's delivery branch and are honoured on the worker
+  close path.
+- No-code verification tasks can close.
+- Merge requests are no longer suppressed as already landed when the branch has
+  not landed.
+- A merged delivery transferred to a new worker still resolves at close.
+- An integration receipt is classified by its own first-parent diff.
+- An unresolved delivery is refused before the task parks.
+- A MERGE REQUIRED park sends one supervisor relay instead of two (cas-3a82).
+
+### Fixed — worker lifecycle (#1185, #1190, #1195, cas-00d5, cas-981e)
+
+- `shutdown_workers` stops idle Codex and Claude workers even when the loop's
+  store budget is spent.
+- A `clear_context` recycle takes effect, or records a failed outcome and
+  tells the supervisor why.
+
+### Changed — coordination and tools (#1188, #1197, #1207, cas-6853, cas-fa1c, cas-48e5, cas-b58a)
+
+- One `remind` refusal lists every missing requirement with an example.
+- `verification add` accepts an `issues` JSON array.
+- The artifact publisher uploads `video/webm` QA recordings.
+- A broadcast can carry `supersede_key` (the newest message per key wins) and
+  `sticky` (workers that join later receive it).
+- The relayed re-close command uses the worker's own harness prefix and says
+  that it runs in the worker's session. The supervisor's escape-hatch close is
+  a separate line.
+- Workers send one message per event, and a status or ready message gives the
+  supervisor a typed wake.
+- The coordination tool schema stays within its 3,600-byte cap.
+
+### Fixed — tests and docs (cas-ec55, cas-1b81, cas-95a4, cas-805e, cas-c3d9)
+
+- Two hub-web WebCrypto lifecycle tests no longer race under load.
+- Test-shape pin checks accept the pins made by rebased lanes.
+- Added the communication contract v2 spec, and refreshed CODEMAP and the product overview.
+
 ## [3.55.0] - 2026-10-15
 
 ### Changed — code merges wait for CI and late failures raise a blocker (cas-6c13)

@@ -164,13 +164,20 @@ fn cas_07ee_merged_delivery_no_longer_needs_attention() {
     git(&["init", "-q", "-b", "main"]);
     git(&["config", "user.email", "test@example.invalid"]);
     git(&["config", "user.name", "Cassy Test"]);
+    std::fs::write(f.root.path().join("base.txt"), "base\n").unwrap();
+    git(&["add", "base.txt"]);
+    git(&["commit", "-qm", "base"]);
+    git(&["checkout", "-qb", "factory/worker"]);
     std::fs::write(f.root.path().join("delivery.txt"), "already merged\n").unwrap();
     git(&["add", "delivery.txt"]);
     git(&["commit", "-qm", "delivery"]);
     let tip = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", "main"]);
+    git(&["merge", "--no-ff", "--no-edit", "factory/worker"]);
     let mut task = Task::new("cas-07ee".into(), "delivery".into());
     task.assignee = Some("worker".into());
     task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some("factory/worker".into());
     crate::store::open_task_store_local(&f.cas_dir)
         .unwrap()
         .add(&task)
@@ -334,7 +341,10 @@ fn cas_07ee_informational_approval_does_not_raise_idle_unread() {
     ] {
         let mut f = Fixture::new();
         f.aged("supervisor", "worker", body);
-        f.scan();
+        f.daemon
+            .pane_silent_since
+            .insert("worker".into(), Instant::now() - Duration::from_secs(900));
+        f.daemon.relay_idle_unacked_messages(f.queue.as_ref());
         assert!(
             !f.queue.peek_all(20).unwrap().iter().any(|row| row
                 .summary

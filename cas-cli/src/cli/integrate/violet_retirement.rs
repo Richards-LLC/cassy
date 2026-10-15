@@ -577,8 +577,7 @@ impl<'a> UpdateMigration<'a> {
     }
 
     fn managed_token(name: &str) -> bool {
-        (name == "VIOLET_SLACK_TOKEN" || name.starts_with("VIOLET_SLACK_TOKEN_"))
-            && name != "VIOLET_SLACK_TOKEN_ENV"
+        name.starts_with("VIOLET_SLACK_TOKEN_") && name != "VIOLET_SLACK_TOKEN_ENV"
     }
 
     fn rename(&self, name: &str, path: &Path, report: &mut ProfileRetirement) -> String {
@@ -828,6 +827,9 @@ impl<'a> UpdateMigration<'a> {
             ProbeOutcome::Tools { .. } => anyhow::bail!(
                 "authenticated tools/list lacks required Violet tools or a usable schema"
             ),
+            ProbeOutcome::Skipped { .. } => anyhow::bail!(
+                "authenticated tools/list skipped: Violet update probe time budget exhausted"
+            ),
             _ => anyhow::bail!(
                 "authenticated tools/list unavailable; retry cas update when the hub is reachable"
             ),
@@ -943,6 +945,8 @@ mod tests {
     #[test]
     fn cas_678d_update_migrates_and_authenticates_every_profile_without_empty_bearer() {
         let (mut env, probe) = update_fixture();
+        // A bare generic variable is not a labelled machine-token candidate.
+        env.set("VIOLET_SLACK_TOKEN", "unlabelled-fixture");
         let home = env.home().to_path_buf();
         let claude_profiles = [
             home.join(".claude.json"),

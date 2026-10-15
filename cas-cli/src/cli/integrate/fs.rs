@@ -138,6 +138,7 @@ fn atomic_write_guarded(
     atomic_write_via_temp_path_guarded(path, contents, &tmp_path, expected)
 }
 
+#[cfg(test)]
 fn atomic_write_via_temp_path(path: &Path, contents: &str, tmp_path: &Path) -> anyhow::Result<()> {
     atomic_write_via_temp_path_guarded(path, contents, tmp_path, None).map(|_| ())
 }

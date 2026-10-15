@@ -995,7 +995,12 @@ fn parse_changelog_section(content: &str, version: &str) -> Option<ChangelogSect
             if let Some(entry) = current.take() {
                 entries.push(entry);
             }
-            category = value.trim().to_string();
+            category = value
+                .split_once(" — ")
+                .map(|(kind, _)| kind)
+                .unwrap_or(value)
+                .trim()
+                .to_string();
         } else if let Some(value) = line.trim_start().strip_prefix("- ") {
             if let Some(entry) = current.take() {
                 entries.push(entry);
@@ -1901,6 +1906,7 @@ fn release_note_title(value: &str) -> String {
 
 fn release_note_group_label(line: &str) -> Option<String> {
     let value = line.trim();
+    let value = value.strip_prefix("### ").unwrap_or(value);
     let value = value
         .strip_prefix("**")
         .and_then(|value| value.strip_suffix("**"))
@@ -1910,14 +1916,16 @@ fn release_note_group_label(line: &str) -> Option<String> {
                 .and_then(|value| value.strip_suffix('*'))
         })?
         .trim();
-    if value.is_empty()
-        || value.contains("Was:")
-        || value.contains("Now:")
-        || is_release_note_top_level(value)
+    let normalized = value.trim_end_matches(':').trim();
+    if normalized.is_empty()
+        || normalized.eq_ignore_ascii_case("Reply (Was → Now)")
+        || normalized.contains("Was:")
+        || normalized.contains("Now:")
+        || is_release_note_top_level(normalized)
     {
         return None;
     }
-    Some(value.to_string())
+    Some(normalized.to_string())
 }
 
 fn is_release_note_top_level(value: &str) -> bool {
@@ -3007,7 +3015,9 @@ Dev reply
         let parsed = parse_release_note_draft(draft);
         let themes = draft_theme_order(&parsed.articles);
         assert!(
-            themes.iter().all(|theme| !theme.contains("Reply (Was → Now)")),
+            themes
+                .iter()
+                .all(|theme| !theme.contains("Reply (Was → Now)")),
             "unexpected presentation heading in themes: {themes:?}"
         );
 

@@ -10,16 +10,16 @@
 
 ## Critique
 
-terminal-qa: PASS issue-repo-origin · 12 runs · 0 fail · 0 warn · 12 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f398/terminal-qa/issue-repo-origin/report.json
+terminal-qa: PASS issue-repo-origin-fixed · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-828c/terminal-qa/issue-repo-origin-fixed/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Hierarchy | 4 | The issues.repo row identifies the effective tracker and its unset origin in one scan; plain get yields the actionable scalar immediately. |
 | Fit | 4 | Provenance stays adjacent to its value; the selected issues row fits both 80 and 120 columns. |
 | Craft | 4 | The existing config grammar gains one muted suffix; JSON retains its value fields and uses explicit source/configured fields. |
-| Theme safety | 4 (scoped) | No added contrast finding across four palettes, NO_COLOR, pipe and C locale; twelve unchanged baseline findings are tracked by cas-828c and narrowly allowlisted. |
+| Theme safety | 5 | All 12 terminal-QA runs pass with zero findings across dark, light and both Solarized palettes at 80/120 columns, pipe, NO_COLOR, C locale and JSON. Existing chip foreground guard still protects saturated fill colors. |
 | Machine contract | 5 | JSON parses as one document; scalar get remains exactly owner/repo; read/override/reset tests preserve config bytes. |
 
-Scored by calm-viper-79 on 2026-10-15 for the origin-provenance change. The
-installed baseline and initial candidate failures are preserved under the task
-artifact root; this receipt does not claim the existing theme defect is fixed.
+Scored by vivid-robin-62 on 2026-10-15 after the contrast fix. The installed
+baseline and initial candidate failures remain preserved under the cas-f398
+artifact root; the final no-allowlist receipt is preserved under cas-828c.

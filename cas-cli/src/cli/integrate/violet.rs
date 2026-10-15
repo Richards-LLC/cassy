@@ -292,6 +292,16 @@ pub struct ProxyHubProbe;
 
 impl HubProbe for ProxyHubProbe {
     fn list_tools(&self, server: &ServerConfig) -> ProbeOutcome {
+        self.list_tools_with_timeout(server, std::time::Duration::from_secs(30))
+    }
+}
+
+impl ProxyHubProbe {
+    pub(super) fn list_tools_with_timeout(
+        &self,
+        server: &ServerConfig,
+        limit: std::time::Duration,
+    ) -> ProbeOutcome {
         use std::collections::HashMap;
         let server = server.clone();
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -306,54 +316,60 @@ impl HubProbe for ProxyHubProbe {
             }
         };
         runtime.block_on(async move {
-            let engine = match cmcp_core::ProxyEngine::from_configs(HashMap::from([(
-                VIOLET_SERVER.to_string(),
-                server,
-            )]))
-            .await
-            {
-                Ok(engine) => engine,
-                Err(error) => {
-                    return ProbeOutcome::Unreachable {
-                        code: format!("{error}"),
-                    };
-                }
-            };
-            let health = engine.health_snapshot().await;
-            let record = health
-                .servers
-                .iter()
-                .find(|server| server.name == VIOLET_SERVER);
-            let outcome = match record {
-                Some(server) if server.state == cmcp_core::UpstreamState::Healthy => {
-                    let catalog = engine.catalog_entries_by_server().await;
-                    let entries = catalog.get(VIOLET_SERVER).map(Vec::as_slice).unwrap_or(&[]);
-                    let tools = entries.iter().map(|e| e.name.clone()).collect();
-                    let schema_problems = entries
-                        .iter()
-                        .find(|e| e.name == VIOLET_POST_TOOL)
-                        .map(|e| violet_post_schema_problems(&e.input_schema))
-                        .unwrap_or_default();
-                    ProbeOutcome::Tools {
-                        tools,
-                        schema_problems,
+            tokio::time::timeout(limit, async move {
+                let engine = match cmcp_core::ProxyEngine::from_configs(HashMap::from([(
+                    VIOLET_SERVER.to_string(),
+                    server,
+                )]))
+                .await
+                {
+                    Ok(engine) => engine,
+                    Err(error) => {
+                        return ProbeOutcome::Unreachable {
+                            code: format!("{error}"),
+                        };
                     }
-                }
-                Some(server) => match server.last_error_code.as_deref() {
-                    Some("authentication_required") => ProbeOutcome::Unauthorized,
-                    Some(code) => ProbeOutcome::Unreachable {
-                        code: code.to_string(),
+                };
+                let health = engine.health_snapshot().await;
+                let record = health
+                    .servers
+                    .iter()
+                    .find(|server| server.name == VIOLET_SERVER);
+                let outcome = match record {
+                    Some(server) if server.state == cmcp_core::UpstreamState::Healthy => {
+                        let catalog = engine.catalog_entries_by_server().await;
+                        let entries = catalog.get(VIOLET_SERVER).map(Vec::as_slice).unwrap_or(&[]);
+                        let tools = entries.iter().map(|e| e.name.clone()).collect();
+                        let schema_problems = entries
+                            .iter()
+                            .find(|e| e.name == VIOLET_POST_TOOL)
+                            .map(|e| violet_post_schema_problems(&e.input_schema))
+                            .unwrap_or_default();
+                        ProbeOutcome::Tools {
+                            tools,
+                            schema_problems,
+                        }
+                    }
+                    Some(server) => match server.last_error_code.as_deref() {
+                        Some("authentication_required") => ProbeOutcome::Unauthorized,
+                        Some(code) => ProbeOutcome::Unreachable {
+                            code: code.to_string(),
+                        },
+                        None => ProbeOutcome::Unreachable {
+                            code: "connection_failed".to_string(),
+                        },
                     },
                     None => ProbeOutcome::Unreachable {
-                        code: "connection_failed".to_string(),
+                        code: "not_configured".to_string(),
                     },
-                },
-                None => ProbeOutcome::Unreachable {
-                    code: "not_configured".to_string(),
-                },
-            };
-            engine.shutdown().await;
-            outcome
+                };
+                engine.shutdown().await;
+                outcome
+            })
+            .await
+            .unwrap_or_else(|_| ProbeOutcome::Unreachable {
+                code: "update_probe_timeout".into(),
+            })
         })
     }
 }
@@ -1112,16 +1128,7 @@ fn assignment_name(line: &str) -> Option<&str> {
 }
 
 fn assignment_value(line: &str) -> Option<(String, String)> {
-    let name = assignment_name(line)?.to_string();
-    let raw_value = line.split_once('=')?.1.trim();
-    let value = if raw_value.starts_with('\'') && raw_value.ends_with('\'') {
-        raw_value[1..raw_value.len() - 1].replace("'\\''", "'")
-    } else if raw_value.starts_with('"') && raw_value.ends_with('"') {
-        raw_value[1..raw_value.len() - 1].replace("\\\"", "\"")
-    } else {
-        raw_value.to_string()
-    };
-    Some((name, value))
+    cas_pty::violet_env::literal_assignment(line)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1310,30 +1317,26 @@ pub(super) fn update_machine_credentials() -> Result<std::collections::BTreeMap<
     let paths = MachinePaths::from_env(&ProcessEnv)?;
     rename_legacy_credentials(&paths.credentials_file, false)
         .with_context(|| format!("renaming keys in {}", paths.credentials_file.display()))?;
-    let mut values = std::collections::BTreeMap::new();
-    let mut visited = std::collections::BTreeSet::new();
+    let mut source = std::collections::BTreeMap::new();
     if let Some(profile) = paths.login_profile.as_deref() {
-        load_shell_assignments(profile, &mut values, &mut visited, 0);
+        load_shell_assignments(profile, &mut source, &mut Default::default(), 0);
     }
-    load_shell_assignments(&paths.credentials_file, &mut values, &mut visited, 0);
-    for (name, value) in std::env::vars_os()
-        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-    {
-        if !value.trim().is_empty() || !values.contains_key(&name) {
-            values.insert(name, value);
-        }
-    }
-    // Older installations may have only shell exports, with no managed file.
-    // Preserve those working values before renaming their direct-harness refs.
-    let imports: Vec<_> = values
-        .iter()
+    let current = cas_pty::violet_env::resolved_environment(&[], &[]);
+    let imports: Vec<_> = source
+        .into_iter()
         .filter_map(|(name, value)| {
-            let canonical = canonical_violet_credential_name(name);
-            (canonical != *name
-                && canonical != "VIOLET_SLACK_TOKEN_ENV"
+            let canonical = canonical_violet_credential_name(&name);
+            (canonical != name
+                && cas_pty::violet_env::canonical_credential(&canonical)
                 && !value.trim().is_empty()
-                && !values.get(&canonical).is_some_and(|v| !v.trim().is_empty()))
-            .then(|| (canonical, value.clone()))
+                && !value.contains(['$', '`'])
+                && !std::env::var(&name)
+                    .ok()
+                    .is_some_and(|v| !v.trim().is_empty())
+                && !current
+                    .get(&canonical)
+                    .is_some_and(|v| !v.trim().is_empty()))
+            .then_some((canonical, value))
         })
         .collect();
     if !imports.is_empty() {
@@ -1342,12 +1345,9 @@ pub(super) fn update_machine_credentials() -> Result<std::collections::BTreeMap<
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
         write_credential_exports(&paths.credentials_file, &exports)?;
-        if let Some(profile) = paths.login_profile.as_deref() {
-            ensure_profile_line(profile, &paths.credentials_file)?;
-        }
-        values.extend(imports);
     }
-    Ok(values)
+    // Exactly the resolver used at the real Claude/Codex and PTY launch seams.
+    Ok(cas_pty::violet_env::resolved_environment(&[], &[]))
 }
 
 fn profile_source_line(credentials: &Path) -> String {
@@ -1478,13 +1478,9 @@ fn load_machine_credentials_with_installer(
     excluded: &[String],
     mut install: impl FnMut(&str, &str),
 ) -> Result<usize> {
-    let paths = MachinePaths::from_env(&ProcessEnv)?;
-    let mut values = std::collections::BTreeMap::new();
-    let mut visited = std::collections::BTreeSet::new();
-    load_shell_assignments(&paths.credentials_file, &mut values, &mut visited, 0);
-    if let Some(profile) = paths.login_profile.as_deref() {
-        load_shell_assignments(profile, &mut values, &mut visited, 0);
-    }
+    let values = cas_pty::violet_env::credential_file()
+        .map(|path| cas_pty::violet_env::literal_file_values(&path))
+        .unwrap_or_default();
     let mut loaded = 0;
     for (name, value) in values {
         let canonical_violet = name == VIOLET_DEFAULT_BYPASS_ENV
@@ -3323,6 +3319,69 @@ mod tests {
     const TEST_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_SOUNDWAVE";
 
     #[test]
+    fn cas_678d_round1_import_skips_shell_expressions_and_live_exports() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+        env.set("SHELL", "/bin/bash");
+        env.set("MECHA_SLACK_TOKEN_EXTERNAL", "keychain-fixture");
+        for name in [
+            "MECHA_SLACK_TOKEN_EXPRESSION",
+            "VIOLET_SLACK_TOKEN_EXPRESSION",
+            "VIOLET_SLACK_TOKEN_EXTERNAL",
+        ] {
+            env.remove(name);
+        }
+        let original = "export MECHA_SLACK_TOKEN_EXPRESSION='$(pass show secret)'\nexport MECHA_SLACK_TOKEN_EXTERNAL='static-profile-fixture'\n";
+        fs::write(home.join(".profile"), original).unwrap();
+        let values = update_machine_credentials().unwrap();
+        assert!(!values.contains_key("VIOLET_SLACK_TOKEN_EXPRESSION"));
+        assert!(!values.contains_key("VIOLET_SLACK_TOKEN_EXTERNAL"));
+        assert!(!home.join("credentials.env").exists());
+        assert_eq!(fs::read_to_string(home.join(".profile")).unwrap(), original);
+        super::super::violet_retirement::retire_installed_hub(None).unwrap();
+        assert!(!home.join("credentials.env").exists());
+    }
+
+    #[test]
+    fn cas_678d_round1_real_cli_launch_builders_load_the_same_environment_as_update() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let file = home.join("credentials.env");
+        env.set("CAS_CREDENTIALS_FILE", &file);
+        env.set("VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE", "");
+        fs::write(
+            file,
+            "export VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE='launch-fixture'\n",
+        )
+        .unwrap();
+        let expected = cas_pty::violet_env::resolved_environment(&[], &[]);
+        for command in [
+            crate::cli::claude::build_claude_command(
+                "main",
+                &home.join(".claude"),
+                &["--no-chrome".into()],
+            ),
+            crate::cli::codex::build_codex_command("main", &home.join(".codex"), &[]),
+        ] {
+            let actual = command
+                .get_envs()
+                .find(|(name, _)| *name == "VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE")
+                .and_then(|(_, value)| value)
+                .and_then(|v| v.to_str());
+            assert_eq!(
+                actual,
+                expected
+                    .get("VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE")
+                    .map(String::as_str)
+            );
+            assert_eq!(actual, Some("launch-fixture"));
+        }
+        assert!(!home.join(".profile").exists());
+    }
+
+    #[test]
     fn cas_678d_update_keeps_legacy_shell_exports_usable_after_reference_rename() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         for name in std::env::vars_os()
@@ -3340,8 +3399,12 @@ mod tests {
         env.set("XDG_CONFIG_HOME", home.join(".config"));
         env.set("CAS_CREDENTIALS_FILE", &credentials);
         env.set("SHELL", "/bin/bash");
-        env.set("MECHA_SLACK_TOKEN_LAPTOP", FAKE_TOKEN);
-        env.set("MECHA_VERCEL_BYPASS", FAKE_BYPASS);
+        env.set("MECHA_SLACK_TOKEN_LAPTOP", "");
+        env.set("MECHA_VERCEL_BYPASS", "");
+        let profile_text = format!(
+            "export MECHA_SLACK_TOKEN_LAPTOP='{FAKE_TOKEN}'\nexport MECHA_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+        );
+        fs::write(home.join(".profile"), &profile_text).unwrap();
         let values = update_machine_credentials().unwrap();
         assert_eq!(
             values.get("VIOLET_SLACK_TOKEN_LAPTOP").map(String::as_str),
@@ -3355,10 +3418,9 @@ mod tests {
         assert!(!raw.contains("MECHA_"));
         assert!(raw.contains("export VIOLET_SLACK_TOKEN_LAPTOP="));
         assert!(raw.contains("export VIOLET_VERCEL_BYPASS="));
-        assert!(
-            fs::read_to_string(home.join(".profile"))
-                .unwrap()
-                .contains(&profile_source_line(&credentials))
+        assert_eq!(
+            fs::read_to_string(home.join(".profile")).unwrap(),
+            profile_text
         );
         env.set("VIOLET_SLACK_TOKEN_LAPTOP", "");
         assert_eq!(

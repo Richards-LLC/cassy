@@ -211,6 +211,7 @@ fn configure_profile_command(command: &mut Command, profile: &str, profile_dir: 
             .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_dir);
     }
     scrub_claude_credentials(command);
+    cas_pty::violet_env::configure_command(command, "claude");
 }
 
 /// Explicit and inherited-account launches must not accidentally authenticate
@@ -343,6 +344,7 @@ pub(crate) fn build_claude_command(
 pub(crate) fn build_inherited_claude_command(args: &[OsString]) -> Command {
     let mut command = Command::new("claude");
     scrub_claude_credentials(&mut command);
+    cas_pty::violet_env::configure_command(&mut command, "claude");
     command.args(args);
     enable_chrome_if_supported(&mut command);
     command

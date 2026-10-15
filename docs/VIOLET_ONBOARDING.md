@@ -4,10 +4,15 @@
 and Codex account profile, including `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
 It renames legacy credential exports and references, then reports an
 authenticated `tools/list` result for each production-hub profile. A missing,
-empty or ambiguous credential produces a named warning and an incomplete
-update receipt; no empty bearer is sent. Custom endpoints and working
+empty or ambiguous credential produces a named advisory; builtin sync continues
+and no empty bearer is sent. Custom endpoints and working
 account-specific credentials are preserved. No manual integration step is
-needed after an upgrade.
+needed after an upgrade. Cassy's Claude/Codex CLI and factory launch paths load
+missing or empty canonical credentials from the private credentials file directly;
+update does not edit shell profiles. Only an unavailable retired managed token
+name may move to a different label, and only when exactly one usable canonical
+token exists. Every such mapping is printed. Probes share that launch resolver
+and have a 30-second total budget (at most 10 seconds per profile).
 
 Violet is the hosted hub that holds the Slack bot credential. Cassy sends
 your **per-machine bearer** to the hub, and the hub talks to Slack. The bearer

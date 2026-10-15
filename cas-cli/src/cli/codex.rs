@@ -225,6 +225,7 @@ pub(crate) fn configure_profile_command(command: &mut Command, profile: &str, pr
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY")
         .env_remove("CODEX_ACCESS_TOKEN");
+    cas_pty::violet_env::configure_command(command, "codex");
 }
 
 /// Resolve the picker to a profile name, running a new login when asked.

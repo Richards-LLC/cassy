@@ -2402,6 +2402,10 @@ impl Pty {
             return Err(Error::pty(reason.clone()));
         }
         config.apply_worker_credential_policy();
+        let harness = config.effective_command().to_string();
+        if harness == "claude" || harness == "codex" {
+            crate::violet_env::hydrate(&harness, &mut config.env, &config.env_remove);
+        }
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
 

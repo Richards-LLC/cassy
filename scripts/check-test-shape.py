@@ -1,19 +1,159 @@
 #!/usr/bin/env python3
-"""Deterministic Rust test-shape lint; no compiler or third-party packages.
+"""Deterministic test-shape lint; no compiler or third-party packages.
 
-Scan test bodies and test-only helpers for constant/literal equality pins and
-Rust source reads. A // pin: reason immediately above the statement or function
-acknowledges an intentional structural/compatibility contract. Vendor code is
-excluded. Integration tests under cas-cli/tests and crates/*/tests must resolve
-Cargo binaries at runtime rather than through env!("CARGO_BIN_EXE_<name>"); this
-archive-portability rule cannot be exempted with a pin. --changed-since uses
-merge-base(ref, HEAD), including working changes.
+Scan Rust tests for constant/literal equality pins and Rust source reads, and
+test files in any language for exact prose snapshots or source/workflow text
+needles. A reasoned // pin: comment immediately above the pinned statement is
+the escape. Vendor code is excluded. Integration tests under cas-cli/tests and
+crates/*/tests must resolve Cargo binaries at runtime rather than through
+env!("CARGO_BIN_EXE_<name>"); this archive-portability rule cannot be exempted.
+Text-pin checks cover changed test files, so legacy pins do not block unrelated
+work. --changed-since uses merge-base(ref, HEAD), including working changes.
 """
 import argparse
 from pathlib import Path
 import re
 import subprocess
 from rust_test_source import tokens, pairs
+
+
+def is_test_file(path):
+    """Recognize conventional test directories and filenames across languages."""
+    parts = Path(path).as_posix().lower().split('/')
+    name = parts[-1]
+    source_suffixes = {
+        '.rs', '.py', '.pyi', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+        '.sh', '.bash', '.go', '.rb', '.java', '.kt', '.kts', '.cs', '.php',
+        '.swift', '.c', '.cc', '.cpp', '.h', '.hpp', '.lua', '.sql', '.pl',
+        '.r', '.ex', '.exs', '.scala', '.clj', '.vue', '.svelte', '.yaml',
+        '.yml', '.toml',
+    }
+    suffix = Path(name).suffix
+    return (
+        any(part in ('test', 'tests', '__tests__', 'spec', 'specs') for part in parts[:-1])
+        or name.startswith(('test_', 'test-'))
+        or (suffix in source_suffixes and re.search(r'(?:[._-])(test|spec)(?:[._-]|$)', name) is not None)
+    )
+
+
+def text_literals(source, path):
+    """Yield quoted strings while skipping line and block comments."""
+    suffix = Path(path).suffix.lower()
+    if suffix == '.rs':
+        comments = []
+        for token in tokens(source, comments):
+            if token.string:
+                literal = source[token.start:token.end]
+                raw = re.match(r'(?:b|c)?r(#{0,255})"', literal)
+                if raw:
+                    body = literal[raw.end():-(1 + len(raw[1]))]
+                else:
+                    quote = literal.find('"')
+                    if quote < 0:
+                        quote = literal.find("'")
+                    body = literal[quote + 1:-1] if quote >= 0 else token.value
+                yield token.start, token.end, body
+        return
+    hash_comments = suffix in {'.py', '.pyi', '.sh', '.bash', '.rb', '.pl', '.r', '.yaml', '.yml', '.toml', '.ini'}
+    i = 0
+    while i < len(source):
+        if source.startswith('//', i) or (hash_comments and source[i] == '#'):
+            newline = source.find('\n', i)
+            i = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith('/*', i):
+            close = source.find('*/', i + 2)
+            i = len(source) if close < 0 else close + 2
+            continue
+        quote = source[i]
+        if quote not in ('"', "'", '`'):
+            i += 1
+            continue
+        width = 3 if quote != '`' and source.startswith(quote * 3, i) else 1
+        start = i
+        body_start = i + width
+        i = body_start
+        while i < len(source):
+            if source[i] == '\\':
+                i += 2
+            elif source.startswith(quote * width, i):
+                body = source[body_start:i]
+                yield start, i + width, body
+                i += width
+                break
+            else:
+                if width == 1 and quote != '`' and source[i] == '\n':
+                    break
+                i += 1
+        else:
+            continue
+
+
+def has_text_pin_reason(source, start):
+    """A non-empty pin comment may sit on the statement or its adjacent line."""
+    prefix = source[:start]
+    lines = prefix.splitlines()
+    if lines and re.search(r'//\s*pin:\s*\S', lines[-1]):
+        return True
+    for line in reversed(lines[:-1]):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(('//', '#', '*', '/*')):
+            if re.search(r'//\s*pin:\s*\S', stripped) or re.search(r'#\s*pin:\s*\S', stripped):
+                return True
+            continue
+        break
+    return False
+
+
+def is_exact_text_pin(body, context):
+    """Recognize long exact prose and short needles into source-like inputs."""
+    words = re.findall(r"[A-Za-z0-9_'-]+", body)
+    prose = len(body.strip()) >= 55 and len(words) >= 8 and (
+        '\n' in body or re.search(r'[.!?](?:\s|$)', body) is not None
+    )
+    assertion = re.search(
+        r'\b(?:assert\w*|expect|toBe|toEqual|toContain|toMatch|toHaveText|'
+        r'toMatchSnapshot|snapshot|should)\b|(?:===|==)', context, re.I,
+    ) is not None
+    source_input = re.search(
+        r'\b(?:source|prompt|workflow|skill|template|contract|read_text|readFile|'
+        r'read_to_string|include_str|markdown|yaml|toml)(?:[_A-Za-z0-9]*)\b', context, re.I,
+    ) is not None
+    search = re.search(
+        r'\b(?:contains|includes|indexOf|find|assertIn|assertRegex|toContain|'
+        r'toMatch|toEqual|toBe|assert\w*)\b|(?:===|==)', context, re.I,
+    ) is not None
+    return (prose and assertion) or (len(body.strip()) >= 12 and len(words) >= 2 and source_input and search)
+
+
+def lint_text_pins(source, path, ranges=None):
+    """Find brittle prose pins in a conventional test file, independent of language."""
+    if not is_test_file(path) and not ranges:
+        return []
+    hits = []
+    literals = list(text_literals(source, path))
+    for start, end, body in literals:
+        if ranges and not any(left <= start < right for left, right in ranges):
+            continue
+        if has_text_pin_reason(source, start):
+            continue
+        line_start = source.rfind('\n', 0, start) + 1
+        line_end = source.find('\n', end)
+        if line_end < 0:
+            line_end = len(source)
+        context_chars = list(source[line_start:line_end])
+        for literal_start, literal_end, _ in literals:
+            if literal_start >= line_end or literal_end <= line_start:
+                continue
+            left = max(literal_start, line_start) - line_start
+            right = min(literal_end, line_end) - line_start
+            context_chars[left:right] = ' ' * (right - left)
+        context = ''.join(context_chars)
+        if is_exact_text_pin(body, context):
+            hits.append((source.count('\n', 0, start) + 1, 'exact-text pin'))
+    return sorted(set(hits))
 
 
 def pinned(source, start):
@@ -29,7 +169,7 @@ def pinned(source, start):
     return False
 
 
-def lint(source, path):
+def lint(source, path, check_text_pins=True):
     comments = []
     ts = tokens(source, comments)
     pin_lines = {source.count("\n", 0, a) + 1 for a, b in comments if re.match(r"//\s*pin:\s*\S", source[a:b])}
@@ -137,6 +277,18 @@ def lint(source, path):
                 if not function_pin and not pinned(source, ts[start].start) and not pinned(source, t.start) and source.count("\n", 0, t.start) + 1 not in pin_lines:
                     line = source.count('\n', 0, t.start) + 1
                     hits.append((line, kind))
+    text_ranges = []
+    if integration:
+        text_ranges.append((0, len(source)))
+    else:
+        for fn, begin, end in scopes:
+            first = fn if fn >= 0 else begin
+            if first < 0:
+                text_ranges.append((0, len(source)))
+            elif end < len(ts):
+                text_ranges.append((ts[first].start, ts[end].end))
+    if check_text_pins:
+        hits.extend(lint_text_pins(source, path, text_ranges))
     return sorted(hits)
 
 
@@ -147,14 +299,31 @@ def main():
     try:
         if args.changed_since:
             base = subprocess.check_output(['git', 'merge-base', args.changed_since, 'HEAD'], text=True).strip()
-            paths = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', base, '--', '*.rs'], text=True).split('\0')
+            paths = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', base], text=True).split('\0')
+            text_pin_paths = set(paths)
         else:
-            paths = subprocess.check_output(['git', 'ls-files', '-z', '*.rs'], text=True).split('\0')
+            paths = subprocess.check_output(['git', 'ls-files', '-z', '--', '*.rs'], text=True).split('\0')
+            parents = subprocess.check_output(['git', 'rev-list', '--parents', '-n', '1', 'HEAD'], text=True).split()
+            if len(parents) > 1:
+                changed = subprocess.check_output(
+                    ['git', 'diff', '--name-only', '--diff-filter=ACMR', '-z', 'HEAD^'], text=True,
+                ).split('\0')
+            else:
+                changed = subprocess.check_output(['git', 'ls-files', '-z'], text=True).split('\0')
+            text_pin_paths = set(changed)
+            paths = [*paths, *changed]
         hits = []
         for path in sorted(set(paths)):
-            if not path or path.startswith('vendor/') or not Path(path).is_file():
+            if (not path or path.startswith('vendor/')
+                    or (not path.endswith('.rs') and not is_test_file(path))
+                    or not Path(path).is_file()):
                 continue
-            for line, kind in lint(Path(path).read_text(), path):
+            try:
+                source = Path(path).read_text()
+            except UnicodeDecodeError:
+                continue
+            file_hits = lint(source, path, path in text_pin_paths) if path.endswith('.rs') else lint_text_pins(source, path)
+            for line, kind in file_hits:
                 if kind == 'archive-unsafe Cargo binary path':
                     remedy = 'use cas::test_paths::cas_binary() for archive runners'
                 elif kind.startswith('archive-unsafe Cargo binary path ('):

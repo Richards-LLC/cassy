@@ -1145,6 +1145,6 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     await attempt;
     expect(TransportSocket.instances).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS + MACHINE_RETRY_CEILING_MS);
-    expect(TransportSocket.instances.length, "the live machine's heartbeat reattached the session").toBeGreaterThan(0);
+    await vi.waitFor(() => expect(TransportSocket.instances.length, "the live machine's heartbeat reattached the session").toBeGreaterThan(0));
   });
 });

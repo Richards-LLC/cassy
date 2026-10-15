@@ -205,6 +205,74 @@ pub fn connect_error(code: &str) -> VioletError {
 // Production transport
 // ---------------------------------------------------------------------------
 
+/// Resolve the production connect configuration before any network activity.
+#[cfg(feature = "mcp-proxy")]
+pub(super) fn connect_config(
+    cas_root: Option<&std::path::Path>,
+) -> Result<cmcp_core::config::Config, VioletError> {
+    use cmcp_core::config::{ServerConfig, VIOLET_SERVER};
+
+    let not_configured = |detail: String| {
+        VioletError::local(
+            "not_configured",
+            format!("{detail}; run `cas integrate violet`, then `cas doctor`"),
+        )
+    };
+    let mut config = match cas_root {
+        Some(root) => crate::mcp::load_proxy_config_for_process(root),
+        None => cmcp_core::config::Config::load_merged(None),
+    }
+    .map_err(|error| {
+        not_configured(format!(
+            "the proxy configuration could not be read ({error:#})"
+        ))
+    })?;
+    let mut server = config.servers.remove(VIOLET_SERVER).ok_or_else(|| {
+        not_configured(format!(
+            "Violet is not registered here (no [servers.{VIOLET_SERVER}] in the proxy configuration, \
+             or this worker's policy withholds it)"
+        ))
+    })?;
+
+    // Resolve credential references the way the proxy does (VIOLET_*
+    // first, the legacy names second), from the environment and then the
+    // machine credentials file. A worker never receives a variable its
+    // factory policy reserves for the supervisor.
+    let policy = cas_root.and_then(|root| crate::mcp::worker_proxy_policy(root).ok().flatten());
+    let mut machine =
+        crate::cli::integrate::violet::machine_credential_values().unwrap_or_default();
+    if let Some(policy) = &policy {
+        machine.retain(|name, _| !policy.denies_env(name));
+    }
+    let resolve = |value: &mut String| -> Result<(), VioletError> {
+        if let Some(name) = value.strip_prefix("env:").filter(|name| !name.is_empty()) {
+            let resolved = cmcp_core::config::violet_credential_value(name, |candidate| {
+                std::env::var(candidate)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| machine.get(candidate).cloned())
+            })
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| connect_error(&format!("missing_credential_env:{name}")))?;
+            *value = resolved;
+        }
+        Ok(())
+    };
+    match &mut server {
+        ServerConfig::Http { auth, headers, .. } | ServerConfig::Sse { auth, headers, .. } => {
+            if let Some(auth) = auth.as_mut() {
+                resolve(auth)?;
+            }
+            for value in headers.values_mut() {
+                resolve(value)?;
+            }
+        }
+        ServerConfig::Stdio { .. } => {}
+    }
+    config.servers = std::collections::HashMap::from([(VIOLET_SERVER.to_string(), server)]);
+    Ok(config)
+}
+
 /// The live hub, reached through the proxy engine with the same registration
 /// `cas serve` loads. Construct and drop it outside any Tokio runtime.
 #[cfg(feature = "mcp-proxy")]
@@ -220,66 +288,8 @@ impl ProxyHub {
     /// project's `.cas/proxy.toml` and worker policy apply, exactly as for
     /// the MCP proxy; elsewhere the machine registration is used.
     pub fn connect(cas_root: Option<&std::path::Path>) -> Result<Self, VioletError> {
-        use cmcp_core::config::{ServerConfig, VIOLET_SERVER};
-
-        let not_configured = |detail: String| {
-            VioletError::local(
-                "not_configured",
-                format!("{detail}; run `cas integrate violet`, then `cas doctor`"),
-            )
-        };
-        let mut config = match cas_root {
-            Some(root) => crate::mcp::load_proxy_config_for_process(root),
-            None => cmcp_core::config::Config::load_merged(None),
-        }
-        .map_err(|error| {
-            not_configured(format!(
-                "the proxy configuration could not be read ({error:#})"
-            ))
-        })?;
-        let mut server = config.servers.remove(VIOLET_SERVER).ok_or_else(|| {
-            not_configured(format!(
-                "Violet is not registered here (no [servers.{VIOLET_SERVER}] in the proxy configuration, \
-                 or this worker's policy withholds it)"
-            ))
-        })?;
-
-        // Resolve credential references the way the proxy does (VIOLET_*
-        // first, the legacy names second), from the environment and then the
-        // machine credentials file. A worker never receives a variable its
-        // factory policy reserves for the supervisor.
-        let policy = cas_root.and_then(|root| crate::mcp::worker_proxy_policy(root).ok().flatten());
-        let mut machine =
-            crate::cli::integrate::violet::machine_credential_values().unwrap_or_default();
-        if let Some(policy) = &policy {
-            machine.retain(|name, _| !policy.denies_env(name));
-        }
-        let resolve = |value: &mut String| -> Result<(), VioletError> {
-            if let Some(name) = value.strip_prefix("env:").filter(|name| !name.is_empty()) {
-                let resolved = cmcp_core::config::violet_credential_value(name, |candidate| {
-                    std::env::var(candidate)
-                        .ok()
-                        .filter(|value| !value.trim().is_empty())
-                        .or_else(|| machine.get(candidate).cloned())
-                })
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| connect_error(&format!("missing_credential_env:{name}")))?;
-                *value = resolved;
-            }
-            Ok(())
-        };
-        match &mut server {
-            ServerConfig::Http { auth, headers, .. } | ServerConfig::Sse { auth, headers, .. } => {
-                if let Some(auth) = auth.as_mut() {
-                    resolve(auth)?;
-                }
-                for value in headers.values_mut() {
-                    resolve(value)?;
-                }
-            }
-            ServerConfig::Stdio { .. } => {}
-        }
-        config.servers = std::collections::HashMap::from([(VIOLET_SERVER.to_string(), server)]);
+        use cmcp_core::config::VIOLET_SERVER;
+        let config = connect_config(cas_root)?;
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

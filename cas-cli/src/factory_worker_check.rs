@@ -543,6 +543,34 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     execute_at_with_scope(cas_root, args, cwd, cargo, None)
 }
 
+/// Prefer the active task's declared integration target, never the pushed
+/// worker branch's upstream (which would erase the task diff after a push).
+fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Result<String> {
+    let mut target = configured.map(str::to_string);
+    if let Ok(session) = std::env::var("CAS_SESSION_ID") {
+        let agents = crate::store::open_agent_store(cas_root)?;
+        if let Ok(agent) = agents.get(&session) {
+            let tasks = crate::store::open_task_store(cas_root)?;
+            for lease in agents.list_agent_leases(&agent.id)? {
+                let task = tasks.get(&lease.task_id)?;
+                if task.status == crate::types::TaskStatus::InProgress {
+                    target = task.deliverables.work_target.map(|work| work.target_branch).or(target);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(target) = target {
+        let remote = format!("refs/remotes/origin/{target}");
+        return git(repo, &["merge-base", &remote, "HEAD"])
+            .or_else(|_| git(repo, &["merge-base", &format!("refs/heads/{target}"), "HEAD"]));
+    }
+    // Standalone checkouts and hermetic fixtures have no factory assignment.
+    git(repo, &["merge-base", "refs/remotes/origin/HEAD", "HEAD"])
+        .or_else(|_| git(repo, &["rev-parse", "HEAD^"]))
+        .or_else(|_| git(repo, &["rev-parse", "HEAD"]))
+}
+
 fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>) -> Result<()> {
     let test = targeted_test(args);
     let packages = match &test {
@@ -618,11 +646,22 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let count_file = slots.join(format!("count-{lane_key}"));
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
-        let mut command = Command::new("bash");
+        let verified = include_str!("../../scripts/run-verified-tests.sh");
+        let mut command = if repo.join("scripts/worker-proof-guards.py").is_file() {
+            let mut guarded = Command::new("python3");
+            guarded.arg("-c").arg(include_str!("../../scripts/worker-proof-guards.py"))
+                .arg("--base").arg(proof_diff_base(&cas_root, &repo, config.epic_base_branch.as_deref())?)
+                .arg("--verified-script").arg(verified)
+                .arg("--cargo").arg(cargo)
+                .arg("--count-file").arg(&count_file)
+                .arg("--");
+            guarded
+        } else {
+            let mut plain = Command::new("bash");
+            plain.arg("-c").arg(verified).arg("worker-verified-tests");
+            plain
+        };
         command
-            .arg("-c")
-            .arg(include_str!("../../scripts/run-verified-tests.sh"))
-            .arg("worker-verified-tests")
             .env("VERIFIED_TEST_REPO_ROOT", &repo)
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
             .env_remove("VERIFIED_TEST_LOG")
@@ -758,6 +797,33 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
         assert_eq!(invocations.lines().count(), 2);
         assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(unrelated) 2"));
+        fake_cargo(&fake, r#"case "$*" in
+    *test_support::*) printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n' ;;
+    *) printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n' ;;
+esac"#);
+        assert!(execute_at(&root, &args, &repo, &fake).is_err(), "passing guards cannot hide an empty requested selection");
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+        fake_cargo(&fake, r#"printf '%s\n' "$*" > target/failed-guard
+printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
+        assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
+        // pin: the failing external invocation must be the fixed guard selection.
+        assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+    }
+
+    #[test]
+    fn worker_proof_diff_uses_integration_target_after_worker_push() {
+        let _env = crate::test_support::TestEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let base = fixture_head(&repo);
+        git(&repo, &["update-ref", "refs/remotes/origin/epic/v42", &base]).unwrap();
+        std::fs::write(repo.join("delivery.rs"), "fn changed() {}\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "delivery"]).unwrap();
+        git(&repo, &["update-ref", "refs/remotes/origin/factory/worker", "HEAD"]).unwrap();
+        assert_eq!(proof_diff_base(&root, &repo, Some("epic/v42")).unwrap(), base);
     }
 
     #[cfg(unix)]

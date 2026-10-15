@@ -284,11 +284,19 @@ fn resume_floor(
     }
 }
 
-pub(super) fn mirror_supervisor_replies(
+#[derive(Default)]
+pub(crate) struct MirrorScanState {
+    #[cfg(test)]
+    transcript_reads: usize,
+}
+
+pub(super) fn scan_supervisor_replies(
     root: &Path,
     project_path: &Path,
     session: &str,
     queue: &dyn PromptQueueStore,
+    agents: &[cas_types::Agent],
+    state: &mut MirrorScanState,
 ) {
     let Ok(config) = crate::config::Config::load(root) else {
         return;
@@ -297,12 +305,6 @@ pub(super) fn mirror_supervisor_replies(
         let _ = resume_floor(root, session, false);
         return;
     }
-    let Ok(agents) = crate::store::open_agent_store(root) else {
-        return;
-    };
-    let Ok(agents) = agents.list(None) else {
-        return;
-    };
     let supervisors = agents
         .iter()
         .filter(|agent| {
@@ -349,6 +351,8 @@ pub(super) fn mirror_supervisor_replies(
         else {
             continue;
         };
+        #[cfg(test)]
+        { state.transcript_reads += 1; }
         let Ok(values) = transcript_tail(&path) else {
             continue;
         };
@@ -455,6 +459,12 @@ pub(super) fn mirror_supervisor_replies(
             }
         }
     }
+}
+
+#[cfg(test)]
+fn mirror_supervisor_replies(root: &Path, project_path: &Path, session: &str, queue: &dyn PromptQueueStore) {
+    let agents = crate::store::open_agent_store(root).and_then(|store| store.list(None)).unwrap_or_default();
+    scan_supervisor_replies(root, project_path, session, queue, &agents, &mut MirrorScanState::default());
 }
 
 #[cfg(test)]
@@ -650,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn no_verified_pair_does_not_create_a_mirror_marker_or_reply() {
+    fn no_registered_supervisor_does_not_create_a_mirror_marker_or_reply() {
         let temp = tempfile::tempdir().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
@@ -883,6 +893,58 @@ mod tests {
             .filter(|row| row.target == "operator")
             .map(|row| serde_json::from_str(&row.prompt).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_unchanged_transcript_is_not_read() {
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "status", "[cas #77 agent-authored] update", "Ready.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut state = MirrorScanState::default();
+        let agents = store.list(None).unwrap();
+        scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+        assert_eq!(state.transcript_reads, 1);
+        for status in [cas_types::AgentStatus::Idle, cas_types::AgentStatus::Shutdown] {
+            let mut agent = store.get("supervisor-id").unwrap();
+            agent.status = status;
+            store.update(&agent).unwrap();
+            scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), &mut state);
+        }
+        assert_eq!(state.transcript_reads, 1, "unchanged polls must not read transcript tails");
+        assert_eq!(operator_replies(&queue).len(), 1);
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_toggle_between_polls_excludes_private_turn() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let mut config = crate::config::Config::default();
+        config.set("factory.commander_mirror_enabled", "false").unwrap();
+        config.save(&root).unwrap();
+        let disabled_config = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        // CLI saving false must record the floor without a daemon poll.
+        assert!(root.join("commander-mirror/policy.disabled").exists(), "disable boundary must be durable");
+        let _ = disabled_config;
+        let path = temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let now = Utc::now();
+        for mut value in codex_turn_at("private", "Terminal question", "Private reply", now) {
+            value["timestamp"] = serde_json::json!(now.to_rfc3339());
+            writeln!(file, "{value}").unwrap();
+        }
+        queue.record_terminal_operator_turn("factory-1", "Terminal question").unwrap();
+        config.set("factory.commander_mirror_enabled", "true").unwrap();
+        config.save(&root).unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        assert!(operator_replies(&queue).is_empty(), "no poll observed false; disabled replies must still stay private");
+        for value in codex_turn_at("public", "[cas #78 agent-authored] update", "Public reply", Utc::now()) {
+            writeln!(file, "{value}").unwrap();
+        }
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].message, "Public reply");
     }
 
     #[test]

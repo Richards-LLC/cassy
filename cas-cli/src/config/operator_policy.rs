@@ -1117,6 +1117,7 @@ mod tests {
         assert_eq!(operator_config_refusal(&[], &agent), None);
 
         for (key, value) in [
+            ("factory.commander_mirror_enabled", "false"),
             ("verification.enabled", "false"),
             ("verification.force_bypass_allowed", "true"),
             ("slack.transport", "any"),

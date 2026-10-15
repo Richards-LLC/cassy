@@ -33,6 +33,10 @@ Use a red → green loop to produce tests worth keeping. Keep durable decisions 
 - Agree the public seam before testing. A seam is the boundary where a caller observes behavior without reaching into internals.
 - Work vertical tracer bullets: one test, the smallest implementation that makes it pass, then the next learned slice. Do not write a horizontal wall of imagined tests.
 - Use the project’s scoped test command and record the actual proof result in the task. Do not treat a zero-test success as proof.
+- Factory workers run the targeted tests for their change themselves. For Rust: one package, a named-test
+  `-E` filter, through the capped runner; commit and run the failing test, then commit the fix and run the
+  same filter for green. JS, TS and Python suites run directly in the worker. The merge queue runs the
+  full suite once; never run it locally.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

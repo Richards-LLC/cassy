@@ -1287,6 +1287,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ct2_p2_activity_read_per_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+        let worker = Agent::new_with_role("session-worker".into(), "worker".into(), AgentRole::Worker);
+        stores.agent_store.register(&worker).unwrap();
+        let event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, "cas-poll", "worker progress").with_session(&worker.id);
+        stores.event_store.record(&event).unwrap();
+        for _ in 0..80 {
+            stores.event_store.record(&Event::new(EventType::TaskNoteAdded, EventEntityType::Task, "cas-other", "other worker").with_session("other")).unwrap();
+        }
+        let data = DirectorData::load_with_stores(temp.path(), None, false, Some(&stores)).unwrap();
+        assert_eq!(data.agents.iter().find(|a| a.id == worker.id).unwrap().latest_activity.as_ref().map(|(s, _)| s.as_str()), Some("worker progress"));
+    }
+
     /// cas-1829: a push-block event for a worker that is not in this factory
     /// session must not reach ACTIVITY, and must not be pinned on the
     /// supervisor row just because the supervisor's session recorded it. The

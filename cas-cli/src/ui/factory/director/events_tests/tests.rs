@@ -3285,3 +3285,41 @@ fn ct2_p2_stall_episode_baseline_tracks_activity() {
         assert_eq!(detector.worker_attention_episode_start(event), Some(resumed));
     }
 }
+
+#[test]
+fn ct2_p2_sleep_poll_one_nudge_per_window() {
+    let base = chrono::Utc::now();
+    let tick = std::time::Instant::now();
+    let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(300);
+    let mut data = stalled_data_for(make_agent_working_stalled("a", "poller", "cas-poll", 0, Some(900), base));
+    detector.initialize(&data);
+    let mut nudges = 0;
+    for seconds in [0, 31, 62, 93, 124, 155, 186, 217, 248, 279, 310] {
+        let now = base + chrono::Duration::seconds(seconds);
+        data.agents[0].last_heartbeat = Some(now);
+        // Alternating closed/cold and open calls must not restart the cooldown.
+        detector.set_transcript_age_override(HashMap::from([("poller".into(), Some(Duration::from_secs(900)))]));
+        detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), true)]));
+        assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+        detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), false)]));
+        nudges += detector.detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now).iter().filter(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })).count();
+        assert_eq!(nudges, if seconds < 300 { 1 } else { 2 }, "at {seconds}s");
+    }
+}
+
+#[test]
+fn ct2_p2_no_stall_while_tool_open() {
+    test_7e85_in_flight_tool_call_suppresses_stall_alert();
+}
+
+#[test]
+fn ct2_p2_transcript_activity_within_threshold() {
+    let base = chrono::Utc::now();
+    let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(600);
+    detector.set_transcript_age_override(HashMap::from([("poller".into(), Some(Duration::from_secs(400)))]));
+    let data = stalled_data_for(make_agent_working_stalled("a", "poller", "cas-poll", 0, Some(900), base));
+    detector.initialize(&data);
+    assert!(!detector.detect_changes_at(&data, None, std::time::Instant::now(), base).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+}

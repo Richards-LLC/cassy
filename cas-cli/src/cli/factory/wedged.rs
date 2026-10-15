@@ -766,11 +766,14 @@ fn codex_has_pending_tool_call(lines: &[String]) -> bool {
         let Some(call_id) = payload.get("call_id").and_then(|v| v.as_str()) else {
             continue;
         };
+        // cas-9bf6: code-mode calls (`functions.exec` running orchestrated
+        // exec_command calls) are `custom_tool_call` records; a long one is
+        // as in-flight as a plain function call.
         match payload_type {
-            Some("function_call" | "local_shell_call") => {
+            Some("function_call" | "local_shell_call" | "custom_tool_call") => {
                 pending.insert(call_id.to_string());
             }
-            Some("function_call_output" | "local_shell_call_output") => {
+            Some("function_call_output" | "local_shell_call_output" | "custom_tool_call_output") => {
                 pending.remove(call_id);
             }
             _ => {}
@@ -3456,6 +3459,33 @@ mod tests {
         );
         assert!(has_in_flight_tool_call(
             Cursor::new(transcript),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// cas-9bf6: a code-mode `functions.exec` call is a `custom_tool_call`
+    /// record (the shape of the Codex workers' rollouts on 2026-10-15). An
+    /// unresolved one is in flight; its `custom_tool_call_output` resolves it.
+    #[test]
+    fn codex_custom_tool_call_in_flight_until_its_output_cas_9bf6() {
+        let open = concat!(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_x9","name":"exec","input":"..."}}"#,
+            "\n",
+        );
+        assert!(has_in_flight_tool_call(
+            Cursor::new(open),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+        let resolved = concat!(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_x9","name":"exec","input":"..."}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_x9","output":"ok"}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(resolved),
             cas_mux::SupervisorCli::Codex,
             IN_FLIGHT_TAIL_LINES,
         ));

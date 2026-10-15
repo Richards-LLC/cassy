@@ -4176,17 +4176,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // delivery alone is still not a recipient read or acknowledgment.
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         // cas-f7b0 (communication contract v2, P1.7): an unread notice must
-        // agree with what the recipient has already done. Two signals:
-        //   superseded: the recipient has since surfaced or acked a LATER
-        //     message from the same sender, so it is reading that channel.
-        //   acted: the recipient claimed or released a task lease after this
-        //     message was enqueued, e.g. it started, closed or parked the
-        //     task the message asked about.
-        // In both cases the row is not a candidate. It stays as it is, and no
-        // "unread on idle worker" or "delivery stalled" notice is built from
-        // it. This is the 2026-10-14 case: "Verification approved: retry
-        // close" was reported unread after the worker had already closed both
-        // tasks.
+        // agree with what the recipient has already done. If the recipient
+        // claimed or released a task lease after this message was enqueued
+        // (it started, closed or parked a task), the row is not a candidate:
+        // it stays as it is, and no "unread on idle worker" or "delivery
+        // stalled" notice is built from it. This is the 2026-10-14 case:
+        // "Verification approved: retry close" was reported unread after the
+        // worker had already closed both tasks. A later read from the same
+        // sender is deliberately NOT evidence: a claimed but unrendered
+        // earlier row is still unread, and its sender must hear that it
+        // stalled (cas-b5ad).
         let lease_history: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_lease_history')",
             [],
@@ -4235,18 +4234,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     SELECT 1 FROM prompt_queue_recipient_seen seen
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
                        AND seen.source <> 'transport_claimed'
-               )
-               AND NOT EXISTS (
-                    SELECT 1 FROM prompt_queue later
-                     WHERE later.factory_session = q.factory_session
-                       AND later.target = q.target
-                       AND later.source = q.source
-                       AND later.id > q.id
-                       AND (later.acked_at IS NOT NULL
-                            OR EXISTS (SELECT 1 FROM prompt_queue_recipient_seen later_seen
-                                        WHERE later_seen.prompt_id = later.id
-                                          AND later_seen.recipient = later.target
-                                          AND later_seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}))
                )
                {recipient_acted}
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
@@ -10771,9 +10758,9 @@ mod tests {
 
     /// Communication contract v2, P1.7 (cas-f7b0): an unread notice must agree
     /// with what the recipient already did. A recipient that closed (released)
-    /// a task after the message, or read a later message from the same
-    /// sender, no longer yields "unread"/"delivery stalled" candidates for
-    /// it.
+    /// a task after the message no longer yields "unread"/"delivery stalled"
+    /// candidates for it. Reading a later message from the same sender does
+    /// not count: the earlier row is still unread (cas-b5ad).
     #[test]
     fn ct2_p1_notice_suppressed_after_action() {
         let (_temp, store) = create_test_store();
@@ -10813,7 +10800,10 @@ mod tests {
 
         let after = candidate_ids(&store);
         assert!(!after.contains(&retry_close), "acted on: {after:?}");
-        assert!(!after.contains(&older), "superseded by a later read: {after:?}");
+        assert!(
+            after.contains(&older),
+            "a later read does not make an earlier row read (cas-b5ad): {after:?}"
+        );
     }
 
     /// Communication contract v2, P2.5 (cas-f7b0): once the original is acked,

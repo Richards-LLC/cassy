@@ -60,6 +60,15 @@ class ChangedStrings(unittest.TestCase):
         product.write_text('fn receipt() { "new receipt"; "keep"; }\n')
         self.assertEqual(GUARDS.changed_string_matches(self.repo, base), [])
 
+    def test_format_receipt_field_names_substring_assertion(self):
+        product = self.repo / 'product.rs'
+        product.write_text('fn receipt() { format!("Message queued\\nTo: {target}"); }\n')
+        (self.repo / 'inline.rs').write_text('#[test] fn supervisor_alias() { assert!(reply.contains("To: cosmic-bear")); }\n')
+        base = self.commit()
+        product.write_text('fn receipt() { format!("queued -> {target}"); }\n')
+        self.assertEqual([name for _, _, name in GUARDS.changed_string_matches(self.repo, base)],
+                         ['supervisor_alias'])
+
 
 if __name__ == '__main__':
     unittest.main()

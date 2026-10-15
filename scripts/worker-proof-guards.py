@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 
 GUARD_FILTER = ('test(=test_support::lib_test_process_env_mutation_is_isolated) | '
                 'test(=config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9)')
@@ -32,7 +33,9 @@ def literals(shape, source, path):
         quoted = source[start:end]
         if not re.match(r'(?:b|c)?r#*"', quoted):
             try:
-                body = ast.literal_eval(quoted)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', SyntaxWarning)
+                    body = ast.literal_eval(quoted)
             except (ValueError, SyntaxError):
                 pass
         if isinstance(body, str) and body.strip():
@@ -55,11 +58,19 @@ def changed_string_matches(repo, base):
     hits = set()
     if not removed:
         return []
+    # format! receipts often have tests pinning one rendered field rather
+    # than the full template, e.g. "To: cosmic-bear" from "To: {target}".
+    fragments = {part.strip() for value in removed if '\n' in value or '{' in value
+                 for part in re.split(r'\{[^{}]*\}|\n', value)
+                 if len(part.strip()) >= 3}
+    needles = removed | fragments
     for path in filter(None, git(repo, 'ls-files', '-z').split('\0')):
         source_path = repo / path
         if not source_path.is_file() or path.startswith('vendor/'):
             continue
         rust = path.endswith('.rs')
+        if source_path.suffix not in {'.rs', '.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs', '.sh', '.bash'}:
+            continue
         if not rust and not shape.is_test_file(path):
             continue
         try:
@@ -67,11 +78,11 @@ def changed_string_matches(repo, base):
         except UnicodeDecodeError:
             continue
         # Fast grep before tokenizing candidate Rust files.
-        if not any(value in source or repr(value)[1:-1] in source for value in removed):
+        if not any(value in source or repr(value)[1:-1] in source for value in needles):
             continue
         names = list(re.finditer(r'\b(?:async\s+)?fn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(', source)) if rust else []
         for start, value in literals(shape, source, path):
-            if value not in removed:
+            if value not in removed and not any(fragment in value for fragment in fragments):
                 continue
             preceding = [name for name in names if name.start() < start]
             if rust:

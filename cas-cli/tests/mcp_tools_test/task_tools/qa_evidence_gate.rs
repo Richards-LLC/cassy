@@ -1033,3 +1033,72 @@ async fn cas_6f10_waiver_does_not_cover_another_tip() {
     assert_eq!(fx.status(), TaskStatus::InProgress);
     assert!(!fx.notes().contains("QA evidence ledger waived"));
 }
+
+/// GH #1199: qa_waive promises the worker may close this exact tip, including
+/// a web delivery that otherwise requires a bundle.
+async fn waive_bundle_tip_cas_06f5(fx: &Fx, env: &mut TestEnvGuard) -> String {
+    let cas_dir = fx.repo.join(".cas");
+    let agents = cas::store::open_agent_store(&cas_dir).unwrap();
+    let worker_id = format!("test-session-{}", std::process::id());
+    let mut worker = agents.get(&worker_id).unwrap();
+    worker.role = cas::types::AgentRole::Worker;
+    agents.update(&worker).unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(&fx.repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(&fx.repo, &["push", "-q", "origin", "factory/test-agent"]);
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let service = cas::mcp::CasService::new(cas_6f10_supervisor(fx), None);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let waived = extract_text(service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "qa_waive", "task_id": TASK, "head_sha": head,
+        "summary": "Operator reviewed this exact web delivery",
+    })).unwrap())).await.unwrap());
+    env.remove("CAS_AGENT_ROLE");
+    assert!(waived.contains("waived"), "{waived}");
+    // The remote only needs to live through the explicit-tip validation.
+    head
+}
+
+#[tokio::test]
+async fn exact_bundle_waiver_allows_worker_close_cas_06f5() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env, &[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer");
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("QA evidence bundle is not cited"), "{refused}");
+    let head = waive_bundle_tip_cas_06f5(&fx, &mut env).await;
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(fx.notes().contains("QA evidence bundle waived"), "{}", fx.notes());
+    assert!(!fx.notes().contains("qa-bundle:"));
+    merge_into_main(&fx, &head);
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(closed.contains("Closed task:"), "{closed}");
+    assert_eq!(fx.status(), TaskStatus::Closed);
+}
+
+#[tokio::test]
+async fn bundle_waiver_rejects_worker_next_tip_cas_06f5() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env, &[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer");
+    let head = waive_bundle_tip_cas_06f5(&fx, &mut env).await;
+    let changed = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
+    assert_ne!(changed, head);
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("QA evidence bundle is not cited"), "{refused}");
+    assert_eq!(fx.status(), TaskStatus::InProgress);
+    assert!(!fx.notes().contains("QA evidence bundle waived"));
+}
+
+#[tokio::test]
+async fn bundle_waiver_preserves_skip_marker_gate_cas_06f5() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env, &[
+        ("web/composer.css", ".composer{gap:8px}\n"),
+        ("tests/test.spec.ts", "test.only('feature', () => {});\n"),
+    ], "Open the composer");
+    waive_bundle_tip_cas_06f5(&fx, &mut env).await;
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("adds test skip/focus markers"), "{refused}");
+    assert_eq!(fx.status(), TaskStatus::InProgress);
+}

@@ -74,8 +74,9 @@ can configure interaction globs for their TUI modules; an empty list restores
 terminal-qa for all output matches. The ledger's freshness and real-build PASS
 checks still apply, and web/journey bundles and skip-marker gates are unchanged.
 
-A supervisor `qa_waive` bound to the exact delivered SHA satisfies the ledger
-and terminal receipt tier on worker re-close. It does not waive web bundles or
+A supervisor `qa_waive` bound to the exact delivered SHA satisfies the bundle,
+ledger and terminal receipt requirements on worker park and re-close. The close
+records the waiver, delivered SHA, supervisor and reason. It does not waive
 unexplained test skip/focus markers; a waiver for another tip does not apply.
 
 A fresh ledger may instead contain a deployed check with verdict `DEFERRED`,

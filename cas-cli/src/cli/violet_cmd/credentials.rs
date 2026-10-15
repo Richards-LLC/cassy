@@ -5,8 +5,8 @@ use std::path::Path;
 use cas_pty::violet_env;
 use cmcp_core::config::{
     Config, Scope, ServerConfig, VIOLET_DEFAULT_TOKEN_ENV, VIOLET_SERVER,
-    canonical_violet_credential_name, is_violet_hub_url, violet_credential_names,
-    violet_credential_value,
+    canonical_violet_credential_name, is_violet_hub_url, violet_compatibility,
+    violet_credential_names, violet_credential_value,
 };
 
 use super::hub::VioletError;
@@ -48,7 +48,9 @@ fn value(
     env: &BTreeMap<String, String>,
     removed: &[String],
 ) -> Result<String, VioletError> {
-    if removed.contains(&name.to_owned()) {
+    if removed.iter().any(|denied| {
+        canonical_violet_credential_name(denied) == canonical_violet_credential_name(name)
+    }) {
         return Err(missing(format!(
             "credential variable {name} is withheld by worker policy"
         )));
@@ -58,29 +60,46 @@ fn value(
         .ok_or_else(|| missing(format!("credential variable {name} is empty or unset")))
 }
 
+// Validate before admitting a selector reference to the private-file resolver.
+fn selector(env: &BTreeMap<String, String>) -> Result<Option<String>, VioletError> {
+    let Some(selected) = [
+        "VIOLET_SLACK_TOKEN_ENV",
+        violet_compatibility().legacy_token_selector_env.as_str(),
+    ]
+    .into_iter()
+    .find_map(|key| env.get(key).filter(|v| !v.trim().is_empty())) else {
+        return Ok(None);
+    };
+    let selected = selected.trim();
+    let canonical = canonical_violet_credential_name(selected);
+    if !selected
+        .bytes()
+        .enumerate()
+        .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+        || !violet_env::canonical_credential(&canonical)
+        || canonical == "VIOLET_VERCEL_BYPASS"
+    {
+        return Err(missing(
+            "VIOLET_SLACK_TOKEN_ENV must name a Violet Slack token variable",
+        ));
+    }
+    Ok(Some(canonical))
+}
+
 fn selected_token(
     env: &BTreeMap<String, String>,
     native: &[(std::path::PathBuf, BTreeSet<String>)],
     removed: &[String],
+    selector: Option<&str>,
 ) -> Result<String, VioletError> {
     // A denied default cannot be replaced with another account.
-    if removed.iter().any(|name| name == VIOLET_DEFAULT_TOKEN_ENV) {
+    if removed
+        .iter()
+        .any(|name| canonical_violet_credential_name(name) == VIOLET_DEFAULT_TOKEN_ENV)
+    {
         return value(VIOLET_DEFAULT_TOKEN_ENV, env, removed);
     }
-    if let Some(selector) = env
-        .get("VIOLET_SLACK_TOKEN_ENV")
-        .filter(|v| !v.trim().is_empty())
-    {
-        let selector = selector.trim();
-        if !selector
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
-        {
-            return Err(missing(
-                "VIOLET_SLACK_TOKEN_ENV must name an environment variable",
-            ));
-        }
+    if let Some(selector) = selector {
         return value(selector, env, removed);
     }
     for name in [VIOLET_DEFAULT_TOKEN_ENV, "VIOLET_SLACK_TOKEN"] {
@@ -136,7 +155,13 @@ pub(super) fn resolve(
     removed: &[String],
 ) -> Result<(), VioletError> {
     let managed = managed_default(server, root);
+    let removed: Vec<_> = removed
+        .iter()
+        .flat_map(|name| violet_credential_names(name))
+        .collect();
+    let removed = removed.as_slice();
     let base = violet_env::resolved_environment(&[], removed);
+    let selector = if managed { selector(&base)? } else { None };
     let native: Vec<_> = if managed {
         ["claude", "codex"]
             .iter()
@@ -149,8 +174,8 @@ pub(super) fn resolve(
         .iter()
         .flat_map(|(_, names)| names.iter().cloned())
         .collect();
-    if let Some(selector) = base.get("VIOLET_SLACK_TOKEN_ENV") {
-        refs.push(selector.trim().into());
+    if let Some(selector) = &selector {
+        refs.push(selector.clone());
     }
     match server {
         ServerConfig::Http { auth, headers, .. } | ServerConfig::Sse { auth, headers, .. } => {
@@ -181,7 +206,7 @@ pub(super) fn resolve(
         ServerConfig::Http { auth, headers, .. } | ServerConfig::Sse { auth, headers, .. } => {
             if let Some(auth) = auth {
                 if managed {
-                    *auth = selected_token(&env, &native, removed)?;
+                    *auth = selected_token(&env, &native, removed, selector.as_deref())?;
                 } else {
                     strict(auth)?;
                 }

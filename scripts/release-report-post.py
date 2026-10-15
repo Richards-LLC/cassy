@@ -237,11 +237,25 @@ def select_token_env(candidates: set[str], registered_env: str | None) -> str | 
     return None
 
 
+def validated_token_selector(name: str) -> str:
+    """Explicit bearer selectors may reference only Violet token credentials."""
+    name = name.strip()
+    canonical = credential_names(name)[0]
+    if (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+            or not (canonical == "VIOLET_SLACK_TOKEN"
+                    or canonical.startswith("VIOLET_SLACK_TOKEN_"))
+            or canonical == "VIOLET_SLACK_TOKEN_ENV"):
+        fail("Violet bearer selector must name a Violet Slack token variable")
+    return canonical
+
+
 def resolve_token(credentials: dict[str, str]) -> str:
     explicit = (os.environ.get("VIOLET_SLACK_TOKEN_ENV")
                 or os.environ.get("CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV")
                 or os.environ.get(LEGACY_TRAIN_SELECTOR_ENV)
                 or os.environ.get(LEGACY_TOKEN_SELECTOR_ENV))
+    if explicit:
+        explicit = validated_token_selector(explicit)
     token = resolve_secret("VIOLET_SLACK_TOKEN", explicit, credentials)
     if token:
         return token

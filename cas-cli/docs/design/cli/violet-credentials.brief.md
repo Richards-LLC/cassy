@@ -20,3 +20,11 @@ shadow private values. This uses the same resolver as harness launch and update
 probes. The CLI additionally asks that resolver for explicitly referenced custom
 or legacy private-file variables; harness hydration still injects only registered
 canonical credentials.
+
+The canonical selector takes precedence over its installed legacy alias; a
+missing selected credential cannot fall through to another account. Selectors
+accept only Violet Slack token variable names (including their legacy spelling),
+never bypass or unrelated secrets. Worker denials compare canonical credential
+identities, covering both spellings in inherited values and private-file loads.
+After explicit selection and the exact default, the generic token precedes the
+native registration, matching the release adapter; labelled discovery is last.

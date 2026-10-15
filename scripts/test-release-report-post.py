@@ -504,7 +504,13 @@ def run_selector_safety_proof() -> None:
                     os.environ["VIOLET_SLACK_TOKEN_ENV"] = selected
                     if inherited and selected != "VIOLET_SLACK_TOKEN_ENV":
                         os.environ[selected] = "unrelated-fixture"
-                    expect_adapter_error(module, lambda: module.resolve_token(credentials), "must name a Violet Slack token")
+                    try:
+                        module.resolve_token(credentials)
+                    except module.AdapterError as exc:
+                        assert "must name a Violet Slack token" in str(exc)
+                        assert "unrelated-fixture" not in str(exc)
+                    else:
+                        raise AssertionError("non-token selector must fail closed")
                     if selected != "VIOLET_SLACK_TOKEN_ENV":
                         os.environ.pop(selected, None)
                     refusals += 1

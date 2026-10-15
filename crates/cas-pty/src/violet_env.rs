@@ -165,13 +165,18 @@ pub fn resolved_environment_for_references(
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
     env.extend(overrides.iter().cloned());
-    for name in removed {
-        env.remove(name);
-    }
+    let removed: BTreeSet<_> = removed
+        .iter()
+        .map(|name| cas_types::violet_compatibility::canonical_violet_credential_name(name))
+        .collect();
+    let denied = |name: &str| {
+        removed.contains(&cas_types::violet_compatibility::canonical_violet_credential_name(name))
+    };
+    env.retain(|name, _| !denied(name));
     if let Some(path) = credential_file() {
         for (name, value) in literal_file_values(&path) {
             if (canonical_credential(&name) || references.contains(&name))
-                && !removed.contains(&name)
+                && !denied(&name)
                 && !value.trim().is_empty()
                 && !env.get(&name).is_some_and(|v| !v.trim().is_empty())
             {

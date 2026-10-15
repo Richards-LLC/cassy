@@ -430,6 +430,7 @@ mod tests {
             for input in [
                 "crates/cas-mux/src/input_stream.rs",
                 "crates/cas-mux/src/pty.rs",
+                "crates/cas-mux/src/pane/mod.rs",
             ] {
                 assert!(!requires_terminal_qa(&[input.into()], &qa));
             }

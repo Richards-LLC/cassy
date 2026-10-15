@@ -563,34 +563,41 @@ async fn evidence_gate_can_be_disabled_per_project() {
 #[tokio::test]
 async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() {
     let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
-        &[("cas-cli/src/ui/status.rs", "pub fn draw() {}\n")],
-        "Run cas status; the table fits 80 columns",
-    );
-    let task_dir = fx.artifacts.join(TASK);
-    std::fs::create_dir_all(&task_dir).unwrap();
-    std::fs::write(
-        task_dir.join("LEDGER.md"),
-        "| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n",
-    )
-    .unwrap();
+    for surface in [
+        "cas-cli/src/ui/status.rs",
+        "crates/cas-mux/src/render.rs",
+        "crates/cas-mux/src/pane/style.rs",
+        "crates/cas-mux/src/pane/snapshot.rs",
+    ] {
+        let fx = fixture(&mut test_env,
+            &[(surface, "pub fn draw() {}\n")],
+            "Run cas status; the table fits 80 columns",
+        );
+        let task_dir = fx.artifacts.join(TASK);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(
+            task_dir.join("LEDGER.md"),
+            "| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n",
+        )
+        .unwrap();
 
-    let refused = close_text(&fx.core, TASK).await;
-    assert!(
-        refused.contains("terminal-qa receipt is missing"),
-        "{refused}"
-    );
-    assert!(refused.contains("scripts/terminal-qa.mjs"), "{refused}");
+        let refused = close_text(&fx.core, TASK).await;
+        assert!(
+            refused.contains("terminal-qa receipt is missing"),
+            "{refused}"
+        );
+        assert!(refused.contains("scripts/terminal-qa.mjs"), "{refused}");
 
-    let report = task_dir.join("terminal-qa/cas-status/report.md");
-    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
-    std::fs::write(
-        &report,
-        "terminal-qa: PASS cas-status · 14 runs · 0 fail · 0 warn\n",
-    )
-    .unwrap();
-    let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        let report = task_dir.join("terminal-qa/cas-status/report.md");
+        std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+        std::fs::write(
+            &report,
+            "terminal-qa: PASS cas-status · 14 runs · 0 fail · 0 warn\n",
+        )
+        .unwrap();
+        let parked = close_text(&fx.core, TASK).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    }
 }
 
 #[tokio::test]

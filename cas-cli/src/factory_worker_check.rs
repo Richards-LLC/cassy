@@ -1088,7 +1088,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         fixture_commit(&repo);
         std::fs::write(root.join("config.toml"), "[factory]\nworker_memory_high_gib = 3\n").unwrap();
         let scope = dir.path().join("scope runner");
-        fake_cargo(&scope, r#"printf '%s\n' "$@" > target/scope-args
+        fake_scope(&scope, r#"printf '%s\n' "$@" > target/scope-args
 while [ "$1" != -- ]; do shift; done
 shift
 exec "$@""#);
@@ -1140,7 +1140,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         let scope = dir.path().join("scope");
-        fake_cargo(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, "echo run >> target/runs\nexit 7");
         let error = execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap_err();
@@ -1159,7 +1159,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         let scope = dir.path().join("scope");
-        fake_cargo(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, r#"[ "$1" = nextest ] || exit 3
 [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 4
@@ -1594,6 +1594,13 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             ],
         )
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn fake_scope(path: &Path, body: &str) {
+        fake_cargo(path, &format!(
+            "if [ \"$1\" = --version ]; then printf 'systemd 259\\n'; exit 0; fi\n{body}"
+        ));
     }
 
     #[cfg(unix)]

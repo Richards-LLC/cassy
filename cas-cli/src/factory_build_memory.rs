@@ -5,6 +5,28 @@ use std::process::Command;
 const GIB: u64 = 1024 * 1024 * 1024;
 const INTERACTIVE_LOW: u64 = 256 * 1024 * 1024;
 
+fn legacy_scope_arguments(runner: &Path) -> bool {
+    use crate::bounded_process::{Deadline, run_command};
+    let budget = std::time::Duration::from_millis(500);
+    let mut command = Command::new(runner);
+    command.arg("--version");
+    let version = run_command(&mut command, Deadline::after(budget), budget)
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let stdout = String::from_utf8(output.stdout).ok()?;
+            stdout
+                .strip_prefix("systemd ")?
+                .split_whitespace()
+                .next()?
+                .parse::<u32>()
+                .ok()
+        });
+    // Before 254, scopes never expanded argv and the switch did not exist.
+    // Unknown/new runners get the explicit safe option, never guessed escaping.
+    version.is_some_and(|version| version < 254)
+}
+
 pub(crate) fn memory_high(configured_gib: u32, builders: usize, meminfo: &str) -> u64 {
     if configured_gib != 0 {
         return u64::from(configured_gib) * GIB;
@@ -45,8 +67,11 @@ pub(crate) fn scope_command(
 runner=$1
 high=$2
 marker=$3
-shift 3
-"$runner" --user --scope --quiet -p "MemoryHigh=$high" -- bash -c '
+literal_option=$4
+shift 4
+options=()
+if [ -n "$literal_option" ]; then options+=("$literal_option"); fi
+"$runner" --user --scope --quiet "${options[@]}" -p "MemoryHigh=$high" -- bash -c '
 marker=$1
 shift
 : > "$marker" || exit 125
@@ -65,6 +90,11 @@ exec "$@"
         .arg(runner)
         .arg(high.to_string())
         .arg(marker)
+        .arg(if legacy_scope_arguments(runner) {
+            ""
+        } else {
+            "--expand-environment=no"
+        })
         .arg(command.get_program())
         .args(command.get_args());
     for (key, value) in command.get_envs() {
@@ -163,6 +193,107 @@ fn protect_low_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn script_payload(directory: &Path) -> Command {
+        let mut command = Command::new("bash");
+        command
+            .args([
+                "-c",
+                r#"printf '%s\n' "$CAS_192B_VALUE" '$CAS_192B_LITERAL' "$1" "${2}""#,
+                "payload",
+                "$CAS_192B_ARGUMENT",
+                "${CAS_192B_BRACED}",
+            ])
+            .env("CAS_192B_VALUE", "child value with spaces")
+            .current_dir(directory);
+        command
+    }
+
+    #[cfg(unix)]
+    fn assert_scoped_script_survives(runner: &Path, directory: &Path) {
+        let marker = directory.join("started-${CAS_192B_MARKER}");
+        let output = scope_command(script_payload(directory), Some(runner), GIB, &marker)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "scope script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            marker.is_file(),
+            "the inner script must mark a real scoped launch"
+        );
+        // pin: every dollar expression must reach Bash unchanged; only the
+        // payload's unquoted child variable may expand, after scope admission.
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "child value with spaces\n$CAS_192B_LITERAL\n$CAS_192B_ARGUMENT\n${CAS_192B_BRACED}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_memory_scope_preserves_scripts_with_systemd_expansion_cas_192b() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let runner = directory.path().join("systemd-run");
+        // Model the external argv-expansion boundary, not shell evaluation:
+        // systemd expands even dollar expressions inside shell quote characters.
+        let script = r#"#!/usr/bin/python3
+import os, re, sys
+args = sys.argv[1:]
+version = FIXTURE_VERSION
+if args == ['--version']:
+    print(f'systemd {version} (fixture)')
+    sys.exit(0)
+assert '--scope' in args
+assert 'MemoryHigh=1073741824' in args
+if version < 254:
+    assert '--expand-environment=no' not in args, 'unsupported legacy option'
+expand = version >= 254 and '--expand-environment=no' not in args
+args = args[args.index('--') + 1:]
+if expand:
+    def replace(match):
+        if match[0] == '$$':
+            return '$'
+        return os.environ.get(match[1], '')
+    def expand_arg(arg):
+        if re.fullmatch(r'\$[A-Za-z_][A-Za-z_0-9]*', arg):
+            return os.environ.get(arg[1:], '')
+        return re.sub(r'\$\$|\$\{([^}]+)\}', replace, arg)
+    args = [expand_arg(arg) for arg in args]
+os.execvpe(args[0], args, os.environ)
+"#;
+        for version in [259, 254, 253] {
+            std::fs::write(
+                &runner,
+                script.replace("FIXTURE_VERSION", &version.to_string()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_scoped_script_survives(&runner, directory.path());
+            std::fs::remove_file(directory.path().join("started-${CAS_192B_MARKER}")).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_memory_scope_preserves_scripts_with_real_systemd_cas_192b() {
+        use crate::bounded_process::{Deadline, run_command};
+        let budget = std::time::Duration::from_secs(2);
+        let mut available = Command::new("systemd-run");
+        available.args(["--user", "--scope", "--quiet", "--", "true"]);
+        if !run_command(&mut available, Deadline::after(budget), budget)
+            .is_ok_and(|output| output.status.success())
+        {
+            eprintln!("SKIP real systemd control: user scopes unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        assert_scoped_script_survives(Path::new("systemd-run"), directory.path());
+    }
 
     #[test]
     fn worker_memory_budget_reserves_ram_and_tracks_builder_cap() {

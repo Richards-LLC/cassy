@@ -598,6 +598,9 @@ in GiB; default `0` divides half of total RAM by `max_concurrent_builders`, boun
 to 256 MiB..16 GiB per build (8 GiB on a 64 GiB host with four builders).
 Unavailable user scopes and other platforms log a fallback and run unscoped.
 Only scope startup failures fall back; a failed build is never rerun unscoped.
+Scope launches disable systemd's argument expansion so embedded proof scripts
+reach Bash and Python unchanged. A bounded version probe omits the unsupported
+switch on systemd older than 254, whose scopes already pass arguments literally.
 Daemon startup also tries to give its inherited interactive cgroup (including
 the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
 settings. Missing controllers or user-manager permissions leave startup working.

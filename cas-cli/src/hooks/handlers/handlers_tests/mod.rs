@@ -9,6 +9,7 @@ mod message_display;
 mod neon_sql_guard;
 mod permission_request_factory;
 mod preferences_context;
+mod process_signal_guard;
 mod reload_skills;
 mod reviews;
 mod ripple_path_scope;

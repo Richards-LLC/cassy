@@ -1,7 +1,7 @@
 # Factory loop v2: typing never waits
 
 Task: cas-5c24. Epic: cas-759c (GH #1211; also closes #1210, informs #1213).
-Status: **draft for supervisor review**. Base: `7b518440c` (v42 epic tip).
+Status: **draft for supervisor review**; spec record spec-4c5b. Base: `7b518440c` (v42 epic tip).
 Related contract: spec-6194 (communication contract v2) for the queue and
 relay semantics this spec moves off the loop.
 

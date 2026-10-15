@@ -2442,6 +2442,13 @@ impl FactoryApp {
     }
 
     /// Get the director data
+    /// Replace the cached director snapshot (tests: a stale cache).
+    #[cfg(test)]
+    pub(crate) fn set_director_data_for_test(&mut self, data: DirectorData) {
+        self.director_data = data.clone();
+        self.unfiltered_director_data = data;
+    }
+
     pub fn director_data(&self) -> &DirectorData {
         &self.director_data
     }

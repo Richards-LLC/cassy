@@ -127,6 +127,16 @@ fn claim_source(cas_dir: &Path, row: i64, recipient: &str) -> Option<String> {
     .ok()
 }
 
+fn store_claim(cas_dir: &Path, row: i64, recipient: &str) -> anyhow::Result<Option<String>> {
+    Ok(crate::store::open_prompt_queue_store(cas_dir)?.claim_recipient_transport_token(row, recipient)?)
+}
+
+fn receipts(cas_dir: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM prompt_queue_recipient_seen", [], |r| r.get(0))
+        .unwrap()
+}
+
 #[test]
 fn flv2_queue_stamps_on_writer() {
     let (_root, cas_dir) = project();
@@ -135,8 +145,7 @@ fn flv2_queue_stamps_on_writer() {
     let writer = TestWriter::start(false);
     let mut jobs = jobs_on(&writer);
 
-    // QueueSelect runs on the writer and returns the batch with its claims,
-    // taken in the selecting transaction.
+    // QueueSelect runs its store work on the writer and returns the batch.
     let select_threads = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&select_threads);
     jobs.submit_select(request(&cas_dir), move |request, generation| {
@@ -147,55 +156,60 @@ fn flv2_queue_stamps_on_writer() {
         super::super::queue_and_events::run_queue_select(request, generation)
     });
     assert!(jobs.select_in_flight());
-    settle(&mut jobs, |jobs| jobs.has_ready() || !jobs.select_in_flight());
-    jobs.apply_completions();
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
     let selection = jobs.take_selection().expect("the selection lands as a completion");
     assert_eq!(
         select_threads.lock().unwrap().as_slice(),
         ["test-store-writer"],
         "the selection's store work ran on the writer, not the caller"
     );
-    let ids: Vec<i64> = selection.rows.iter().map(|row| row.prompt.id).collect();
+    let ids: Vec<i64> = selection.rows.iter().map(|row| row.id).collect();
     assert_eq!(ids, vec![delivered, released]);
-    for row in &selection.rows {
-        assert_eq!(row.claims, vec![("worker-a".to_string(), true)]);
-        assert_eq!(claim_source(&cas_dir, row.prompt.id, "worker-a").as_deref(), Some("transport_claimed"));
-    }
-    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
     let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
     let selected_at: Option<String> = conn
         .query_row("SELECT selected_at FROM prompt_queue WHERE id = ?", [delivered], |r| r.get(0))
         .unwrap();
     assert!(selected_at.is_some(), "QueueSelect stamps the Selected stage");
+    assert_eq!(receipts(&cas_dir), 0, "selection takes no claim (review round 1, H1)");
 
-    // Control delivers the first row and hands its claim off; the second row
-    // is gated this pass, so the pass releases its claim.
-    jobs.open_pass_claims(&selection.rows);
-    let generation = match jobs.admit(delivered, "worker-a", Instant::now(), || unreachable!()).unwrap() {
+    // Control delivers the first row; the second is claimed, then gated.
+    let cas = cas_dir.clone();
+    let generation = match jobs
+        .admit(delivered, "worker-a", Instant::now(), || store_claim(&cas, delivered, "worker-a"))
+        .unwrap()
+    {
         Admission::Inject { generation } => generation,
-        other => panic!("the claimed row is admitted, got {other:?}"),
+        other => panic!("the unclaimed row is admitted, got {other:?}"),
     };
     jobs.record_outcome(delivered, "worker-a", generation);
     jobs.stamp(&cas_dir, delivered, "worker-a", QueueStamp::TransportReceipt);
     jobs.stamp(&cas_dir, delivered, "worker-a", QueueStamp::TransportDelivered);
-    assert_eq!(jobs.close_pass_claims(&cas_dir), 1, "the gated row's claim is released");
+    let cas = cas_dir.clone();
+    let gated = match jobs
+        .admit(released, "worker-a", Instant::now(), || store_claim(&cas, released, "worker-a"))
+        .unwrap()
+    {
+        Admission::Inject { generation } => generation,
+        other => panic!("the second row is admitted, got {other:?}"),
+    };
+    jobs.release_inject_claim(&cas_dir, released, "worker-a");
+    jobs.record_outcome(released, "worker-a", gated);
     jobs.settle_injects(&cas_dir);
     settle(&mut jobs, |jobs| jobs.in_flight().len() == 0);
-    settle(&mut jobs, |_| writer.ran().len() >= 5);
 
     // Every selection and stamp ran on the writer thread, none on the caller.
     let ran = writer.ran();
     assert_eq!(
         ran.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
-        vec!["QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueStamp"],
-        "the selection, then receipt, delivered, release and settle stamps: {ran:?}"
+        vec!["QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueStamp", "QueueStamp"],
+        "the selection, then receipt, delivered, release and two settles: {ran:?}"
     );
     assert!(ran.iter().all(|(_, thread)| thread == "test-store-writer"), "{ran:?}");
-    assert_ne!(std::thread::current().name(), Some("test-store-writer"));
 
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
     let row = queue.queued_prompt(delivered).unwrap().unwrap();
     assert!(row.processed_at.is_some(), "the delivered stamp landed");
-    assert_eq!(claim_source(&cas_dir, released, "worker-a"), None, "the unused claim was released");
+    assert_eq!(claim_source(&cas_dir, released, "worker-a"), None, "the gated row's claim was released");
     let pending = queue.queued_prompt(released).unwrap().unwrap();
     assert!(pending.processed_at.is_none(), "the gated row stays pending");
 }
@@ -204,71 +218,169 @@ fn flv2_queue_stamps_on_writer() {
 fn flv2_no_double_inject() {
     let (_root, cas_dir) = project();
     let row_id = enqueue(&cas_dir, "worker-a", "only once");
-    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-    let row = queue.queued_prompt(row_id).unwrap().unwrap();
     // Stamps are held at the writer, so they have not landed while the row
     // is selected a second time.
     let writer = TestWriter::start(true);
     let mut jobs = jobs_on(&writer);
-    let selected = vec![cas_store::SelectedPrompt {
-        prompt: row.clone(),
-        // Worst case: both selections report the claim as theirs, so only
-        // the in-flight set stands between the row and a second inject.
-        claims: vec![("worker-a".to_string(), true)],
-    }];
 
     let t0 = Instant::now();
     let mut injects = 0;
     for pass in 0..2 {
-        jobs.open_pass_claims(&selected);
-        match jobs.admit(row_id, "worker-a", t0, || unreachable!()).unwrap() {
+        let cas = cas_dir.clone();
+        let issued = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&issued);
+        match jobs
+            .admit(row_id, "worker-a", t0, move || {
+                let token = store_claim(&cas, row_id, "worker-a")?;
+                *seen.lock().unwrap() = token.clone();
+                Ok(token)
+            })
+            .unwrap()
+        {
             Admission::Inject { generation } => {
                 injects += 1;
+                assert!(issued.lock().unwrap().is_some(), "the inject holds a real store claim");
                 jobs.record_outcome(row_id, "worker-a", generation);
                 jobs.stamp(&cas_dir, row_id, "worker-a", QueueStamp::TransportDelivered);
                 // A repeated stamp for the same generation is not submitted.
                 jobs.stamp(&cas_dir, row_id, "worker-a", QueueStamp::TransportDelivered);
             }
             Admission::InFlight => assert_eq!(pass, 1),
-            Admission::NotClaimed => panic!("the selection claimed the row"),
+            Admission::NotClaimed => panic!("pass {pass}: nothing else holds the row"),
         }
-        jobs.close_pass_claims(&cas_dir);
         jobs.settle_injects(&cas_dir);
         jobs.apply_completions();
     }
     assert_eq!(injects, 1, "a row selected twice before its stamp lands is injected once");
     assert!(jobs.in_flight().holds_row(row_id));
+    // Even without the in-flight set, the store claim refuses a second inject.
+    assert_eq!(store_claim(&cas_dir, row_id, "worker-a").unwrap(), None);
 
-    // The stamps land; the entry clears.
+    // A late release naming another claim never drops this one.
+    jobs.stamp(
+        &cas_dir,
+        row_id,
+        "worker-a",
+        QueueStamp::ReleaseClaim { token: "2000-01-01T00:00:00+00:00".into() },
+    );
     writer.open();
     settle(&mut jobs, |jobs| !jobs.in_flight().holds_row(row_id));
-    let stamps = writer.ran().iter().filter(|(label, _)| *label == "QueueStamp").count();
-    assert_eq!(stamps, 3, "delivered once, the second pass's unused claim, and the settle");
+    settle(&mut jobs, |_| writer.ran().len() >= 3);
+    assert_eq!(
+        claim_source(&cas_dir, row_id, "worker-a").as_deref(),
+        Some("transport_claimed"),
+        "the delivered row keeps its claim"
+    );
+    let stale_release = crate::store::open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .release_recipient_transport_claim(row_id, "worker-a", "2000-01-01T00:00:00+00:00")
+        .unwrap();
+    assert!(!stale_release, "a stale token releases nothing");
+    assert_eq!(claim_source(&cas_dir, row_id, "worker-a").as_deref(), Some("transport_claimed"));
 
-    // An inject whose outcome never arrives releases its claim after the
-    // outcome timeout (fake clock), and the row is no longer in flight.
+    // An inject whose outcome never arrives releases its own claim after the
+    // outcome timeout (fake clock); the row can be claimed again.
     let lost = enqueue(&cas_dir, "worker-a", "outcome lost");
-    assert!(queue.claim_recipient_transport(lost, "worker-a").unwrap());
-    let lost_row = vec![cas_store::SelectedPrompt {
-        prompt: queue.queued_prompt(lost).unwrap().unwrap(),
-        claims: vec![("worker-a".to_string(), true)],
-    }];
-    jobs.open_pass_claims(&lost_row);
+    let cas = cas_dir.clone();
     assert!(matches!(
-        jobs.admit(lost, "worker-a", t0, || unreachable!()).unwrap(),
+        jobs.admit(lost, "worker-a", t0, move || store_claim(&cas, lost, "worker-a")).unwrap(),
         Admission::Inject { .. }
     ));
-    assert_eq!(jobs.close_pass_claims(&cas_dir), 0, "the claim was handed to the inject");
     jobs.settle_injects(&cas_dir);
     assert_eq!(jobs.expire_injects(&cas_dir, t0 + INJECT_OUTCOME_TIMEOUT - Duration::from_millis(1)), 0);
     assert!(jobs.in_flight().holds_row(lost));
     assert_eq!(jobs.expire_injects(&cas_dir, t0 + INJECT_OUTCOME_TIMEOUT), 1);
     assert!(!jobs.in_flight().holds_row(lost));
     settle(&mut jobs, |_| claim_source(&cas_dir, lost, "worker-a").is_none());
-    assert!(
-        queue.claim_recipient_transport(lost, "worker-a").unwrap(),
-        "the released row can be claimed again on its normal cadence"
+    assert!(store_claim(&cas_dir, lost, "worker-a").unwrap().is_some());
+}
+
+/// Review round 1, H1: a selection that is never delivered (the daemon
+/// stopped with it queued or unread, or crashed) leaves no claim, so the row
+/// is still delivered, once, after restart.
+#[test]
+fn an_undelivered_selection_leaves_its_rows_deliverable() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "survive a restart");
+
+    // Shutdown with a select queued behind a held writer.
+    let held = TestWriter::start(true);
+    let mut stopping = jobs_on(&held);
+    stopping.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    held.open();
+    assert!(stopping.drain_for_shutdown(&cas_dir, Duration::from_secs(10)));
+    drop(stopping);
+    assert_eq!(receipts(&cas_dir), 0, "the unread selection holds no claim");
+
+    // Crash after a selection landed but before delivery.
+    let writer = TestWriter::start(false);
+    let mut crashed = jobs_on(&writer);
+    crashed.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    settle(&mut crashed, |jobs| !jobs.select_in_flight());
+    assert!(crashed.take_selection().is_some());
+    drop(crashed);
+    assert_eq!(receipts(&cas_dir), 0);
+
+    // After restart the row is selected again and delivered exactly once.
+    let mut restarted = jobs_on(&writer);
+    restarted.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    settle(&mut restarted, |jobs| !jobs.select_in_flight());
+    let rows = restarted.take_selection().unwrap().rows;
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![row_id]);
+    assert!(store_claim(&cas_dir, row_id, "worker-a").unwrap().is_some());
+    assert!(store_claim(&cas_dir, row_id, "worker-a").unwrap().is_none());
+}
+
+/// Review round 1, M5: a settle that never completes stops holding its row.
+#[test]
+fn an_unsettled_inject_stops_holding_its_row() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "settle lost");
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    let cas = cas_dir.clone();
+    let generation = match jobs
+        .admit(row_id, "worker-a", Instant::now(), move || store_claim(&cas, row_id, "worker-a"))
+        .unwrap()
+    {
+        Admission::Inject { generation } => generation,
+        other => panic!("{other:?}"),
+    };
+    jobs.record_outcome(row_id, "worker-a", generation);
+    jobs.settle_injects(&cas_dir);
+    let now = Instant::now();
+    jobs.expire_injects(&cas_dir, now);
+    assert!(jobs.in_flight().holds_row(row_id), "a settle in progress holds the row");
+    jobs.expire_injects(&cas_dir, now + SETTLE_TIMEOUT);
+    assert!(!jobs.in_flight().holds_row(row_id), "a settle that never lands stops holding it");
+    writer.open();
+}
+
+/// C2 shares this runtime; its RevalidateFresh jobs that panic must come
+/// back to it, or its in-flight slot never clears.
+#[test]
+fn a_panicked_non_inbox_revalidation_is_handed_back() {
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    jobs.submit_external_read(
+        super::super::jobs::JobSpec {
+            kind: "RevalidateFresh",
+            key: "RevalidateFresh:director:delivery".into(),
+            lane: Lane::Read,
+            criticality: super::super::jobs::Criticality::Refresh,
+            generation: 7,
+            budget: Duration::from_millis(250),
+        },
+        |_stores| panic!("director read failed"),
     );
+    let mut done = Vec::new();
+    settle(&mut jobs, |jobs| {
+        done.extend(jobs.take_external_completions());
+        !done.is_empty()
+    });
+    assert_eq!(done[0].key, "RevalidateFresh:director:delivery");
+    assert_eq!(done[0].generation, 7);
+    assert!(done[0].outcome.is_err());
 }
 
 fn task(id: &str, assignee: &str) -> cas_factory::TaskSummary {
@@ -451,4 +563,72 @@ fn another_childs_jobs_share_the_runtime_and_come_back_typed() {
     let read = done.remove(0).outcome.unwrap();
     assert_eq!(read.downcast_ref::<bool>(), Some(&true), "no read context is wired in this test");
     assert!(jobs.take_selection().is_none(), "external results never look like a selection");
+}
+
+/// Review round 1, M6: a retraction removes only the rows it judged. An
+/// alert written after the decision stays, even for the same worker.
+#[test]
+fn retraction_removes_only_the_rows_it_judged() {
+    let root = tempfile::tempdir().unwrap();
+    let teams = super::super::teams::TeamsManager::rooted_at(root.path().join("t"), "t");
+    std::fs::create_dir_all(root.path().join("t").join("inboxes")).unwrap();
+    teams
+        .write_to_inbox_for_worker_idle("supervisor", "director", "worker-a is idle (old)", None, None, "worker-a")
+        .unwrap();
+    let pruner = teams.inbox_pruner();
+    let judged: std::collections::HashSet<_> = pruner
+        .unread_alerts("supervisor")
+        .into_iter()
+        .map(|alert| alert.identity)
+        .collect();
+    assert_eq!(judged.len(), 1);
+    teams
+        .write_to_inbox_for_worker_idle("supervisor", "director", "worker-a is idle (new)", None, None, "worker-a")
+        .unwrap();
+    let retracted = pruner.retract_exact("supervisor", &judged).unwrap();
+    assert_eq!(retracted.idle, 1);
+    let left = pruner.unread_alerts("supervisor");
+    assert_eq!(left.len(), 1, "the alert written after the decision stays");
+    assert!(!judged.contains(&left[0].identity));
+}
+
+/// flv2_retraction_reads_fresh through the production wiring: the daemon's
+/// own retraction call (lifecycle.rs), its fresh read of the real store and
+/// the supervisor's real Teams inbox.
+#[test]
+fn flv2_retraction_reads_fresh_through_the_daemon() {
+    let (_root, cas_dir) = project();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let teams_root = tempfile::tempdir().unwrap();
+    let teams = super::super::teams::TeamsManager::rooted_at(teams_root.path().join("t"), "t");
+    std::fs::create_dir_all(teams_root.path().join("t").join("inboxes")).unwrap();
+    teams
+        .write_to_inbox_for_worker_idle("supervisor", "director", "worker-a is idle", None, None, "worker-a")
+        .unwrap();
+    let pruner = teams.inbox_pruner();
+    daemon.teams = Some(teams);
+    // The cached snapshot is stale: it shows worker-a assigned.
+    daemon.app.set_director_data_for_test(data(vec![task("cas-old", "worker-a")]));
+
+    daemon.submit_supervisor_inbox_retraction();
+    daemon.queue_jobs.apply_completions();
+    daemon.queue_jobs.apply_completions();
+    assert_eq!(daemon.queue_jobs.prunes_done, 1);
+    assert_eq!(
+        pruner.unread_alerts("supervisor").len(),
+        1,
+        "the fresh store read shows worker-a idle; the stale cache never retracts"
+    );
+
+    // The store now shows the assignment: the alert is retracted.
+    let mut assigned = cas_types::Task::new("cas-live".into(), "live".into());
+    assigned.status = cas_types::TaskStatus::InProgress;
+    assigned.assignee = Some("worker-a".into());
+    crate::store::open_task_store_local(&cas_dir).unwrap().add(&assigned).unwrap();
+    daemon.app.set_director_data_for_test(data(Vec::new()));
+    daemon.submit_supervisor_inbox_retraction();
+    daemon.queue_jobs.apply_completions();
+    daemon.queue_jobs.apply_completions();
+    assert_eq!(daemon.queue_jobs.prunes_done, 2);
+    assert!(pruner.unread_alerts("supervisor").is_empty(), "a fresh read showing the assignment retracts it");
 }

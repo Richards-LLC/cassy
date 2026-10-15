@@ -36,7 +36,7 @@ use std::time::{Duration, Instant, SystemTime};
 use super::jobs::{
     Criticality, JobPanicked, JobResult, JobRuntime, JobSpec, Lane, LaneWiring, Submitted,
 };
-use super::teams::{InboxPruner, RetractionKeys};
+use super::teams::{AlertIdentity, InboxPruner};
 use crate::ui::factory::director::{DirectorData, DirectorStores};
 
 /// Watchdog budget for `QueueSelect` and `QueueStamp` (spec §4.4).
@@ -57,8 +57,9 @@ const LANE_CAPACITY: usize = 256;
 /// What one store write records about a delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QueueStamp {
-    /// Release a transport claim that was not handed off.
-    ReleaseClaim,
+    /// Release the transport claim `token` names, which was not handed off.
+    /// A late release never drops a newer claim (review round 1, L10).
+    ReleaseClaim { token: String },
     /// The row reached its recipient's transport.
     TransportDelivered,
     /// The recipient's transport receipt (`transport_claimed` surfacing).
@@ -81,7 +82,7 @@ pub(crate) enum QueueStamp {
 impl QueueStamp {
     fn label(&self) -> &'static str {
         match self {
-            Self::ReleaseClaim => "release_claim",
+            Self::ReleaseClaim { .. } => "release_claim",
             Self::TransportDelivered => "transport_delivered",
             Self::TransportReceipt => "transport_receipt",
             Self::PendingReason { .. } => "pending_reason",
@@ -92,7 +93,9 @@ impl QueueStamp {
 
     fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
-            Self::ReleaseClaim => queue.release_recipient_transport(row, recipient),
+            Self::ReleaseClaim { token } => queue
+                .release_recipient_transport_claim(row, recipient, token)
+                .map(drop),
             Self::TransportDelivered => queue.mark_transport_delivered(row),
             Self::TransportReceipt => queue.record_recipient_surfaced(
                 row,
@@ -143,8 +146,10 @@ pub(crate) struct QueueSelection {
     pub(crate) shut_down_recipients: Vec<String>,
     /// Session agents served by their native extension, not by the daemon.
     pub(crate) native_agents: HashSet<String>,
-    /// The batch, with the claims the selection took.
-    pub(crate) rows: Vec<cas_store::SelectedPrompt>,
+    /// The batch, stamped `Selected`. No claims: control claims each row just
+    /// before its transport handoff, so an undelivered selection leaves
+    /// nothing behind (review round 1, H1).
+    pub(crate) rows: Vec<cas_store::QueuedPrompt>,
 }
 
 /// A fresh read for one retraction decision.
@@ -248,6 +253,10 @@ fn run_inline(
     }
 }
 
+/// A settling stamp that never completes (its job panicked or the lane
+/// refused it) must not hold its row forever (review round 1, M5).
+pub(crate) const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Where an in-flight inject stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectPhase {
@@ -259,11 +268,23 @@ enum InjectPhase {
     Settling,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct InFlight {
     generation: u64,
+    /// When the current phase began.
     since: Instant,
     phase: InjectPhase,
+    /// The transport claim the inject holds, released by token.
+    token: Option<String>,
+}
+
+/// An inject whose outcome never arrived: release `token`'s claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpiredInject {
+    pub(crate) row: i64,
+    pub(crate) recipient: String,
+    pub(crate) generation: u64,
+    pub(crate) token: Option<String>,
 }
 
 /// Rows control has injected whose stamps have not landed (spec §4.5 rule 2).
@@ -275,15 +296,30 @@ pub(crate) struct InFlightSet {
 
 impl InFlightSet {
     /// Record an inject about to be sent at `now`.
-    pub(crate) fn begin(&mut self, row: i64, recipient: &str, generation: u64, now: Instant) {
+    pub(crate) fn begin(
+        &mut self,
+        row: i64,
+        recipient: &str,
+        generation: u64,
+        now: Instant,
+        token: Option<String>,
+    ) {
         self.entries.insert(
             (row, recipient.to_string()),
             InFlight {
                 generation,
                 since: now,
                 phase: InjectPhase::AwaitingOutcome,
+                token,
             },
         );
+    }
+
+    /// The transport claim token an in-flight inject holds.
+    pub(crate) fn token_of(&self, row: i64, recipient: &str) -> Option<String> {
+        self.entries
+            .get(&(row, recipient.to_string()))
+            .and_then(|entry| entry.token.clone())
     }
 
     /// Whether any recipient of `row` is in flight.
@@ -298,26 +334,39 @@ impl InFlightSet {
     }
 
     /// The inject's outcome arrived.
-    pub(crate) fn record_outcome(&mut self, row: i64, recipient: &str, generation: u64) {
+    pub(crate) fn record_outcome(&mut self, row: i64, recipient: &str, generation: u64, now: Instant) {
         if let Some(entry) = self.entries.get_mut(&(row, recipient.to_string()))
             && entry.generation == generation
             && entry.phase == InjectPhase::AwaitingOutcome
         {
             entry.phase = InjectPhase::Stamping;
+            entry.since = now;
         }
     }
 
     /// Entries whose outcome is in and whose settling stamp is not queued yet;
     /// marks them settling.
-    fn take_unsettled(&mut self) -> Vec<(i64, String, u64)> {
+    fn take_unsettled(&mut self, now: Instant) -> Vec<(i64, String, u64)> {
         self.entries
             .iter_mut()
             .filter(|(_, entry)| entry.phase == InjectPhase::Stamping)
             .map(|((row, recipient), entry)| {
                 entry.phase = InjectPhase::Settling;
+                entry.since = now;
                 (*row, recipient.clone(), entry.generation)
             })
             .collect()
+    }
+
+    /// Clear `(row, recipient)` at `generation` whatever its phase: its
+    /// settling stamp failed to run.
+    fn clear(&mut self, row: i64, recipient: &str, generation: u64) -> bool {
+        let key = (row, recipient.to_string());
+        if self.entries.get(&key).is_some_and(|entry| entry.generation == generation) {
+            self.entries.remove(&key);
+            return true;
+        }
+        false
     }
 
     /// The settling stamp for `generation` completed: clear the entry. A
@@ -336,20 +385,43 @@ impl InFlightSet {
     }
 
     /// Remove and return injects with no outcome after `timeout`.
-    pub(crate) fn expire(&mut self, now: Instant, timeout: Duration) -> Vec<(i64, String, u64)> {
-        let expired: Vec<(i64, String, u64)> = self
+    pub(crate) fn expire(&mut self, now: Instant, timeout: Duration) -> Vec<ExpiredInject> {
+        let expired: Vec<ExpiredInject> = self
             .entries
             .iter()
             .filter(|(_, entry)| {
                 entry.phase == InjectPhase::AwaitingOutcome
                     && now.saturating_duration_since(entry.since) >= timeout
             })
-            .map(|((row, recipient), entry)| (*row, recipient.clone(), entry.generation))
+            .map(|((row, recipient), entry)| ExpiredInject {
+                row: *row,
+                recipient: recipient.clone(),
+                generation: entry.generation,
+                token: entry.token.clone(),
+            })
             .collect();
-        for (row, recipient, _) in &expired {
-            self.entries.remove(&(*row, recipient.clone()));
+        for expired in &expired {
+            self.entries.remove(&(expired.row, expired.recipient.clone()));
         }
         expired
+    }
+
+    /// Remove and return entries whose outcome is in but whose stamps have
+    /// not settled after `timeout` (review round 1, M5).
+    pub(crate) fn expire_unsettled(&mut self, now: Instant, timeout: Duration) -> Vec<(i64, String, u64)> {
+        let stale: Vec<(i64, String, u64)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.phase != InjectPhase::AwaitingOutcome
+                    && now.saturating_duration_since(entry.since) >= timeout
+            })
+            .map(|((row, recipient), entry)| (*row, recipient.clone(), entry.generation))
+            .collect();
+        for (row, recipient, _) in &stale {
+            self.entries.remove(&(*row, recipient.clone()));
+        }
+        stale
     }
 
     #[cfg(test)]
@@ -478,15 +550,6 @@ pub(crate) enum Admission {
     NotClaimed,
 }
 
-/// Claims the current selection took, until they are handed off or released.
-#[derive(Debug, Default)]
-struct PassClaims {
-    /// `(row, recipient)` -> handed off (true) or still held (false).
-    taken: HashMap<(i64, String), bool>,
-    /// What the selection saw for each `(row, recipient)`.
-    observed: HashMap<(i64, String), bool>,
-}
-
 /// The prompt queue's jobs and the control-side state that orders them.
 pub(crate) struct QueueJobs {
     exec: Exec,
@@ -501,7 +564,6 @@ pub(crate) struct QueueJobs {
     /// Stamps submitted per in-flight generation, so a repeat is not
     /// submitted again. Cleared when the generation settles.
     submitted_stamps: HashSet<(i64, String, u64, String)>,
-    claims: PassClaims,
     /// Retractions waiting for their fresh read: recipient -> (pruner, repo).
     retractions: HashMap<String, (InboxPruner, PathBuf)>,
     /// Finished jobs other children submitted to this runtime, until taken.
@@ -547,7 +609,6 @@ impl QueueJobs {
             ready: Arc::new(AtomicBool::new(false)),
             in_flight: InFlightSet::default(),
             submitted_stamps: HashSet::new(),
-            claims: PassClaims::default(),
             retractions: HashMap::new(),
             external: Vec::new(),
             mirror_in_flight: false,
@@ -641,7 +702,14 @@ impl QueueJobs {
         self.submit_stamp(cas_dir, row, recipient, generation, stamp);
     }
 
-    fn submit_stamp(&mut self, cas_dir: &Path, row: i64, recipient: &str, generation: u64, stamp: QueueStamp) {
+    fn submit_stamp(
+        &mut self,
+        cas_dir: &Path,
+        row: i64,
+        recipient: &str,
+        generation: u64,
+        stamp: QueueStamp,
+    ) -> Submitted {
         let cas_dir = cas_dir.to_path_buf();
         let recipient = recipient.to_string();
         let spec = JobSpec {
@@ -663,111 +731,102 @@ impl QueueJobs {
                 stamp: stamp.label(),
                 error,
             })
-        });
+        })
     }
 
     /// Decide whether control may inject `(row, recipient)` now (spec §4.5
-    /// rules 1–2): not while an earlier inject of the row is in flight, and
-    /// only under a transport claim. `claim` takes one when the selection did
-    /// not consider this recipient. On `Inject` the row is in flight from
-    /// `now`.
+    /// rule 2): not while an earlier inject of the row is in flight, and only
+    /// under a transport claim `claim` takes right now. The claim is the
+    /// fresh per-row check (review round 1, H2): it fails for a row a hook,
+    /// poll or earlier handoff already holds. On `Inject` the row is in
+    /// flight from `now` and holds the claim's token.
     pub(crate) fn admit(
         &mut self,
         row: i64,
         recipient: &str,
         now: Instant,
-        claim: impl FnOnce() -> anyhow::Result<bool>,
+        claim: impl FnOnce() -> anyhow::Result<Option<String>>,
     ) -> anyhow::Result<Admission> {
         if self.in_flight.holds_row(row) {
             return Ok(Admission::InFlight);
         }
-        let claimed = match self.use_claim(row, recipient) {
-            Some(claimed) => claimed,
-            None => claim()?,
-        };
-        if !claimed {
+        let Some(token) = claim()? else {
             return Ok(Admission::NotClaimed);
-        }
-        Ok(Admission::Inject {
-            generation: self.begin_inject(row, recipient, now),
-        })
-    }
-
-    /// Record an inject about to be sent; returns its generation.
-    pub(crate) fn begin_inject(&mut self, row: i64, recipient: &str, now: Instant) -> u64 {
+        };
         let generation = self.generation();
-        self.in_flight.begin(row, recipient, generation, now);
-        generation
+        self.in_flight.begin(row, recipient, generation, now, Some(token));
+        Ok(Admission::Inject { generation })
     }
 
     /// The inject's outcome arrived (inline today; an io-lane event in C4a).
     pub(crate) fn record_outcome(&mut self, row: i64, recipient: &str, generation: u64) {
-        self.in_flight.record_outcome(row, recipient, generation);
+        self.in_flight
+            .record_outcome(row, recipient, generation, Instant::now());
+    }
+
+    /// Release the transport claim the in-flight inject of `(row, recipient)`
+    /// holds, by its token. No-op when there is none.
+    pub(crate) fn release_inject_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
+        if let Some(token) = self.in_flight.token_of(row, recipient) {
+            self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { token });
+        }
     }
 
     /// Queue the settling stamp for every inject whose outcome is in. It runs
     /// after that row's earlier stamps (same key), and its completion clears
     /// the in-flight entry.
     pub(crate) fn settle_injects(&mut self, cas_dir: &Path) {
-        for (row, recipient, generation) in self.in_flight.take_unsettled() {
-            self.submit_stamp(cas_dir, row, &recipient, generation, QueueStamp::Settled);
+        for (row, recipient, generation) in self.in_flight.take_unsettled(Instant::now()) {
+            let submitted =
+                self.submit_stamp(cas_dir, row, &recipient, generation, QueueStamp::Settled);
+            if !accepted(&submitted) {
+                // M5: a settle that cannot run must not hold the row.
+                self.forget_generation(row, &recipient, generation);
+            }
         }
+    }
+
+    fn forget_generation(&mut self, row: i64, recipient: &str, generation: u64) {
+        self.in_flight.clear(row, recipient, generation);
+        self.submitted_stamps.retain(|(id, to, stamped, _)| {
+            !(*id == row && to == recipient && *stamped == generation)
+        });
     }
 
     /// Release the claim of every inject with no outcome after the timeout.
     pub(crate) fn expire_injects(&mut self, cas_dir: &Path, now: Instant) -> usize {
         let expired = self.in_flight.expire(now, INJECT_OUTCOME_TIMEOUT);
-        for (row, recipient, generation) in &expired {
+        for inject in &expired {
             tracing::warn!(
                 target: "cas::coordination",
                 stage = "inject_outcome_timeout",
-                message_id = *row,
-                %recipient,
-                generation = *generation,
+                message_id = inject.row,
+                recipient = %inject.recipient,
+                generation = inject.generation,
                 "factory loop v2: no inject outcome in time; releasing the transport claim so the row retries"
             );
-            self.submit_stamp(cas_dir, *row, recipient, *generation, QueueStamp::ReleaseClaim);
+            if let Some(token) = inject.token.clone() {
+                self.submit_stamp(
+                    cas_dir,
+                    inject.row,
+                    &inject.recipient,
+                    inject.generation,
+                    QueueStamp::ReleaseClaim { token },
+                );
+            }
+        }
+        for (row, recipient, generation) in self.in_flight.expire_unsettled(now, SETTLE_TIMEOUT) {
+            tracing::warn!(
+                target: "cas::coordination",
+                stage = "inject_settle_timeout",
+                message_id = row,
+                %recipient,
+                generation,
+                "factory loop v2: an inject's stamps did not settle in time; the row is no longer held"
+            );
+            self.forget_generation(row, &recipient, generation);
         }
         expired.len()
-    }
-
-    /// Start tracking `selection`'s claims for this pass.
-    pub(crate) fn open_pass_claims(&mut self, rows: &[cas_store::SelectedPrompt]) {
-        for selected in rows {
-            for (recipient, claimed) in &selected.claims {
-                let key = (selected.prompt.id, recipient.clone());
-                self.claims.observed.insert(key.clone(), *claimed);
-                if *claimed {
-                    self.claims.taken.insert(key, false);
-                }
-            }
-        }
-    }
-
-    /// The selection's claim for `(row, recipient)`, marked handed off.
-    /// `None` when the selection did not consider this recipient.
-    pub(crate) fn use_claim(&mut self, row: i64, recipient: &str) -> Option<bool> {
-        let key = (row, recipient.to_string());
-        let claimed = *self.claims.observed.get(&key)?;
-        if let Some(used) = self.claims.taken.get_mut(&key) {
-            *used = true;
-        }
-        Some(claimed)
-    }
-
-    /// Release every claim the pass took and did not hand off. Runs at the
-    /// end of each pass, and at the start of the next in case a pass returned
-    /// early.
-    pub(crate) fn close_pass_claims(&mut self, cas_dir: &Path) -> usize {
-        let claims = std::mem::take(&mut self.claims);
-        let mut released = 0;
-        for ((row, recipient), used) in claims.taken {
-            if !used {
-                released += 1;
-                self.submit_stamp(cas_dir, row, &recipient, 0, QueueStamp::ReleaseClaim);
-            }
-        }
-        released
     }
 
     /// Retract stale alerts from `recipient`'s inbox. `fresh` is a read
@@ -879,12 +938,25 @@ impl QueueJobs {
                             self.mirror_in_flight = false;
                             self.mirror_state = Some(Box::default());
                         }
-                        "RevalidateFresh" => {
+                        "RevalidateFresh" if result.key.starts_with("RevalidateFresh:inbox:") => {
                             if let Some(recipient) = result.key.strip_prefix("RevalidateFresh:inbox:") {
                                 self.retractions.remove(recipient);
                             }
                         }
-                        "QueueStamp" | "InboxPrune" => {}
+                        "QueueStamp" => {
+                            // M5: a stamp job that panicked never settles its
+                            // row; stop holding it.
+                            if let Some((row, recipient)) = result
+                                .key
+                                .strip_prefix("QueueStamp:")
+                                .and_then(|rest| rest.split_once(':'))
+                                && let Ok(row) = row.parse::<i64>()
+                                && result.generation != 0
+                            {
+                                self.forget_generation(row, recipient, result.generation);
+                            }
+                        }
+                        "InboxPrune" => {}
                         _ => self.external.push(JobResult {
                             kind: result.kind,
                             key: result.key,
@@ -1053,15 +1125,66 @@ fn accepted(submitted: &Submitted) -> bool {
     )
 }
 
+thread_local! {
+    /// Stores a job thread has opened, by kind and `.cas` directory.
+    static JOB_THREAD_STORES: std::cell::RefCell<HashMap<(&'static str, PathBuf), Box<dyn std::any::Any>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A store opened, and its schema `init()` run, once per job thread and then
+/// reused by every later job on that thread (review round 1, M4). Write-lane
+/// jobs all run on the StoreWorker thread, so the daemon keeps one handle per
+/// store there.
+pub(crate) fn job_thread_store<T: ?Sized + 'static>(
+    kind: &'static str,
+    cas_dir: &Path,
+    open: impl FnOnce(&Path) -> anyhow::Result<Arc<T>>,
+) -> anyhow::Result<Arc<T>> {
+    let key = (kind, cas_dir.to_path_buf());
+    if let Some(store) = JOB_THREAD_STORES.with(|stores| {
+        stores
+            .borrow()
+            .get(&key)
+            .and_then(|store| store.downcast_ref::<Arc<T>>())
+            .cloned()
+    }) {
+        return Ok(store);
+    }
+    let store = open(cas_dir)?;
+    JOB_THREAD_STORES.with(|stores| {
+        stores
+            .borrow_mut()
+            .insert(key, Box::new(Arc::clone(&store)) as Box<dyn std::any::Any>)
+    });
+    Ok(store)
+}
+
+/// Drop this thread's handles for `cas_dir`, so the next job reopens them.
+pub(crate) fn forget_job_thread_stores(cas_dir: &Path) {
+    JOB_THREAD_STORES.with(|stores| stores.borrow_mut().retain(|(_, dir), _| dir != cas_dir));
+}
+
+pub(crate) fn job_thread_prompt_queue(
+    cas_dir: &Path,
+) -> anyhow::Result<Arc<dyn cas_store::PromptQueueStore>> {
+    job_thread_store("prompt_queue", cas_dir, |dir| {
+        Ok(crate::store::open_prompt_queue_store(dir)?)
+    })
+}
+
 /// Run one stamp, retrying a busy store a few times on the writer. Returns
 /// the last error when every attempt failed.
 fn apply_stamp_with_retry(cas_dir: &Path, row: i64, recipient: &str, stamp: &QueueStamp) -> Option<String> {
     let mut pause = Duration::from_millis(100);
     let mut last = None;
     for attempt in 1..=4 {
-        let result = crate::store::open_prompt_queue_store(cas_dir)
+        let result = job_thread_prompt_queue(cas_dir)
             .map_err(|error| error.to_string())
             .and_then(|queue| stamp.apply(queue.as_ref(), row, recipient).map_err(|error| error.to_string()));
+        if result.is_err() {
+            // A broken handle is reopened on the next attempt.
+            forget_job_thread_stores(cas_dir);
+        }
         match result {
             Ok(()) => return None,
             Err(error) => {
@@ -1086,38 +1209,50 @@ pub(crate) fn prune_inbox_from_fresh(
     fresh: &DirectorData,
     repo_root: &Path,
 ) -> PruneReport {
-    let keys = pruner.unread_retraction_keys(recipient);
-    let stale = RetractionKeys {
-        workers: keys
-            .workers
-            .into_iter()
-            .filter(|worker| crate::ui::factory::director::worker_now_has_real_assignment(fresh, worker))
-            .collect(),
-        tasks: keys
-            .tasks
-            .into_iter()
-            .filter(|task| {
-                matches!(
-                    crate::ui::factory::director::check_merge_alert_freshness_for_task(task, fresh, repo_root),
-                    crate::ui::factory::director::MergeAlertFreshness::Stale
-                )
-            })
-            .collect(),
-        epics: keys
-            .epics
-            .into_iter()
-            .filter(|epic| !crate::ui::factory::director::epic_completion_is_current(fresh, epic))
-            .collect(),
+    use crate::ui::factory::director::{
+        MergeAlertFreshness, check_merge_alert_freshness_for_task, epic_completion_is_current,
+        worker_now_has_real_assignment,
     };
+    // Judge each unread tagged row from the fresh read, outside the lock.
+    // Each verdict is computed once per tag.
+    let mut workers: HashMap<String, bool> = HashMap::new();
+    let mut tasks: HashMap<String, bool> = HashMap::new();
+    let mut epics: HashMap<String, bool> = HashMap::new();
+    let stale: HashSet<AlertIdentity> = pruner
+        .unread_alerts(recipient)
+        .into_iter()
+        .filter(|alert| {
+            let worker_stale = alert.retract_worker.as_ref().is_some_and(|worker| {
+                *workers
+                    .entry(worker.clone())
+                    .or_insert_with(|| worker_now_has_real_assignment(fresh, worker))
+            });
+            let task_stale = alert.retract_task.as_ref().is_some_and(|task| {
+                *tasks.entry(task.clone()).or_insert_with(|| {
+                    matches!(
+                        check_merge_alert_freshness_for_task(task, fresh, repo_root),
+                        MergeAlertFreshness::Stale
+                    )
+                })
+            });
+            let epic_stale = alert.retract_epic.as_ref().is_some_and(|epic| {
+                *epics
+                    .entry(epic.clone())
+                    .or_insert_with(|| !epic_completion_is_current(fresh, epic))
+            });
+            worker_stale || task_stale || epic_stale
+        })
+        .map(|alert| alert.identity)
+        .collect();
     let mut report = PruneReport {
         recipient: recipient.to_string(),
         ..PruneReport::default()
     };
-    match pruner.retract(recipient, &stale) {
-        Ok((idle, merge, epic)) => {
-            report.idle = idle;
-            report.merge = merge;
-            report.epic = epic;
+    match pruner.retract_exact(recipient, &stale) {
+        Ok(retracted) => {
+            report.idle = retracted.idle;
+            report.merge = retracted.merge;
+            report.epic = retracted.epic;
         }
         Err(error) => report.error = Some(error.to_string()),
     }

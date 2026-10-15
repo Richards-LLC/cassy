@@ -189,16 +189,47 @@ impl Drop for InboxFileLock<'_> {
     }
 }
 
-/// The retraction tags on the unread rows of one inbox, read without the
-/// inbox lock (factory loop v2, cas-d2a2). A retraction decides from these
-/// before it takes the lock, so a slow freshness check (git) never runs while
-/// the lock is held. The prune itself re-reads the file under the lock and
-/// removes only rows whose tag was judged stale.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct RetractionKeys {
-    pub(crate) workers: std::collections::BTreeSet<String>,
-    pub(crate) tasks: std::collections::BTreeSet<String>,
-    pub(crate) epics: std::collections::BTreeSet<String>,
+/// Which unread inbox row a retraction judged (review round 1, M6): the
+/// row's timestamp, sender and a hash of its text. A row written after the
+/// decision has a different identity, so it is never removed by it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AlertIdentity {
+    timestamp: String,
+    from: String,
+    text_hash: u64,
+}
+
+impl AlertIdentity {
+    fn of(message: &InboxMessage) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        message.text.hash(&mut hasher);
+        Self {
+            timestamp: message.timestamp.clone(),
+            from: message.from.clone(),
+            text_hash: hasher.finish(),
+        }
+    }
+}
+
+/// One unread row that carries a retraction tag, read without the inbox lock
+/// (factory loop v2, cas-d2a2). A retraction decides from these before it
+/// takes the lock, so a slow freshness check (git) never runs while the lock
+/// is held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnreadAlert {
+    pub(crate) identity: AlertIdentity,
+    pub(crate) retract_worker: Option<String>,
+    pub(crate) retract_task: Option<String>,
+    pub(crate) retract_epic: Option<String>,
+}
+
+/// Rows removed by one retraction, per alert kind.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Retracted {
+    pub(crate) idle: usize,
+    pub(crate) merge: usize,
+    pub(crate) epic: usize,
 }
 
 /// Prunes one session's Teams inboxes from a job lane. Cheap to clone and
@@ -214,77 +245,89 @@ impl InboxPruner {
         Self { inboxes_dir }
     }
 
-    /// Retraction tags of `target`'s unread rows, read without the lock. A
-    /// missing or unreadable inbox has none.
-    pub(crate) fn unread_retraction_keys(&self, target: &str) -> RetractionKeys {
+    /// `target`'s unread rows that carry a retraction tag, read without the
+    /// lock. A missing or unreadable inbox has none.
+    pub(crate) fn unread_alerts(&self, target: &str) -> Vec<UnreadAlert> {
         let path = self.inboxes_dir.join(format!("{target}.json"));
         let messages: Vec<InboxMessage> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_default();
-        let mut keys = RetractionKeys::default();
-        for message in messages.iter().filter(|message| !message.read) {
-            if let Some(worker) = &message.retract_worker {
-                keys.workers.insert(worker.clone());
-            }
-            if let Some(task) = &message.retract_task {
-                keys.tasks.insert(task.clone());
-            }
-            if let Some(epic) = &message.retract_epic {
-                keys.epics.insert(epic.clone());
-            }
-        }
-        keys
+        messages
+            .iter()
+            .filter(|message| {
+                !message.read
+                    && (message.retract_worker.is_some()
+                        || message.retract_task.is_some()
+                        || message.retract_epic.is_some())
+            })
+            .map(|message| UnreadAlert {
+                identity: AlertIdentity::of(message),
+                retract_worker: message.retract_worker.clone(),
+                retract_task: message.retract_task.clone(),
+                retract_epic: message.retract_epic.clone(),
+            })
+            .collect()
     }
 
-    /// Remove `target`'s unread rows whose tag is in `stale`, under the inbox
-    /// lock. Returns the rows removed per alert kind (idle, merge, epic).
-    pub(crate) fn retract(
+    /// Remove exactly the judged rows `stale` names that are still unread,
+    /// under the inbox lock (review round 1, M6). Rows written or read since
+    /// the decision stay.
+    pub(crate) fn retract_exact(
         &self,
         target: &str,
-        stale: &RetractionKeys,
-    ) -> anyhow::Result<(usize, usize, usize)> {
-        let idle = if stale.workers.is_empty() {
-            0
-        } else {
-            prune_stale_rows_in(
-                &self.inboxes_dir,
-                target,
-                |message| message.retract_worker.as_deref(),
-                |worker| stale.workers.contains(worker),
-                "WorkerIdle",
-                "worker gained a real assignment before this row was read",
-            )?
-        };
-        let merge = if stale.tasks.is_empty() {
-            0
-        } else {
-            prune_stale_rows_in(
-                &self.inboxes_dir,
-                target,
-                |message| message.retract_task.as_deref(),
-                |task| stale.tasks.contains(task),
-                "MergeRequired",
-                "merge already landed (or task left AwaitingMerge) before this row was read",
-            )?
-        };
-        let epic = if stale.epics.is_empty() {
-            0
-        } else {
-            prune_stale_rows_in(
-                &self.inboxes_dir,
-                target,
-                |message| message.retract_epic.as_deref(),
-                |epic| stale.epics.contains(epic),
-                "EpicAllSubtasksClosed",
-                "epic closed or a subtask reopened before this row was read",
-            )?
-        };
-        Ok((idle, merge, epic))
+        stale: &std::collections::HashSet<AlertIdentity>,
+    ) -> anyhow::Result<Retracted> {
+        let mut retracted = Retracted::default();
+        if stale.is_empty() {
+            return Ok(retracted);
+        }
+        let inbox_path = self.inboxes_dir.join(format!("{target}.json"));
+        if !inbox_path.exists() {
+            return Ok(retracted);
+        }
+        TeamsManager::with_exclusive_inbox_lock(&inbox_path, || {
+            let mut messages: Vec<InboxMessage> = {
+                let content =
+                    std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
+                serde_json::from_str(&content).unwrap_or_default()
+            };
+            let before = messages.len();
+            messages.retain(|message| {
+                if message.read || !stale.contains(&AlertIdentity::of(message)) {
+                    return true;
+                }
+                let kind = if message.retract_worker.is_some() {
+                    retracted.idle += 1;
+                    "WorkerIdle"
+                } else if message.retract_task.is_some() {
+                    retracted.merge += 1;
+                    "MergeRequired"
+                } else {
+                    retracted.epic += 1;
+                    "EpicAllSubtasksClosed"
+                };
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "retract_stale_alert",
+                    channel = "teams_inbox",
+                    alert_kind = kind,
+                    target_agent = target,
+                    "retracting a queued alert judged stale by a fresh read before it was read"
+                );
+                false
+            });
+            if messages.len() != before {
+                let json = serde_json::to_string_pretty(&messages)?;
+                std::fs::write(&inbox_path, json)?;
+            }
+            Ok(retracted)
+        })
     }
 }
 
 /// The lock/read/retain/write body shared by every stale-row prune.
+#[cfg(test)]
 fn prune_stale_rows_in(
     inboxes_dir: &std::path::Path,
     target: &str,
@@ -1575,6 +1618,17 @@ impl TeamsManager {
             alert_kind,
             log_reason,
         )
+    }
+
+    /// A manager rooted at `teams_dir` (tests).
+    #[cfg(test)]
+    pub(crate) fn rooted_at(teams_dir: PathBuf, name: &str) -> Self {
+        Self {
+            team_name: name.to_string(),
+            inboxes_dir: teams_dir.join("inboxes"),
+            teams_dir,
+            config: std::sync::Mutex::new(None),
+        }
     }
 
     /// A handle that prunes this session's inboxes off the loop (factory loop

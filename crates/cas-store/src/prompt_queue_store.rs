@@ -291,19 +291,6 @@ pub enum PromptRetryDisposition {
     Abandoned { attempts: u32 },
 }
 
-/// A row picked by [`PromptQueueStore::select_and_claim_for_targets`], with the
-/// transport claims that selection took for it (factory loop v2, spec §4.5).
-#[derive(Debug, Clone)]
-pub struct SelectedPrompt {
-    /// The full row, read in the selecting transaction.
-    pub prompt: QueuedPrompt,
-    /// `(recipient, claimed)` per recipient: the addressed target for a direct
-    /// row, each named broadcast recipient for `all_workers`. `claimed` is
-    /// false when another channel or an earlier pass already holds a receipt,
-    /// exactly as [`PromptQueueStore::claim_recipient_transport`] reports.
-    pub claims: Vec<(String, bool)>,
-}
-
 /// A prompt in the queue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedPrompt {
@@ -2308,44 +2295,37 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
-    /// Factory loop v2 `QueueSelect` (spec §4.5 rule 1): select the delivery
-    /// batch exactly as [`Self::peek_for_targets`] does, stamp each row
-    /// `Selected`, and take its transport claims, all in one transaction. A
-    /// direct row is claimed for its target; an `all_workers` row for each of
-    /// `broadcast_recipients`. A row someone else already claimed is still
-    /// returned (the caller's pending-row logic needs it), with `claimed`
-    /// false. The caller must release, through
-    /// [`Self::release_recipient_transport`], every claim it took and did not
-    /// hand off.
-    fn select_and_claim_for_targets(
+    /// Factory loop v2 `QueueSelect` (cas-d2a2): select the delivery batch
+    /// exactly as [`Self::peek_for_targets`] does, stamp each row `Selected`
+    /// and read it in full, in one transaction. Takes no transport claim: the
+    /// daemon claims a row just before its transport handoff
+    /// ([`Self::claim_recipient_transport_token`]), so a selection that is
+    /// never delivered (shutdown, crash) leaves nothing behind.
+    fn select_for_targets(
         &self,
         targets: &[&str],
         factory_session: Option<&str>,
         limit: usize,
-        broadcast_recipients: &[&str],
-    ) -> Result<Vec<SelectedPrompt>> {
-        let mut selected = Vec::new();
-        for peeked in self.peek_for_targets(targets, factory_session, limit)? {
-            self.record_selected(peeked.id)?;
-            let Some(prompt) = self.queued_prompt(peeked.id)? else {
-                continue;
-            };
-            let recipients: Vec<&str> = if prompt.target == "all_workers" {
-                broadcast_recipients.to_vec()
-            } else {
-                vec![prompt.target.as_str()]
-            };
-            let mut claims = Vec::with_capacity(recipients.len());
-            for recipient in recipients {
-                claims.push((
-                    recipient.to_string(),
-                    self.claim_recipient_transport(prompt.id, recipient)?,
-                ));
-            }
-            selected.push(SelectedPrompt { prompt, claims });
-        }
-        Ok(selected)
-    }
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// [`Self::claim_recipient_transport`], returning the claim's token (its
+    /// `seen_at`) when it was taken, for [`Self::release_recipient_transport_claim`].
+    fn claim_recipient_transport_token(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+    ) -> Result<Option<String>>;
+
+    /// Release exactly the transport claim `token` names, if it is still a
+    /// `transport_claimed` receipt. A late release can therefore never drop a
+    /// newer claim, nor a receipt a hook or poll took over. Returns whether a
+    /// claim was released.
+    fn release_recipient_transport_claim(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+        token: &str,
+    ) -> Result<bool>;
 
     /// Most recent message timestamp for each target from any of `sources`.
     ///
@@ -3758,7 +3738,7 @@ fn require_operator_session(target: &str, factory_session: Option<&str>) -> Resu
 
 impl SqlitePromptQueueStore {
     /// [`PromptQueueStore::peek_for_targets`] on a held connection, so
-    /// [`PromptQueueStore::select_and_claim_for_targets`] can select inside
+    /// [`PromptQueueStore::select_for_targets`] can select inside
     /// its own transaction.
     fn peek_for_targets_on_conn(
         conn: &Connection,
@@ -3931,10 +3911,11 @@ impl SqlitePromptQueueStore {
         conn: &Connection,
         prompt_id: i64,
         recipient: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other("transport claim requires a recipient".into()));
         }
+        let token = Utc::now().to_rfc3339();
         let changed = conn.execute(
             "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
              SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
@@ -3946,9 +3927,9 @@ impl SqlitePromptQueueStore {
              ON CONFLICT(prompt_id, recipient) DO UPDATE SET
                 seen_at = excluded.seen_at, source = excluded.source
              WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
-            params![recipient, Utc::now().to_rfc3339(), prompt_id, recipient],
+            params![recipient, token, prompt_id, recipient],
         )?;
-        Ok(changed == 1)
+        Ok((changed == 1).then_some(token))
     }
 }
 
@@ -5357,7 +5338,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            Self::claim_recipient_transport_on_conn(&conn, prompt_id, recipient)
+            Ok(Self::claim_recipient_transport_on_conn(&conn, prompt_id, recipient)?.is_some())
         })
     }
 
@@ -5613,13 +5594,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Self::peek_for_targets_on_conn(&conn, targets, factory_session, limit)
     }
 
-    fn select_and_claim_for_targets(
+    fn select_for_targets(
         &self,
         targets: &[&str],
         factory_session: Option<&str>,
         limit: usize,
-        broadcast_recipients: &[&str],
-    ) -> Result<Vec<SelectedPrompt>> {
+    ) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
@@ -5632,25 +5612,41 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     DeliveryStage::Selected,
                     AtomicStampOpts::clear_reason(),
                 )?;
-                let Some(prompt) = Self::queued_prompt_on_conn(&tx, row.id)? else {
-                    continue;
-                };
-                let recipients: Vec<&str> = if prompt.target == "all_workers" {
-                    broadcast_recipients.to_vec()
-                } else {
-                    vec![prompt.target.as_str()]
-                };
-                let mut claims = Vec::with_capacity(recipients.len());
-                for recipient in recipients {
-                    claims.push((
-                        recipient.to_string(),
-                        Self::claim_recipient_transport_on_conn(&tx, prompt.id, recipient)?,
-                    ));
+                if let Some(prompt) = Self::queued_prompt_on_conn(&tx, row.id)? {
+                    selected.push(prompt);
                 }
-                selected.push(SelectedPrompt { prompt, claims });
             }
             tx.commit()?;
             Ok(selected)
+        })
+    }
+
+    fn claim_recipient_transport_token(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+    ) -> Result<Option<String>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            Self::claim_recipient_transport_on_conn(&conn, prompt_id, recipient)
+        })
+    }
+
+    fn release_recipient_transport_claim(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+        token: &str,
+    ) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let changed = conn.execute(
+                "DELETE FROM prompt_queue_recipient_seen
+                 WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'
+                   AND seen_at = ?",
+                params![prompt_id, recipient, token],
+            )?;
+            Ok(changed == 1)
         })
     }
 
@@ -11131,6 +11127,57 @@ mod tests {
             1,
             "the message must still be deliverable after being counted"
         );
+    }
+
+    /// cas-d2a2: QueueSelect selects and stamps without claiming, so a
+    /// selection that is never delivered leaves the row claimable.
+    #[test]
+    fn select_for_targets_stamps_selected_and_takes_no_claim() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "row", "session-a")
+            .unwrap();
+        let selected = store
+            .select_for_targets(&["worker"], Some("session-a"), 10)
+            .unwrap();
+        assert_eq!(selected.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        let conn = store.conn.lock().unwrap();
+        let selected_at: Option<String> = conn
+            .query_row("SELECT selected_at FROM prompt_queue WHERE id = ?", [id], |r| r.get(0))
+            .unwrap();
+        let receipts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue_recipient_seen WHERE prompt_id = ?",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert!(selected_at.is_some());
+        assert_eq!(receipts, 0, "selection must not hide the row from hooks or a later pass");
+        assert!(store.claim_recipient_transport(id, "worker").unwrap());
+    }
+
+    /// cas-d2a2 (review L10): a release names the claim it releases. A late
+    /// release carrying an older token never drops the newer claim.
+    #[test]
+    fn a_token_release_drops_only_its_own_claim() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "row", "session-a")
+            .unwrap();
+        let first = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
+        assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
+        assert!(store.release_recipient_transport_claim(id, "worker", &first).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
+        assert_ne!(first, second);
+        assert!(
+            !store.release_recipient_transport_claim(id, "worker", &first).unwrap(),
+            "a stale token must not release the newer claim"
+        );
+        assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
+        assert!(store.release_recipient_transport_claim(id, "worker", &second).unwrap());
     }
 
     #[test]

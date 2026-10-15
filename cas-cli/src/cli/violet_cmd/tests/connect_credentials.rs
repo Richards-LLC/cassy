@@ -257,3 +257,76 @@ fn cas_0a4c_worker_policy_blocks_selectors_native_refs_headers_and_servers() {
         "not_configured"
     );
 }
+
+#[test]
+fn cas_0a4c_review_denied_bearer_cannot_use_legacy_spelling() {
+    let mut env = fixture();
+    env.set("CAS_AGENT_ROLE", "worker");
+    let legacy = cas_types::violet_compatibility::violet_compatibility();
+    let old = format!("{}_SUPERVISOR", legacy.legacy_token_prefix);
+    let canonical = "VIOLET_SLACK_TOKEN_SUPERVISOR";
+    let root = env.home().join(".cas");
+    for denied in [canonical, old.as_str()] {
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nsupervisor_only_env=[{denied:?}]\n"),
+        )
+        .unwrap();
+        for selected in [old.as_str(), canonical] {
+            env.set("VIOLET_SLACK_TOKEN_ENV", selected);
+            for inherited in [false, true] {
+                private(env.home(), &format!("{old}='denied-fixture'\n"));
+                if inherited {
+                    env.set(&old, "denied-fixture");
+                } else {
+                    env.remove(&old);
+                }
+                let error = connect_config(Some(&root)).unwrap_err();
+                assert_eq!(error.code, "missing_credential");
+                assert!(!error.message.contains("denied-fixture"));
+            }
+        }
+    }
+}
+
+#[test]
+fn cas_0a4c_review_selector_rejects_unrelated_secrets_and_bypass() {
+    let mut env = fixture();
+    let legacy = cas_types::violet_compatibility::violet_compatibility();
+    for selected in [
+        "UNRELATED_SECRET",
+        "VIOLET_VERCEL_BYPASS",
+        legacy.legacy_bypass_env.as_str(),
+        "VIOLET_SLACK_TOKEN_ENV",
+    ] {
+        private(env.home(), &format!("{selected}='unrelated-fixture'\n"));
+        env.set("VIOLET_SLACK_TOKEN_ENV", selected);
+        let error = connect_config(None).unwrap_err();
+        assert_eq!(error.code, "missing_credential");
+        assert!(!error.message.contains("unrelated-fixture"));
+    }
+}
+
+#[test]
+fn cas_0a4c_review_legacy_selector_has_parity_and_modern_precedence() {
+    let mut env = fixture();
+    let legacy = cas_types::violet_compatibility::violet_compatibility();
+    private(
+        env.home(),
+        "VIOLET_SLACK_TOKEN_A='a-fixture'\nVIOLET_SLACK_TOKEN_B='b-fixture'\nVIOLET_SLACK_TOKEN_CASSY_PROXY='default-fixture'\n",
+    );
+    env.set(
+        &legacy.legacy_token_selector_env,
+        format!("{}_A", legacy.legacy_token_prefix),
+    );
+    assert_eq!(bearer(None), "a-fixture");
+    env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_B");
+    assert_eq!(bearer(None), "b-fixture");
+    env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_MISSING");
+    assert!(
+        connect_config(None)
+            .unwrap_err()
+            .message
+            .contains("VIOLET_SLACK_TOKEN_MISSING")
+    );
+}

@@ -490,6 +490,35 @@ def run_violet_credential_proof() -> None:
     print("Violet credentials: legacy fallback, primary precedence, empty fallback, explicit selector, registration precedence passed")
 
 
+def run_selector_safety_proof() -> None:
+    """No explicit selector may turn an unrelated secret into a Violet bearer."""
+    from unittest.mock import patch
+
+    module = adapter_module()
+    refusals = 0
+    with tempfile.TemporaryDirectory(prefix="violet-selector-safety-") as directory:
+        with patch.dict(os.environ, {"HOME": directory, "CLAUDE_CONFIG_DIR": directory}, clear=True):
+            for selected in ("UNRELATED_SECRET", "VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV, "VIOLET_SLACK_TOKEN_ENV"):
+                for inherited in (False, True):
+                    credentials = {selected: "unrelated-fixture"}
+                    os.environ["VIOLET_SLACK_TOKEN_ENV"] = selected
+                    if inherited and selected != "VIOLET_SLACK_TOKEN_ENV":
+                        os.environ[selected] = "unrelated-fixture"
+                    expect_adapter_error(module, lambda: module.resolve_token(credentials), "must name a Violet Slack token")
+                    if selected != "VIOLET_SLACK_TOKEN_ENV":
+                        os.environ.pop(selected, None)
+                    refusals += 1
+            credentials = {"VIOLET_SLACK_TOKEN_A": "a-fixture", "VIOLET_SLACK_TOKEN_B": "b-fixture"}
+            os.environ.pop("VIOLET_SLACK_TOKEN_ENV")
+            os.environ[module.LEGACY_TOKEN_SELECTOR_ENV] = module.LEGACY_TOKEN_PREFIX + "_A"
+            assert module.resolve_token(credentials) == "a-fixture"
+            os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_B"
+            assert module.resolve_token(credentials) == "b-fixture"
+            os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_MISSING"
+            expect_adapter_error(module, lambda: module.resolve_token(credentials), "unset or empty")
+    print(f"Violet selector safety: {refusals} refusals + 3 legacy/modern authority controls passed")
+
+
 def run_adapter(
     server: ThreadingHTTPServer,
     state: StubState,
@@ -552,6 +581,7 @@ def main() -> int:
     pdf = PDF.read_bytes()
     run_token_selection_proof()
     run_violet_credential_proof()
+    run_selector_safety_proof()
     run_download_policy_proof()
     state = StubState(pdf)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(state))

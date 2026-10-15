@@ -3710,19 +3710,22 @@ mod related_recall_response_tests {
         );
     }
 
-    /// GH #1216: an explicit target outside epic/ stays the epic's base
-    /// (cas-3afc), and the receipt says where deliveries land instead.
+    /// GH #1216: an explicit target outside epic/ (here a staging branch)
+    /// stays the epic's base (cas-3afc), and the receipt says plainly where
+    /// deliveries land instead.
     #[tokio::test]
     async fn epic_create_names_the_lane_when_an_explicit_target_is_its_base_gh_1216() {
         let _env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("initialize isolated host registry");
         let (_temp, repo) = epic_lane_repo();
+        epic_lane_git(&repo, &["branch", "staging"]);
+        epic_lane_git(&repo, &["push", "-q", "origin", "staging"]);
         let core = CasCore::with_daemon(epic_lane_cas_root(&repo), None, None);
         let created = core
             .cas_task_create_with_target(
-                epic_request("Main based epic", "cut a lane from main"),
+                epic_request("Staging based epic", "cut a lane from staging"),
                 Some(repo.to_str().expect("repo utf8")),
-                Some("main"),
+                Some("staging"),
                 false,
             )
             .await
@@ -3734,13 +3737,15 @@ mod related_recall_response_tests {
             .list(None)
             .expect("list tasks")
             .into_iter()
-            .find(|task| task.title == "Main based epic")
+            .find(|task| task.title == "Staging based epic")
             .expect("created epic");
         let lane = epic.branch.expect("an auto lane is still cut from a base target");
-        assert!(lane.starts_with("epic/main-based-epic-"), "{lane}");
+        assert!(lane.starts_with("epic/staging-based-epic-"), "{lane}");
         assert!(receipt.contains("Epic branch created"), "{receipt}");
         assert!(
-            receipt.contains(&format!("Deliveries land on {lane}; 'main' is its base")),
+            receipt.contains(&format!(
+                "Deliveries land on {lane}; 'staging' is its base and the epic's PR target"
+            )),
             "{receipt}"
         );
 

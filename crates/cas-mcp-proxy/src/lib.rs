@@ -3599,6 +3599,46 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn missing_optional_credentials_are_logged_once_below_error_while_real_failures_stay_errors() {
+        let config = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some("env:VIKTOR_API_KEY".to_string()),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let missing_code = classify_error(&anyhow::Error::new(MissingCredentialError {
+            name: "VIKTOR_API_KEY".to_string(),
+        }));
+        assert_eq!(missing_code, "missing_credential_env:VIKTOR_API_KEY");
+
+        let mut missing_health = initial_health("viktor", &config);
+        assert_eq!(
+            format!("{:?}", record_failure(&mut missing_health, &missing_code, 1_000)),
+            "Info",
+            "an optional upstream missing its credential is expected to log once at info"
+        );
+        assert_eq!(
+            format!("{:?}", record_failure(&mut missing_health, &missing_code, 6_000)),
+            "Debug",
+            "retries for an unchanged missing credential must not return to error"
+        );
+
+        let mut configured_failure_health = initial_health("viktor", &config);
+        assert_eq!(
+            format!(
+                "{:?}",
+                record_failure(
+                    &mut configured_failure_health,
+                    "authentication_required",
+                    1_000
+                )
+            ),
+            "Error",
+            "a configured upstream that rejects its credentials remains an error"
+        );
+    }
+
+    #[test]
     fn upstream_failures_are_classified_without_exposing_content() {
         assert_eq!(
             classify_error(&anyhow::anyhow!("AuthRequired: bearer token omitted")),

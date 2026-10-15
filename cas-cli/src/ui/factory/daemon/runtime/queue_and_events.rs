@@ -9891,7 +9891,7 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
+        LIFECYCLE_MAX_RENUDGE_ATTEMPTS, WORKER_DEATH_TAIL_MAX_CHARS, append_spawn_audit, append_spawn_audit_line,
         boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
         describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
         enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,

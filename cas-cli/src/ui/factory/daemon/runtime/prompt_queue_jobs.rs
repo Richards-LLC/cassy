@@ -604,10 +604,8 @@ impl QueueJobs {
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
-        let submitted = Exec::Inline(VecDeque::new()).submit(spec.clone(), || QueueJobOutcome::Pruned(PruneReport::default()));
-        let _ = submitted;
-        let selection = select(&request, generation);
         let submitted = self.exec.submit(spec, move || {
+            let selection = select(&request, generation);
             ready.store(true, Ordering::Release);
             QueueJobOutcome::Selected(selection)
         });
@@ -674,7 +672,9 @@ impl QueueJobs {
         now: Instant,
         claim: impl FnOnce() -> anyhow::Result<bool>,
     ) -> anyhow::Result<Admission> {
-        // RED STUB
+        if self.in_flight.holds_row(row) {
+            return Ok(Admission::InFlight);
+        }
         let claimed = match self.use_claim(row, recipient) {
             Some(claimed) => claimed,
             None => claim()?,
@@ -788,8 +788,7 @@ impl QueueJobs {
             budget: REVALIDATE_FRESH_BUDGET,
         };
         let submitted = self.exec.submit_read(spec, move |stores| {
-            let _ = (fresh, stores);
-            let data: anyhow::Result<DirectorData> = Err(anyhow::anyhow!("RED STUB: no fresh read"));
+            let data = fresh(stores);
             QueueJobOutcome::Revalidated {
                 recipient: owned,
                 data,

@@ -2115,7 +2115,8 @@ impl CasService {
         let provisioner_build = if ctx.factory_session.is_some() {
             #[cfg(test)]
             {
-                option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string()
+                crate::ui::factory::installed_provisioner_build_hash()
+                    .expect("test provisioner build ID")
             }
             #[cfg(not(test))]
             {

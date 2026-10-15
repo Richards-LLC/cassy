@@ -91,7 +91,7 @@ fn cas_559c_details_enforce_repo_machine_session_liveness_and_active_leases() {
             .iter()
             .map(|c| c.task_id.as_str())
             .collect::<Vec<_>>(),
-        ["cas-held", "cas-running", "cas-stale"]
+        ["cas-held", "cas-running"]
     );
     assert_eq!(detail.workers[0].claims[0].task_id, "cas-running");
     assert_eq!(detail.workers[0].branch.as_deref(), Some("factory/worker"));

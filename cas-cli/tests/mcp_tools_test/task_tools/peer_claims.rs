@@ -39,6 +39,7 @@ struct FakeState {
     /// Registered agents: id -> (name, hostname, last heartbeat).
     agents: HashMap<String, (String, String, DateTime<Utc>)>,
     requests: Vec<String>,
+    statuses: HashMap<String, String>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -78,13 +79,20 @@ impl FakeCloud {
             for mut request in thread_server.incoming_requests() {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
-                let (status, json) =
-                    Self::handle(&thread_state, request.method().as_str(), request.url(), &body);
+                let (status, json) = Self::handle(
+                    &thread_state,
+                    request.method().as_str(),
+                    request.url(),
+                    &body,
+                );
                 let response = tiny_http::Response::from_string(json.to_string())
                     .with_status_code(status)
                     .with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                            .unwrap(),
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
                     );
                 let _ = request.respond(response);
             }
@@ -107,12 +115,15 @@ impl FakeCloud {
                 .iter()
                 .map(|(id, (name, host, seen))| {
                     serde_json::json!({"id": id, "name": name, "agent_type": "primary",
-                        "status": "active", "pid": null, "session_id": null, "machine_id": host,
+                        "status": state.statuses.get(id).map(String::as_str).unwrap_or("active"), "pid": null, "session_id": null, "machine_id": host,
                         "last_heartbeat": seen.to_rfc3339(), "active_tasks": 0,
                         "metadata": {"hostname": host, "canonical_id": PROJECT}})
                 })
                 .collect();
-            return (200, serde_json::json!({"status": "success", "agents": agents}));
+            return (
+                200,
+                serde_json::json!({"status": "success", "agents": agents}),
+            );
         }
         let Some(rest) = url.strip_prefix("/api/agents/tasks/") else {
             // Registration, heartbeats, sync: accepted and ignored.
@@ -122,7 +133,11 @@ impl FakeCloud {
         let key = key.to_string();
         let agent_id = body["agent_id"].as_str().unwrap_or_default().to_string();
         let now = Utc::now();
-        let active = state.locks.get(&key).filter(|lock| lock.status == "active").cloned();
+        let active = state
+            .locks
+            .get(&key)
+            .filter(|lock| lock.status == "active")
+            .cloned();
         match (method, action) {
             ("POST", "claim") => match active {
                 // The production contract (petra-stella-cloud #150, PR #153, as
@@ -157,8 +172,11 @@ impl FakeCloud {
                     };
                     let json = lock_json(&key, &lock);
                     state.locks.insert(key, lock);
-                    (200, serde_json::json!({"status": "success", "result": "claimed",
-                        "lock": json, "error": null, "owner_agent_id": null}))
+                    (
+                        200,
+                        serde_json::json!({"status": "success", "result": "claimed",
+                        "lock": json, "error": null, "owner_agent_id": null}),
+                    )
                 }
             },
             ("POST", "release") => {
@@ -202,14 +220,13 @@ impl FakeCloud {
 
     /// The daemon registered `machine`'s agent and it heartbeats now.
     fn live(&self, machine: &Machine, name: &str) {
-        self.state
-            .lock()
-            .unwrap()
-            .agents
-            .insert(machine.agent_id.clone(), (name.to_string(), hostname(), Utc::now()));
+        self.state.lock().unwrap().agents.insert(
+            machine.agent_id.clone(),
+            (name.to_string(), hostname(), Utc::now()),
+        );
     }
 
-        /// How many requests so far read a lock directly.
+    /// How many requests so far read a lock directly.
     fn lock_reads(&self) -> usize {
         self.state
             .lock()
@@ -297,11 +314,20 @@ fn machine(endpoint: &str, project: &str, name: &str) -> Machine {
     .unwrap();
     let agent_id = format!("{name}-session-{}", std::process::id());
     agents
-        .register(&Agent::new_with_role(agent_id.clone(), name.to_string(), AgentRole::Standard))
+        .register(&Agent::new_with_role(
+            agent_id.clone(),
+            name.to_string(),
+            AgentRole::Standard,
+        ))
         .unwrap();
     let core = CasCore::with_daemon(cas_dir.clone(), None, None);
     core.set_agent_id_for_testing(agent_id.clone());
-    Machine { _temp: temp, cas_dir, core, agent_id }
+    Machine {
+        _temp: temp,
+        cas_dir,
+        core,
+        agent_id,
+    }
 }
 
 impl Machine {
@@ -329,7 +355,11 @@ impl Machine {
         let id = format!("{name}-session-{}", std::process::id());
         open_agent_store(&self.cas_dir)
             .unwrap()
-            .register(&Agent::new_with_role(id.clone(), name.to_string(), AgentRole::Standard))
+            .register(&Agent::new_with_role(
+                id.clone(),
+                name.to_string(),
+                AgentRole::Standard,
+            ))
             .unwrap();
         let core = CasCore::with_daemon(self.cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(id);
@@ -350,7 +380,10 @@ async fn start(core: &CasCore, id: &str, force: bool) -> Result<String, String> 
 
 async fn release(core: &CasCore, id: &str) -> String {
     match core
-        .cas_task_release(Parameters(TaskReleaseRequest { task_id: id.to_string(), force: None }))
+        .cas_task_release(Parameters(TaskReleaseRequest {
+            task_id: id.to_string(),
+            force: None,
+        }))
         .await
     {
         Ok(result) => extract_text(result),
@@ -376,32 +409,67 @@ async fn peer_start_is_refused_with_the_holders_identity_until_it_releases() {
     }
 
     cloud.live(&alpha, "alpha-sup");
-    let started = start(&alpha.core, "cas-p001", false).await.expect("alpha starts");
-    let (key, lock) = cloud.active_lock("cas-p001").expect("alpha's start claims in the cloud");
+    let started = start(&alpha.core, "cas-p001", false)
+        .await
+        .expect("alpha starts");
+    let (key, lock) = cloud
+        .active_lock("cas-p001")
+        .expect("alpha's start claims in the cloud");
     assert_eq!(lock.agent_id, alpha.agent_id, "{started}");
     assert_ne!(key, "cas-p001", "the claim key carries the project scope");
 
     let reads_before = cloud.lock_reads();
-    let refused = start(&bravo.core, "cas-p001", false).await.expect_err("bravo is refused");
+    let refused = start(&bravo.core, "cas-p001", false)
+        .await
+        .expect_err("bravo is refused");
     // cas-0078: the 409 names the holder and its expiry, and the agent list
     // names its machine, so a refusal needs no second read of the lock.
     assert_eq!(cloud.lock_reads(), reads_before, "{refused}");
-    assert!(refused.contains(&lock.expires_at.format("%H:%M UTC").to_string()), "{refused}");
+    assert!(
+        refused.contains(&lock.expires_at.format("%H:%M UTC").to_string()),
+        "{refused}"
+    );
     assert!(refused.contains("alpha-sup"), "{refused}");
     assert!(refused.contains(&hostname()), "{refused}");
-    assert!(refused.contains("message"), "names how to reach the holder: {refused}");
-    assert!(refused.contains("force=true"), "names the override: {refused}");
-    let task = open_task_store(&bravo.cas_dir).unwrap().get("cas-p001").unwrap();
-    assert_eq!(task.status, TaskStatus::Open, "a refused start changes nothing: {refused}");
     assert!(
-        open_agent_store(&bravo.cas_dir).unwrap().get_lease("cas-p001").unwrap().is_none(),
+        refused.contains("message"),
+        "names how to reach the holder: {refused}"
+    );
+    assert!(
+        refused.contains("force=true"),
+        "names the override: {refused}"
+    );
+    let task = open_task_store(&bravo.cas_dir)
+        .unwrap()
+        .get("cas-p001")
+        .unwrap();
+    assert_eq!(
+        task.status,
+        TaskStatus::Open,
+        "a refused start changes nothing: {refused}"
+    );
+    assert!(
+        open_agent_store(&bravo.cas_dir)
+            .unwrap()
+            .get_lease("cas-p001")
+            .unwrap()
+            .is_none(),
         "no local lease either"
     );
 
     let released = release(&alpha.core, "cas-p001").await;
-    assert!(cloud.active_lock("cas-p001").is_none(), "release frees the cloud claim: {released}");
-    let taken = start(&bravo.core, "cas-p001", false).await.expect("bravo starts after release");
-    assert_eq!(cloud.active_lock("cas-p001").unwrap().1.agent_id, bravo.agent_id, "{taken}");
+    assert!(
+        cloud.active_lock("cas-p001").is_none(),
+        "release frees the cloud claim: {released}"
+    );
+    let taken = start(&bravo.core, "cas-p001", false)
+        .await
+        .expect("bravo starts after release");
+    assert_eq!(
+        cloud.active_lock("cas-p001").unwrap().1.agent_id,
+        bravo.agent_id,
+        "{taken}"
+    );
 }
 
 /// The operator may override a live peer claim; the start says so.
@@ -417,10 +485,15 @@ async fn force_overrides_a_peer_claim_with_a_visible_note() {
     }
     cloud.live(&alpha, "alpha-sup");
     start(&alpha.core, "cas-p002", false).await.unwrap();
-    let forced = start(&bravo.core, "cas-p002", true).await.expect("force starts");
+    let forced = start(&bravo.core, "cas-p002", true)
+        .await
+        .expect("force starts");
     assert!(forced.contains("alpha-sup"), "{forced}");
     assert!(forced.to_lowercase().contains("override"), "{forced}");
-    let task = open_task_store(&bravo.cas_dir).unwrap().get("cas-p002").unwrap();
+    let task = open_task_store(&bravo.cas_dir)
+        .unwrap()
+        .get("cas-p002")
+        .unwrap();
     assert_eq!(task.status, TaskStatus::InProgress);
 }
 
@@ -457,7 +530,10 @@ async fn close_releases_and_other_repositories_never_collide() {
         .await
         .map(extract_text)
         .unwrap_or_else(|error| error.message.to_string());
-    let task = open_task_store(&alpha.cas_dir).unwrap().get("cas-p003").unwrap();
+    let task = open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .get("cas-p003")
+        .unwrap();
     assert_eq!(task.status, TaskStatus::Closed, "{closed}");
     start(&bravo.core, "cas-p003", false)
         .await
@@ -491,7 +567,11 @@ async fn claims_renew_while_working_and_an_expired_claim_is_taken_over() {
         .await
         .expect("an expired claim does not block");
     assert!(!taken.contains("HELD BY A PEER"), "{taken}");
-    assert_eq!(cloud.active_lock("cas-p004").unwrap().1.agent_id, bravo.agent_id, "{taken}");
+    assert_eq!(
+        cloud.active_lock("cas-p004").unwrap().1.agent_id,
+        bravo.agent_id,
+        "{taken}"
+    );
 }
 
 /// Two supervisors working children of one epic are told about each other.
@@ -509,7 +589,10 @@ async fn epic_focus_overlap_warns_without_refusing() {
     }
     cloud.live(&alpha, "alpha-sup");
     start(&alpha.core, "cas-p005", false).await.unwrap();
-    assert!(cloud.active_lock("cas-pe01").is_some(), "the epic focus is claimed too");
+    assert!(
+        cloud.active_lock("cas-pe01").is_some(),
+        "the epic focus is claimed too"
+    );
     let shared = start(&bravo.core, "cas-p006", false)
         .await
         .expect("a sibling task is not refused");
@@ -528,11 +611,17 @@ async fn an_unreachable_cloud_falls_back_to_the_local_lease_with_a_warning() {
     drop(closed_port);
     let alpha = machine(&endpoint, PROJECT, "alpha-sup");
     alpha.put_task("cas-p007", TaskType::Task);
-    let started = start(&alpha.core, "cas-p007", false).await.expect("local lease still works");
+    let started = start(&alpha.core, "cas-p007", false)
+        .await
+        .expect("local lease still works");
     assert!(started.to_lowercase().contains("peer"), "{started}");
     assert!(started.to_lowercase().contains("unreachable"), "{started}");
     assert!(
-        open_agent_store(&alpha.cas_dir).unwrap().get_lease("cas-p007").unwrap().is_some(),
+        open_agent_store(&alpha.cas_dir)
+            .unwrap()
+            .get_lease("cas-p007")
+            .unwrap()
+            .is_some(),
         "{started}"
     );
 }
@@ -548,14 +637,25 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
     alpha.put_task("cas-p008", TaskType::Task);
     start(&alpha.core, "cas-p008", false).await.unwrap();
     // The local lease is dropped without touching the cloud (a crashed path).
-    open_agent_store(&alpha.cas_dir).unwrap().release_lease("cas-p008", &alpha.agent_id).unwrap();
-    let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-p008").unwrap();
+    open_agent_store(&alpha.cas_dir)
+        .unwrap()
+        .release_lease("cas-p008", &alpha.agent_id)
+        .unwrap();
+    let mut task = open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .get("cas-p008")
+        .unwrap();
     task.status = TaskStatus::Open;
     task.assignee = None;
-    open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
+    open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .update(&task)
+        .unwrap();
 
     let worker = alpha.second_agent("delta-worker");
-    let taken = start(&worker, "cas-p008", false).await.expect("a local holder is not a peer");
+    let taken = start(&worker, "cas-p008", false)
+        .await
+        .expect("a local holder is not a peer");
     let (_, lock) = cloud.active_lock("cas-p008").unwrap();
     assert_ne!(lock.agent_id, alpha.agent_id, "{taken}");
 }
@@ -572,9 +672,14 @@ async fn in_progress_elsewhere_names_the_remote_assignee() {
     task.status = TaskStatus::InProgress;
     task.assignee = Some("echo-sup".into());
     open_task_store(&bravo.cas_dir).unwrap().add(&task).unwrap();
-    let started = start(&bravo.core, "cas-p009", true).await.unwrap_or_else(|e| e);
+    let started = start(&bravo.core, "cas-p009", true)
+        .await
+        .unwrap_or_else(|e| e);
     assert!(started.contains("echo-sup"), "{started}");
-    assert!(started.to_lowercase().contains("another machine"), "{started}");
+    assert!(
+        started.to_lowercase().contains("another machine"),
+        "{started}"
+    );
 }
 
 /// Until the cloud expires claims itself (petra-stella-cloud#150), a claim
@@ -622,7 +727,10 @@ async fn an_unregistered_holder_with_a_fresh_renewal_still_refuses() {
         .expect_err("a claim renewed within the live window is a live claim");
     assert!(refused.contains("HELD BY A PEER"), "{refused}");
     assert!(refused.contains("alpha-sup"), "{refused}");
-    assert_eq!(cloud.active_lock("cas-pe11").unwrap().1.agent_id, alpha.agent_id);
+    assert_eq!(
+        cloud.active_lock("cas-pe11").unwrap().1.agent_id,
+        alpha.agent_id
+    );
 }
 
 async fn claim(core: &CasCore, id: &str) -> Result<String, String> {
@@ -650,29 +758,49 @@ async fn a_refused_local_claim_leaves_the_cloud_claim_with_its_holder() {
         m.put_task("cas-pa01", TaskType::Task);
     }
     cloud.live(&alpha, "alpha-sup");
-    start(&alpha.core, "cas-pa01", false).await.expect("alpha starts");
+    start(&alpha.core, "cas-pa01", false)
+        .await
+        .expect("alpha starts");
     // The task row is unassigned again (e.g. edited), but alpha's lease stands.
-    let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-pa01").unwrap();
+    let mut task = open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .get("cas-pa01")
+        .unwrap();
     task.assignee = None;
     task.status = TaskStatus::Open;
-    open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
+    open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .update(&task)
+        .unwrap();
 
     let delta = alpha.second_agent("delta-sup");
     let refused = start(&delta, "cas-pa01", false)
         .await
         .expect_err("the local lease refuses delta");
     assert!(refused.contains("locked by"), "{refused}");
-    let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused start");
+    let (_, lock) = cloud
+        .active_lock("cas-pa01")
+        .expect("the claim survives a refused start");
     assert_eq!(lock.agent_id, alpha.agent_id, "{refused}");
 
     // The claim path needs the task assigned to the claimant before it asks
     // the cloud; alpha's local lease still stands.
-    let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-pa01").unwrap();
+    let mut task = open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .get("cas-pa01")
+        .unwrap();
     task.assignee = Some("delta-sup".into());
-    open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
-    let claimed = claim(&delta, "cas-pa01").await.unwrap_or_else(|error| error);
+    open_task_store(&alpha.cas_dir)
+        .unwrap()
+        .update(&task)
+        .unwrap();
+    let claimed = claim(&delta, "cas-pa01")
+        .await
+        .unwrap_or_else(|error| error);
     assert!(claimed.contains("already claimed"), "{claimed}");
-    let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused claim");
+    let (_, lock) = cloud
+        .active_lock("cas-pa01")
+        .expect("the claim survives a refused claim");
     assert_eq!(lock.agent_id, alpha.agent_id, "{claimed}");
 
     let peer = start(&bravo.core, "cas-pa01", false)
@@ -700,7 +828,9 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
 
     cloud.drop_lock("cas-pb01");
     let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
-    let (_, lock) = cloud.active_lock("cas-pb01").expect("renewal re-acquires the lost claim");
+    let (_, lock) = cloud
+        .active_lock("cas-pb01")
+        .expect("renewal re-acquires the lost claim");
     assert_eq!(lock.agent_id, alpha.agent_id, "{report:?}");
     assert_eq!(report.reacquired, 1, "{report:?}");
 
@@ -713,7 +843,10 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
     let (task, hold) = &report.conflicts[0];
     assert_eq!(task, "cas-pb01");
     assert_eq!(hold.name(), "bravo-sup", "{}", hold.describe());
-    assert_eq!(cloud.active_lock("cas-pb01").unwrap().1.agent_id, bravo.agent_id);
+    assert_eq!(
+        cloud.active_lock("cas-pb01").unwrap().1.agent_id,
+        bravo.agent_id
+    );
 }
 
 fn factory_service(m: &Machine) -> cas::mcp::CasService {
@@ -755,20 +888,31 @@ async fn the_focus_claim_renews_while_focused_and_releases_on_clear() {
     cloud.live(&alpha, "alpha-sup");
     let service = factory_service(&alpha);
 
-    let pinned = factory(&service, serde_json::json!({"action": "focus_epic", "id": "cas-pf01"}))
-        .await
-        .expect("focus pins");
+    let pinned = factory(
+        &service,
+        serde_json::json!({"action": "focus_epic", "id": "cas-pf01"}),
+    )
+    .await
+    .expect("focus pins");
     let (_, before) = cloud.active_lock("cas-pf01").expect("the focus is claimed");
     assert_eq!(before.agent_id, alpha.agent_id, "{pinned}");
 
     let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
-    let (_, after) = cloud.active_lock("cas-pf01").expect("the focus claim stays");
+    let (_, after) = cloud
+        .active_lock("cas-pf01")
+        .expect("the focus claim stays");
     assert_eq!(after.renewal_count, before.renewal_count + 1, "{report:?}");
 
-    let cleared = factory(&service, serde_json::json!({"action": "focus_epic", "clear": true}))
-        .await
-        .expect("focus clears");
-    assert!(cloud.active_lock("cas-pf01").is_none(), "clearing releases the claim: {cleared}");
+    let cleared = factory(
+        &service,
+        serde_json::json!({"action": "focus_epic", "clear": true}),
+    )
+    .await
+    .expect("focus clears");
+    assert!(
+        cloud.active_lock("cas-pf01").is_none(),
+        "clearing releases the claim: {cleared}"
+    );
 }
 
 /// cas-0078 (d): a spawn on a task a live peer holds is refused, naming the
@@ -796,7 +940,10 @@ async fn a_spawn_on_a_peer_claimed_task_is_refused_before_queueing() {
     assert!(refused.contains("HELD BY A PEER"), "{refused}");
     assert!(refused.contains("alpha-sup"), "{refused}");
     assert!(refused.contains("force=true"), "{refused}");
-    let queued = cas::store::open_spawn_queue_store(&bravo.cas_dir).unwrap().peek(10).unwrap();
+    let queued = cas::store::open_spawn_queue_store(&bravo.cas_dir)
+        .unwrap()
+        .peek(10)
+        .unwrap();
     assert!(queued.is_empty(), "nothing is queued: {queued:?}");
 }
 
@@ -830,9 +977,13 @@ async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
     worker.factory_session = Some(session.clone());
     agents.register(&worker).unwrap();
     // The worker holds the local lease, but a peer holds the cloud claim.
-    agents.try_claim("cas-pb02", &worker.id, 600, Some("Task started")).unwrap();
+    agents
+        .try_claim("cas-pb02", &worker.id, 600, Some("Task started"))
+        .unwrap();
     cloud.live(&bravo, "bravo-sup");
-    start(&bravo.core, "cas-pb02", false).await.expect("bravo claims it");
+    start(&bravo.core, "cas-pb02", false)
+        .await
+        .expect("bravo claims it");
 
     let first = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &worker.id);
     assert_eq!(first.conflicts.len(), 1, "{first:?}");
@@ -848,9 +999,15 @@ async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
         .collect();
     let prompts: Vec<&str> = notices.iter().map(|row| row.prompt.as_str()).collect();
     assert_eq!(notices.len(), 1, "one deduped notice: {prompts:?}");
-    let expected = format!("claim on cas-pb02 lost to bravo-sup@{}; stop work or coordinate", hostname());
+    let expected = format!(
+        "claim on cas-pb02 lost to bravo-sup@{}; stop work or coordinate",
+        hostname()
+    );
     assert!(prompts[0].contains(&expected), "{prompts:?}");
-    assert_eq!(notices[0].factory_session.as_deref(), Some(session.as_str()));
+    assert_eq!(
+        notices[0].factory_session.as_deref(),
+        Some(session.as_str())
+    );
 }
 
 /// cas-c7c7: this fake's claim routes answer every recorded production
@@ -872,4 +1029,110 @@ fn contract_parity_claims_fake_matches_production() {
         replay.check(&exchange);
     }
     replay.assert_clean();
+}
+
+#[tokio::test]
+async fn cas_50713_ended_or_stale_holder_is_taken_over_without_claim_lost() {
+    for ended in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "old-worker");
+        let new = machine(&cloud.url, PROJECT, "replacement");
+        for m in [&old, &new] {
+            m.put_task("cas-stale", TaskType::Task);
+        }
+        cloud.live(&old, "old-worker");
+        start(&old.core, "cas-stale", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            if ended {
+                state
+                    .statuses
+                    .insert(old.agent_id.clone(), "shutdown".into());
+            } else {
+                state.agents.get_mut(&old.agent_id).unwrap().2 =
+                    Utc::now() - Duration::seconds(301);
+            }
+        }
+        let taken = start(&new.core, "cas-stale", false)
+            .await
+            .expect("dead holder must not refuse");
+        assert!(!taken.contains("STALE PEER CLAIM") && !taken.contains("PEER CLAIM OVERRIDE"));
+        assert_eq!(
+            cloud.active_lock("cas-stale").unwrap().1.agent_id,
+            new.agent_id
+        );
+        let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert!(
+            !cas::store::open_prompt_queue_store(&new.cas_dir)
+                .unwrap()
+                .peek_all(100)
+                .unwrap()
+                .iter()
+                .any(|row| row.prompt.contains("PEER CLAIM LOST"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_never_announces_a_dead_peer_as_a_live_conflict() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "dead-peer");
+    let new = machine(&cloud.url, PROJECT, "successor");
+    new.put_task("cas-renew", TaskType::Task);
+    start(&new.core, "cas-renew", false).await.unwrap();
+    cloud.give_to("cas-renew", &old.agent_id, None);
+    cloud.live(&old, "dead-peer");
+    cloud
+        .state
+        .lock()
+        .unwrap()
+        .statuses
+        .insert(old.agent_id.clone(), "shutdown".into());
+    let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
+    assert!(
+        report.conflicts.is_empty(),
+        "dead claim is not a competitor: {report:?}"
+    );
+    assert_eq!(
+        cloud.active_lock("cas-renew").unwrap().1.agent_id,
+        new.agent_id
+    );
+    assert!(
+        cas::store::open_prompt_queue_store(&new.cas_dir)
+            .unwrap()
+            .peek_all(100)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cas_50713_successor_focus_moves_the_ended_local_supervisors_claim() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "predecessor");
+    old.put_task("cas-focus", TaskType::Epic);
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &old.agent_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    let agents = open_agent_store(&old.cas_dir).unwrap();
+    let mut ended = agents.get(&old.agent_id).unwrap();
+    ended.status = cas::types::AgentStatus::Shutdown;
+    ended.pid = None;
+    ended.last_heartbeat = Utc::now() - Duration::minutes(20);
+    agents.register(&ended).unwrap();
+    old.second_agent("successor");
+    let new_id = format!("successor-session-{}", std::process::id());
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &new_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    assert_eq!(cloud.active_lock("cas-focus").unwrap().1.agent_id, new_id);
 }

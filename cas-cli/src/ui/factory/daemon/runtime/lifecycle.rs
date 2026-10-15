@@ -344,7 +344,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     failing_job: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
@@ -352,11 +352,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let Some(supervisor) =
-        resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
-    else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
+    let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let kind = if worker.is_empty() { "Epic PR" } else { "Delivery PR" };
     let mut detail = match failed_run_id {
         Some(run_id) => format!(
@@ -389,7 +385,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     })
     .to_string();
     let notification_id = match supervisor_queue.notify_idempotent(
-        &supervisor.agent_id,
+        &supervisor.id,
         "merge_queue_ejected",
         &payload,
         NotificationPriority::High,
@@ -423,9 +419,9 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if prompt_queue.enqueue_idempotent(
         &source,
-        "supervisor",
+        &supervisor.name,
         &supervisor_body,
-        factory_session.as_deref(),
+        supervisor.session.as_deref(),
         Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-outbox:{notification_id}"),
@@ -918,7 +914,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
@@ -927,11 +923,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         tracing::warn!("worker attention relay skipped: agent store unavailable");
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let Some(supervisor) =
-        resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
-    else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
+    let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         tracing::warn!(worker = %worker, kind, "worker attention relay skipped: supervisor queue unavailable");
         return WorkerAttentionRelayOutcome::Pending;
@@ -962,7 +954,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     })
     .to_string();
     let notification_id = match supervisor_queue.notify_idempotent(
-        &supervisor.agent_id,
+        &supervisor.id,
         kind,
         &payload,
         NotificationPriority::High,
@@ -994,7 +986,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     // after a durable-only write. Missing harness evidence stays neutral; the
     // daemon's own process environment does not describe the receiving agent.
     let prefix = agent_store
-        .get(&supervisor.agent_id)
+        .get(&supervisor.id)
         .ok()
         .as_ref()
         .and_then(crate::harness_policy::agent_tool_prefix)
@@ -1011,9 +1003,9 @@ fn enqueue_worker_attention_relay_detail_with_key(
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if let Err(error) = prompt_queue.enqueue_idempotent(
         &source,
-        "supervisor",
+        &supervisor.name,
         &body,
-        factory_session.as_deref(),
+        supervisor.session.as_deref(),
         Some(&format!("{kind}: {worker}")),
         Some(NotificationPriority::High),
         &format!("worker-attention-outbox:{notification_id}"),

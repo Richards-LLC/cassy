@@ -6786,6 +6786,8 @@ impl CasService {
                 use crate::cloud::peer_claims::Acquire;
                 let claimed = {
                     let epic = epic.clone();
+                    let cas_root = cas_root.clone();
+                    let agent = agent.clone();
                     budget
                         .run(move || {
                             crate::cloud::peer_claims::claim_epic_focus(&cas_root, &epic, &agent)
@@ -6793,10 +6795,12 @@ impl CasService {
                         .await
                 };
                 match claimed {
-                    Ok(Some(Acquire::PeerHolds(hold))) => hold.shared_epic_note(
-                        &epic,
-                        &crate::mcp::tools::core::guidance::caller_prefix(),
-                    ),
+                    Ok(Some(Acquire::PeerHolds(hold))) => {
+                        crate::supervisor_notices::remote_focus_conflict(
+                            &cas_root, &agent, &epic, &hold,
+                        ).await;
+                        hold.shared_epic_note(&epic, &crate::mcp::tools::core::guidance::caller_prefix())
+                    }
                     Ok(Some(Acquire::Unavailable(why))) | Err(why) => format!(
                         "\n\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}), so whether a session on another machine already works {epic} could not be checked.",
                         crate::mcp::tools::truncate_str(&why, 200),

@@ -18263,3 +18263,17 @@ mod stall_nudge_rework_tests {
         assert!(transported.is_none(), "resumed work must never receive the stale nudge");
     }
 }
+
+#[cfg(test)]
+mod supervisor_notice_wake_tests {
+    use super::*;
+
+    #[test]
+    fn owner_notices_wake_only_with_daemon_authority() {
+        let body = "<cas-supervisor-notice kind=\"epic_orphaned\" notification_id=\"42\">\nAdopt cas-epic.\n</cas-supervisor-notice>";
+        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon, "owner", "supervisor-notice:42", body), Some(SupervisorWakeClass::Blocker));
+        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Unattributed, "owner", "supervisor-notice:42", body), None);
+        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Registered { role: cas_types::AgentRole::Worker, name: "worker".into() }, "owner", "supervisor-notice:42", body), None);
+        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon, "owner", "supervisor-notice:42", "ordinary text"), None);
+    }
+}

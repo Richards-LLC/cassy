@@ -196,3 +196,168 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
             .is_some_and(|id| id.parse::<i64>().is_ok())
         && body.ends_with("</cas-supervisor-notice>")
 }
+
+/// Called after a real focus change, from both the MCP and Commander facade.
+pub(crate) fn integration_overlap(
+    root: &Path,
+    focused: &cas_types::Task,
+    session: &str,
+) -> Result<(), crate::error::CasError> {
+    use crate::mcp::tools::core::task::repo_context::inherited_work_target_from_epic;
+    let Some(lane) = inherited_work_target_from_epic(focused) else {
+        return Ok(());
+    };
+    let agents = open_agent_store(root)?.list(None)?;
+    let first = resolve(
+        &agents,
+        focused.epic_verification_owner.as_deref(),
+        Some(session),
+    );
+    for other in open_task_store(root)?
+        .list(None)?
+        .into_iter()
+        .filter(|t| t.task_type == TaskType::Epic && !t.is_terminal() && t.id != focused.id)
+    {
+        let Some(other_lane) = inherited_work_target_from_epic(&other) else {
+            continue;
+        };
+        let same_repo = lane.repo_selector == other_lane.repo_selector;
+        let stacked = focused
+            .deliverables
+            .work_target
+            .as_ref()
+            .is_some_and(|t| t.target_branch == other_lane.target_branch)
+            || other
+                .deliverables
+                .work_target
+                .as_ref()
+                .is_some_and(|t| t.target_branch == lane.target_branch);
+        if !same_repo || !(lane.target_branch == other_lane.target_branch || stacked) {
+            continue;
+        }
+        let Some(owner) = other.epic_verification_owner.as_deref() else {
+            continue;
+        };
+        let second = resolve(&agents, Some(owner), None);
+        if first.id == second.id {
+            continue;
+        }
+        let detail = format!(
+            "Integration lanes overlap: {} ({}) and {} ({}) use {} / {} in {}. Coordinate merges before changing either lane.",
+            focused.id,
+            first.name,
+            other.id,
+            second.name,
+            lane.target_branch,
+            other_lane.target_branch,
+            lane.repo_selector
+        );
+        // Ownership/lane changes create a new episode; merely focusing again does not.
+        let mut lanes = [
+            format!(
+                "{}:{}:{}",
+                focused.id,
+                focused.updated_at.to_rfc3339(),
+                lane.target_branch
+            ),
+            format!(
+                "{}:{}:{}",
+                other.id,
+                other.updated_at.to_rfc3339(),
+                other_lane.target_branch
+            ),
+        ];
+        lanes.sort();
+        let occurrence = format!("{}:{}", lanes[0], lanes[1]);
+        enqueue(root, &first, "integration_conflict", &detail, &occurrence)?;
+        enqueue(root, &second, "integration_conflict", &detail, &occurrence)?;
+    }
+    Ok(())
+}
+
+/// The claim event already supplied the remote holder and its liveness. No
+/// additional discovery is done on a daemon tick or SessionEnd. HTTP is bounded
+/// by MAILBOX_TIMEOUT and runs on a blocking task, outside the factory loop.
+pub(crate) async fn remote_focus_conflict(
+    root: &Path,
+    sender: &str,
+    epic: &str,
+    hold: &crate::cloud::peer_claims::PeerHold,
+) {
+    use crate::cloud::peer_mailbox::{PeerMailbox, PeerSend, http_mailbox};
+    use sha2::{Digest, Sha256};
+    let label = format!("{}:{}:{}", sender, epic, hold.agent_id);
+    let detail = format!(
+        "Epic focus conflict: supervisor {sender} also focused {epic}, held by {}. Coordinate ownership and integration lanes before proceeding.",
+        hold.describe()
+    );
+    let root_owned = root.to_path_buf();
+    let sender_id = sender.to_string();
+    let hold = hold.clone();
+    let body = detail.clone();
+    let event = label.clone();
+    let result = tokio::time::timeout(
+        crate::cloud::peer_mailbox::MAILBOX_TIMEOUT + std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if hold.live != Some(true) || hold.is_expired(chrono::Utc::now()) {
+                return Err("remote focus holder is not confirmed live".into());
+            }
+            let project = crate::cloud::resolve_canonical_id(&root_owned)
+                .ok_or("project identity unavailable")?;
+            let mailbox = http_mailbox(&root_owned).ok_or("Cassy Cloud mailbox unavailable")?;
+            let key = format!(
+                "focus-conflict:{:x}",
+                Sha256::digest(format!(
+                    "{project}:{event}:{}",
+                    hold.expires_at
+                        .map(|at| at.to_rfc3339())
+                        .unwrap_or_default()
+                ))
+            );
+            mailbox
+                .send(&PeerSend {
+                    project_id: project,
+                    sender_agent_id: sender_id,
+                    recipient_agent_id: hold.agent_id,
+                    body: crate::cloud::peer_mailbox::attach_message_intent(
+                        &body,
+                        Some("ask"),
+                        false,
+                    ),
+                    summary: Some("epic focus conflict".into()),
+                    in_reply_to: None,
+                    dedupe_key: key,
+                })
+                .map(|_| ())
+        }),
+    )
+    .await;
+    let failure = match result {
+        Ok(Ok(Ok(()))) => return,
+        Ok(Ok(Err(error))) => error,
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => "remote focus notice timed out".to_string(),
+    };
+    let agents = open_agent_store(root)
+        .ok()
+        .and_then(|s| s.list(None).ok())
+        .unwrap_or_default();
+    let session = agents
+        .iter()
+        .find(|a| a.id == sender)
+        .and_then(|a| a.factory_session.as_deref())
+        .unwrap_or("supervisor-recovery");
+    if let Err(error) = enqueue(
+        root,
+        &Recipient::operator(session),
+        "integration_conflict",
+        &format!("{detail}\nRemote notice failed: {failure}. Operator intervention is required."),
+        &label,
+    ) {
+        tracing::error!(%error, "focus-conflict operator fallback failed");
+    }
+}
+
+#[cfg(test)]
+#[path = "supervisor_notices_tests.rs"]
+mod tests;

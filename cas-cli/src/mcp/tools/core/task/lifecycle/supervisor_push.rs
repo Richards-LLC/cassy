@@ -173,7 +173,7 @@ pub fn prepare_task_lifecycle_outbox(
     occurrence_id: &str,
 ) -> Option<cas_store::TaskReopenLifecycleOutbox> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
-    let supervisor = resolve_worker_supervisor(agent_store, factory_session.as_deref())?;
+    let (supervisor, recipient) = lifecycle_notice_owner(agent_store, factory_session.as_deref())?;
     let transition_key = transition_key(
         task_id,
         old_status,
@@ -194,6 +194,8 @@ pub fn prepare_task_lifecycle_outbox(
         "factory_session": factory_session,
         "supervisor_id": supervisor.agent_id,
         "supervisor_name": supervisor.name,
+        "recipient_target": recipient.name,
+        "recipient_factory_session": recipient.session,
         "occurrence_id": occurrence_id,
         "transition_key": transition_key,
         "timestamp": now.to_rfc3339(),
@@ -496,7 +498,7 @@ pub struct OwningSupervisor {
 ///
 /// Session isolation: only agents with `role == Supervisor` and matching
 /// `factory_session` (via [`Agent::visible_to_factory_session`]) are considered.
-/// Prefers Active/Idle over Stale/Shutdown, then stable name order.
+/// Requires Active/Idle and a fresh heartbeat, then prefers registration recency.
 pub fn resolve_owning_supervisor(
     agent_store: &dyn AgentStore,
     factory_session: Option<&str>,
@@ -513,6 +515,7 @@ pub fn resolve_owning_supervisor(
 
 /// The supervisor row a relay should address among `candidates`.
 fn best_supervisor(mut candidates: Vec<cas_types::Agent>) -> Option<OwningSupervisor> {
+    candidates.retain(crate::supervisor_notices::is_live);
     if candidates.is_empty() {
         return None;
     }
@@ -598,17 +601,39 @@ pub fn resolve_worker_supervisor(
     let sessionless_live: Vec<cas_types::Agent> = supervisors
         .into_iter()
         .filter(|a| a.factory_session.as_deref().is_none_or(|s| s.trim().is_empty()))
-        .filter(|a| {
-            matches!(
-                a.status,
-                cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
-            )
-        })
+        .filter(|a| crate::supervisor_notices::is_live(a))
         .collect();
     if sessionless_live.len() == 1 {
         return best_supervisor(sessionless_live);
     }
     None
+}
+
+/// Owner notices may cross local supervisor sessions; worker operations may not.
+pub(crate) fn resolve_notice_recipient(
+    agent_store: &dyn AgentStore,
+    session: Option<&str>,
+) -> crate::supervisor_notices::Recipient {
+    if let Some(owner) = resolve_worker_supervisor(agent_store, session)
+        && let Ok(agent) = agent_store.get(&owner.agent_id)
+    {
+        return crate::supervisor_notices::Recipient::agent(&agent);
+    }
+    let agents = agent_store.list(None).unwrap_or_default();
+    let name = session.and_then(session_metadata_supervisor_name);
+    crate::supervisor_notices::resolve(&agents, name.as_deref(), session)
+}
+
+fn lifecycle_notice_owner(
+    agents: &dyn AgentStore,
+    session: Option<&str>,
+) -> Option<(OwningSupervisor, crate::supervisor_notices::Recipient)> {
+    // Non-factory task writes have never generated operator notices.
+    if session.is_none() && resolve_worker_supervisor(agents, session).is_none() {
+        return None;
+    }
+    let recipient = resolve_notice_recipient(agents, session);
+    Some((OwningSupervisor { agent_id: recipient.id.clone(), name: recipient.name.clone() }, recipient))
 }
 
 /// The supervisor name a factory session's metadata file records, if any.
@@ -786,7 +811,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
     branch_tip: Option<&str>,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
-    let Some(supervisor) = resolve_worker_supervisor(agent_store, factory_session.as_deref())
+    let Some((supervisor, recipient)) = lifecycle_notice_owner(agent_store, factory_session.as_deref())
     else {
         return Ok(LifecyclePushResult::NoSupervisor);
     };
@@ -811,6 +836,8 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
         "factory_session": factory_session,
         "supervisor_id": supervisor.agent_id,
         "supervisor_name": supervisor.name,
+        "recipient_target": recipient.name,
+        "recipient_factory_session": recipient.session,
         "occurrence_id": occurrence_id,
         "branch_tip": branch_tip,
         "transition_key": key,
@@ -891,6 +918,8 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
         factory_session.as_deref(),
         occurrence_id,
         branch_tip,
+        &recipient.name,
+        recipient.session.as_deref(),
     )
     .map_err(|error| error.to_string())?;
 
@@ -1032,6 +1061,8 @@ fn deliver_prompt_for_notification(
     factory_session: Option<&str>,
     occurrence_id: &str,
     branch_tip: Option<&str>,
+    recipient_target: &str,
+    recipient_session: Option<&str>,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
     let body = build_prompt_body(
@@ -1054,9 +1085,9 @@ fn deliver_prompt_for_notification(
     prompt_queue
         .enqueue_idempotent(
             &source,
-            "supervisor",
+            recipient_target,
             &body,
-            factory_session,
+            recipient_session,
             Some(&summary),
             Some(kind.priority()),
             &dedupe,
@@ -1228,6 +1259,11 @@ pub fn deliver_lifecycle_outbox_row(
         factory_session,
         occurrence_id,
         branch_tip,
+        payload.get("recipient_target").and_then(|v| v.as_str()).unwrap_or("supervisor"),
+        match payload.get("recipient_factory_session") {
+            Some(value) => value.as_str(),
+            None => factory_session,
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -1765,7 +1801,7 @@ mod tests {
 
         let rows = pq.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1, "exactly one supervisor push");
-        assert_eq!(rows[0].target, "supervisor");
+        assert_eq!(rows[0].target, "cosmic-bear-43");
         assert!(
             is_lifecycle_wake_source(&rows[0].source),
             "the dispatch layer must be able to tell this apart from ordinary \

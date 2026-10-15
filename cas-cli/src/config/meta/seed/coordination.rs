@@ -192,6 +192,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.worker_memory_high_gib",
+        section: "factory",
+        name: "Worker Build Memory High (GiB)",
+        description: "Per-build MemoryHigh in a dedicated systemd user scope. 0 shares half of host RAM across max_concurrent_builders, bounded to 256 MiB..16 GiB per build. Unavailable user scopes and non-Linux hosts log and run unscoped.",
+        value_type: ConfigType::Int,
+        default: "0",
+        constraint: Constraint::Range(0, 65536),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "memory", "systemd", "scope", "workers"],
+        use_cases: &["Keep worker compilation from swapping out the supervisor and daemon"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.spawn_min_free_gib",
         section: "factory",
         name: "Worker Spawn Minimum Free Space (GiB)",

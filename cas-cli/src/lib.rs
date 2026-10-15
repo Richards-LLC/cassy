@@ -44,6 +44,7 @@ pub use light_lane::run_detached_worker;
 pub mod factory_auth_health;
 pub mod factory_hook_canary;
 pub(crate) mod factory_build_guard;
+pub(crate) mod factory_build_memory;
 pub(crate) mod factory_worker_check;
 pub mod factory_context_reset;
 pub mod factory_isolation;

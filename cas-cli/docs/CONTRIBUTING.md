@@ -557,6 +557,17 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+On Linux, the capped runner launches each build in a dedicated
+`systemd-run --user --scope` with `MemoryHigh`, keeping compiler reclaim separate
+from the supervisor and daemon. `factory.worker_memory_high_gib` sets the limit
+in GiB; default `0` divides half of total RAM by `max_concurrent_builders`, bounded
+to 256 MiB..16 GiB per build (8 GiB on a 64 GiB host with four builders).
+Unavailable user scopes and other platforms log a fallback and run unscoped.
+Only scope startup failures fall back; a failed build is never rerun unscoped.
+Daemon startup also tries to give its inherited interactive cgroup (including
+the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
+settings. Missing controllers or user-manager permissions leave startup working.
+
 Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create
 the parent directory first. In-repo logs that Git does not ignore are refused

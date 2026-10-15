@@ -3139,6 +3139,32 @@ impl FactoryDaemon {
 }
 
 impl FactoryDaemon {
+    /// cas-d2a2: retract stale alerts from the supervisor's Teams inbox as a
+    /// job (factory loop v2 §4.3). The decision comes from a fresh read
+    /// issued for it on the queue jobs' read connection, never the cached
+    /// director snapshot (app/mod.rs:1541–1547); only the exact rows judged
+    /// stale are removed, under the inbox lock.
+    pub(super) fn submit_supervisor_inbox_retraction(&mut self) {
+        let Some(teams) = self.teams.as_ref() else {
+            return;
+        };
+        let repo_root = self
+            .app
+            .cas_dir()
+            .parent()
+            .unwrap_or(self.app.cas_dir())
+            .to_path_buf();
+        let request = self.app.delivery_request(&[]);
+        self.queue_jobs.submit_inbox_retraction(
+            "supervisor",
+            teams.inbox_pruner(),
+            repo_root,
+            Box::new(move |stores| request.read(stores).into_data()),
+        );
+    }
+}
+
+impl FactoryDaemon {
     /// One loop pass's share of the two-second director refresh (cas-ee9ab).
     /// Returns true when a director read was applied.
     pub(super) async fn director_refresh_pass(
@@ -3386,21 +3412,7 @@ impl FactoryDaemon {
         // the CURRENT epic tip) and the epic-completion check (cas-06ca) then
         // run on the blocking lane, before the inbox lock is taken; missing
         // state preserves every row.
-        if let Some(teams) = self.teams.as_ref() {
-            let repo_root = self
-                .app
-                .cas_dir()
-                .parent()
-                .unwrap_or(self.app.cas_dir())
-                .to_path_buf();
-            let request = self.app.delivery_request(&[]);
-            self.queue_jobs.submit_inbox_retraction(
-                "supervisor",
-                teams.inbox_pruner(),
-                repo_root,
-                Box::new(move |stores| request.read(stores).into_data()),
-            );
-        }
+        self.submit_supervisor_inbox_retraction();
 
         // Inject prompts (config already checked in generate_prompt)
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshInject);

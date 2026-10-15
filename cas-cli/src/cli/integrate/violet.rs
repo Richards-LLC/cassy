@@ -3375,8 +3375,18 @@ mod tests {
         env.set("CAS_CREDENTIALS_FILE", &file);
         env.set("VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE", "");
         fs::write(
-            file,
+            &file,
             "export VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE='launch-fixture'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/.claude.json"), r#"{"mcpServers":{"violet":{"headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE}"}}}}"#).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex/config.toml"),
+            "[mcp_servers.violet]\nbearer_token_env_var='VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE'\n",
         )
         .unwrap();
         let expected = cas_pty::violet_env::resolved_environment(&[], &[]);
@@ -3488,6 +3498,8 @@ mod tests {
              export WORKER_EXPORTED_EMPTY_FIXTURE_TOKEN='file-fixture'\n",
         )
         .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();
         env.set("CAS_CREDENTIALS_FILE", &credentials);
         env.remove("WORKER_DENIED_FIXTURE_TOKEN");
         env.remove("WORKER_ALLOWED_FIXTURE_TOKEN");

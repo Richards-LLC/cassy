@@ -309,11 +309,7 @@ mcp__cas__task action=ready."
 /// launch-time intro prompt CAS queues for the worker (see
 /// `queue_codex_worker_intro_prompt`). Uses Claude's `mcp__cas__` tool prefix.
 pub fn claude_worker_contract(worker_name: &str) -> String {
-    worker_contract(
-        "mcp__cas__",
-        Some(worker_name),
-        WorkerContractHarness::Claude,
-    )
+    worker_contract("mcp__cas__", Some(worker_name), WorkerContractHarness::Claude)
 }
 
 /// The Codex worker contract, delivered as `--config developer_instructions`.
@@ -3320,33 +3316,10 @@ mod tests {
     #[test]
     fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
         for (args, cli, account_env) in [
-            (
-                vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"],
-                "claude",
-                "CLAUDE_CONFIG_DIR",
-            ),
-            (
-                vec![
-                    "--adjustment=10",
-                    "codex",
-                    "--effort",
-                    "high",
-                    "--model",
-                    "large",
-                ],
-                "codex",
-                "CODEX_HOME",
-            ),
-            (
-                vec!["-n10", "claude", "--effort", "high", "--model", "codex"],
-                "claude",
-                "CLAUDE_CONFIG_DIR",
-            ),
-            (
-                vec!["--", "codex", "--model", "large"],
-                "codex",
-                "CODEX_HOME",
-            ),
+            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
+            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
+            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
         ] {
             let config = PtyConfig {
                 command: "nice".into(),
@@ -3799,10 +3772,8 @@ mod tests {
                 command: cli.into(),
                 env: vec![
                     ("CAS_AGENT_ROLE".into(), "worker".into()),
-                    (
-                        WORKER_CREDENTIAL_WARNING_ENV.into(),
-                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into(),
-                    ),
+                    (WORKER_CREDENTIAL_WARNING_ENV.into(),
+                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into()),
                 ],
                 ..Default::default()
             };

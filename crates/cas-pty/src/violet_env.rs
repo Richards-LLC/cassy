@@ -233,7 +233,13 @@ pub fn hydrate(harness: &str, overrides: &mut Vec<(String, String)>, removed: &[
     let env = resolved_environment(overrides, removed);
     let (_, names) = registration_references(harness, &env);
     for warning in missing_references(harness, &env) {
-        warn_once(&warning, || tracing::warn!("Violet launch: {warning}"));
+        warn_once(
+            warning
+                .rsplit_once(": ")
+                .map(|(_, name)| name)
+                .unwrap_or(&warning),
+            || tracing::warn!("Violet launch: {warning}"),
+        );
     }
     for (name, value) in env
         .into_iter()

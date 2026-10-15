@@ -1008,8 +1008,20 @@ mod tests {
 
     #[test]
     fn cas_678d_round3_managed_proxy_rebinds_only_unique_candidate() {
-        for (managed, ambiguous) in [(true, false), (true, true), (false, false)] {
+        for (managed, ambiguous, missing) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
             let (mut env, probe) = update_fixture();
+            if missing {
+                std::fs::write(
+                    env.home().join("credentials.env"),
+                    "VIOLET_VERCEL_BYPASS=fixture-bypass\n",
+                )
+                .unwrap();
+            }
             if ambiguous {
                 env.set("VIOLET_SLACK_TOKEN_SECOND", "second-fixture");
             }
@@ -1023,10 +1035,11 @@ mod tests {
             std::fs::write(&path, &original).unwrap();
             let report = migrate_installed_hub_with_probe(&probe).unwrap();
             let written = std::fs::read_to_string(&path).unwrap();
-            if managed && !ambiguous {
+            if managed && !ambiguous && !missing {
                 assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
                 assert!(written.contains("# preserve"));
                 assert!(report.authenticated.contains(&path));
+                assert!(report.unexported.contains("VIOLET_SLACK_TOKEN_SOUNDWAVE"));
                 assert!(report.credential_warnings.iter().any(|w| {
                     w.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE")
                 }));
@@ -1034,8 +1047,18 @@ mod tests {
                 assert_eq!(written, original);
                 assert!(!report.authenticated.contains(&path));
                 if managed {
-                    assert!(report.warnings.iter().any(|(_, w)| w.contains("ambiguous")));
+                    assert!(
+                        report
+                            .warnings
+                            .iter()
+                            .any(|(_, w)| w.contains(if ambiguous {
+                                "ambiguous"
+                            } else {
+                                "empty or unset"
+                            }))
+                    );
                 }
+                assert!(probe.calls.borrow().is_empty());
             }
         }
     }
@@ -1304,6 +1327,11 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(writes.get(), 2);
+        assert_eq!(
+            report.credential_warnings.len(),
+            2,
+            "retry must deduplicate token and bypass mappings"
+        );
         assert_eq!(probe.calls.borrow().len(), 1);
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

@@ -4379,16 +4379,17 @@ mod tests {
         let release_gate = scripts.join("release-gate.sh");
         std::fs::write(
             &release_gate,
-            "#!/bin/bash\n\
-             common=\"$(git rev-parse --path-format=absolute --git-common-dir)\"\n\
-             touch \"$common/gate-ran\"\n\
-             if grep -Fq '9.99.8' version.txt; then\n\
-               echo 'FIX version-literals: fixture next-version literal' >&2\n\
-               exit 1\n\
-             fi\n\
-             sha=\"$(git rev-parse HEAD)\"\n\
-             mkdir -p \"$common/cas/fast-rows\"\n\
-             printf 'fast-rows: PASS %s fixture\\n' \"$sha\" >\"$common/cas/fast-rows/$sha.pass\"\n\",
+            r#"#!/bin/bash
+common="$(git rev-parse --path-format=absolute --git-common-dir)"
+touch "$common/gate-ran"
+if grep -Fq '9.99.8' version.txt; then
+  echo 'FIX version-literals: fixture next-version literal' >&2
+  exit 1
+fi
+sha="$(git rev-parse HEAD)"
+mkdir -p "$common/cas/fast-rows"
+printf 'fast-rows: PASS %s fixture\n' "$sha" >"$common/cas/fast-rows/$sha.pass"
+"#,
         )
         .unwrap();
         std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();

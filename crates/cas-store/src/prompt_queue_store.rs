@@ -5954,9 +5954,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let changed = conn.execute(
+                // cas-1f0c: once the Teams body fallback has sent the body,
+                // the receipt must stay, or hooks would surface the row again.
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'
-                   AND seen_at = ?",
+                   AND seen_at = ? AND teams_body_fallback_at IS NULL",
                 params![prompt_id, recipient, seen_at],
             )?;
             Ok(changed == 1)
@@ -11563,6 +11565,30 @@ mod tests {
         );
         assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
         assert!(store.release_recipient_transport_claim(id, "worker", second).unwrap());
+    }
+
+    /// cas-d2a2 x cas-1f0c: after the Teams body fallback sent the body, no
+    /// release, stale or exact, may delete the receipt.
+    #[test]
+    fn a_release_never_drops_a_receipt_the_body_fallback_claimed() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "row", "session-a")
+            .unwrap();
+        let token = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
+        assert!(store.claim_teams_body_fallback(id, "worker").unwrap());
+        assert!(
+            !store
+                .release_recipient_transport_claim(id, "worker", ClaimToken::never_issued())
+                .unwrap(),
+            "a stale-token release leaves the receipt"
+        );
+        assert!(
+            !store.release_recipient_transport_claim(id, "worker", token).unwrap(),
+            "even the claim's own token cannot release it after the fallback"
+        );
+        assert!(store.teams_body_fallback_claimed(id, "worker").unwrap());
+        assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
     }
 
     #[test]

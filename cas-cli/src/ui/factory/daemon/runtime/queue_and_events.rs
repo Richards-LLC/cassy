@@ -69,7 +69,60 @@ fn registration_timeout_detail(
 const WORKER_EXIT_TAIL_MAX_CHARS: usize = 2_000;
 
 /// Cap for the pane tail embedded in a worker-death relay (cas-b06f, P2.8).
-const WORKER_DEATH_TAIL_MAX_CHARS: usize = 2_000;
+/// The cas-447d storm carried ~2.9K-char bodies, mostly spinner frames.
+const WORKER_DEATH_TAIL_MAX_CHARS: usize = 600;
+/// Most lines of real output a death relay keeps (cas-b06f).
+const WORKER_DEATH_TAIL_MAX_LINES: usize = 12;
+
+/// TUI chrome, not output: box drawing, block elements, Braille spinner
+/// frames, and the dingbat/asterisk spinner glyphs Claude and Codex cycle.
+fn is_tui_glyph(ch: char) -> bool {
+    matches!(ch,
+        '\u{2500}'..='\u{259F}'   // box drawing + block elements
+        | '\u{2800}'..='\u{28FF}' // Braille spinner frames
+        | '\u{2720}'..='\u{274B}' // dingbat stars and asterisks (✢✳✶✻✽…)
+        | '\u{00B7}' | '\u{2022}' | '\u{2219}' | '\u{25CF}' | '\u{25CB}' | '\u{25E6}'
+        | '\u{23F5}' | '\u{23FA}' | '\u{276F}'
+    )
+}
+
+/// A spinner status line: after its glyphs are gone, a single "Verbing…"
+/// word with optional "(12s · esc to interrupt)" style chrome.
+fn is_spinner_status(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("esc to interrupt") || lower.contains("ctrl+c to interrupt") {
+        return true;
+    }
+    let head = line.split('(').next().unwrap_or(line).trim();
+    !head.is_empty()
+        && (head.ends_with('…') || head.ends_with("..."))
+        && head.split_whitespace().count() <= 2
+}
+
+/// Strip TUI chrome from a pane tail before it is embedded in a death relay,
+/// then keep only the last few lines, capped (cas-b06f, spec-6194 P2.8).
+pub(crate) fn clean_death_tail(text: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line: String = raw.chars().filter(|ch| !is_tui_glyph(*ch)).collect();
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() || is_spinner_status(&line) {
+            continue;
+        }
+        if kept.last() == Some(&line) {
+            continue;
+        }
+        kept.push(line);
+    }
+    let start = kept.len().saturating_sub(WORKER_DEATH_TAIL_MAX_LINES);
+    let joined = kept[start..].join("\n");
+    let tail: String = joined
+        .chars()
+        .rev()
+        .take(WORKER_DEATH_TAIL_MAX_CHARS)
+        .collect();
+    tail.chars().rev().collect()
+}
 
 fn bounded_tail_text(text: &str) -> String {
     let tail: String = text
@@ -132,8 +185,9 @@ fn worker_exit_cause(
                 crate::hooks::handlers::handlers_events::message_display::redact_secrets(
                     tail.to_string(),
                 );
-            bounded_tail_text(crate::ai_enrichment::redact_string(&redacted).trim())
-        });
+            clean_death_tail(crate::ai_enrichment::redact_string(&redacted).trim())
+        })
+        .filter(|tail| !tail.is_empty());
     crate::prompt_revalidation::WorkerExitCause {
         exit_code,
         exit_signal: exit_signal
@@ -948,25 +1002,19 @@ fn record_shutdown_outcome(
     factory_session: &str,
     supervisor_name: &str,
     request_id: Option<i64>,
-    workers: &[String],
-    outcome: Result<(), String>,
+    report: &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport,
 ) {
-    let target = if workers.is_empty() {
-        "no live workers".to_string()
+    let stopped = report.stopped.len();
+    let lines = shutdown_receipt_lines(report);
+    let (audit_outcome, state) = if report.failed.is_empty() {
+        ("completed", cas_store::SpawnLifecycleState::Stopped)
     } else {
-        workers.join(", ")
+        ("failed", cas_store::SpawnLifecycleState::Failed)
     };
-    let (audit_outcome, state, detail) = match &outcome {
-        Ok(()) => (
-            "completed",
-            cas_store::SpawnLifecycleState::Stopped,
-            format!("Stopped {target}."),
-        ),
-        Err(error) => (
-            "failed",
-            cas_store::SpawnLifecycleState::Failed,
-            format!("Shutdown of {target} failed: {error}"),
-        ),
+    let detail = if lines.is_empty() {
+        "No live workers matched the request.".to_string()
+    } else {
+        lines.join("; ")
     };
     append_spawn_audit(
         cas_dir,
@@ -980,20 +1028,58 @@ fn record_shutdown_outcome(
     if let Some(id) = request_id {
         record_terminal_spawn_state(cas_dir, id, state, None, &detail);
     }
-    if outcome.is_err() {
-        let request = request_id
-            .map(|id| format!("request {id}"))
-            .unwrap_or_else(|| "direct request".to_string());
-        notify_supervisor_or_defer(
-            cas_dir,
-            supervisor_name,
-            factory_session,
-            format!("Worker shutdown failed: {target}"),
+    // cas-b06f (spec-6194 P2.6): the supervisor asked for this, so it gets
+    // ONE receipt with every worker's outcome, never a Critical worker_died
+    // alarm per worker. A failure is still named, with what to do next.
+    let request = request_id
+        .map(|id| format!("shutdown request {id}"))
+        .unwrap_or_else(|| "direct shutdown request".to_string());
+    let (summary, headline) = if report.failed.is_empty() {
+        (
+            format!("Shut down {stopped} worker(s) as requested"),
+            format!("Factory {request}: shut down {stopped} worker(s) as requested."),
+        )
+    } else {
+        (
             format!(
-                "Factory shutdown {request} did not complete. {detail} Workers that failed may still be running; retry shutdown_workers or check worker_status."
+                "Worker shutdown: {stopped} stopped, {} failed",
+                report.failed.len()
             ),
-        );
-    }
+            format!(
+                "Factory {request}: {stopped} worker(s) stopped, {} failed. Workers that failed may still be running; retry shutdown_workers or check worker_status.",
+                report.failed.len()
+            ),
+        )
+    };
+    let body = if lines.is_empty() {
+        format!("{headline}\nNo live workers matched the request.")
+    } else {
+        format!("{headline}\n- {}", lines.join("\n- "))
+    };
+    notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, body);
+}
+
+/// One line per worker for the shutdown receipt (cas-b06f).
+fn shutdown_receipt_lines(
+    report: &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport,
+) -> Vec<String> {
+    report
+        .stopped
+        .iter()
+        .map(|(name, released)| {
+            if released.is_empty() {
+                format!("{name}: stopped; held no open task")
+            } else {
+                format!("{name}: stopped; released {}", released.join(", "))
+            }
+        })
+        .chain(
+            report
+                .failed
+                .iter()
+                .map(|(name, error)| format!("{name}: NOT stopped: {error}")),
+        )
+        .collect()
 }
 
 /// Record a terminal lifecycle state on a queue row. Tried on the loop
@@ -4120,17 +4206,33 @@ impl FactoryDaemon {
         // cas-2ffe (GH #915): the relay carries the cause as structured
         // fields plus a redacted tail, not spliced into its own lines.
         let exit_cause = worker_exit_cause(exit_code, exit_signal.as_deref(), pane_tail.as_deref());
-        self.recent_worker_exits.push(ObservedWorkerExit {
-            at: chrono::Utc::now(),
-            worker: worker_name.to_string(),
-            status: exit_cause.status(),
-        });
+        // cas-b06f (spec-6194 P2.6): a worker the supervisor already asked to
+        // stop (its shutdown failed, or it was stopped out of band while the
+        // request stood) is that request taking effect, not an unexpected
+        // death: no Critical alarm and no workers_died_together group.
+        let requested_stop = self.dead_workers.contains(worker_name);
+        if !requested_stop {
+            self.recent_worker_exits.push(ObservedWorkerExit {
+                at: chrono::Utc::now(),
+                worker: worker_name.to_string(),
+                status: exit_cause.status(),
+            });
+        }
 
         // A registered worker can still be a dead harness whose MCP child
         // answered first. Mark the durable agent stale before removing the
         // pane so task leases are parked and worker_status cannot retain the
         // transcript-backed active row.
-        self.mark_registered_worker_stale(worker_name, &exit_cause.status(), Some(&exit_cause));
+        self.mark_registered_worker_stale(
+            worker_name,
+            &exit_cause.status(),
+            Some(&exit_cause),
+            if requested_stop {
+                crate::mcp::tools::service::orphan_recovery::DeathRelay::Requested
+            } else {
+                crate::mcp::tools::service::orphan_recovery::DeathRelay::Alarm
+            },
+        );
         self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
@@ -4187,6 +4289,7 @@ impl FactoryDaemon {
         worker_name: &str,
         reason: &str,
         exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+        relay: crate::mcp::tools::service::orphan_recovery::DeathRelay,
     ) {
         let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
             return;
@@ -4233,13 +4336,14 @@ impl FactoryDaemon {
             .map(|lease| lease.task_id)
             .collect::<Vec<_>>();
         let _ = agent_store.mark_stale(&agent.id);
-        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished_with_exit(
+        crate::mcp::tools::service::orphan_recovery::recover_worker(
             self.app.cas_dir(),
             agent_store.as_ref(),
             &agent,
             &held,
             reason,
             exit,
+            relay,
         );
     }
 
@@ -4475,7 +4579,12 @@ impl FactoryDaemon {
                 if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
                     tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
                 }
-                self.mark_registered_worker_stale(&worker, "worker harness failed during boot", None);
+                self.mark_registered_worker_stale(
+                    &worker,
+                    "worker harness failed during boot",
+                    None,
+                    crate::mcp::tools::service::orphan_recovery::DeathRelay::Alarm,
+                );
                 self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
@@ -8959,44 +9068,27 @@ impl FactoryDaemon {
                         name,
                     );
                 }
-                let outcome = self.app.shutdown_workers(count, &names, force).await;
+                let report = self.app.shutdown_workers(count, &names, force).await;
                 // cas-00d5: the queue row was marked processed at dequeue; it
-                // must end in a terminal state, and a failure must reach the
-                // supervisor, not only the TUI error line.
+                // must end in a terminal state. cas-b06f: the supervisor gets
+                // one receipt listing every worker's outcome.
                 record_shutdown_outcome(
                     self.app.cas_dir(),
                     &self.session_name,
                     self.app.supervisor_name(),
                     shutdown_request_id,
-                    &workers_to_stop,
-                    outcome.as_ref().map(|_| ()).map_err(ToString::to_string),
+                    &report,
                 );
-                if let Err(e) = outcome {
-                    let target = if !names.is_empty() {
-                        names.join(", ")
-                    } else if let Some(c) = count {
-                        if c == 0 {
-                            "all workers".to_string()
-                        } else {
-                            format!("{c} worker(s)")
-                        }
-                    } else {
-                        "all workers".to_string()
-                    };
-                    self.app
-                        .set_error(format!("Failed to shutdown {target}: {e}"));
-                    tracing::error!("Failed to shutdown {}: {}", target, e);
-                } else {
+                for (name, error) in &report.failed {
+                    tracing::error!("Failed to shutdown {}: {}", name, error);
+                }
+                for (name, _) in &report.stopped {
                     // Remove shut-down workers from native Agent Teams
                     if let Some(ref teams) = self.teams {
-                        for name in &workers_to_stop {
-                            let _ = teams.remove_member(name);
-                        }
+                        let _ = teams.remove_member(name);
                     }
                     // Notify GUI and WS clients that panes were removed
-                    for name in &workers_to_stop {
-                        self.gui_notify_pane_removed(name);
-                    }
+                    self.gui_notify_pane_removed(name);
                 }
             }
             PendingSpawn::Respawn(name) => {

@@ -82,6 +82,58 @@ pub(crate) fn recover_worker_vanished_with_exit(
     reason: &str,
     exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
 ) -> OrphanRecoverySummary {
+    recover_worker(
+        cas_root,
+        agent_store,
+        agent,
+        held_task_ids,
+        reason,
+        exit,
+        DeathRelay::Alarm,
+    )
+}
+
+/// Whether a worker's end reaches the supervisor as a death alarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeathRelay {
+    /// An unexpected death: one blocker-class `worker_died` relay (P2.6).
+    Alarm,
+    /// The supervisor asked for this stop (cas-b06f, spec-6194 P2.6). Tasks
+    /// are still parked and released as GH #197 requires and the activity
+    /// event is still recorded, but the supervisor hears about it once, in
+    /// the shutdown receipt, not as one Critical alarm per worker.
+    Requested,
+}
+
+/// [`recover_worker_vanished`] for a worker stopped by a supervisor request
+/// (cas-b06f): the same task parking, no per-worker death alarm.
+pub(crate) fn recover_worker_retired_on_request(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    held_task_ids: &[String],
+    reason: &str,
+) -> OrphanRecoverySummary {
+    recover_worker(
+        cas_root,
+        agent_store,
+        agent,
+        held_task_ids,
+        reason,
+        None,
+        DeathRelay::Requested,
+    )
+}
+
+pub(crate) fn recover_worker(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    held_task_ids: &[String],
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+    relay: DeathRelay,
+) -> OrphanRecoverySummary {
     let mut summary = OrphanRecoverySummary {
         held_task_ids: held_task_ids.to_vec(),
         ..Default::default()
@@ -90,7 +142,9 @@ pub(crate) fn recover_worker_vanished_with_exit(
     let task_store = match open_task_store(cas_root) {
         Ok(s) => s,
         Err(_) => {
-            emit_worker_died_signals_with_exit(cas_root, agent_store, agent, &summary, reason, exit);
+            emit_worker_died_signals_with_exit(
+                cas_root, agent_store, agent, &summary, reason, exit, relay,
+            );
             return summary;
         }
     };
@@ -136,7 +190,9 @@ pub(crate) fn recover_worker_vanished_with_exit(
         }
     }
 
-    emit_worker_died_signals_with_exit(cas_root, agent_store, agent, &summary, reason, exit);
+    emit_worker_died_signals_with_exit(
+        cas_root, agent_store, agent, &summary, reason, exit, relay,
+    );
     summary
 }
 
@@ -372,7 +428,15 @@ fn emit_worker_died_signals(
     summary: &OrphanRecoverySummary,
     reason: &str,
 ) {
-    emit_worker_died_signals_with_exit(cas_root, agent_store, agent, summary, reason, None);
+    emit_worker_died_signals_with_exit(
+        cas_root,
+        agent_store,
+        agent,
+        summary,
+        reason,
+        None,
+        DeathRelay::Alarm,
+    );
 }
 
 fn emit_worker_died_signals_with_exit(
@@ -382,6 +446,7 @@ fn emit_worker_died_signals_with_exit(
     summary: &OrphanRecoverySummary,
     reason: &str,
     exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+    relay: DeathRelay,
 ) {
     // The maintenance callers operate on the generic agent registry.  A
     // supervisor row expiring after a restart is not a worker death and must
@@ -425,6 +490,11 @@ fn emit_worker_died_signals_with_exit(
         .with_metadata(payload.clone())
         .with_session(agent.id.clone());
         let _ = event_store.record(&event);
+    }
+
+    // cas-b06f: a requested stop is reported once, by the shutdown receipt.
+    if relay == DeathRelay::Requested {
+        return;
     }
 
     // Supervisor queue — critical priority.
@@ -1168,6 +1238,48 @@ mod cas_3dcb_death_relay_tests {
         }
         let relay = fixture.prompt_relays().pop().expect("death relay");
         assert!(relay.prompt.contains("cas-in-progress") && relay.prompt.contains("cas-blocked"));
+    }
+
+    /// cas-b06f (spec-6194 P2.6): a requested stop parks and releases what
+    /// the worker held, exactly as GH #197 requires, but raises no death
+    /// alarm; the shutdown receipt reports it. An unexpected death of the same
+    /// shape still alarms (`ct2_p2_unexpected_death_still_alarms`).
+    #[test]
+    fn ct2_p2_requested_stop_parks_tasks_without_alarm_cas_b06f() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("stopped-on-request", 900);
+        let tasks = open_task_store(&fixture.cas_root).expect("task store");
+        let mut task = Task::new("cas-requested".into(), "held at shutdown".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).expect("add task");
+
+        let summary = recover_worker_retired_on_request(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &worker,
+            &[],
+            "worker terminated by shutdown request",
+        );
+        assert_eq!(summary.recovered_task_ids, vec!["cas-requested"]);
+        assert_eq!(tasks.get("cas-requested").unwrap().assignee, None);
+        assert!(fixture.prompt_relays().is_empty(), "no death relay");
+        assert_eq!(fixture.durable_notices(), 0, "no Critical worker_died notice");
+    }
+
+    #[test]
+    fn ct2_p2_unexpected_death_still_alarms_cas_b06f() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("died-unasked", 900);
+        recover_worker_vanished(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &worker,
+            &[],
+            "harness exited",
+        );
+        assert_eq!(fixture.prompt_relays().len(), 1, "one death relay");
+        assert_eq!(fixture.durable_notices(), 1);
     }
 
     #[test]

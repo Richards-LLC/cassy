@@ -7516,7 +7516,8 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
         if agent.status != cas_types::AgentStatus::Shutdown {
-            super::orphan_recovery::recover_worker_vanished(
+            // cas-b06f: requested, so reported by the shutdown receipt.
+            super::orphan_recovery::recover_worker_retired_on_request(
                 cas_root,
                 agents.as_ref(),
                 agent,

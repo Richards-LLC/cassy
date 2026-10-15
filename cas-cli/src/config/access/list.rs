@@ -194,6 +194,14 @@ impl Config {
                 factory.worker_memory_high_gib.to_string(),
             ),
             (
+                "factory.render_max_fps".to_string(),
+                factory.render_max_fps.to_string(),
+            ),
+            (
+                "factory.render_unfocused_fps".to_string(),
+                factory.render_unfocused_fps.to_string(),
+            ),
+            (
                 "factory.warn_stale_assignment".to_string(),
                 factory.warn_stale_assignment.to_string(),
             ),

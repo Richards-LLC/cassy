@@ -188,6 +188,23 @@ impl Config {
                         "Invalid integer value for factory.worker_memory_high_gib: {value}"
                     )))?;
             }
+            "factory.render_max_fps" | "factory.render_unfocused_fps" => {
+                let fps: u32 = value
+                    .parse()
+                    .ok()
+                    .filter(|fps| (1..=120).contains(fps))
+                    .ok_or_else(|| {
+                        MemError::Parse(format!(
+                            "Invalid value for {key}: {value} (expected 1..=120 frames per second)"
+                        ))
+                    })?;
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                if key == "factory.render_max_fps" {
+                    factory.render_max_fps = fps;
+                } else {
+                    factory.render_unfocused_fps = fps;
+                }
+            }
             "factory.spawn_min_free_gib" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.spawn_min_free_gib = value.parse().map_err(|_| {

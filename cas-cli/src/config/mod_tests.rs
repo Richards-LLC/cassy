@@ -950,6 +950,8 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.commander_mirror_enabled", "false", "false"),
         ("factory.max_concurrent_builders", "3", "3"),
         ("factory.worker_memory_high_gib", "6", "6"),
+        ("factory.render_max_fps", "12", "12"),
+        ("factory.render_unfocused_fps", "3", "3"),
         ("factory.spawn_min_free_gib", "30", "30"),
         ("factory.prompt_retention_days", "14", "14"),
         ("factory.event_telemetry_retention_days", "30", "30"),

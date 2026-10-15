@@ -114,6 +114,8 @@ impl Config {
             "factory.commander_mirror_enabled" => Some(factory.commander_mirror_enabled.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
             "factory.worker_memory_high_gib" => Some(factory.worker_memory_high_gib.to_string()),
+            "factory.render_max_fps" => Some(factory.render_max_fps.to_string()),
+            "factory.render_unfocused_fps" => Some(factory.render_unfocused_fps.to_string()),
             "factory.warn_stale_assignment" => Some(factory.warn_stale_assignment.to_string()),
             "factory.block_stale_assignment" => Some(factory.block_stale_assignment.to_string()),
             "factory.stale_threshold_commits" => Some(factory.stale_threshold_commits.to_string()),

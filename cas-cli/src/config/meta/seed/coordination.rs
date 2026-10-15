@@ -220,6 +220,34 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.render_max_fps",
+        section: "factory",
+        name: "Factory TUI Output Frame Cap (focused pane)",
+        description: "Most frames per second the factory TUI draws for output from the focused pane. Input echo and layout changes are drawn at once; read when the factory daemon starts.",
+        value_type: ConfigType::Int,
+        default: "15",
+        constraint: Constraint::Range(1, 120),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "tui", "render", "fps", "frames", "terminal", "latency"],
+        use_cases: &["Lower the repaint rate when the host terminal is busy painting worker output"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.render_unfocused_fps",
+        section: "factory",
+        name: "Factory TUI Output Frame Cap (other panes)",
+        description: "Most frames per second the factory TUI draws for output from visible panes other than the focused one. Panes not on screen never draw. The two caps add up, so output frames reach at most render_max_fps + render_unfocused_fps per second (20 by default); read when the factory daemon starts.",
+        value_type: ConfigType::Int,
+        default: "5",
+        constraint: Constraint::Range(1, 120),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "tui", "render", "fps", "frames", "terminal", "workers"],
+        use_cases: &["Keep busy worker panes from repainting the whole factory TUI"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.spawn_min_free_gib",
         section: "factory",
         name: "Worker Spawn Minimum Free Space (GiB)",

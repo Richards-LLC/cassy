@@ -3543,8 +3543,8 @@ impl FactoryDaemon {
                     );
                 }
                 NormalDeliveryProbeAction::FlagSupervisor => {
-                    if let Ok(Some(row)) = queue.queued_prompt(row_id) {
-                        match self.message_attention_decisions(queue, &[row]).get(&row_id) {
+                    match queue.queued_prompt(row_id) {
+                        Ok(Some(row)) => match self.message_attention_decisions(queue, &[row]).get(&row_id) {
                             Some(MessageAttention::Satisfied) => {
                                 self.normal_delivery_probes.remove(&row_id);
                                 continue;
@@ -3556,6 +3556,16 @@ impl FactoryDaemon {
                                 }
                                 continue;
                             }
+                        },
+                        Ok(None) => {
+                            self.normal_delivery_probes.remove(&row_id);
+                            continue;
+                        }
+                        Err(_) => {
+                            if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
+                                probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
+                            }
+                            continue;
                         }
                     }
                     // A supervisor pane is not a worker-health incident. The

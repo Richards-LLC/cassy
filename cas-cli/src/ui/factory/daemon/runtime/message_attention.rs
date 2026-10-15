@@ -18,10 +18,22 @@ fn informational_approval(row: &cas_store::QueuedPrompt) -> bool {
             || text.contains("i'll merge")
             || text.contains("i merge")
             || text.contains("awaiting ci"))
-        && !text.contains("re-close now")
-        && !text.contains("task action=close")
-        && !text.contains("action=start")
-        && !text.contains("please ")
+        && ![
+            "re-close now",
+            "reclose now",
+            "action=close",
+            "action=start",
+            "please ",
+            "rebase ",
+            "run ",
+            "fix ",
+            "implement ",
+            "resume ",
+            "stop ",
+            "start ",
+        ]
+        .iter()
+        .any(|instruction| text.contains(instruction))
 }
 
 fn close_instruction_tasks(prompt: &str) -> Vec<String> {
@@ -76,8 +88,8 @@ impl FactoryDaemon {
                 })
                 .max_by_key(|agent| agent.registered_at);
             let Some(recipient) = recipient else {
-                // An unregistered/removed recipient cannot act on an unread notice.
-                decisions.insert(row.id, MessageAttention::Satisfied);
+                // Missing registry state is not proof of either shutdown or read.
+                decisions.insert(row.id, MessageAttention::Unknown);
                 continue;
             };
             if recipient.status == cas_types::AgentStatus::Shutdown {

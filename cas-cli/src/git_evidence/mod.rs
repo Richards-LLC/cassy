@@ -10,6 +10,14 @@ pub(crate) mod measurement;
 
 use measurement::CommandExt as _;
 
+/// A `git` command, reported to the daemon's blocking-call guard when it is
+/// built on an io or control lane (factory loop v2 §6.6, cas-6931).
+#[track_caller]
+fn lane_git() -> std::process::Command {
+    cas_store::lane_guard::note_blocking_call(cas_store::lane_guard::BlockingKind::Command, "git");
+    std::process::Command::new("git")
+}
+
 /// cas-cf64 (P3, option-injection hardening): `true` when `name` is safe to
 /// pass as a git ref/branch-name argument to a git subcommand.
 ///
@@ -33,8 +41,7 @@ pub(crate) fn is_safe_git_refname(name: &str) -> bool {
 /// operation, so verify both object existence and commit shape with
 /// `git cat-file -e <refname>^{commit}`.
 pub(crate) fn git_ref_exists(repo_path: &std::path::Path, refname: &str) -> bool {
-    use std::process::Command;
-    Command::new("git")
+    lane_git()
         .args(["cat-file", "-e", "--", &format!("{refname}^{{commit}}")])
         .current_dir(repo_path)
         .measurement_output()
@@ -48,8 +55,7 @@ pub(crate) fn git_ref_exists(repo_path: &std::path::Path, refname: &str) -> bool
 /// failure — used by the cas-4b3f factory-branch-anchor snapshot, where an
 /// unresolvable ref simply means "nothing to anchor yet", not an error.
 pub(crate) fn resolve_branch_sha(repo_path: &std::path::Path, refname: &str) -> Option<String> {
-    use std::process::Command;
-    let out = Command::new("git")
+    let out = lane_git()
         .args(["rev-parse", "--verify", refname])
         .current_dir(repo_path)
         .measurement_output()
@@ -71,14 +77,12 @@ pub(crate) fn resolve_ref_commit_sha(
     repo_path: &std::path::Path,
     reference: &str,
 ) -> Option<String> {
-    use std::process::Command;
-
     if !is_safe_git_refname(reference) {
         return None;
     }
 
     let commit = format!("{reference}^{{commit}}");
-    let out = Command::new("git")
+    let out = lane_git()
         .args(["rev-parse", "--verify", &commit])
         .current_dir(repo_path)
         .output()
@@ -95,8 +99,7 @@ pub(crate) fn git_merge_base(
     left: &str,
     right: &str,
 ) -> Option<String> {
-    use std::process::Command;
-    let out = Command::new("git")
+    let out = lane_git()
         .args(["merge-base", left, right])
         .current_dir(repo_path)
         .measurement_output()
@@ -117,7 +120,7 @@ pub(crate) fn git_commit_is_ancestor(
     commit: &str,
     descendant: &str,
 ) -> bool {
-    std::process::Command::new("git")
+    lane_git()
         .arg("-C")
         .arg(repo_path)
         .args(["merge-base", "--is-ancestor", commit, descendant])
@@ -128,7 +131,7 @@ pub(crate) fn git_commit_is_ancestor(
 
 /// Number of parents of `commit`, or 0 when git cannot answer.
 pub(crate) fn git_commit_parent_count(repo_path: &std::path::Path, commit: &str) -> usize {
-    let out = match std::process::Command::new("git")
+    let out = match lane_git()
         .arg("-C")
         .arg(repo_path)
         .args(["rev-list", "--parents", "-n", "1", commit])
@@ -147,7 +150,7 @@ pub(crate) fn git_commit_parent_count(repo_path: &std::path::Path, commit: &str)
 /// The blob a commit's tree holds at `path`: `Some(None)` when the path is
 /// absent, `None` when Git cannot answer (which never proves anything).
 pub(crate) fn tree_path_blob(repo_path: &std::path::Path, commit: &str, path: &str) -> Option<Option<String>> {
-    let output = std::process::Command::new("git")
+    let output = lane_git()
         .args(["ls-tree", "-z", commit, "--", path])
         .current_dir(repo_path)
         .output()
@@ -223,11 +226,11 @@ pub(crate) enum BoundedFetch {
 /// Run one `git fetch` with no prompt, no output and a hard deadline of
 /// [`FETCH_TIMEOUT`]; the shared runner for every close-time fetch.
 pub(crate) fn run_bounded_git_fetch(repo_path: &std::path::Path, args: &[&str]) -> BoundedFetch {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::Instant;
 
     if let Some(deadline) = measurement::deadline() {
-        let mut command = Command::new("git");
+        let mut command = lane_git();
         command
             .args(args)
             .current_dir(repo_path)
@@ -242,7 +245,7 @@ pub(crate) fn run_bounded_git_fetch(repo_path: &std::path::Path, args: &[&str]) 
         };
     }
 
-    let mut child = match Command::new("git")
+    let mut child = match lane_git()
         .args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -304,7 +307,6 @@ pub(crate) fn known_unmerged_factory_commits(
     factory_branch: &str,
     parent_branch: &str,
 ) -> KnownUnmergedCount {
-    use std::process::Command;
 
     if !is_safe_git_refname(factory_branch) || !is_safe_git_refname(parent_branch) {
         // Corrupted/injection input: not KnownZero. Surface as positive so
@@ -318,7 +320,7 @@ pub(crate) fn known_unmerged_factory_commits(
         return KnownUnmergedCount::Unknown;
     }
 
-    let merge_base_out = Command::new("git")
+    let merge_base_out = lane_git()
         .args(["merge-base", parent_branch, factory_branch])
         .current_dir(repo_path)
         .measurement_output();
@@ -333,7 +335,7 @@ pub(crate) fn known_unmerged_factory_commits(
         _ => return KnownUnmergedCount::Unknown,
     };
 
-    let count_out = Command::new("git")
+    let count_out = lane_git()
         .args([
             "rev-list",
             "--count",
@@ -356,7 +358,7 @@ pub(crate) fn known_unmerged_factory_commits(
 
 /// Trimmed stdout of `git <args>` in `repo`, or `None` when Git fails.
 pub(crate) fn git_text(repo: &std::path::Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = lane_git()
         .args(args)
         .current_dir(repo)
         .output()

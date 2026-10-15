@@ -2375,6 +2375,11 @@ impl FactoryDaemon {
             self.session_name.clone(),
             std::sync::Arc::clone(&self.shutdown),
         );
+        // cas-6931 (factory loop v2 §6): this thread is the daemon's io and
+        // control lane. Steps marked below and inside the prompt queue and
+        // the director apply reach the watchdog, and blocking calls made on
+        // this thread are reported (report mode).
+        let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
         // GH #1165: store writes whose result the loop does not need on the
         // spot run on one ordered background thread, and the task-sync repair
@@ -2462,6 +2467,8 @@ impl FactoryDaemon {
                     }
                 }
                 let _ = self.process_prompt_queue().await;
+                // The pass's sub-steps end here (cas-6931).
+                loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
                 // cas-ecff: auto-drain pending lifecycle outbox (durable
                 // task_lifecycle rows with prompt_delivered_at unset) so
                 // partial failures recover without re-running task mutations.
@@ -2851,7 +2858,12 @@ impl FactoryDaemon {
             }
 
             let spawning = self.app.spawning_count > 0;
+            // cas-6931: the watchdog's badge (worst slow step, or a live job
+            // wedge). It changes at most once a second. This loop cannot show
+            // its own wedge: when it gets here, the wedge is over.
+            let loop_health_changed = self.app.set_loop_health(loop_progress.status_line());
             let dirty = had_output
+                || loop_health_changed
                 || input_activity
                 || gui_activity
                 || ws_activity

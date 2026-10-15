@@ -231,3 +231,73 @@ async fn shutdown_stops_the_worker_even_when_retirement_must_wait_cas_00d5() {
         shutdown_row_state(&cas_dir, request_id)
     );
 }
+
+/// cas-981e (GH #1185): a `clear_context` recycle runs the same shutdown, so
+/// under a spent pass budget it used to abort before stopping the worker and
+/// reported nothing: the worker kept its old context and the supervisor never
+/// heard back. The old process must stop, and an outcome must reach both the
+/// queue row and the supervisor. The recipe here is refused by routing policy
+/// after the old worker stops, so the test exercises the failure report
+/// without launching a real harness.
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_under_a_spent_budget_stops_the_old_worker_and_reports_its_outcome_cas_981e() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    let name = "idle-codex";
+    register_idle_worker(&cas_dir, name);
+    let pane = idle_worker_pane(name, cas_mux::SupervisorCli::Codex);
+    let pid = pane
+        .process_group_id()
+        .expect("the PTY child leads its group");
+    daemon.app.adopt_worker_pane_for_test(pane);
+
+    let refused = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Claude,
+        model: Some("claude-haiku-4-5".to_string()),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    let queue = open_spawn_queue_store(&cas_dir).unwrap();
+    let request_id = queue
+        .enqueue_recycle(
+            name,
+            Some(&serde_json::to_string(&refused).unwrap()),
+            Some(SESSION),
+        )
+        .unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+
+    let lock = hold_write_lock(&cas_dir, Duration::from_millis(300));
+    {
+        let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
+        daemon.process_pending_spawns().await;
+    }
+    lock.join().unwrap();
+
+    assert!(
+        wait_until(Duration::from_secs(5), || !alive(pid)),
+        "the recycle's shutdown half must stop the old worker"
+    );
+    assert!(
+        wait_until(Duration::from_secs(15), || shutdown_row_state(
+            &cas_dir, request_id
+        )
+        .0
+        .as_deref()
+            == Some(SpawnLifecycleState::Failed.as_str())),
+        "the recycle row names its failure: {:?}",
+        shutdown_row_state(&cas_dir, request_id)
+    );
+    let prompts = open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(15), || prompts
+            .peek_all(50)
+            .unwrap()
+            .iter()
+            .any(|row| row.target == daemon.app.supervisor_name()
+                && row.prompt.contains(&format!("request {request_id}"))
+                && row.prompt.contains(name))),
+        "the supervisor is told the recycle failed"
+    );
+}

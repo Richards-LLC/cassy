@@ -651,3 +651,91 @@ async fn worker_parks_without_a_fast_rows_receipt_and_merge_gate_still_refuses_c
     assert!(again.contains("MERGE REQUIRED"), "unmerged work must not close: {again}");
     assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
 }
+
+/// Release preparation used a suffixed promotion branch, while the worker's
+/// plain lane still holds another task. The canonical task branch never existed.
+fn promotion_receipt(f: &Fixture, id: &str) -> (String, String) {
+    let mut task = assigned(id, TaskType::Chore, "main");
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PROOF.into());
+    f.put(&task);
+    claim(f, id);
+    let promo = format!("{LANE}-{id}-promo");
+    git(f.dir.path(), &["checkout", "-q", "-b", &promo, "main"]);
+    std::fs::write(f.dir.path().join("release.md"), "promotion receipt\n").unwrap();
+    git(f.dir.path(), &["add", "release.md"]);
+    git(f.dir.path(), &["commit", "-q", "-m", &format!("chore({id}): prepare promotion")]);
+    git(f.dir.path(), &["push", "-q", "origin", &promo]);
+    let receipt = git(f.dir.path(), &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["checkout", "-q", "main"]);
+    git(f.dir.path(), &["merge", "-q", "--no-ff", &promo, "-m", &format!("Merge promotion {id}")]);
+    git(f.dir.path(), &["push", "-q", "origin", "main"]);
+    (receipt, promo)
+}
+
+#[tokio::test]
+async fn merged_promotion_receipt_closes_without_canonical_branch_gh1202() {
+    for remove_promo in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let id = "cas-b302";
+        let (receipt, promo) = promotion_receipt(&f, id);
+        if remove_promo {
+            git(f.dir.path(), &["branch", "-D", &promo]);
+            git(f.dir.path(), &["push", "-q", "origin", "--delete", &promo]);
+        }
+        let response = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Promotion shipped",
+            "commit_receipt": receipt, "merged_into": "main", "external_ref": PROOF,
+        })).await;
+        assert_closed_without_lane(&f, id, &response);
+        assert!(!f.task(id).deliverables.merge_conflicted, "{response}");
+    }
+}
+
+#[tokio::test]
+async fn wrong_target_promotion_receipt_refuses_before_parking_gh1202() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "staging");
+    let id = "cas-b303";
+    let (receipt, promo) = promotion_receipt(&f, id);
+    git(f.dir.path(), &["branch", "-D", &promo]);
+    git(f.dir.path(), &["push", "-q", "origin", "--delete", &promo]);
+    let mut task = f.task(id);
+    task.deliverables.work_target.as_mut().unwrap().target_branch = "staging".into();
+    f.put(&task);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Promotion shipped to main",
+        "commit_receipt": receipt, "merged_into": "main", "external_ref": PROOF,
+    })).await;
+    assert!(response.contains("not an ancestor of staging"), "{response}");
+    let rejected = f.task(id);
+    assert_eq!(rejected.status, TaskStatus::InProgress, "{response}");
+    assert!(rejected.deliverables.parked_branch.is_none(), "{response}");
+    assert!(rejected.deliverables.factory_branch_anchor.is_none(), "{response}");
+    assert!(!rejected.deliverables.merge_conflicted, "{response}");
+    assert!(!response.contains("merge-tree"), "{response}");
+}
+
+#[tokio::test]
+async fn empty_promotion_receipt_refuses_before_parking_gh1202() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-b304";
+    let (_, promo) = promotion_receipt(&f, id);
+    git(f.dir.path(), &["branch", "-D", &promo]);
+    git(f.dir.path(), &["push", "-q", "origin", "--delete", &promo]);
+    git(f.dir.path(), &["commit", "-q", "--allow-empty", "-m", "empty receipt"]);
+    let receipt = git(f.dir.path(), &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["push", "-q", "origin", "main"]);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Promotion shipped",
+        "commit_receipt": receipt, "merged_into": "main", "external_ref": PROOF,
+    })).await;
+    assert!(response.contains("empty file diff"), "{response}");
+    let rejected = f.task(id);
+    assert_eq!(rejected.status, TaskStatus::InProgress, "{response}");
+    assert!(rejected.deliverables.parked_branch.is_none(), "{response}");
+    assert!(rejected.deliverables.factory_branch_anchor.is_none(), "{response}");
+    assert!(!rejected.deliverables.merge_conflicted, "{response}");
+}

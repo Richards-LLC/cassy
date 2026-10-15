@@ -2352,6 +2352,14 @@ fn worker_pattern_kill_group(group: &[Vec<String>], piped: bool, depth: usize) -
     let mut signals = false;
     let mut dynamic_signal = false;
     for words in group {
+        // env -S's executable lives inside its split string; the ordinary
+        // wrapper resolver can legitimately return None for this statement.
+        if depth < 4
+            && let Some(script) = env_split_string_payload(words)
+            && worker_command_pattern_kill_at_depth(&script, depth + 1)
+        {
+            return true;
+        }
         let Some(index) = unwrapped_command_index(words) else { continue };
         let name = shell_word_basename(&words[index]);
         let args = &words[index + 1..];
@@ -2387,12 +2395,6 @@ fn worker_pattern_kill_group(group: &[Vec<String>], piped: bool, depth: usize) -
                 }
             }
             _ => {}
-        }
-        if depth < 4
-            && let Some(script) = env_split_string_payload(words)
-            && worker_command_pattern_kill_at_depth(&script, depth + 1)
-        {
-            return true;
         }
     }
     searches && signals && (piped || dynamic_signal)

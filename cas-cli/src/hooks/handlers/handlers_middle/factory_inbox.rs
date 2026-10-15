@@ -166,8 +166,18 @@ fn factory_session() -> Option<String> {
 /// by design: a hook that errors is a hook the harness may disable, and losing
 /// prompt capture to a queue problem would be a worse bug than the one this
 /// fixes.
+///
+/// cas-1f0c: the rendered bodies fit [`cas_store::HOOK_SURFACE_BUDGET_CHARS`];
+/// a row that does not fit stays unread and the block says so.
 pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Option<String> {
-    surface_factory_inbox_with_transport_delivery(cas_root, input, Surfacing::TurnStart)
+    let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+    surface_factory_inbox_with_transport_delivery(
+        cas_root,
+        input,
+        Surfacing::TurnStart,
+        &mut budget,
+    )
+    .and_then(|outcome| outcome.text)
 }
 
 /// The turn a tool-boundary surfacing runs inside, read from the transcript.
@@ -183,25 +193,139 @@ pub(crate) struct CurrentTurn<'a> {
 /// excluded (cas-9568). A row handed off after the turn began reached a busy
 /// recipient mid-turn and is surfaced now, within one tool call, unless its
 /// body is the turn's own prompt. Without a known turn only unmarked rows are
-/// eligible.
+/// eligible. Rendered bodies spend `budget` (cas-1f0c).
 pub(crate) fn surface_factory_inbox_after_tool_result(
     cas_root: Option<&Path>,
     input: &HookInput,
     turn: Option<CurrentTurn<'_>>,
+    budget: &mut usize,
 ) -> Option<String> {
-    surface_factory_inbox_with_transport_delivery(cas_root, input, Surfacing::ToolBoundary(turn))
+    surface_factory_inbox_with_transport_delivery(
+        cas_root,
+        input,
+        Surfacing::ToolBoundary(turn),
+        budget,
+    )
+    .and_then(|outcome| outcome.text)
+}
+
+/// cas-1f0c: what one hook's additional context may hold in total. Claude
+/// Code keeps hook context whole only up to about 10,000 characters and shows
+/// a short preview past that. Mail is bounded by
+/// [`cas_store::HOOK_SURFACE_BUDGET_CHARS`] plus its frames and notes; the
+/// rest (supervisor reminder, ambient recall) must fit what is left.
+pub(crate) const HOOK_CONTEXT_CAP_CHARS: usize = 9_500;
+
+/// cas-1f0c: what a hook's mail block may spend beyond its bodies: the
+/// header and the notes (already shown, withdrawn, not shown, sent in full).
+pub(crate) const HOOK_MAIL_NOTES_RESERVE_CHARS: usize = 1_500;
+
+/// cas-1f0c: the body budget for a hook whose output already carries
+/// `reserved` characters of other context (PostToolUse lessons and
+/// guardrail warnings), so bodies, notes and that context stay within
+/// [`HOOK_CONTEXT_CAP_CHARS`] together.
+pub(crate) fn hook_body_budget(reserved: usize) -> usize {
+    cas_store::HOOK_SURFACE_BUDGET_CHARS.min(
+        HOOK_CONTEXT_CAP_CHARS.saturating_sub(reserved + HOOK_MAIL_NOTES_RESERVE_CHARS),
+    )
+}
+
+/// cas-1f0c: append `addition` to a hook's context only if the whole, plus
+/// `reserved` characters of other context in the same output, stays within
+/// [`HOOK_CONTEXT_CAP_CHARS`]. Returns whether it was appended.
+pub(crate) fn push_within_hook_cap(context: &mut String, addition: &str, reserved: usize) -> bool {
+    let separator = if context.is_empty() { 0 } else { 2 };
+    if reserved + context.chars().count() + separator + addition.chars().count()
+        > HOOK_CONTEXT_CAP_CHARS
+    {
+        return false;
+    }
+    if separator > 0 {
+        context.push_str("\n\n");
+    }
+    context.push_str(addition);
+    true
+}
+
+/// cas-1f0c: build optional context after mail was already receipted. A
+/// panic here must not take the rendered mail down with the hook process.
+pub(crate) fn after_mail<T>(build: impl FnOnce() -> Option<T>) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(build))
+        .ok()
+        .flatten()
+}
+
+/// cas-1f0c: what one hook surfacing did.
+pub(crate) struct SurfacingOutcome {
+    /// The `[incoming messages]` block, if anything was shown or noted.
+    pub text: Option<String>,
+    /// Every row the surfacing selected was resolved: shown, withdrawn, or
+    /// too long for any hook (a Claude Teams copy then carries the body).
+    /// `false` when a drain failed or a row only lacked room this time, so a
+    /// later tool boundary retries.
+    pub complete: bool,
+}
+
+/// cas-1f0c: surface, at a tool boundary, the rows this turn's own prompt
+/// names with a `CAS wake: message N` pointer.
+///
+/// A Claude Teams inbox carries a pointer instead of the body, and the
+/// teammate-message turn it starts fires no UserPromptSubmit, so the body
+/// would otherwise reach the agent only by its own `inbox_poll`. The same
+/// path recovers a pointer-woken turn whose turn-start hook failed or ran out
+/// of room. Rows already shown are not drained again (the store's receipt
+/// decides), so this never duplicates a body.
+///
+/// `first_boundary` is true at the first tool boundary of a turn no
+/// UserPromptSubmit served. Only then does the block carry the turn-start
+/// notes (already shown, withdrawn, did not fit), which no hook has given
+/// yet; an `[already shown]` note can also come from a `[cas #N …]` envelope.
+pub(crate) fn surface_turn_prompt_rows(
+    cas_root: &Path,
+    input: &HookInput,
+    prompt: &str,
+    first_boundary: bool,
+    budget: &mut usize,
+) -> Option<SurfacingOutcome> {
+    if !names_wake_pointer(prompt) && !(first_boundary && !envelope_ids(prompt).is_empty()) {
+        return None;
+    }
+    surface_factory_inbox_with_transport_delivery(
+        Some(cas_root),
+        input,
+        Surfacing::TurnPrompt {
+            prompt,
+            notes: first_boundary,
+        },
+        budget,
+    )
+}
+
+/// cas-1f0c: whether `prompt` names any row by a pointer wake. Reads no store.
+pub(crate) fn names_wake_pointer(prompt: &str) -> bool {
+    !wake_named_ids(prompt).is_empty()
 }
 
 enum Surfacing<'a> {
     TurnStart,
     ToolBoundary(Option<CurrentTurn<'a>>),
+    /// cas-1f0c: a tool boundary handling the rows its turn's prompt names.
+    TurnPrompt { prompt: &'a str, notes: bool },
 }
+
+const TURN_START_HEADER: &str = "The following message(s) arrived while you were not in a turn. \
+     They are delivered here once — act on them now.";
+const TOOL_BOUNDARY_HEADER: &str = "The following message(s) arrived while you were working. \
+     They are delivered here once — read them before your next step.";
+const TURN_PROMPT_HEADER: &str = "The following message(s) are the ones this turn's CAS wake \
+     names. They are delivered here once — act on them now.";
 
 fn surface_factory_inbox_with_transport_delivery(
     cas_root: Option<&Path>,
     input: &HookInput,
     surfacing: Surfacing<'_>,
-) -> Option<String> {
+    budget: &mut usize,
+) -> Option<SurfacingOutcome> {
     if !owns_factory_inbox(input) {
         return None;
     }
@@ -214,131 +338,254 @@ fn surface_factory_inbox_with_transport_delivery(
     let queue = crate::store::open_prompt_queue_store(cas_root).ok()?;
     let task_store = crate::store::open_task_store_local(cas_root).ok();
 
-    let wake_ids = match &surfacing {
-        Surfacing::TurnStart => wake_named_ids(input.submitted_prompt().unwrap_or_default()),
-        Surfacing::ToolBoundary(_) => Vec::new(),
+    let turn_prompt = match &surfacing {
+        Surfacing::TurnStart => Some(input.submitted_prompt().unwrap_or_default()),
+        Surfacing::TurnPrompt { prompt, .. } => Some(*prompt),
+        Surfacing::ToolBoundary(_) => None,
     };
+    let wake_ids = turn_prompt.map(wake_named_ids).unwrap_or_default();
+    // Turn-start notes go to the first hook that serves a turn: UserPromptSubmit,
+    // or the first tool boundary of a teammate turn that fired none.
+    let notes = matches!(
+        surfacing,
+        Surfacing::TurnStart | Surfacing::TurnPrompt { notes: true, .. }
+    );
     // cas-7ce4: read before this turn's drain, so only an earlier surfacing
     // counts as "already shown".
-    let already_shown = match &surfacing {
-        Surfacing::TurnStart => already_surfaced_envelopes(
-            &*queue,
-            input.submitted_prompt().unwrap_or_default(),
-            &aliases,
-        ),
-        Surfacing::ToolBoundary(_) => Vec::new(),
+    let already_shown = if notes {
+        already_surfaced_envelopes(&*queue, turn_prompt.unwrap_or_default(), &aliases)
+    } else {
+        Vec::new()
     };
     let mut rows: Vec<QueuedPrompt> = Vec::new();
+    let mut over_budget: Vec<(i64, usize)> = Vec::new();
+    let mut withheld: Vec<i64> = Vec::new();
+    let mut drain_failed = false;
     for alias in &aliases {
-        let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
-        if remaining == 0 {
-            break;
-        }
-        let found = match &surfacing {
+        let drains = match &surfacing {
             // cas-ad92: a pointer wake names the row whose body the harness
             // holds back until the next turn boundary; surface it into the
             // wake turn first, over the daemon's transport claim.
-            Surfacing::TurnStart => queue
-                .surface_wake_named_for_recipient(alias, session.as_deref(), &wake_ids)
-                .and_then(|mut named| {
-                    let left = remaining.saturating_sub(named.len());
-                    named.extend(queue.surface_unseen_for_recipient(
-                        alias,
-                        session.as_deref(),
-                        left,
-                    )?);
-                    Ok(named)
-                }),
-            Surfacing::ToolBoundary(Some(turn)) => queue
-                .surface_unseen_for_recipient_delivered_after(
-                    alias,
-                    session.as_deref(),
-                    remaining,
-                    turn.started_at,
-                ),
-            Surfacing::ToolBoundary(None) => queue
-                .surface_unseen_for_recipient_without_transport_delivery(
-                    alias,
-                    session.as_deref(),
-                    remaining,
-                ),
-        };
-        match found {
-            Ok(found) => {
-                for row in found {
-                    // Transport-delivered rows remain eligible for this hook
-                    // so a wake the harness dropped can recover. Revalidate
-                    // assignment/start boilerplate before rendering it: the
-                    // task may have moved beyond Open while the row waited.
-                    if task_store.as_ref().is_some_and(|store| {
-                        assignment_is_stale_for_recipient(store.as_ref(), &row, alias)
-                    }) {
-                        tracing::info!(
-                            target: "cas::coordination",
-                            stage = "suppress_stale_assignment_at_hook_surface",
-                            prompt_id = row.id,
-                            recipient = %alias,
-                            "cas-7c1a: withheld stale assignment boilerplate from turn-start surfacing"
-                        );
-                        continue;
-                    }
-                    // A supervisor's two aliases are two distinct recipient
-                    // keys in the receipt table, so a broadcast row can come
-                    // back from both. Injecting it twice into one turn is the
-                    // duplicate this task must not create.
-                    if rows.iter().any(|existing| existing.id == row.id) {
-                        continue;
-                    }
-                    // A row injected as this turn's own prompt is already in
-                    // front of the model; its receipt is now correct, and
-                    // rendering it again would duplicate it.
-                    if let Surfacing::ToolBoundary(Some(turn)) = &surfacing
-                        && !row.prompt.trim().is_empty()
-                        && turn.prompt.contains(row.prompt.trim())
-                    {
-                        continue;
-                    }
-                    rows.push(row);
-                }
+            Surfacing::TurnStart => vec![
+                cas_store::HookDrain::WakeNamed(&wake_ids),
+                cas_store::HookDrain::Unseen,
+            ],
+            Surfacing::ToolBoundary(Some(turn)) => {
+                vec![cas_store::HookDrain::DeliveredAfter(turn.started_at)]
             }
-            Err(error) => {
-                tracing::debug!(
-                    target: "cas::coordination",
-                    recipient = %alias,
-                    %error,
-                    "cas-7a01: turn-start inbox surfacing failed"
-                );
+            Surfacing::ToolBoundary(None) => vec![cas_store::HookDrain::WithoutTransport],
+            Surfacing::TurnPrompt { .. } => vec![cas_store::HookDrain::WakeNamed(&wake_ids)],
+        };
+        for drain in drains {
+            let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
+            if remaining == 0 {
+                break;
+            }
+            let found = match queue.surface_for_recipient_within_budget(
+                alias,
+                session.as_deref(),
+                drain,
+                remaining,
+                *budget,
+            ) {
+                Ok(found) => found,
+                Err(error) => {
+                    drain_failed = true;
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        recipient = %alias,
+                        %error,
+                        "cas-7a01: turn-start inbox surfacing failed"
+                    );
+                    continue;
+                }
+            };
+            over_budget.extend(found.over_budget);
+            for row in found.rows {
+                // Transport-delivered rows remain eligible for this hook
+                // so a wake the harness dropped can recover. Revalidate
+                // assignment/start boilerplate before rendering it: the
+                // task may have moved beyond Open while the row waited.
+                if task_store.as_ref().is_some_and(|store| {
+                    assignment_is_stale_for_recipient(store.as_ref(), &row, alias)
+                }) {
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "suppress_stale_assignment_at_hook_surface",
+                        prompt_id = row.id,
+                        recipient = %alias,
+                        "cas-7c1a: withheld stale assignment boilerplate from turn-start surfacing"
+                    );
+                    withheld.push(row.id);
+                    continue;
+                }
+                // A supervisor's two aliases are two distinct recipient
+                // keys in the receipt table, so a broadcast row can come
+                // back from both. Injecting it twice into one turn is the
+                // duplicate this task must not create.
+                if rows.iter().any(|existing| existing.id == row.id) {
+                    continue;
+                }
+                // A row injected as this turn's own prompt is already in
+                // front of the model; its receipt is now correct, and
+                // rendering it again would duplicate it.
+                if let Surfacing::ToolBoundary(Some(turn)) = &surfacing
+                    && !row.prompt.trim().is_empty()
+                    && turn.prompt.contains(row.prompt.trim())
+                {
+                    continue;
+                }
+                *budget = budget.saturating_sub(cas_store::hook_surface_cost(&row.prompt));
+                rows.push(row);
             }
         }
     }
+    over_budget.sort_unstable();
+    over_budget.dedup_by_key(|(id, _)| *id);
+    over_budget.retain(|(id, _)| !rows.iter().any(|row| row.id == *id));
+    // A row that would fit an empty block only lacked room this time.
+    let complete = !drain_failed
+        && over_budget
+            .iter()
+            .all(|(_, cost)| *cost > cas_store::HOOK_SURFACE_BUDGET_CHARS);
 
-    let repeat_note = already_shown_note(&already_shown);
-    if rows.is_empty() {
-        return repeat_note;
+    let mut block_notes: Vec<String> = Vec::new();
+    if notes {
+        block_notes.extend(already_shown_note(&already_shown));
+        // cas-1f0c: the wake promised this turn the body or a reason.
+        let withdrawn: Vec<i64> = withheld
+            .iter()
+            .copied()
+            .filter(|id| wake_ids.contains(id))
+            .collect();
+        block_notes.extend(withdrawn_note(&withdrawn));
+        block_notes.extend(over_budget_note(&over_budget));
+        // cas-1f0c: a named row whose full body was re-sent as a Teams copy
+        // is not rendered here (the copy carries it).
+        let sent_in_full: Vec<i64> = wake_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                !rows.iter().any(|row| row.id == *id)
+                    && !already_shown.contains(id)
+                    && aliases.iter().any(|alias| {
+                        queue
+                            .teams_body_fallback_claimed(*id, alias)
+                            .unwrap_or(false)
+                    })
+            })
+            .collect();
+        block_notes.extend(sent_in_full_note(&sent_in_full));
     }
-    // cas-3bf1 (GH #176): a surfacing retires the row for the WHOLE identity,
-    // not just the alias that happened to fetch it. Without this, a row drained
-    // under `warm-jaguar-96` keeps no receipt under `supervisor`, so the other
-    // reader re-injects it on a later turn — and the in-turn dedupe above only
-    // covers duplicates WITHIN one turn, never across them.
-    crate::harness_policy::mirror_receipts_across_aliases_with_source(
-        &*queue,
-        &rows,
-        &aliases,
-        cas_store::SurfacingSource::HookSurfaced,
-    );
-    let rendered = match surfacing {
-        Surfacing::TurnStart => render_surfaced(&rows),
-        Surfacing::ToolBoundary(_) => render_surfaced_with_header(
+    if !rows.is_empty() {
+        // cas-3bf1 (GH #176): a surfacing retires the row for the WHOLE
+        // identity, not just the alias that happened to fetch it. Without
+        // this, a row drained under `warm-jaguar-96` keeps no receipt under
+        // `supervisor`, so the other reader re-injects it on a later turn —
+        // and the in-turn dedupe above only covers duplicates WITHIN one
+        // turn, never across them.
+        crate::harness_policy::mirror_receipts_across_aliases_with_source(
+            &*queue,
             &rows,
-            "The following message(s) arrived while you were working. \
-             They are delivered here once — read them before your next step.",
-        ),
+            &aliases,
+            cas_store::SurfacingSource::HookSurfaced,
+        );
+    }
+    let header = match surfacing {
+        Surfacing::TurnStart => TURN_START_HEADER,
+        Surfacing::ToolBoundary(_) => TOOL_BOUNDARY_HEADER,
+        Surfacing::TurnPrompt { .. } => TURN_PROMPT_HEADER,
     };
-    Some(match repeat_note {
-        Some(note) => format!("{note}\n\n{rendered}"),
-        None => rendered,
+    Some(SurfacingOutcome {
+        text: render_block(&block_notes, &rows, header),
+        complete,
     })
+}
+
+/// cas-1f0c: the `[incoming messages]` block: notes first, then the rows.
+/// `None` when there is neither.
+fn render_block(notes: &[String], rows: &[QueuedPrompt], header: &str) -> Option<String> {
+    if notes.is_empty() && rows.is_empty() {
+        return None;
+    }
+    let mut out = String::from("[incoming messages]\n");
+    for note in notes {
+        out.push_str(note);
+        out.push('\n');
+    }
+    if !rows.is_empty() {
+        let rendered = render_surfaced_with_header(rows, header);
+        out.push_str(
+            rendered
+                .strip_prefix("[incoming messages]\n")
+                .unwrap_or(&rendered),
+        );
+    }
+    Some(out)
+}
+
+/// cas-1f0c: a row the wake named whose assignment no longer applies. Its
+/// receipt is written, so without this the wake's promise of a body would end
+/// in silence.
+fn withdrawn_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[withdrawn] Message {} named by this turn's CAS wake is an assignment for a task that \
+         is no longer open for you, so CAS did not show it. No action is needed.",
+        id_list(ids)
+    ))
+}
+
+/// cas-1f0c: named rows whose body the daemon's time fallback claimed to
+/// send in full as a Teams copy. A crash between claim and write leaves no
+/// copy, so the note also names `inbox_poll`.
+fn sent_in_full_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[sent in full] Message {} is sent to you in full as its own teammate message (or \
+         read it with inbox_poll notification_id=<id>).",
+        id_list(ids)
+    ))
+}
+
+/// cas-1f0c: rows left unread because their bodies did not fit this block.
+fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let (too_long, no_room): (Vec<(i64, usize)>, Vec<(i64, usize)>) = rows
+        .iter()
+        .copied()
+        .partition(|(_, cost)| *cost > cas_store::HOOK_SURFACE_BUDGET_CHARS);
+    let ids = |rows: &[(i64, usize)]| id_list(&rows.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+    let mut notes = Vec::new();
+    if !too_long.is_empty() {
+        notes.push(format!(
+            "[not shown here] Message {} is too long for this block and stays unread. Its full \
+             text comes as its own message; if it is not in your prompt, run inbox_poll \
+             notification_id=<id>.",
+            ids(&too_long)
+        ));
+    }
+    if !no_room.is_empty() {
+        notes.push(format!(
+            "[not shown here] Message {} did not fit in this block and stays unread; read it \
+             with inbox_poll notification_id=<id>.",
+            ids(&no_room)
+        ));
+    }
+    Some(notes.join("\n"))
+}
+
+fn id_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// cas-7bfa (GH #1209): record that this turn's own prompt carried queued
@@ -394,8 +641,10 @@ pub(crate) fn record_turn_prompt_envelopes(
 }
 
 /// Whether the turn `prompt` delivered queue row `id` to one of `aliases`:
-/// a direct row addressed to them, with a transport receipt, whose body text
-/// is in the prompt (cas-7bfa).
+/// a row addressed to them, directly or as a broadcast, for which one of
+/// them holds a transport receipt, and whose body text is in the prompt
+/// (cas-7bfa). cas-1f0c: the receipt is read per alias, so a broadcast's
+/// full-body Teams copy is recorded too.
 fn turn_prompt_carries_row(
     queue: &dyn cas_store::PromptQueueStore,
     prompt: &str,
@@ -408,23 +657,20 @@ fn turn_prompt_carries_row(
     let body = row.prompt.trim();
     if body.is_empty()
         || !prompt.contains(body)
-        || !aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&row.target))
+        || !(row.target == "all_workers"
+            || aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&row.target)))
     {
         return false;
     }
-    queue
-        .message_delivery_report(id)
-        .ok()
-        .flatten()
-        .is_some_and(|report| {
-            matches!(
-                report.recipient_receipt,
-                Some(
-                    cas_store::SurfacingSource::TransportClaimed
-                        | cas_store::SurfacingSource::TransportDelivered
-                )
-            )
-        })
+    aliases.iter().any(|alias| {
+        matches!(
+            queue.recipient_receipt(id, alias),
+            Ok(Some(
+                cas_store::SurfacingSource::TransportClaimed
+                    | cas_store::SurfacingSource::TransportDelivered
+            ))
+        )
+    })
 }
 
 /// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon
@@ -447,29 +693,38 @@ fn envelope_ids(prompt: &str) -> Vec<i64> {
     ids
 }
 
-/// cas-7ce4: messages this turn's prompt repeats that a hook already put in
-/// front of this agent in an earlier turn. After cas-b5ad a busy Claude worker
-/// sees a claimed message at a tool boundary, and Claude Code later renders
-/// the teams copy it held; the harness copy cannot be withdrawn (the teams
-/// layer drains its inbox file at once), so the turn says it is a repeat.
+/// cas-7ce4: messages this turn's prompt names that were already put in front
+/// of this agent before this turn: by a hook (turn start or tool boundary) or
+/// by its own `inbox_poll`. The prompt names a message by its `[cas #N …]`
+/// envelope or by a `CAS wake: message N` pointer.
+///
+/// cas-1f0c: since a Claude Teams inbox carries only a pointer, the teammate
+/// block Claude Code renders after the body was shown holds no second body;
+/// this note tells the agent the pointer is to something it already has. The
+/// receipt is read per alias, so a broadcast (`target = all_workers`, read
+/// state per recipient) is covered too.
 fn already_surfaced_envelopes(
     queue: &dyn cas_store::PromptQueueStore,
     prompt: &str,
     aliases: &[String],
 ) -> Vec<i64> {
-    envelope_ids(prompt)
-        .into_iter()
+    let mut ids = envelope_ids(prompt);
+    for id in wake_named_ids(prompt) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.into_iter()
         .filter(|id| {
-            queue
-                .message_delivery_report(*id)
-                .ok()
-                .flatten()
-                .is_some_and(|report| {
-                    report.recipient_receipt == Some(cas_store::SurfacingSource::HookSurfaced)
-                        && aliases
-                            .iter()
-                            .any(|alias| alias.eq_ignore_ascii_case(&report.target))
-                })
+            aliases.iter().any(|alias| {
+                matches!(
+                    queue.recipient_receipt(*id, alias),
+                    Ok(Some(
+                        cas_store::SurfacingSource::HookSurfaced
+                            | cas_store::SurfacingSource::InboxPoll
+                    ))
+                )
+            })
         })
         .collect()
 }
@@ -478,15 +733,11 @@ fn already_shown_note(ids: &[i64]) -> Option<String> {
     if ids.is_empty() {
         return None;
     }
-    let named = ids
-        .iter()
-        .map(|id| format!("#{id}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     Some(format!(
-        "[already shown] Message {named} in this turn's prompt was already shown to you in an \
-         earlier turn, at a tool call. This is the harness's held copy of the same message, not a \
-         new one: act on it only if you have not already."
+        "[already shown] Message {} named in this turn's prompt was already shown to you \
+         before this turn, by CAS or your own inbox_poll. This is a pointer or the harness's held \
+         copy of the same message, not a new one: act on it only if you have not already.",
+        id_list(ids)
     ))
 }
 
@@ -516,11 +767,7 @@ fn wake_named_ids(prompt: &str) -> Vec<i64> {
 /// sender and the message id for every row, because the recipient's only way
 /// to acknowledge or reply is to name that id back.
 pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
-    render_surfaced_with_header(
-        rows,
-        "The following message(s) arrived while you were not in a turn. \
-         They are delivered here once — act on them now.",
-    )
+    render_surfaced_with_header(rows, TURN_START_HEADER)
 }
 
 fn render_surfaced_with_header(rows: &[QueuedPrompt], header: &str) -> String {
@@ -610,6 +857,24 @@ mod tests {
         let rendered = render_surfaced(&[spoofed]);
         assert!(rendered.contains("[cas #82 unverified:Daniel@iphone-15 "), "{rendered}");
         assert!(!rendered.contains("in_reply_to=82"), "{rendered}");
+    }
+
+    /// cas-1f0c round 3: PostToolUse lessons and guardrail warnings share
+    /// the hook output with the mail, so they are reserved inside the cap.
+    #[test]
+    fn reserved_context_shrinks_the_body_budget_and_the_recall_room() {
+        assert_eq!(hook_body_budget(0), cas_store::HOOK_SURFACE_BUDGET_CHARS);
+        let lessons = 4_000;
+        let budget = hook_body_budget(lessons);
+        assert!(budget < cas_store::HOOK_SURFACE_BUDGET_CHARS);
+        assert!(lessons + budget + HOOK_MAIL_NOTES_RESERVE_CHARS <= HOOK_CONTEXT_CAP_CHARS);
+        assert_eq!(hook_body_budget(HOOK_CONTEXT_CAP_CHARS), 0);
+
+        let recall = "r".repeat(3_000);
+        let mut context = "m".repeat(5_000);
+        assert!(push_within_hook_cap(&mut context.clone(), &recall, 0));
+        assert!(!push_within_hook_cap(&mut context, &recall, 1_600), "lessons leave no room");
+        assert_eq!(context.len(), 5_000, "a refused addition leaves the context unchanged");
     }
 
     #[test]
@@ -744,9 +1009,10 @@ mod tests {
         }"#).unwrap();
         input.agent_role = Some("worker".into());
         let at_turn = surface_factory_inbox(Some(temp.path()), &input);
-        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None);
+        let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None, &mut budget);
         let in_turn = surface_factory_inbox_after_tool_result(Some(temp.path()), &input,
-            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }));
+            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }), &mut budget);
         assert!(at_turn.is_none() && at_tool.is_none() && in_turn.is_none(),
             "automatic hook surfacing must leave premise-sensitive nudges to the daemon");
         let queued = store.queued_prompt(id).unwrap().unwrap();

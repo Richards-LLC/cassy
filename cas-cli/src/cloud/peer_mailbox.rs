@@ -172,6 +172,71 @@ pub struct PeerEnvelope {
     pub machine: String,
     pub session: Option<String>,
     pub repo: String,
+    pub in_reply_to: Option<String>,
+    pub kind: Option<PeerMessageKind>,
+}
+
+/// A sender-selected action, independent of Cloud's authenticated identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerMessageKind {
+    Ask,
+    Blocker,
+}
+
+impl PeerMessageKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Blocker => "blocker",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ask" => Some(Self::Ask),
+            "blocker" => Some(Self::Blocker),
+            _ => None,
+        }
+    }
+}
+
+impl PeerEnvelope {
+    pub fn wakes_idle(&self) -> bool {
+        self.in_reply_to
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+            || self.kind.is_some()
+    }
+}
+
+/// Carry action intent through the existing Cloud body contract. This is
+/// routing intent, never authority: only an admitted, daemon-stamped peer
+/// envelope may use it to wake a supervisor.
+pub fn attach_message_intent(body: &str, kind: Option<&str>, blocker: bool) -> String {
+    let kind = if blocker {
+        Some(PeerMessageKind::Blocker)
+    } else {
+        kind.and_then(PeerMessageKind::parse)
+    };
+    match kind {
+        Some(kind) => format!("<cas-peer-intent kind=\"{}\"/>\n{body}", kind.as_str()),
+        None => body.to_string(),
+    }
+}
+
+fn split_message_intent(body: &str) -> (Option<PeerMessageKind>, &str) {
+    let Some((line, rest)) = body.split_once('\n') else {
+        return (None, body);
+    };
+    let kind = line
+        .strip_prefix("<cas-peer-intent kind=\"")
+        .and_then(|line| line.strip_suffix("\"/>"))
+        .and_then(PeerMessageKind::parse);
+    if kind.is_some() {
+        (kind, rest)
+    } else {
+        (None, body)
+    }
 }
 
 /// Render the envelope line.
@@ -188,6 +253,12 @@ pub fn render_envelope(envelope: &PeerEnvelope) -> String {
         attribute("session", session);
     }
     attribute("repo", &envelope.repo);
+    if let Some(reply) = &envelope.in_reply_to {
+        attribute("in_reply_to", reply);
+    }
+    if let Some(kind) = envelope.kind {
+        attribute("kind", kind.as_str());
+    }
     line.push_str("/>");
     line
 }
@@ -243,6 +314,8 @@ pub fn parse_envelope(prompt: &str) -> Option<PeerEnvelope> {
         machine: take("machine")?,
         session: take("session"),
         repo: take("repo")?,
+        in_reply_to: take("in_reply_to"),
+        kind: take("kind").as_deref().and_then(PeerMessageKind::parse),
     })
 }
 
@@ -250,6 +323,14 @@ pub fn parse_envelope(prompt: &str) -> Option<PeerEnvelope> {
 /// the body.
 pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let machine = machine_of(message);
+    let (kind, body) = split_message_intent(&message.body);
+    // Existing first-line split proposals are typed asks too. Preserve their
+    // protocol body for epic_split::ingest instead of wrapping it in a new tag.
+    let kind = kind.or_else(|| {
+        crate::cloud::epic_split::SplitMessage::parse(body)
+            .filter(|split| split.kind == crate::cloud::epic_split::SplitKind::Proposal)
+            .map(|_| PeerMessageKind::Ask)
+    });
     let envelope = render_envelope(&PeerEnvelope {
         id: message.id.clone(),
         sender_name: message.sender_name.clone(),
@@ -257,6 +338,8 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         machine: machine.clone(),
         session: message.sender_session.clone(),
         repo: message.project_id.clone(),
+        in_reply_to: message.in_reply_to.clone(),
+        kind,
     });
     let reply_to = message
         .in_reply_to
@@ -270,7 +353,7 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
          in_reply_to=<this message's notification id>.\n\n{body}",
         name = message.sender_name,
         repo = message.project_id,
-        body = message.body,
+        body = body,
     )
 }
 
@@ -719,7 +802,10 @@ impl PeerMailbox for HttpPeerMailbox {
                     .as_str()
                     .map(str::trim)
                     .filter(|label| !label.is_empty())?;
-                sender_ids.iter().any(|sender| sender == id).then(|| (id.to_string(), label.to_string()))
+                sender_ids
+                    .iter()
+                    .any(|sender| sender == id)
+                    .then(|| (id.to_string(), label.to_string()))
             })
             .collect()
     }

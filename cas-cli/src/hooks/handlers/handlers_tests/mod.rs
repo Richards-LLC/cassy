@@ -16,6 +16,7 @@ mod ripple_path_scope;
 mod send_message_policy;
 mod session_title;
 mod slack_transport;
+mod worker_denied_tools;
 mod publication_gate;
 mod stop_hook_active;
 mod supervisor_reminder;

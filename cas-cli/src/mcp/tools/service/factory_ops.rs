@@ -11507,7 +11507,8 @@ mod tests {
         let service = CasService::new(core);
         let req: FactoryRequest = serde_json::from_value(serde_json::json!({
             "action": "spawn_workers",
-            "count": 1
+            "count": 1,
+            "cli": "grok"
         }))
         .expect("valid spawn request");
 

@@ -10,6 +10,7 @@ use super::provisioning_tests::daemon;
 use cas_store::{SpawnLifecycleState, SpawnQueueStore};
 
 const SESSION: &str = "provision-test";
+const REPLACEMENT_STARTUP: &str = "REPLACEMENT CODEX: startup reached";
 
 fn idle_worker_pane(name: &str, harness: cas_mux::SupervisorCli) -> cas_mux::Pane {
     let pty = cas_mux::Pty::spawn(
@@ -452,14 +453,68 @@ async fn recycle_drops_the_old_sessions_pane_buffer_cas_c1a2() {
 /// alive without registering, so the real timeout path has to diagnose it.
 #[tokio::test(flavor = "current_thread")]
 async fn long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2() {
-    long_transcript_recycle(false).await;
+    if !run_hermetic_recycle_child(
+        "long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2",
+    ) {
+        long_transcript_recycle(false).await;
+    }
 }
 
 /// The old output must also be gone when the replacement registers normally.
 /// This is the successful control for the deliberately unregistered child.
 #[tokio::test(flavor = "current_thread")]
 async fn long_transcript_recycle_registers_fresh_session_cas_c1a2() {
-    long_transcript_recycle(true).await;
+    if !run_hermetic_recycle_child("long_transcript_recycle_registers_fresh_session_cas_c1a2") {
+        long_transcript_recycle(true).await;
+    }
+}
+
+/// Keep harness discovery local to a child process, including the CAS binary
+/// required by the Codex PTY preflight. Neither stand-in uses the host install.
+fn run_hermetic_recycle_child(test_name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("CAS_C1A2_RECYCLE_CHILD").is_some() {
+        return false;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for (name, script) in [
+        (
+            "codex",
+            format!(
+                "#!/bin/sh\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
+            ),
+        ),
+        ("cas", "#!/bin/sh\nexit 0\n".into()),
+    ] {
+        let executable = bin.join(name);
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths([bin, "/usr/bin".into(), "/bin".into()]).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("PATH", path)
+        .env("CAS_C1A2_RECYCLE_CHILD", "1")
+        .arg(format!(
+            "ui::factory::daemon::runtime::shutdown_tests::{test_name}"
+        ))
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "hermetic {test_name}:\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
+    true
 }
 
 /// Reproduce the lane environment inside the capped test runner: no login
@@ -495,7 +550,7 @@ fn shutdown_module_and_env_policy_pass_without_local_harnesses_cas_c1a2() {
             .find(|line| line.starts_with("test result:"))
             .unwrap();
         assert!(
-            !summary.contains("0 passed"),
+            !summary.contains(" 0 passed;"),
             "no tests executed: {summary}"
         );
         eprintln!("scrubbed {filter}: {summary}");
@@ -503,27 +558,13 @@ fn shutdown_module_and_env_policy_pass_without_local_harnesses_cas_c1a2() {
 }
 
 async fn long_transcript_recycle(register_replacement: bool) {
-    use std::os::unix::fs::PermissionsExt;
-
     const NAME: &str = "long-history-codex";
     const OLD: &str = "OLD SESSION TRANSCRIPT: prior delivery\r\n";
-    const NEW: &str = "REPLACEMENT CODEX: startup reached";
+    const NEW: &str = REPLACEMENT_STARTUP;
     let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     env.set_current_dir(dir.path());
-    let bin = dir.path().join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    let codex = bin.join("codex");
-    std::fs::write(
-        &codex,
-        format!("#!/bin/sh\nprintf '\\033[32m{NEW}\\033[0m\\n'\nexec sleep 300\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut paths = vec![bin];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    env.set("PATH", std::env::join_paths(paths).unwrap());
 
     let mut daemon = daemon(&cas_dir);
     register_idle_worker(&cas_dir, NAME);
@@ -558,10 +599,12 @@ async fn long_transcript_recycle(register_replacement: bool) {
         !alive(old_pid),
         "the old process stopped before the relaunch"
     );
-    let verification = daemon
-        .spawn_verifications
-        .get(NAME)
-        .expect("relaunch awaits registration");
+    let verification = daemon.spawn_verifications.get(NAME).unwrap_or_else(|| {
+        panic!(
+            "relaunch awaits registration: {:?}",
+            shutdown_row_state(&cas_dir, request_id)
+        )
+    });
     assert_eq!(verification.request_id, Some(request_id));
     assert_eq!(daemon.app.harness_for(NAME), cas_mux::SupervisorCli::Codex);
 

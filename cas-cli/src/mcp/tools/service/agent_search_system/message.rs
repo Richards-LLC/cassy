@@ -5048,11 +5048,13 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(envelope.branch_tip, live_tip);
         assert_eq!(envelope.anchor_tip.as_deref(), Some(old_anchor.as_str()));
         assert_eq!(envelope.target_branch_tip, target_tip);
+        // pin: verify the generated diff summary is bound to the live source SHA.
         assert!(
             row.prompt.contains(&format!("{target_tip}\n  -> {live_tip}")),
             "summary must diff from the live target to the rebased published head: {}",
             row.prompt
         );
+        // pin: verify the rebased task's changed file appears in the summary.
         assert!(row.prompt.contains("A\tdelivery.txt"), "{}", row.prompt);
     }
 

@@ -162,6 +162,17 @@ fn latest_turn_with_start(
 /// row surfaces once. Recall still runs once per turn, and only when the
 /// normal prompt hook did not serve the turn.
 pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String> {
+    fallback_context_within(root, input, 0)
+}
+
+/// [`fallback_context`] for an output that already carries `reserved`
+/// characters of other context (cas-1f0c: PostToolUse lessons and guardrail
+/// warnings), so the whole stays within Claude Code's hook cap.
+pub(crate) fn fallback_context_within(
+    root: &Path,
+    input: &HookInput,
+    reserved: usize,
+) -> Option<String> {
     if crate::internal_llm::is_internal_invocation()
         || !super::handlers::handlers_middle::factory_inbox::owns_factory_inbox(input)
     {
@@ -193,7 +204,7 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
     let mut parts = Vec::new();
     let mut changed = false;
     // cas-1f0c: one render budget for every block this output carries.
-    let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+    let mut budget = super::handlers::handlers_middle::factory_inbox::hook_body_budget(reserved);
 
     // cas-1f0c: the rows this turn's own prompt names come first, and before
     // the turn is recorded below, so only an earlier surfacing reads as
@@ -254,6 +265,7 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
             if super::handlers::handlers_middle::factory_inbox::push_within_hook_cap(
                 &mut joined,
                 &packet.full,
+                reserved,
             ) {
                 parts.push(packet.full);
             }

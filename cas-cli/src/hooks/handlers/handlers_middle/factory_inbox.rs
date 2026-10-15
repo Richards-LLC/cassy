@@ -216,11 +216,28 @@ pub(crate) fn surface_factory_inbox_after_tool_result(
 /// rest (supervisor reminder, ambient recall) must fit what is left.
 pub(crate) const HOOK_CONTEXT_CAP_CHARS: usize = 9_500;
 
-/// cas-1f0c: append `addition` to a hook's context only if the whole stays
-/// within [`HOOK_CONTEXT_CAP_CHARS`]. Returns whether it was appended.
-pub(crate) fn push_within_hook_cap(context: &mut String, addition: &str) -> bool {
+/// cas-1f0c: what a hook's mail block may spend beyond its bodies: the
+/// header and the notes (already shown, withdrawn, not shown, sent in full).
+pub(crate) const HOOK_MAIL_NOTES_RESERVE_CHARS: usize = 1_500;
+
+/// cas-1f0c: the body budget for a hook whose output already carries
+/// `reserved` characters of other context (PostToolUse lessons and
+/// guardrail warnings), so bodies, notes and that context stay within
+/// [`HOOK_CONTEXT_CAP_CHARS`] together.
+pub(crate) fn hook_body_budget(reserved: usize) -> usize {
+    cas_store::HOOK_SURFACE_BUDGET_CHARS.min(
+        HOOK_CONTEXT_CAP_CHARS.saturating_sub(reserved + HOOK_MAIL_NOTES_RESERVE_CHARS),
+    )
+}
+
+/// cas-1f0c: append `addition` to a hook's context only if the whole, plus
+/// `reserved` characters of other context in the same output, stays within
+/// [`HOOK_CONTEXT_CAP_CHARS`]. Returns whether it was appended.
+pub(crate) fn push_within_hook_cap(context: &mut String, addition: &str, reserved: usize) -> bool {
     let separator = if context.is_empty() { 0 } else { 2 };
-    if context.chars().count() + separator + addition.chars().count() > HOOK_CONTEXT_CAP_CHARS {
+    if reserved + context.chars().count() + separator + addition.chars().count()
+        > HOOK_CONTEXT_CAP_CHARS
+    {
         return false;
     }
     if separator > 0 {
@@ -521,15 +538,16 @@ fn withdrawn_note(ids: &[i64]) -> Option<String> {
     ))
 }
 
-/// cas-1f0c: named rows whose body the daemon re-sent in full as a Teams
-/// copy after no hook showed it in time.
+/// cas-1f0c: named rows whose body the daemon's time fallback claimed to
+/// send in full as a Teams copy. A crash between claim and write leaves no
+/// copy, so the note also names `inbox_poll`.
 fn sent_in_full_note(ids: &[i64]) -> Option<String> {
     if ids.is_empty() {
         return None;
     }
     Some(format!(
-        "[sent in full] Message {} was re-sent to you in full as its own teammate message; \
-         read it there, or with inbox_poll notification_id=<id> if it is not in front of you.",
+        "[sent in full] Message {} is sent to you in full as its own teammate message (or \
+         read it with inbox_poll notification_id=<id>).",
         id_list(ids)
     ))
 }
@@ -839,6 +857,24 @@ mod tests {
         let rendered = render_surfaced(&[spoofed]);
         assert!(rendered.contains("[cas #82 unverified:Daniel@iphone-15 "), "{rendered}");
         assert!(!rendered.contains("in_reply_to=82"), "{rendered}");
+    }
+
+    /// cas-1f0c round 3: PostToolUse lessons and guardrail warnings share
+    /// the hook output with the mail, so they are reserved inside the cap.
+    #[test]
+    fn reserved_context_shrinks_the_body_budget_and_the_recall_room() {
+        assert_eq!(hook_body_budget(0), cas_store::HOOK_SURFACE_BUDGET_CHARS);
+        let lessons = 4_000;
+        let budget = hook_body_budget(lessons);
+        assert!(budget < cas_store::HOOK_SURFACE_BUDGET_CHARS);
+        assert!(lessons + budget + HOOK_MAIL_NOTES_RESERVE_CHARS <= HOOK_CONTEXT_CAP_CHARS);
+        assert_eq!(hook_body_budget(HOOK_CONTEXT_CAP_CHARS), 0);
+
+        let recall = "r".repeat(3_000);
+        let mut context = "m".repeat(5_000);
+        assert!(push_within_hook_cap(&mut context.clone(), &recall, 0));
+        assert!(!push_within_hook_cap(&mut context, &recall, 1_600), "lessons leave no room");
+        assert_eq!(context.len(), 5_000, "a refused addition leaves the context unchanged");
     }
 
     #[test]

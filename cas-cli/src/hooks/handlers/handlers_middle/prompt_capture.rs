@@ -131,7 +131,7 @@ pub fn handle_user_prompt_submit(
                     false,
                 )
             }) {
-                super::factory_inbox::push_within_hook_cap(&mut factory_context, &packet.full);
+                super::factory_inbox::push_within_hook_cap(&mut factory_context, &packet.full, 0);
             }
         }
     }

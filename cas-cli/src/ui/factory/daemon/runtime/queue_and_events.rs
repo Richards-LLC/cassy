@@ -3142,9 +3142,29 @@ impl FactoryDaemon {
         if self.teams.is_none() {
             return;
         }
+        // Only live Claude Teams recipients got pointer copies; the store
+        // filters on them (and on bodies a hook can show) before its limit.
+        let is_claude_teams = |harness: cas_mux::SupervisorCli| {
+            harness == cas_mux::SupervisorCli::Claude
+                && super::delivery::choose_channel(harness, true)
+                    == super::delivery::DeliveryChannel::TeamsInbox
+        };
+        let supervisor_name = self.app.supervisor_name().to_string();
+        let worker_names = self.app.worker_names().to_vec();
+        let mut recipients: Vec<String> = worker_names
+            .iter()
+            .filter(|name| !self.dead_workers.contains(*name))
+            .filter(|name| is_claude_teams(self.app.harness_for(name)))
+            .cloned()
+            .collect();
+        if is_claude_teams(self.app.harness_for(&supervisor_name)) {
+            recipients.push("supervisor".to_string());
+            recipients.push(supervisor_name.clone());
+        }
         let now = chrono::Utc::now();
         let candidates = match queue.teams_pointer_fallback_candidates(
             &self.session_name,
+            &recipients,
             now - chrono::Duration::seconds(TEAMS_POINTER_FALLBACK_WINDOW_SECS),
             now - chrono::Duration::seconds(TEAMS_POINTER_FALLBACK_AFTER_SECS),
             20,
@@ -3155,20 +3175,8 @@ impl FactoryDaemon {
                 return;
             }
         };
-        let supervisor_name = self.app.supervisor_name().to_string();
-        let worker_names = self.app.worker_names().to_vec();
         for (queued, recipient) in candidates {
-            let pane_target = if recipient == "supervisor" {
-                supervisor_name.as_str()
-            } else {
-                recipient.as_str()
-            };
-            let harness = self.app.harness_for(pane_target);
-            if harness != cas_mux::SupervisorCli::Claude
-                || super::delivery::choose_channel(harness, true)
-                    != super::delivery::DeliveryChannel::TeamsInbox
-                || !cas_store::fits_hook_surface(&queued.prompt)
-            {
+            if !cas_store::fits_hook_surface(&queued.prompt) {
                 continue;
             }
             match queue.claim_teams_body_fallback(queued.id, &recipient) {
@@ -3181,31 +3189,21 @@ impl FactoryDaemon {
             }
             let source = self.inbox_source_name(&queued.source, &worker_names, &supervisor_name);
             let text = teams_body_fallback_text(&queued);
-            let written = self
-                .deliver_to_worker(
-                    &recipient,
-                    &source,
-                    &text,
-                    queued.summary.as_deref(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-            match written {
-                Ok(cas_mux::InjectOutcome::Delivered) => tracing::warn!(
+            match self.write_teams_inbox_only(&recipient, &source, &text, queued.summary.as_deref()) {
+                Ok(()) => tracing::warn!(
                     target: "cas::coordination",
                     stage = "teams_pointer_body_fallback",
                     message_id = queued.id,
                     recipient = %recipient,
                     "cas-1f0c: no hook showed the Teams pointer's row; wrote the full body once"
                 ),
-                other => {
+                // Only the write itself failed, so nothing reached the
+                // recipient: release the claim for a later sweep.
+                Err(error) => {
                     tracing::warn!(
                         message_id = queued.id,
                         recipient = %recipient,
-                        outcome = ?other.as_ref().map_err(ToString::to_string),
+                        %error,
                         "cas-1f0c: Teams body fallback write failed; claim released for a later sweep"
                     );
                     if let Err(error) = queue.release_teams_body_fallback(queued.id, &recipient) {

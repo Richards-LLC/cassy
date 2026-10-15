@@ -1004,6 +1004,36 @@ impl FactoryDaemon {
         .map(|(outcome, _)| outcome)
     }
 
+    /// cas-1f0c: write `text` to `recipient`'s Claude Teams inbox and
+    /// nowhere else: no PTY fallback, so an error means the write itself
+    /// failed and nothing reached the recipient.
+    pub(crate) fn write_teams_inbox_only(
+        &self,
+        recipient: &str,
+        source: &str,
+        text: &str,
+        summary: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let primary = self
+            .teams
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Claude Agent Teams is not active"))?;
+        let pane_target = if recipient == "supervisor" {
+            self.app.supervisor_name()
+        } else {
+            recipient
+        };
+        let inbox_target = if pane_target == self.app.supervisor_name() {
+            "supervisor"
+        } else {
+            pane_target
+        };
+        let view = self.recipient_teams_view(pane_target);
+        view.as_ref()
+            .unwrap_or(primary)
+            .write_to_inbox(inbox_target, source, text, summary, None)
+    }
+
     fn alert_missing_team_tree(&self, teams: &super::teams::TeamsManager) {
         match queue_team_tree_incident(self.app.cas_dir(), teams.team_name(), teams.teams_dir()) {
             Ok(true) => self.app.notifier().notify(
@@ -2153,6 +2183,7 @@ mod tests {
             )
             .unwrap();
         daemon.teams = Some(teams);
+        daemon.app.add_worker_name_for_test(worker);
         assert_eq!(daemon.app.harness_for(worker), cas_mux::SupervisorCli::Claude);
         let inbox_file = config_dir
             .join("teams")

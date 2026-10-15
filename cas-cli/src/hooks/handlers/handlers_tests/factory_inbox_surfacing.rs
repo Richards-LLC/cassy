@@ -1234,6 +1234,7 @@ fn cas_1f0c_after_the_time_fallback_no_hook_renders_the_row_again() {
     let wake_turn = worker.take_turn(&wake);
     assert!(!wake_turn.contains(body), "{wake_turn}");
     assert!(wake_turn.contains(&format!("[sent in full] Message #{id}")), "{wake_turn}");
+    assert!(wake_turn.contains("or read it with inbox_poll"), "{wake_turn}");
     let teammate_turn = worker.next_teammate_turn().unwrap();
     let later = worker.take_turn("continuing my work");
     let seen = format!("{wake_turn}{teammate_turn}{later}");
@@ -1267,6 +1268,7 @@ fn cas_1f0c_a_broadcast_pointer_turn_without_a_tool_call_still_delivers_once() {
     let candidates = store
         .teams_pointer_fallback_candidates(
             SESSION,
+            &[WORKER.to_string()],
             chrono::Utc::now() - chrono::Duration::hours(1),
             chrono::Utc::now(),
             10,

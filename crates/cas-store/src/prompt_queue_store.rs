@@ -2181,11 +2181,17 @@ pub trait PromptQueueStore: Send + Sync {
     /// target of a direct row, or one peer of a broadcast) holds only a
     /// transport receipt taken between `handed_off_after` and
     /// `handed_off_before`, and has no body fallback yet. Urgent, terminal
-    /// and (for direct rows) acked rows are excluded. The daemon filters the
-    /// recipients and rows it wrote pointers for.
+    /// and (for direct rows) acked rows are excluded.
+    ///
+    /// Only `recipients` (the live Claude Teams recipients the daemon wrote
+    /// pointers for) and bodies a hook can show ([`fits_hook_surface`]) are
+    /// selected, in SQL before the limit, so pairs the daemon would skip
+    /// (Codex peers, departed workers, long bodies) can never fill the page
+    /// and starve a later pointer.
     fn teams_pointer_fallback_candidates(
         &self,
         factory_session: &str,
+        recipients: &[String],
         handed_off_after: DateTime<Utc>,
         handed_off_before: DateTime<Utc>,
         limit: usize,
@@ -5217,10 +5223,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn teams_pointer_fallback_candidates(
         &self,
         factory_session: &str,
+        recipients: &[String],
         handed_off_after: DateTime<Utc>,
         handed_off_before: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<(QueuedPrompt, String)>> {
+        if recipients.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", recipients.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // `hook_surface_cost` in SQL: trimmed characters plus the row frame.
+        let fits = format!(
+            "length(trim(q.prompt, ' ' || char(9) || char(10) || char(13))) + {} <= {}",
+            HOOK_SURFACE_ROW_OVERHEAD_CHARS, HOOK_SURFACE_BUDGET_CHARS
+        );
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(&format!(
             "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary,
@@ -5229,6 +5247,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                FROM prompt_queue q
                JOIN prompt_queue_recipient_seen seen ON seen.prompt_id = q.id
               WHERE q.factory_session = ?
+                AND seen.recipient IN ({placeholders})
                 AND (seen.recipient = q.target OR q.target = 'all_workers')
                 AND q.urgent = 0
                 AND (q.target = 'all_workers' OR q.acked_at IS NULL)
@@ -5236,19 +5255,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 AND (q.highest_stage IS NULL
                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})
                 AND seen.source IN ('transport_claimed', 'transport_delivered')
+                AND {fits}
                 AND julianday(seen.seen_at) >= julianday(?)
                 AND julianday(seen.seen_at) <= julianday(?)
               ORDER BY q.id ASC, seen.recipient ASC
               LIMIT ?"
         ))?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(factory_session.to_string())];
+        params.extend(
+            recipients
+                .iter()
+                .map(|recipient| Box::new(recipient.clone()) as Box<dyn rusqlite::ToSql>),
+        );
+        params.push(Box::new(handed_off_after.to_rfc3339()));
+        params.push(Box::new(handed_off_before.to_rfc3339()));
+        params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
         Ok(stmt
             .query_map(
-                params![
-                    factory_session,
-                    handed_off_after.to_rfc3339(),
-                    handed_off_before.to_rfc3339(),
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
+                rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
                 |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(13)?)),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?)
@@ -7742,9 +7766,13 @@ impl SqlitePromptQueueStore {
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&tx)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
             // renders it: any marker for a direct row, this recipient's for a
-            // broadcast. The unbudgeted paths (inbox_poll, the turn recorder)
-            // still reach it.
-            let fallback_sql = if budget_chars.is_some() {
+            // broadcast.
+            // The turn recorder's unbudgeted wake drain and inbox_poll still
+            // reach the row; every other hook drain (turn start, tool
+            // boundary, the task-start gate) does not.
+            let renders = source == SurfacingSource::HookSurfaced
+                && !(matches!(transport, TransportEligibility::WakeNamed) && budget_chars.is_none());
+            let fallback_sql = if renders {
                 format!(
                     "AND NOT EXISTS (
                          SELECT 1 FROM prompt_queue_recipient_seen fb
@@ -16496,11 +16524,54 @@ mod cas_1f0c_teams_body_fallback_tests {
         let candidates = store
             .teams_pointer_fallback_candidates(
                 "s",
+                &["w1".to_string(), "w2".to_string()],
                 Utc::now() - chrono::Duration::hours(1),
                 Utc::now(),
                 10,
             )
             .unwrap();
         assert!(candidates.is_empty(), "nothing left to re-send: {candidates:?}");
+    }
+
+    /// cas-1f0c round 3, High: pairs the daemon must skip (Codex peers,
+    /// departed workers, bodies too long for a hook) are filtered in SQL
+    /// before the page limit, so 25 of them, all older, cannot starve the one
+    /// eligible Claude pointer behind a limit of 20.
+    #[test]
+    fn ineligible_pairs_cannot_starve_a_claude_pointer_of_its_fallback() {
+        let (_temp, store) = store();
+        let long = "x".repeat(HOOK_SURFACE_BUDGET_CHARS);
+        for n in 0..25 {
+            let (target, body) = match n % 3 {
+                0 => ("codex-worker", "short body".to_string()),
+                1 => ("departed-worker", "short body".to_string()),
+                _ => ("claude-worker", long.clone()),
+            };
+            let id = store.enqueue_with_session("supervisor", target, &body, "s").unwrap();
+            assert!(store.claim_recipient_transport(id, target).unwrap());
+        }
+        let broadcast = store.enqueue_with_session("supervisor", "all_workers", "shared", "s").unwrap();
+        assert!(store.claim_recipient_transport(broadcast, "codex-worker").unwrap());
+        let pointer = store.enqueue_with_session("supervisor", "claude-worker", "fits", "s").unwrap();
+        assert!(store.claim_recipient_transport(pointer, "claude-worker").unwrap());
+
+        let candidates = store
+            .teams_pointer_fallback_candidates(
+                "s",
+                &["claude-worker".to_string()],
+                Utc::now() - chrono::Duration::hours(1),
+                Utc::now(),
+                20,
+            )
+            .unwrap();
+        let pairs: Vec<(i64, &str)> =
+            candidates.iter().map(|(row, recipient)| (row.id, recipient.as_str())).collect();
+        assert_eq!(pairs, vec![(pointer, "claude-worker")]);
+        assert!(
+            store
+                .teams_pointer_fallback_candidates("s", &[], Utc::now() - chrono::Duration::hours(1), Utc::now(), 20)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

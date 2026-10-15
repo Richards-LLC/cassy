@@ -182,6 +182,12 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.worker_memory_high_gib" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).worker_memory_high_gib =
+                    value.parse().map_err(|_| MemError::Parse(format!(
+                        "Invalid integer value for factory.worker_memory_high_gib: {value}"
+                    )))?;
+            }
             "factory.spawn_min_free_gib" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.spawn_min_free_gib = value.parse().map_err(|_| {

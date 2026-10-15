@@ -529,15 +529,21 @@ fn discard_shared_fingerprints(target: &Path) -> Result<()> {
 }
 
 pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
-    execute_at(
+    execute_at_with_scope(
         cas_root,
         args,
         &std::env::current_dir()?,
         Path::new("cargo"),
+        cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
     )
 }
 
+#[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
+    execute_at_with_scope(cas_root, args, cwd, cargo, None)
+}
+
+fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>) -> Result<()> {
     let test = targeted_test(args);
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
@@ -637,6 +643,22 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     {
         cargo_args.insert(4, "--lib".into());
     }
+    command
+        .args(&cargo_args)
+        .current_dir(&repo)
+        .env("CARGO_TARGET_DIR", repo.join("target"))
+        // Never let a long-lived compiler cache retain the target lease.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "");
+    let scope_directory = tempfile::tempdir_in(&slots)?;
+    let high = crate::factory_build_memory::memory_high(
+        config.worker_memory_high_gib,
+        config.max_concurrent_builders,
+        &std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
+    );
+    let mut command = crate::factory_build_memory::scope_command(
+        command, scope_runner, high, &scope_directory.path().join("started"),
+    );
     #[cfg(unix)]
     if let Some(lease) = &target_lease {
         lease.inherit(&mut command);
@@ -650,15 +672,6 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         }
     }
     let mut child = command
-        .args(&cargo_args)
-        .current_dir(&repo)
-        .env("CARGO_TARGET_DIR", repo.join("target"))
-        // cas-4b15: a cold sccache client would pass the deliberately inherited
-        // target lease to its long-lived server. Empty overrides also defeat
-        // Cargo config/CARGO_BUILD_* fallbacks, including workspace wrappers.
-        // Cargo/rustc descendants still inherit the output lifetime lease.
-        .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .spawn()
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;
@@ -714,6 +727,102 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_memory_scope_runs_cargo_with_limit_and_preserves_context() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker with spaces");
+        fixture_commit(&repo);
+        std::fs::write(root.join("config.toml"), "[factory]\nworker_memory_high_gib = 3\n").unwrap();
+        let scope = dir.path().join("scope runner");
+        fake_cargo(&scope, r#"printf '%s\n' "$@" > target/scope-args
+while [ "$1" != -- ]; do shift; done
+shift
+exec "$@""#);
+        let cargo = dir.path().join("cargo stand-in");
+        fake_cargo(&cargo, r#"[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 4
+[ -z "$RUSTC_WRAPPER" ] || exit 5
+if [ -d /proc/self/fd ]; then
+    [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 6
+fi
+printf '%s\n' "$@" > target/cargo-args"#);
+        execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap();
+        let scope_args = std::fs::read_to_string(repo.join("target/scope-args")).expect("build must enter a memory-limited scope");
+        assert!(scope_args.contains("--user\n--scope\n"), "{scope_args}");
+        assert!(scope_args.contains("MemoryHigh=3221225472\n"), "{scope_args}");
+        // pin: the external build receives exactly the admitted Cargo argv.
+        assert_eq!(std::fs::read_to_string(repo.join("target/cargo-args")).unwrap(), "check\n-p\ncas\n--lib\n");
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_memory_scope_falls_back_without_a_user_session_or_systemd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let rejected = dir.path().join("no-user-session");
+        fake_cargo(&rejected, "exit 1");
+        let missing = dir.path().join("missing-systemd-run");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, "echo run >> target/runs");
+        for (name, runner) in [("no-session", Some(rejected.as_path())), ("missing", Some(missing.as_path())), ("other-platform", None)] {
+            let repo = root.join("worktrees").join(name);
+            fixture_commit(&repo);
+            execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, runner).unwrap();
+            // pin: unavailable scopes must execute the external build once.
+            assert_eq!(std::fs::read_to_string(repo.join("target/runs")).unwrap().lines().count(), 1, "fallback must execute Cargo once: {name}");
+            assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some(), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_memory_scope_does_not_retry_a_failed_build_unscoped() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let scope = dir.path().join("scope");
+        fake_cargo(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, "echo run >> target/runs\nexit 7");
+        let error = execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap_err();
+        assert!(error.to_string().contains("FAIL"), "{error}");
+        assert_eq!(std::fs::read_to_string(repo.join("target/runs")).unwrap().lines().count(), 1);
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_memory_scope_keeps_targeted_test_receipts_and_lease() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let scope = dir.path().join("scope");
+        fake_cargo(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, r#"[ "$1" = nextest ] || exit 3
+[ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 4
+[ -n "$CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER" ] || exit 5
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
+        let args = ["nextest", "run", "-p", "cas", "-E", "test(worker)"].map(str::to_string);
+        execute_at_with_scope(&root, &args, &repo, &cargo, Some(&scope)).unwrap();
+        let receipts = passing_test_receipts(&root, &repo, &fixture_head(&repo));
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].ends_with("test(worker) 2"), "{receipts:?}");
+        assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

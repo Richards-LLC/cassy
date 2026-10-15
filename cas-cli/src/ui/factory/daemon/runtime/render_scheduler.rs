@@ -35,8 +35,6 @@ pub(crate) const LAYOUT_COALESCE: Duration = Duration::from_millis(16);
 pub(crate) const DEFAULT_RENDER_MAX_FPS: u32 = 15;
 /// `[factory] render_unfocused_fps` default.
 pub(crate) const DEFAULT_RENDER_UNFOCUSED_FPS: u32 = 5;
-/// Red-first stub (cas-77f39): today's rule, a frame on any change.
-const RED_STUB: bool = true;
 
 /// How a pane that produced output is shown right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,10 +157,6 @@ impl RenderScheduler {
 
     /// `pane` produced output this pass.
     pub(crate) fn note_output(&mut self, pane: &str, view: PaneView, now: Instant) {
-        if RED_STUB {
-            self.focused = true;
-            return;
-        }
         if view == PaneView::Hidden {
             return;
         }
@@ -191,23 +185,6 @@ impl RenderScheduler {
         let due = |last: Option<Instant>, interval: Duration| {
             last.is_none_or(|last| now.saturating_duration_since(last) >= interval)
         };
-        if RED_STUB && self.pending() {
-            let cause = if self.input {
-                FrameCause::Input
-            } else if self.layout {
-                FrameCause::Layout
-            } else {
-                FrameCause::OutputFocused
-            };
-            self.input = false;
-            self.layout = false;
-            self.focused = false;
-            self.unfocused = false;
-            return Some(Frame {
-                cause,
-                coalesced: 0,
-            });
-        }
         let cause = if self.input {
             FrameCause::Input
         } else if self.layout && due(self.last_frame, LAYOUT_COALESCE) {
@@ -405,6 +382,71 @@ mod tests {
             s.note_output("supervisor", PaneView::Focused, now);
         });
         assert!(frames.len() <= 16, "{} frames", frames.len());
+    }
+
+    /// Frames drawn for a recorded codex pane's PTY reads, replayed as the
+    /// daemon loop sees them (a pass every 4 ms), under the old rule (a frame
+    /// on every pass with output) and the scheduler. Extra panes replay the
+    /// same trace shifted in time. Returns (old frames, new frames).
+    fn replay_codex_trace(panes: &[(PaneView, u64)]) -> (usize, usize) {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/codex-pty-reads-gh1210.json")).unwrap();
+        let base: Vec<u64> = fixture["reads_ms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_u64().unwrap())
+            .collect();
+        let span = base.last().unwrap() + 1;
+        let mut traces: Vec<(String, PaneView, Vec<u64>, usize)> = panes
+            .iter()
+            .enumerate()
+            .map(|(i, (view, offset))| {
+                let mut reads: Vec<u64> = base.iter().map(|t| (t + offset) % span).collect();
+                reads.sort_unstable();
+                (format!("codex-{i}"), *view, reads, 0)
+            })
+            .collect();
+        let mut scheduler = RenderScheduler::new(RenderCaps::default());
+        let start = Instant::now();
+        let (mut old, mut new) = (0, 0);
+        let mut t = 0;
+        while t < span {
+            let now = start + Duration::from_millis(t);
+            let mut any_output = false;
+            for (pane, view, reads, next) in &mut traces {
+                let mut output = false;
+                while *next < reads.len() && reads[*next] <= t {
+                    output = true;
+                    *next += 1;
+                }
+                if output {
+                    any_output = true;
+                    scheduler.note_output(pane, *view, now);
+                }
+            }
+            old += usize::from(any_output);
+            new += usize::from(scheduler.take_frame(now).is_some());
+            t += 4;
+        }
+        (old, new)
+    }
+
+    /// GH #1210 acceptance: frames before and after for a real codex pane's
+    /// recorded output (codex-cli 0.162.1 streaming a long answer, 61 s).
+    /// Three time-shifted copies reproduce the issue's three codex workers:
+    /// the old rule gives ~33 frames/s while streaming, as the issue
+    /// measured (30.4). The same numbers come from the artifact's replay.
+    #[test]
+    fn flv2_codex_trace_frames_before_after() {
+        use PaneView::{Focused, Hidden, Unfocused};
+        assert_eq!(replay_codex_trace(&[(Focused, 0)]), (478, 356));
+        assert_eq!(replay_codex_trace(&[(Unfocused, 0)]), (478, 201));
+        assert_eq!(replay_codex_trace(&[(Hidden, 0)]), (478, 0));
+        let workers = [(Unfocused, 0), (Unfocused, 333), (Unfocused, 777)];
+        assert_eq!(replay_codex_trace(&workers), (1384, 226));
+        let one_focused = [(Focused, 0), (Unfocused, 333), (Unfocused, 777)];
+        assert_eq!(replay_codex_trace(&one_focused), (1384, 428));
     }
 
     #[test]

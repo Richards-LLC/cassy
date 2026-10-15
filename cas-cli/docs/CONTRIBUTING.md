@@ -313,7 +313,17 @@ supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
 ```
 
 Both lists default to empty and appear in `cas config list`. Server names are
-exact. These denials override project proxy credential grants and read-only
+exact.
+
+Operator-authenticated CLIs and connector tools are refused to workers at the
+pre-tool hook (GH #1219). `factory.worker_denied_clis` (default `vercel`) names
+executables a worker's shell may not run, matched on basename through wrappers
+(`env`, `sudo`, `timeout`, `sh -c`, `eval`, `npx`, `pnpm dlx`, paths).
+`factory.worker_denied_mcp_tools` (default `*vercel*`) holds case-insensitive
+tool-name patterns, also applied to each `server.tool` an `mcp_execute`
+dispatches. The refusal sends the worker to the supervisor with
+`blocker=true`; supervisors are unaffected. Both keys are operator-only, and
+an empty list disables its check. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
 

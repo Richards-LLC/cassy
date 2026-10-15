@@ -295,6 +295,8 @@ pub async fn run_daemon_after_fork(
         .factory()
         .ai_enrichment;
 
+    // cas-d2a2: the prompt queue's store work runs on its own job lanes.
+    let queue_jobs = crate::ui::factory::daemon::runtime::prompt_queue_jobs::QueueJobs::start(app.cas_dir().to_path_buf(), app.project_scope());
     let mut daemon = FactoryDaemon {
         session_name,
         app,
@@ -342,7 +344,7 @@ pub async fn run_daemon_after_fork(
         last_permission_request_scan: None,
         reported_permission_requests: std::collections::HashSet::new(),
         last_commander_mirror_scan: None,
-        commander_mirror_state: Default::default(),
+        queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,
         cancelled_spawns: std::collections::HashSet::new(),

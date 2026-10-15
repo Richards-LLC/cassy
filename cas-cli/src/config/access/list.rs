@@ -159,6 +159,7 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             // Factory section (cas-1a05): the keys `get` and `set` accept.
+            ("factory.commander_mirror_enabled".to_string(), factory.commander_mirror_enabled.to_string()),
             ("factory.write_roots".to_string(), factory.write_roots.join(",")),
             ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),
             ("factory.supervisor_only_env".to_string(), factory.worker_policy.supervisor_only_env.join(",")),

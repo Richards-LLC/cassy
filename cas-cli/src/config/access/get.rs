@@ -107,6 +107,7 @@ impl Config {
                 Some(factory.message_max_chars_escalation.to_string())
             }
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
+            "factory.commander_mirror_enabled" => Some(factory.commander_mirror_enabled.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
             "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),
             "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),

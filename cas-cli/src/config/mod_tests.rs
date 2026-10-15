@@ -945,6 +945,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.message_max_chars", "3000", "3000"),
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),
+        ("factory.commander_mirror_enabled", "false", "false"),
         ("factory.max_concurrent_builders", "3", "3"),
         ("factory.spawn_min_free_gib", "30", "30"),
         ("factory.prompt_retention_days", "14", "14"),

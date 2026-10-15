@@ -2160,6 +2160,7 @@ impl FactoryDaemon {
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
+            commander_mirror_state: Default::default(),
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),

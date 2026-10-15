@@ -5599,11 +5599,13 @@ impl FactoryDaemon {
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
         if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
             self.last_commander_mirror_scan = Some(std::time::Instant::now());
-            super::commander_mirror::mirror_supervisor_replies(
+            super::commander_mirror::scan_supervisor_replies(
                 self.app.cas_dir(),
                 self.app.project_path(),
                 &self.session_name,
                 queue.as_ref(),
+                &registered_agents,
+                &mut self.commander_mirror_state,
             );
         }
         self.process_operator_replies(queue.as_ref())?;

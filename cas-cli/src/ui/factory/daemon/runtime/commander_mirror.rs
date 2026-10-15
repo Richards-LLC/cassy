@@ -5,8 +5,10 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use cas_store::PromptQueueStore;
 
@@ -255,31 +257,107 @@ fn activation_time(
         .or(Some(initial))
 }
 
-pub(super) fn mirror_supervisor_replies(
+/// An explicit opt-out ends the capture window. Persist the resume floor so
+/// neither daemon restarts nor terminal-answer backfill expose disabled turns.
+fn resume_floor(
+    root: &Path,
+    session: &str,
+    enabled: bool,
+    policy_floor: Option<DateTime<Utc>>,
+) -> std::io::Result<Option<DateTime<Utc>>> {
+    let directory = root.join("commander-mirror");
+    std::fs::create_dir_all(&directory)?;
+    let hash = format!("{:x}", Sha256::digest(session.as_bytes()));
+    let disabled = directory.join(format!("{hash}.disabled"));
+    let resumed = directory.join(format!("{hash}.resumed"));
+    if !enabled {
+        std::fs::write(disabled, b"disabled\n")?;
+        return Ok(None);
+    }
+    if disabled.exists() {
+        let disabled_at = DateTime::<Utc>::from(std::fs::metadata(&disabled)?.modified()?);
+        // A CLI resume already opened the window. Don't move it forward to
+        // this poll and discard replies completed since that config save.
+        // A later raw-file opt-out still needs the observed-poll fallback.
+        let floor = policy_floor
+            .filter(|at| *at >= disabled_at)
+            .unwrap_or_else(Utc::now);
+        std::fs::write(&resumed, floor.to_rfc3339())?;
+        std::fs::remove_file(disabled)?;
+    }
+    match std::fs::read_to_string(resumed) {
+        Ok(at) => DateTime::parse_from_rfc3339(&at)
+            .map(|at| Some(at.with_timezone(&Utc)))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MirrorScanState {
+    cursors: HashMap<String, TranscriptCursor>,
+    #[cfg(test)]
+    transcript_reads: usize,
+}
+
+struct TranscriptCursor {
+    source: (String, cas_mux::SupervisorCli, Option<String>),
+    path: PathBuf,
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+pub(super) fn scan_supervisor_replies(
     root: &Path,
     project_path: &Path,
     session: &str,
     queue: &dyn PromptQueueStore,
+    agents: &[cas_types::Agent],
+    state: &mut MirrorScanState,
 ) {
-    // cas-5c89: an operator who only types in the supervisor's terminal is an
-    // operator too. Gating on a paired-device Commander send left a
-    // terminal-only conversation showing questions and never their answers.
-    let Ok(Some(first_operator_at)) = queue.first_operator_activity_at(session) else {
+    let Ok(config) = crate::config::Config::load(root) else {
         return;
     };
+    if !config.factory().commander_mirror_enabled {
+        state.cursors.clear();
+        let _ = resume_floor(root, session, false, None);
+        return;
+    }
+    let supervisors = agents
+        .iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor
+                && agent.factory_session.as_deref() == Some(session)
+        })
+        .collect::<Vec<_>>();
+    if supervisors.is_empty() {
+        return;
+    }
+    // P3: the local operator lane exists before its reader first sends a
+    // message. Enrollment gates remote delivery, not local capture. Final
+    // replies remain owed even if registration became Idle/Stale/Shutdown.
+    let first_operator_at = queue
+        .first_operator_activity_at(session)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::minutes(2));
+    // Config saves persist this project-wide boundary even when the daemon
+    // never observed false. A pending disable fails closed during the write.
+    let Ok(policy_floor) = crate::config::commander_mirror_resume_floor(root) else {
+        return;
+    };
+    let Ok(local_floor) = resume_floor(root, session, true, policy_floor) else {
+        return;
+    };
+    let resumed_since = local_floor.into_iter().chain(policy_floor).max();
     let Some(active_since) = activation_time(root, session, first_operator_at) else {
         return;
     };
-    let Ok(agents) = crate::store::open_agent_store(root) else {
-        return;
-    };
-    let Ok(agents) = agents.list(Some(cas_types::AgentStatus::Active)) else {
-        return;
-    };
-    for agent in agents.iter().filter(|agent| {
-        agent.role == cas_types::AgentRole::Supervisor
-            && agent.factory_session.as_deref() == Some(session)
-    }) {
+    state
+        .cursors
+        .retain(|id, _| supervisors.iter().any(|agent| &agent.id == id));
+    for agent in supervisors {
         // Supervisor registration persists its own harness under
         // `supervisor_cli`; `worker_cli` names the default child harness.
         let cli = agent
@@ -288,23 +366,57 @@ pub(super) fn mirror_supervisor_replies(
             .and_then(|value| value.parse::<cas_mux::SupervisorCli>().ok())
             .unwrap_or(cas_mux::SupervisorCli::Claude);
         let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-        let Some(path) =
-            crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
-                project_path.to_str(),
-                session_id,
-                cli,
-                agent
-                    .metadata
-                    .get("supervisor_account_dir")
-                    .map(String::as_str),
-            )
-        else {
+        let account = agent.metadata.get("supervisor_account_dir").cloned();
+        let source = (session_id.to_owned(), cli, account.clone());
+        // Keep resolution out of the steady-state poll as well: scan-based
+        // harness resolvers can themselves read transcript metadata. /clear,
+        // account/harness changes, and a removed path invalidate this cache.
+        let cached = state
+            .cursors
+            .get(&agent.id)
+            .filter(|cursor| cursor.source == source);
+        let path = cached
+            .filter(|cursor| cursor.path.is_file())
+            .map(|cursor| cursor.path.clone())
+            .or_else(|| {
+                crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
+                    project_path.to_str(),
+                    session_id,
+                    cli,
+                    account.as_deref(),
+                )
+            });
+        let Some(path) = path else {
+            state.cursors.remove(&agent.id);
             continue;
         };
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            state.cursors.remove(&agent.id);
+            continue;
+        };
+        let length = metadata.len();
+        let modified = metadata.modified().ok();
+        if cached.is_some_and(|cursor| {
+            cursor.path == path
+                && cursor.length == length
+                && cursor.modified == modified
+                && modified.is_some()
+        }) {
+            continue;
+        }
+        #[cfg(test)]
+        {
+            state.transcript_reads += 1;
+        }
         let Ok(values) = transcript_tail(&path) else {
+            state.cursors.remove(&agent.id);
             continue;
         };
+        let mut written = true;
         for turn in completed_turns(&values, cli) {
+            if resumed_since.is_some_and(|floor| turn.completed_at < floor) {
+                continue;
+            }
             // cas-5c89: the answer to a question the operator typed in the
             // terminal threads under that question, and is mirrored even if it
             // completed before mirroring started; other turns are not
@@ -400,10 +512,47 @@ pub(super) fn mirror_supervisor_replies(
                 device,
                 kind.as_str(),
             ) {
+                written = false;
                 tracing::warn!(%error, "supervisor Commander mirror queue write failed");
             }
         }
+        // Only acknowledge a snapshot once its rows are durable. A failed
+        // queue write retries on the next poll, with store dedupe intact.
+        if written {
+            state.cursors.insert(
+                agent.id.clone(),
+                TranscriptCursor {
+                    source,
+                    path,
+                    length,
+                    modified,
+                },
+            );
+        } else {
+            state.cursors.remove(&agent.id);
+        }
     }
+}
+
+#[cfg(test)]
+fn mirror_supervisor_replies(
+    root: &Path,
+    project_path: &Path,
+    session: &str,
+    queue: &dyn PromptQueueStore,
+) {
+    let agents = crate::store::open_agent_store(root)
+        .ok()
+        .and_then(|store| store.list(None).ok())
+        .unwrap_or_default();
+    scan_supervisor_replies(
+        root,
+        project_path,
+        session,
+        queue,
+        &agents,
+        &mut MirrorScanState::default(),
+    );
 }
 
 #[cfg(test)]
@@ -599,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn no_verified_pair_does_not_create_a_mirror_marker_or_reply() {
+    fn no_registered_supervisor_does_not_create_a_mirror_marker_or_reply() {
         let temp = tempfile::tempdir().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
@@ -832,6 +981,404 @@ mod tests {
             .filter(|row| row.target == "operator")
             .map(|row| serde_json::from_str(&row.prompt).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_unchanged_transcript_is_not_read() {
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "status",
+            "[cas #77 agent-authored] update",
+            "Ready.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut state = MirrorScanState::default();
+        let agents = store.list(None).unwrap();
+        scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents, &mut state);
+        assert_eq!(state.transcript_reads, 1);
+        for status in [
+            cas_types::AgentStatus::Idle,
+            cas_types::AgentStatus::Shutdown,
+        ] {
+            let mut agent = store.get("supervisor-id").unwrap();
+            agent.status = status;
+            store.update(&agent).unwrap();
+            scan_supervisor_replies(
+                &root,
+                temp.path(),
+                "factory-1",
+                &queue,
+                &store.list(None).unwrap(),
+                &mut state,
+            );
+        }
+        assert_eq!(
+            state.transcript_reads, 1,
+            "unchanged polls must not read transcript tails"
+        );
+        assert_eq!(operator_replies(&queue).len(), 1);
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_toggle_between_polls_excludes_private_turn() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let mut config = crate::config::Config::default();
+        config
+            .set("factory.commander_mirror_enabled", "false")
+            .unwrap();
+        config.save(&root).unwrap();
+        // CLI saving false must record the floor without a daemon poll.
+        assert!(
+            root.join("commander-mirror/policy.disabled").exists(),
+            "disable boundary must be durable"
+        );
+        let path = temp
+            .path()
+            .join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let now = Utc::now();
+        for mut value in codex_turn_at("private", "Terminal question", "Private reply", now) {
+            value["timestamp"] = serde_json::json!(now.to_rfc3339());
+            writeln!(file, "{value}").unwrap();
+        }
+        queue
+            .record_terminal_operator_turn("factory-1", "Terminal question")
+            .unwrap();
+        config
+            .set("factory.commander_mirror_enabled", "true")
+            .unwrap();
+        config.save(&root).unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        assert!(
+            operator_replies(&queue).is_empty(),
+            "no poll observed false; disabled replies must still stay private"
+        );
+        for value in codex_turn_at(
+            "public",
+            "[cas #78 agent-authored] update",
+            "Public reply",
+            Utc::now(),
+        ) {
+            writeln!(file, "{value}").unwrap();
+        }
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].message, "Public reply");
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_resume_starts_at_config_save() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let mut config = crate::config::Config::default();
+        config
+            .set("factory.commander_mirror_enabled", "false")
+            .unwrap();
+        config.save(&root).unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        config
+            .set("factory.commander_mirror_enabled", "true")
+            .unwrap();
+        config.save(&root).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(
+                temp.path()
+                    .join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl"),
+            )
+            .unwrap();
+        let at = Utc::now();
+        for mut value in codex_turn_at(
+            "public-after-resume",
+            "[cas #78 agent-authored] update",
+            "Reply before first enabled poll.",
+            at,
+        ) {
+            value["timestamp"] = serde_json::json!(at.to_rfc3339());
+            writeln!(file, "{value}").unwrap();
+        }
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(
+            replies.len(),
+            1,
+            "resume starts at CLI save, not the later daemon poll"
+        );
+        assert_eq!(replies[0].message, "Reply before first enabled poll.");
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_excludes_workers_and_other_sessions() {
+        for (role, status, session) in [
+            (AgentRole::Worker, cas_types::AgentStatus::Idle, "factory-1"),
+            (
+                AgentRole::Worker,
+                cas_types::AgentStatus::Shutdown,
+                "factory-1",
+            ),
+            (
+                AgentRole::Supervisor,
+                cas_types::AgentStatus::Active,
+                "factory-other",
+            ),
+        ] {
+            let (temp, root, queue) = terminal_session(codex_turn_at(
+                "foreign",
+                "[cas #77 agent-authored] update",
+                "Foreign reply.",
+                Utc::now(),
+            ));
+            let store = SqliteAgentStore::open(&root).unwrap();
+            let mut agent = store.get("supervisor-id").unwrap();
+            agent.role = role;
+            agent.status = status;
+            agent.factory_session = Some(session.into());
+            store.update(&agent).unwrap();
+            let mut state = MirrorScanState::default();
+            scan_supervisor_replies(
+                &root,
+                temp.path(),
+                "factory-1",
+                &queue,
+                &store.list(None).unwrap(),
+                &mut state,
+            );
+            assert_eq!(state.transcript_reads, 0);
+            assert!(
+                operator_replies(&queue).is_empty(),
+                "excluded {role:?}/{status}/{session}"
+            );
+        }
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_defaults_on_when_unset() {
+        let config: crate::config::Config = toml::from_str("[factory]\n").unwrap();
+        assert_eq!(
+            config.get("factory.commander_mirror_enabled").as_deref(),
+            Some("true")
+        );
+        assert!(
+            crate::config::Config::default()
+                .factory()
+                .commander_mirror_enabled
+        );
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_cursor_invalidates_on_source_and_file_changes() {
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "status",
+            "[cas #77 agent-authored] update",
+            "Ready.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut state = MirrorScanState::default();
+        let scan = |state: &mut MirrorScanState| {
+            scan_supervisor_replies(
+                &root,
+                temp.path(),
+                "factory-1",
+                &queue,
+                &store.list(None).unwrap(),
+                state,
+            )
+        };
+        scan(&mut state);
+        let first = temp
+            .path()
+            .join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        let second = temp
+            .path()
+            .join("account2/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::copy(&first, &second).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.metadata.insert(
+            "supervisor_account_dir".into(),
+            temp.path().join("account2").to_string_lossy().into(),
+        );
+        store.update(&agent).unwrap();
+        scan(&mut state);
+        assert_eq!(
+            state.transcript_reads, 2,
+            "account/path change must invalidate"
+        );
+        agent.cc_session_id = Some("new-harness-session".into());
+        store.update(&agent).unwrap();
+        scan(&mut state);
+        assert_eq!(
+            state.transcript_reads, 3,
+            "harness session change must invalidate"
+        );
+        // Same length, changed mtime: edits/replacements are not only appends.
+        std::fs::File::open(&second)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 4, "mtime change must invalidate");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&second)
+            .unwrap();
+        for value in codex_turn_at(
+            "new-status",
+            "[cas #78 agent-authored] update",
+            "New reply.",
+            Utc::now(),
+        ) {
+            writeln!(file, "{value}").unwrap();
+        }
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 5, "length change must invalidate");
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 5);
+        assert_eq!(operator_replies(&queue).len(), 2);
+        let rotated = second.with_file_name("rollout-2026-10-10T12-00-01-terminal.jsonl");
+        std::fs::rename(&second, &rotated).unwrap();
+        scan(&mut state);
+        assert_eq!(
+            state.transcript_reads, 6,
+            "removed path must be resolved again"
+        );
+        agent
+            .metadata
+            .insert("supervisor_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        scan(&mut state);
+        assert_eq!(
+            state.transcript_reads, 6,
+            "must not reuse Codex path for Claude"
+        );
+        agent
+            .metadata
+            .insert("supervisor_cli".into(), "codex".into());
+        store.update(&agent).unwrap();
+        scan(&mut state);
+        assert_eq!(
+            state.transcript_reads, 7,
+            "harness change invalidates source"
+        );
+        assert_eq!(operator_replies(&queue).len(), 2);
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_without_prior_send() {
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "unsolicited-status",
+            "[cas #77 agent-authored] worker update",
+            "The release is ready for review.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        assert_eq!(queue.first_operator_activity_at("factory-1").unwrap(), None);
+
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+
+        for device in ["phone", "desktop"] {
+            let rows = queue
+                .conversation_history("factory-1", device, None, 50)
+                .unwrap();
+            assert_eq!(rows.len(), 1, "operator lane must not need a prior send");
+            assert_eq!(rows[0].target, "operator");
+            let reply: crate::ui::factory::OperatorReplyPayload =
+                serde_json::from_str(&rows[0].prompt).unwrap();
+            assert_eq!(reply.message, "The release is ready for review.");
+            assert_eq!(reply.kind, crate::ui::factory::OperatorTurnKind::Status);
+            assert_eq!(reply.reply_to, None);
+            assert_eq!(reply.device_id, "*");
+        }
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_survives_supervisor_state_changes() {
+        for status in [
+            cas_types::AgentStatus::Idle,
+            cas_types::AgentStatus::Stale,
+            cas_types::AgentStatus::Shutdown,
+        ] {
+            let question = "Is the release ready?";
+            let (temp, root, queue) = terminal_session(codex_turn_at(
+                "final-before-idle",
+                question,
+                "Yes, it is ready.",
+                Utc::now(),
+            ));
+            let terminal = queue
+                .record_terminal_operator_turn("factory-1", question)
+                .unwrap();
+            let agents = SqliteAgentStore::open(&root).unwrap();
+            let mut supervisor = agents.get("supervisor-id").unwrap();
+            supervisor.status = status;
+            agents.update(&supervisor).unwrap();
+
+            mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+            mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+
+            let replies = operator_replies(&queue);
+            assert_eq!(replies.len(), 1, "completed answer lost in {status}");
+            assert_eq!(replies[0].message, "Yes, it is ready.");
+            assert_eq!(replies[0].reply_to, Some(terminal));
+        }
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_opt_out_does_not_backfill_disabled_turns() {
+        let question = "Keep this terminal turn private.";
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "private-turn",
+            question,
+            "Private answer.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        queue
+            .record_terminal_operator_turn("factory-1", question)
+            .unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\ncommander_mirror_enabled = false\n",
+        )
+        .unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        assert!(
+            operator_replies(&queue).is_empty(),
+            "explicit opt-out must stop mirroring"
+        );
+
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\ncommander_mirror_enabled = true\n",
+        )
+        .unwrap();
+        // The first enabled poll starts a new window. Even terminal-linked
+        // answers from the disabled interval must not backfill into it.
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        assert!(operator_replies(&queue).is_empty());
+        let mut transcript = std::fs::OpenOptions::new()
+            .append(true)
+            .open(
+                temp.path()
+                    .join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl"),
+            )
+            .unwrap();
+        for value in codex_turn_at(
+            "public-turn",
+            "[cas #78 agent-authored] new update",
+            "Public status.",
+            Utc::now() + chrono::Duration::seconds(1),
+        ) {
+            writeln!(transcript, "{value}").unwrap();
+        }
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].message, "Public status.");
     }
 
     /// The violet_ps shape: the operator never paired a device and only typed

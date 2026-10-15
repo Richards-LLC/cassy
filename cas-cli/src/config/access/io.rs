@@ -56,7 +56,80 @@ pub(crate) fn atomic_replace_project_config(path: &Path, contents: &str) -> std:
         ".config.toml.cas-write.{}.{sequence}.tmp",
         std::process::id()
     ));
+    record_commander_mirror_config_boundary(path, contents)?;
     atomic_replace_project_config_via(path, contents, &temp_path, |from, to| fs::rename(from, to))
+}
+
+/// Read a durable policy timestamp; malformed state fails closed.
+fn mirror_policy_time(path: &Path) -> std::io::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    match fs::read_to_string(path) {
+        Ok(at) => chrono::DateTime::parse_from_rfc3339(at.trim())
+            .map(|at| Some(at.with_timezone(&chrono::Utc)))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Shared by every session in the project, including daemons that were down
+/// throughout an operator's false -> true toggle.
+pub(crate) fn commander_mirror_resume_floor(
+    root: &Path,
+) -> std::io::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let policy = root.join("commander-mirror");
+    let disabled = mirror_policy_time(&policy.join("policy.disabled"))?;
+    let resumed = mirror_policy_time(&policy.join("policy.resumed"))?;
+    if disabled > resumed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "supervisor reply mirroring is disabled",
+        ));
+    }
+    Ok(resumed)
+}
+
+fn mirror_enabled_in_document(contents: &str) -> Option<bool> {
+    let doc: toml::Value = toml::from_str(contents).ok()?;
+    Some(
+        doc.get("factory")
+            .and_then(|factory| factory.get("commander_mirror_enabled"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true),
+    )
+}
+
+fn record_commander_mirror_config_boundary(path: &Path, contents: &str) -> std::io::Result<()> {
+    let Some(enabled) = mirror_enabled_in_document(contents) else {
+        return Ok(());
+    };
+    let Some(root) = path.parent() else {
+        return Ok(());
+    };
+    let policy = root.join("commander-mirror");
+    let disabled = mirror_policy_time(&policy.join("policy.disabled"))?;
+    let resumed = mirror_policy_time(&policy.join("policy.resumed"))?;
+    let was_enabled = fs::read_to_string(path)
+        .ok()
+        .and_then(|before| mirror_enabled_in_document(&before))
+        .unwrap_or(true);
+    let marker = if !enabled {
+        policy.join("policy.disabled")
+    } else if !was_enabled || disabled > resumed {
+        policy.join("policy.resumed")
+    } else {
+        return Ok(());
+    };
+    fs::create_dir_all(&policy)?;
+    let sequence = PROJECT_CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = policy.join(format!(".policy.{}.{sequence}.tmp", std::process::id()));
+    // Write before replacing config: a failed save may conservatively suppress
+    // replies, but can never publish the disabled interval. Same config lock.
+    atomic_replace_project_config_via(
+        &marker,
+        &chrono::Utc::now().to_rfc3339(),
+        &temporary,
+        |from, to| fs::rename(from, to),
+    )
 }
 
 /// Testable implementation of the complete-document replacement contract.
@@ -203,7 +276,11 @@ impl Config {
         }
         // cas-fd0a: one line naming the retired [factory] sweep keys.
         static NOTED_FACTORY: std::sync::Once = std::sync::Once::new();
-        let retired = self.factory.as_ref().map(FactoryConfig::retired_keys).unwrap_or_default();
+        let retired = self
+            .factory
+            .as_ref()
+            .map(FactoryConfig::retired_keys)
+            .unwrap_or_default();
         if !retired.is_empty() {
             NOTED_FACTORY.call_once(|| {
                 eprintln!(

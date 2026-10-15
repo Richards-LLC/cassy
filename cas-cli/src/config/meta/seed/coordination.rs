@@ -2,6 +2,19 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
+    registry.register(ConfigMeta {
+        key: "factory.commander_mirror_enabled",
+        section: "factory",
+        name: "Supervisor Reply Mirroring",
+        description: "Operator-only automatic supervisor reply capture in local history, independent of prior messages or supervisor status. False opts out; re-enabling excludes disabled-period replies. Terminal questions and explicit operator messages remain recorded. Cloud requires enrollment.",
+        value_type: ConfigType::Bool,
+        default: "true",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "operator", "commander", "mirror", "privacy"],
+        use_cases: &["See supervisor replies without first sending a message", "Opt out of automatic supervisor reply capture"],
+    });
     // FACTORY SECTION
     // ============================================================
     for (key, name, description) in [

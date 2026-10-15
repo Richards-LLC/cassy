@@ -18139,7 +18139,9 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         std::collections::HashMap::new();
     // cas-0a27: whether each delivery lane is already released (contained in
     // the default branch), measured once per lane rather than per child.
-    let mut released_lanes: std::collections::HashMap<String, Option<String>> =
+    let mut released_lanes: std::collections::HashMap<String, Option<ReleasedLane>> =
+        std::collections::HashMap::new();
+    let mut contained_anchors: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
 
     for t in subtasks.iter().skip(offset).take(page_len) {
@@ -18189,18 +18191,27 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             .chain(additional_factory_branches.iter())
             .cloned()
             .collect::<Vec<_>>();
-        // cas-0a27: a closed child proved its own delivery onto its lane when
-        // it closed (the merge-state close gate cannot be overridden). Once
-        // that lane is released — contained in the default branch — every
-        // such child is proven by the lane's single ancestry check, with no
-        // per-child Git work. A 41-child released epic otherwise spent its
-        // whole budget re-proving content its children had already proven.
+        // cas-0a27: once a closed child's lane is released (contained in the
+        // default branch) and the child's recorded anchor is contained there
+        // too, its delivery is shipped. The lane check runs once per lane
+        // and every anchor is checked in one batched `rev-list`, so a
+        // 41-child released epic costs two Git calls instead of re-running
+        // each child's content proof. A child whose anchor is not contained
+        // (a squash, or a rebase that dropped work) keeps the full proof.
         if !options.summary && t.status == TaskStatus::Closed && has_delivery {
             let released = released_lanes
                 .entry(parent_branch.to_string())
                 .or_insert_with(|| released_lane_evidence(repo_path, parent_branch, &git_snapshot))
                 .clone();
-            if let Some(evidence) = released {
+            let anchor_shipped = released.as_ref().zip(resolved_anchor).is_some_and(|(lane, anchor)| {
+                contained_anchors
+                    .entry(lane.default_ref.clone())
+                    .or_insert_with(|| {
+                        anchors_contained_in(repo_path, subtasks, &git_snapshot, &lane.default_ref)
+                    })
+                    .contains(anchor)
+            });
+            if let Some(evidence) = released.filter(|_| anchor_shipped).map(|lane| lane.evidence) {
                 let checked_ref_reads = fallback_branches
                     .iter()
                     .map(|branch| git_snapshot.read_ref(branch))
@@ -18216,9 +18227,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     unmerged_count: 0,
                     last_commit_unix: None,
                     merge_evidence_note: Some(format!(
-                        "decision: child task `{}` is closed and its delivery lane \
-                         `{parent_branch}` is released ({evidence}). Its own close proved \
-                         the delivery onto that lane, so it was not re-proven.",
+                        "decision: child task `{}` is closed, its delivery lane \
+                         `{parent_branch}` is released ({evidence}) and its recorded \
+                         anchor is contained in the same branch, so its delivery shipped \
+                         and was not re-proven.",
                         t.id
                     )),
                     content_evolution_note: None,
@@ -18720,11 +18732,60 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
 /// it is not, is the default branch itself, or cannot be read. Containment
 /// is ancestry of the lane tip (a merge release) or, for a squash release,
 /// the lane tip's tree on the default branch's history.
+#[derive(Debug, Clone)]
+struct ReleasedLane {
+    /// How the lane is contained, for the decision note.
+    evidence: String,
+    /// The default-branch ref that contains it.
+    default_ref: String,
+}
+
+/// The recorded anchors of `subtasks` that `default_ref` contains, from one
+/// `git rev-list <anchors> --not <default_ref>`: an anchor in its output is
+/// not contained. Anchors this checkout lacks are never contained.
+fn anchors_contained_in(
+    repo_path: &std::path::Path,
+    subtasks: &[Task],
+    snapshot: &EpicGitSnapshot,
+    default_ref: &str,
+) -> std::collections::HashSet<String> {
+    use std::process::Command;
+    let anchors: Vec<&str> = subtasks
+        .iter()
+        .filter_map(|task| task.deliverables.factory_branch_anchor.as_deref())
+        .filter(|anchor| is_safe_git_refname(anchor) && snapshot.commit_exists(anchor))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if anchors.is_empty() || !is_safe_git_refname(default_ref) {
+        return std::collections::HashSet::new();
+    }
+    let output = Command::new("git")
+        .arg("rev-list")
+        .args(&anchors)
+        .args(["--not", default_ref])
+        .current_dir(repo_path)
+        .measurement_output();
+    let Ok(output) = output else {
+        return std::collections::HashSet::new();
+    };
+    if !output.status.success() {
+        return std::collections::HashSet::new();
+    }
+    let uncontained: std::collections::HashSet<&str> =
+        std::str::from_utf8(&output.stdout).unwrap_or("").lines().collect();
+    anchors
+        .into_iter()
+        .filter(|anchor| !uncontained.iter().any(|commit| commit.starts_with(anchor)))
+        .map(str::to_string)
+        .collect()
+}
+
 fn released_lane_evidence(
     repo_path: &std::path::Path,
     lane: &str,
     snapshot: &EpicGitSnapshot,
-) -> Option<String> {
+) -> Option<ReleasedLane> {
     let default = resolve_standalone_merge_target(repo_path).ok()?;
     if default == lane || !is_safe_git_refname(lane) || !is_safe_git_refname(&default) {
         return None;
@@ -18743,13 +18804,17 @@ fn released_lane_evidence(
         .iter()
         .find(|candidate| git_commit_is_ancestor(repo_path, &lane_ref, candidate))
     {
-        return Some(format!("`{lane_ref}` @ {lane_sha} is an ancestor of `{candidate}`"));
+        return Some(ReleasedLane {
+            evidence: format!("`{lane_ref}` @ {lane_sha} is an ancestor of `{candidate}`"),
+            default_ref: candidate.clone(),
+        });
     }
     candidates
         .iter()
         .find(|candidate| commit_tip_tree_reachable_from(repo_path, &lane_ref, candidate))
-        .map(|candidate| {
-            format!("the tree of `{lane_ref}` @ {lane_sha} is on `{candidate}`'s history")
+        .map(|candidate| ReleasedLane {
+            evidence: format!("the tree of `{lane_ref}` @ {lane_sha} is on `{candidate}`'s history"),
+            default_ref: candidate.clone(),
         })
 }
 

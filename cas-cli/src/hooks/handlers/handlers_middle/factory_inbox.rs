@@ -731,8 +731,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
-        let id = store.enqueue_worker_stall_nudge("worker-stall-hook", "you are stalled",
-            "stall-hook-session", "cas-stall-hook", "worker-attention:hook-test").unwrap().id();
+        let outcome = store.enqueue_worker_stall_nudge("worker-stall-hook", "you are stalled",
+            "stall-hook-session", "cas-stall-hook", "worker-attention:hook-test").unwrap();
+        let id = match outcome {
+            cas_store::EnqueueIdempotentResult::Created(id) | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
         // SAFETY: guarded by the process-wide hook test env lock.
         unsafe {
             std::env::set_var("CAS_AGENT_NAME", "worker-stall-hook");

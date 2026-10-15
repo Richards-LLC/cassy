@@ -343,9 +343,16 @@ pub(crate) fn delivery_implementer(cas_root: &Path, task: &Task) -> String {
                 .unwrap_or_else(|| assigned.to_string())
         })
         .or_else(|| {
-            task.deliverables.parked_branch.as_deref()
+            task.deliverables
+                .parked_branch
+                .as_deref()
                 .and_then(|branch| branch.strip_prefix("factory/"))
-                .map(|worker| worker.strip_suffix(&format!("-{}", task.id)).unwrap_or(worker).to_string())
+                .map(|worker| {
+                    worker
+                        .strip_suffix(&format!("-{}", task.id))
+                        .unwrap_or(worker)
+                        .to_string()
+                })
         })
         .unwrap_or_default()
 }
@@ -368,20 +375,26 @@ pub(crate) fn delivery_branch(
             .to_string()
     };
     let own = crate::factory_isolation::expected_worker_branch(implementer);
-    let recorded = task.deliverables.parked_branch.as_deref()
+    let parked = task
+        .deliverables
+        .parked_branch
+        .as_deref()
         .filter(|branch| !branch.trim().is_empty())
-        .or_else(|| passes.iter()
-            .find(|pass| !pass.is_withdrawn() && !pass.branch.trim().is_empty())
-            .map(|pass| pass.branch.as_str()))
         .map(normalize);
-    if let Some(branch) = recorded.as_ref().filter(|branch| *branch != &own) {
-        return branch.clone();
+    let round = passes
+        .iter()
+        .find(|pass| !pass.is_withdrawn() && !pass.branch.trim().is_empty())
+        .map(|pass| normalize(&pass.branch));
+    for branch in [parked.as_ref(), round.as_ref()].into_iter().flatten() {
+        if branch != &own {
+            return branch.clone();
+        }
     }
     let task_branch = crate::factory_isolation::worker_task_branch(implementer, &task.id);
     if !implementer.is_empty() && branch_exists(&task_branch) {
         return task_branch;
     }
-    recorded.unwrap_or(own)
+    parked.or(round).unwrap_or(own)
 }
 
 /// The current tip of `branch` in `repo`, as a full SHA.

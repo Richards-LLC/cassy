@@ -1233,6 +1233,15 @@ async fn cas_dd29_waives_an_explicit_pushed_tip_before_park() {
 /// task's pushed branch exists before its first park records a branch.
 #[tokio::test]
 async fn own_task_branch_waiver_cas_3288() {
+    task_branch_waiver_cas_3288(false).await;
+}
+
+#[tokio::test]
+async fn origin_only_task_branch_waiver_cas_3288() {
+    task_branch_waiver_cas_3288(true).await;
+}
+
+async fn task_branch_waiver_cas_3288(origin_only: bool) {
     let mut test_env = TestEnvGuard::temp_home();
     let (_temp, _core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
@@ -1261,6 +1270,14 @@ async fn own_task_branch_waiver_cas_3288() {
             .id,
     );
     tasks.update(&task).unwrap();
+    if origin_only {
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["branch", "-D", &branch]);
+        git(
+            &repo,
+            &["update-ref", "-d", &format!("refs/remotes/origin/{branch}")],
+        );
+    }
     let service = CasService::new(supervisor_core(&cas_dir), None);
     let _role = SupervisorRole::enter(&mut test_env);
     let waived = extract_text(
@@ -1281,7 +1298,63 @@ async fn own_task_branch_waiver_cas_3288() {
         .remove(0);
     assert_eq!(pass.branch, branch);
     assert_eq!(pass.bound_head, head);
-    assert!(cas::qa_pass::branch_merge_refusal(&cas_dir, &repo, &branch).is_none());
+    if !origin_only {
+        assert!(cas::qa_pass::branch_merge_refusal(&cas_dir, &repo, &branch).is_none());
+    }
+}
+
+/// GH #1175: a companion delivery may be recorded by a QA round on a
+/// different task's branch; its worker's base lane is still unrelated.
+#[tokio::test]
+async fn recorded_qa_branch_waiver_cas_3288() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "factory/test-agent"]);
+    let branch = "factory/test-agent-cas-companion";
+    git(&repo, &["switch", "-q", "-c", branch]);
+    let head = commit_file(
+        &repo,
+        "web/companion.css",
+        "a{color:red}\n",
+        "companion delivery",
+    );
+    git(&repo, &["push", "-q", "origin", branch]);
+    cas_store::waive_qa_pass(
+        &cas_dir,
+        &task_id,
+        "supervisor",
+        "test-agent",
+        branch,
+        &head,
+        "recorded delivery",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    tasks.update(&task).unwrap();
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let _role = SupervisorRole::enter(&mut test_env);
+    service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive", "task_id": task_id,
+            "head_sha": head, "summary": "reviewed recorded companion branch",
+        }))))
+        .await
+        .expect("waive the branch recorded by the QA round");
+    let pass = cas_store::list_qa_passes(&cas_dir, &task_id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(pass.branch, branch);
+    assert_eq!(pass.bound_head, head);
 }
 
 /// Origin advances without updating this checkout's branch or tracking ref.
@@ -1356,6 +1429,20 @@ async fn merge_hook_task_branch_binding_cas_3288() {
         chrono::Utc::now(),
     )
     .unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.assignee = Some(
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .unwrap()
+            .id,
+    );
+    tasks.update(&task).unwrap();
     let branch = format!("factory/test-agent-{task_id}");
     git(&repo, &["switch", "-q", "-c", &branch]);
     let head = commit_file(

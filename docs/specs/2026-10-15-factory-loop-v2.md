@@ -101,7 +101,7 @@ processes.
 | cas-7156 | `transcript_confirms_stall` ran on every working pass per worker: agent-store open, 2 `list()`s, a full `/proc` cmdline/environ scan (`wedged.rs:1441`), a child walk and a transcript-tail read, all inside the director refresh at `director_refresh.rs:240` | Gated behind threshold and backoff in v42; still synchronous on the loop |
 | cas-0028 | Worker-attention relays: the daemon snapshots episode baselines on the loop, then hands the store write to the store worker | Precedent for "snapshot on loop, write off loop" |
 | cas-874e | Merge-request revalidation resolves live branch tips (`prompt_revalidation.rs:962`) and now does a bounded source fetch on the MCP side | Daemon-side revalidation must stay ref-local or move off-loop (§4.3) |
-| GH #1210 | `dirty = had_output || input_activity || …` (`lifecycle.rs` ~2680): every pass with any worker PTY output redraws; codex workers write 38–236 times/s; ~30 frames/s × ~16 ms in Konsole, GUI thread ~60% busy | Not fixed |
+| GH #1210 | the dirty flag is set by any PTY output, input or refresh (LC:2829–2842): every pass with any worker PTY output redraws; codex workers write 38–236 times/s; ~30 frames/s × ~16 ms in Konsole, GUI thread ~60% busy | Not fixed |
 | GH #1213 | Worker builds share the TUI's cgroup; at 13:50:45 a daemon pass took 1,618 ms and keys sat unread for 2.0 s; the refresh thread was in D-state on page I/O | Out of scope here (cgroup); §3 makes echo independent of it |
 
 ## 2. Today's loop, step by step

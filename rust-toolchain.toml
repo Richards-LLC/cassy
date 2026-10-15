@@ -1,0 +1,8 @@
+# One compiler everywhere (cas-a677): CI and the published binaries were built
+# with rustc 1.99.0 while the supervisor host's "stable" was 1.95.0, so every
+# local proof used a compiler the shipped binary never saw. rustup installs
+# this channel on first use; bump it deliberately, in its own commit.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

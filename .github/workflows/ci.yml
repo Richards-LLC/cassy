@@ -80,6 +80,9 @@ jobs:
     outputs:
       class: ${{ steps.classify-diff.outputs.class }}
       docs-only: ${{ steps.classify-diff.outputs.class == 'docs-only' }}
+      rust-unaffected: ${{ steps.classify-diff.outputs.rust-unaffected }}
+      web-check-needed: ${{ steps.classify-diff.outputs.web-check-needed }}
+      bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,7 +120,8 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
-          npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund
+          # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
+          npm ci --no-audit --no-fund
           comparison_base="$BASE_SHA"
           if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
             comparison_base="$ZERO_BASE_REF"
@@ -146,7 +150,7 @@ jobs:
           if (( ${#markdown_files[@]} == 0 )); then
             echo 'No Markdown files changed; docs-only paths are still valid.'
           else
-            npx --yes markdownlint-cli2@0.18.1 --config .markdownlint-cli2.jsonc "${markdown_files[@]}"
+            python3 scripts/markdownlint.py --config .markdownlint-cli2.jsonc "${markdown_files[@]}"
           fi
 
       - name: Validate release-note drafts
@@ -341,7 +345,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
-          npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund
+          # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
+          npm ci --no-audit --no-fund
           comparison_base="$BASE_SHA"
           if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
             comparison_base="$ZERO_BASE_REF"
@@ -530,7 +535,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
-          npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund
+          # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
+          npm ci --no-audit --no-fund
           comparison_base="$BASE_SHA"
           if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
             comparison_base="$ZERO_BASE_REF"
@@ -678,14 +684,24 @@ jobs:
 
   # Full Fast Validation runs exactly once on GitHub's canonical merge-queue
   # tree. The required rollup below emits a cheap hosted PR admission context,
-  # then this job family validates the tree that will actually land. This avoids
-  # compiling the PR head and its merge tree back-to-back. When the explicitly
-  # trusted merge-queue runner is enabled, its persistent target and sccache
-  # make all three compiling Linux lanes warm across synthetic queue refs.
+  # then this job family validates the tree that will actually land.
+  #
+  # cas-a677 / cas-a1b0: the former single preflight job ran 19 steps in series
+  # (Commander journeys, then cargo check, the ISA test, the machinery tests and
+  # the build), so the first failure hid every later one: #1198's missing linter
+  # surfaced only in its fourth queue cycle. It is now independent jobs that
+  # each report their own result in the same run:
+  #   fast-validation-preflight     installer fixtures + Rust compile checks
+  #   fast-validation-ci-tiers      release/CI machinery tests (make test-ci-tiers)
+  #   fast-validation-slack-bridge  Slack bridge build and tests (bridge inputs)
+  #   fast-validation-web           Commander typecheck, unit tests, build,
+  #                                 visual QA and dist drift (web inputs)
+  #   fast-validation-journeys      Commander journeys, 6 hosted shards (web inputs)
+  # Steps inside a job use `!cancelled()` where a later step does not depend on
+  # an earlier one, so one red step does not hide the next.
   # cas-4cb8: on a queue tree the release train's full gate already proved,
-  # this job still runs, but only the work the full gate does not cover: the
-  # Commander journeys, `cargo check`, the ISA audit test and the build without
-  # the MCP proxy. See docs/branch-protection/README.md section 3.
+  # only the compile checks and (unless cas-9f70 also proved them) the journeys
+  # run. See docs/branch-protection/README.md section 3.
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
@@ -741,135 +757,56 @@ jobs:
         run: echo "Rust work skipped for $DIFF_CLASS diff."
 
       - if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'hosted'
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'hosted' }}
         uses: ./.github/actions/setup-rust-linux
         with:
           cache-key: fast-validation
 
       - name: Set up shared self-hosted Rust toolchain
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted' }}
         run: ./scripts/setup-cassy-actions-rust.sh
 
       - name: Install Zig on the isolated merge-queue runner
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted' }}
         run: ./scripts/bootstrap-zig.sh
 
       - name: Verify private self-hosted sccache
         if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted'
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && needs.fast-validation-runner-route.outputs.mode == 'self-hosted' }}
         continue-on-error: true
         run: |
           set -euo pipefail
           sccache rustc -vV
           sccache --show-stats
 
-      - name: Build and test the Slack bridge
-        if: steps.classify-diff.outputs.bridge-check-needed == 'true'
-        working-directory: slack-bridge
-        run: |
-          npm ci
-          npm test
-          npm run build
-
-      - name: Build and test Commander web assets
-        if: steps.classify-diff.outputs.web-check-needed == 'true'
-        working-directory: hub-web
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
-          FULL_GATE_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate' }}
-          JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse == 'true' }}
-        run: |
-          if [[ "$FULL_GATE_REUSE" == true && "$JOURNEYS_REUSE" == true ]]; then
-            # cas-9f70: the release train also proved the full journeys on
-            # this exact tree, so nothing in this step is left to run.
-            echo "Commander assets and journeys proven by the release train for this tree; skipped."
-            exit 0
-          fi
-          npm ci
-          if [[ "$FULL_GATE_REUSE" == true ]]; then
-            # cas-4cb8: the full gate proved typecheck, unit tests, build,
-            # visual QA and dist drift on this tree; it does not run journeys.
-            if sudo -n true 2>/dev/null; then
-              npx playwright install --with-deps chromium
-            else
-              npx playwright install chromium
-            fi
-            npm run journeys -- --workers=4
-            exit 0
-          fi
-          npm run typecheck
-          npm test
-          # cas-4ce5: the failure upload below really matches files in the hidden .results dir.
-          bash ../scripts/test-ci-journey-evidence-upload.sh
-          npm run build
-          if sudo -n true 2>/dev/null; then
-            npm exec --yes --package=playwright -- playwright install --with-deps chromium
-          else
-            npm exec --yes --package=playwright -- playwright install chromium
-          fi
-          npm run visual-qa
-          git diff --exit-code -- dist
-          # User journeys (docs/qa/journeys.md) against the committed bundle,
-          # on the Chromium build pinned by @playwright/test. Four workers, the
-          # journey cap: one worker ran 115 journeys in 26.5 min and pushed the
-          # queue run past its check timeout.
-          if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps chromium
-          else
-            npx playwright install chromium
-          fi
-          npm run journeys -- --workers=4
-
-      # cas-4ce5: a journey flake in the queue left no trace to diagnose.
-      # Keep Playwright's traces, error-context.md and screenshots on failure.
-      - name: Upload Commander journey evidence on failure
-        if: failure() && steps.classify-diff.outputs.web-check-needed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
-          path: hub-web/e2e/.results/
-          # .results is a dot-directory: upload-artifact@v4 skips hidden files
-          # unless told otherwise, which shipped an empty artifact (cas-4ce5 QA).
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Check
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas
 
       - name: Test portable x86_64 ISA audit
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
         run: ./scripts/test-check-portable-x86_64-isa.sh
 
-      - name: Test release publication guards
-        # cas-4cb8: the full gate's ci-script-tests row runs this same target.
-        if: >-
-          steps.classify-diff.outputs.rust-unaffected != 'true'
-          && needs.fast-validation-main-push-dedupe.outputs.reuse-source != 'full-gate'
-        run: |
-          if ! python3 -c 'import yaml' 2>/dev/null; then
-            python3 -m venv "$RUNNER_TEMP/ci-tiers-venv"
-            "$RUNNER_TEMP/ci-tiers-venv/bin/pip" install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt
-            export PATH="$RUNNER_TEMP/ci-tiers-venv/bin:$PATH"
-          fi
-          # cas-bf89: test-fast-release-rows.py runs the markdown-lint row.
-          if ! command -v markdownlint-cli2 >/dev/null; then
-            npm install --prefix "$RUNNER_TEMP/markdownlint" markdownlint-cli2@0.18.1 --no-audit --no-fund --silent
-            export PATH="$RUNNER_TEMP/markdownlint/node_modules/.bin:$PATH"
-          fi
-          make -C cas-cli test-ci-tiers
-
       - name: Build (without MCP proxy)
-        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        if: >-
+          ${{ !cancelled()
+          && steps.classify-diff.outputs.rust-unaffected != 'true' }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
@@ -885,6 +822,214 @@ jobs:
           else
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
+
+  # The release, CI and factory machinery's own tests. They compile no Rust;
+  # cas-4cb8: the full gate's ci-script-tests row runs this same target, so a
+  # full-gate queue tree skips it.
+  fast-validation-ci-tiers:
+    name: Fast Validation — CI tiers
+    if: >-
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.ci-diff.outputs.rust-unaffected != 'true'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Test release publication guards
+        run: |
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "$RUNNER_TEMP/ci-tiers-venv"
+            "$RUNNER_TEMP/ci-tiers-venv/bin/pip" install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt
+            export PATH="$RUNNER_TEMP/ci-tiers-venv/bin:$PATH"
+          fi
+          # The pinned markdownlint-cli2 (root package-lock.json) for the
+          # markdown-lint row tests; scripts/markdownlint.py runs it.
+          npm ci --no-audit --no-fund
+          make -C cas-cli test-ci-tiers
+
+  fast-validation-slack-bridge:
+    name: Fast Validation — Slack bridge
+    if: >-
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.ci-diff.outputs.bridge-check-needed == 'true'
+      && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      || needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate')
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Build and test the Slack bridge
+        working-directory: slack-bridge
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+  # Commander checks that need no browser fan-out. cas-4cb8: the full gate
+  # proved all of them on a full-gate queue tree, so that tree skips this job.
+  fast-validation-web:
+    name: Fast Validation — Commander web
+    if: >-
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.ci-diff.outputs.web-check-needed == 'true'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hub-web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Commander dependencies
+        run: npm ci
+
+      - name: Typecheck Commander
+        run: npm run typecheck
+
+      - name: Test Commander units
+        if: ${{ !cancelled() }}
+        run: |
+          npm test
+          # cas-4ce5: the journeys' failure upload really matches files in the hidden .results dir.
+          bash ../scripts/test-ci-journey-evidence-upload.sh
+
+      - name: Build Commander and check the committed bundle
+        id: build
+        if: ${{ !cancelled() }}
+        run: |
+          npm run build
+          git diff --exit-code -- dist
+
+      - name: Visual QA
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: |
+          if sudo -n true 2>/dev/null; then
+            npm exec --yes --package=playwright -- playwright install --with-deps chromium
+          else
+            npm exec --yes --package=playwright -- playwright install chromium
+          fi
+          npm run visual-qa
+
+  # User journeys (docs/qa/journeys.md) against the committed bundle, on the
+  # Chromium build pinned by @playwright/test, in six hosted shards of two
+  # workers each (one 141-journey job took 13.7-22 min, cas-a677; four workers
+  # on a 4-vCPU hosted runner timed out, run 38674369439). They run only
+  # when Commander inputs change (scripts/classify-web-inputs.py), and cas-9f70:
+  # a full-gate queue tree skips them when the train also proved the journeys.
+  fast-validation-journeys:
+    name: Fast Validation — Commander journeys ${{ matrix.shard }}/6
+    if: >-
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.ci-diff.outputs.web-check-needed == 'true'
+      && (needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      || (needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
+      && needs.fast-validation-main-push-dedupe.outputs.journeys-reuse != 'true'))
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group'
+      || (github.event_name == 'push'
+      && (github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: [ci-diff, fast-validation-main-push-dedupe]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # cas-c4b2: the app ships no fonts, so its sans-serif and monospace
+      # stacks resolve to whatever the machine renders. Ubuntu's hosted image
+      # renders DejaVu, which moved the J2, J5, J14 and J15 layouts; the
+      # journeys were written against Noto Sans and IBM Plex Mono
+      # (artifacts cas-c4b2/hosted-diagnosis.md). Install those and make Noto
+      # Sans the generic sans-serif and system-ui face.
+      - name: Install the fonts the journeys are written against
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends fonts-noto-core fonts-ibm-plex
+          mkdir -p "$HOME/.config/fontconfig"
+          cat > "$HOME/.config/fontconfig/fonts.conf" <<'FONTS'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <match target="pattern">
+              <test qual="any" name="family"><string>sans-serif</string></test>
+              <edit name="family" mode="prepend_first" binding="strong"><string>Noto Sans</string></edit>
+            </match>
+            <match target="pattern">
+              <test qual="any" name="family"><string>system-ui</string></test>
+              <edit name="family" mode="prepend_first" binding="strong"><string>Noto Sans</string></edit>
+            </match>
+          </fontconfig>
+          FONTS
+          fc-cache -f >/dev/null
+          echo "sans-serif: $(fc-match sans-serif)"
+          echo "IBM Plex Mono: $(fc-match 'IBM Plex Mono')"
+          fc-match sans-serif | grep -q 'Noto Sans'
+          fc-match 'IBM Plex Mono' | grep -q 'IBM Plex Mono'
+
+      - name: Run Commander journeys shard ${{ matrix.shard }}/6
+        working-directory: hub-web
+        env:
+          SHARD: ${{ matrix.shard }}
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: |
+          npm ci
+          if sudo -n true 2>/dev/null; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
+          npm run journeys -- --workers=2 --shard="$SHARD/6"
+
+      # cas-4ce5: a journey flake in the queue left no trace to diagnose.
+      # Keep Playwright's traces, error-context.md and screenshots on failure.
+      - name: Upload Commander journey evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-web-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
+          path: hub-web/e2e/.results/
+          # .results is a dot-directory: upload-artifact@v4 skips hidden files
+          # unless told otherwise, which shipped an empty artifact (cas-4ce5 QA).
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
 
   # Compile the workspace test graph once. The archive contains the binaries
   # and nextest metadata needed by the shard jobs below, avoiding three cold
@@ -1300,6 +1445,10 @@ jobs:
       - ci-diff
       - fast-validation-main-push-dedupe
       - fast-validation-preflight
+      - fast-validation-ci-tiers
+      - fast-validation-slack-bridge
+      - fast-validation-web
+      - fast-validation-journeys
       - fast-validation-suite
       - fast-validation-docs
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
@@ -1331,10 +1480,24 @@ jobs:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
           SUITE: ${{ needs.fast-validation-suite.result }}
           DOCS: ${{ needs.fast-validation-docs.result }}
+          CI_TIERS: ${{ needs.fast-validation-ci-tiers.result }}
+          SLACK_BRIDGE: ${{ needs.fast-validation-slack-bridge.result }}
+          WEB: ${{ needs.fast-validation-web.result }}
+          JOURNEYS: ${{ needs.fast-validation-journeys.result }}
         run: |
           test "$PREFLIGHT" = success
           test "$SUITE" = success
           test "$DOCS" = success
+          # Input-gated lanes: skipped when their inputs did not change, never
+          # failed or cancelled. Report every red lane, not just the first.
+          failed=0
+          for lane in CI_TIERS SLACK_BRIDGE WEB JOURNEYS; do
+            case "${!lane}" in
+              success|skipped) ;;
+              *) echo "::error title=Fast Validation::$lane lane is ${!lane}"; failed=1 ;;
+            esac
+          done
+          exit "$failed"
 
       - name: Report successful merge-queue validation reused by this main push
         if: >-
@@ -1355,6 +1518,8 @@ jobs:
           && needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'
         env:
           PREFLIGHT: ${{ needs.fast-validation-preflight.result }}
+          SLACK_BRIDGE: ${{ needs.fast-validation-slack-bridge.result }}
+          JOURNEYS: ${{ needs.fast-validation-journeys.result }}
           VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
           PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
           JOURNEYS_REUSE: ${{ needs.fast-validation-main-push-dedupe.outputs.journeys-reuse }}
@@ -1363,6 +1528,8 @@ jobs:
           # The compile checks the full gate does not cover still ran, and the
           # journeys did too unless the train proved them on this tree (cas-9f70).
           test "$PREFLIGHT" = success
+          [[ "$SLACK_BRIDGE" == success || "$SLACK_BRIDGE" == skipped ]]
+          [[ "$JOURNEYS" == success || "$JOURNEYS" == skipped ]]
           if [[ "$JOURNEYS_REUSE" == true ]]; then
             journeys="the Commander journeys were reused from the train's full journeys run ($JOURNEYS_PRIOR_URL)"
           else

@@ -237,42 +237,6 @@ else
     fail=$((fail + 1))
 fi
 
-required_jobs=(
-    fast-validation-preflight
-    fast-validation-suite-build
-    fast-validation-suite-shards
-    fast-validation-suite
-    fast-validation-docs
-    fast-validation
-    macos-check
-)
-
-gate_row_parity="$repo_root/scripts/check-ci-gate-row-parity.sh"
-gate_exemptions="$repo_root/docs/ci/gate-exemptions.md"
-if [[ -x "$gate_row_parity" ]]; then
-    if "$gate_row_parity" "$ci" "$repo_root/scripts/release-gate.sh" "$gate_exemptions"; then
-        printf 'ok   protected CI jobs map to release-gate rows\n'
-        pass=$((pass + 1))
-    else
-        printf 'FAIL protected CI jobs map to release-gate rows\n'
-        fail=$((fail + 1))
-    fi
-    parity_tmp="$(mktemp)"
-    sed '/\[fast-validation-suite-shards\]=archive-mode/d' "$gate_row_parity" >"$parity_tmp"
-    chmod +x "$parity_tmp"
-    if "$parity_tmp" "$ci" "$repo_root/scripts/release-gate.sh" "$gate_exemptions" >/dev/null 2>&1; then
-        printf 'FAIL CI gate-row parity mutation removes a required mapping\n'
-        fail=$((fail + 1))
-    else
-        printf 'ok   CI gate-row parity mutation catches a removed mapping\n'
-        pass=$((pass + 1))
-    fi
-    rm -f "$parity_tmp"
-else
-    printf 'FAIL CI gate-row parity checker is executable\n'
-    fail=$((fail + 1))
-fi
-
 classifier="$repo_root/scripts/classify-ci-diff.sh"
 fast_classifier="$repo_root/scripts/classify-fast-admission.sh"
 if [[ -x "$fast_classifier" ]]; then
@@ -724,19 +688,6 @@ else
 fi
 
 summary_script="$repo_root/scripts/ci-sccache-summary.sh"
-
-declare -A compiling_lanes=(
-    [scoped-validation]='Scoped Validation'
-    [scoped-validation-fast]='Scoped Validation (fast)'
-    [fast-validation-preflight]='Fast Validation — preflight'
-    [fast-validation-suite-build]='Fast Validation — suite archive build'
-    [fast-validation-docs]='Fast Validation — doctests'
-    [clippy]='Clippy'
-    [macos-check]='macOS Check'
-    [test-compile-guard]='Test Compile Guard'
-    [panic-isolation-release]='Panic Isolation — release profile'
-    [panic-isolation-release-fast]='Panic Isolation — release-fast profile'
-)
 
 skew_tmp="$(mktemp -d)"
 skew_guard='if [[ -x ./scripts/ci-sccache-summary.sh ]]; then

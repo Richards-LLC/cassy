@@ -27,14 +27,15 @@ fn cas_cmd_at(project: &Path, home: &Path, xdg: &Path) -> Command {
 }
 
 fn assert_markdownlint_clean(repo_root: &Path, files: &[&Path]) {
-    assert_markdownlint_clean_with_npx(repo_root, files, "npx");
+    assert_markdownlint_clean_with_python(repo_root, files, "python3");
 }
 
-fn assert_markdownlint_clean_with_npx(repo_root: &Path, files: &[&Path], npx: &str) {
-    let mut command = ProcessCommand::new(npx);
-    command.args([
-        "--yes",
-        "markdownlint-cli2@0.18.1",
+/// Docs Lint over generated Markdown through the repository's one pinned
+/// linter (`scripts/markdownlint.py`, the root devDependency; cas-a1b0), not an
+/// `npx` download or a PATH lookup.
+fn assert_markdownlint_clean_with_python(repo_root: &Path, files: &[&Path], python: &str) {
+    let mut command = ProcessCommand::new(python);
+    command.arg(repo_root.join("scripts/markdownlint.py")).args([
         "--config",
         repo_root.join(".markdownlint-cli2.jsonc").to_str().unwrap(),
     ]);
@@ -45,13 +46,20 @@ fn assert_markdownlint_clean_with_npx(repo_root: &Path, files: &[&Path], npx: &s
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             println!(
-                "SKIP: generated Markdown Docs Lint looked for `{npx}` on PATH \
-                 (markdownlint-cli2@0.18.1); `{npx}` is unavailable"
+                "SKIP: generated Markdown Docs Lint looked for `{python}` on PATH \
+                 (scripts/markdownlint.py); `{python}` is unavailable"
             );
             return;
         }
-        Err(error) => panic!("could not run generated Markdown Docs Lint via `{npx}`: {error}"),
+        Err(error) => panic!("could not run generated Markdown Docs Lint via `{python}`: {error}"),
     };
+    if output.status.code() == Some(3) {
+        println!(
+            "SKIP: the pinned markdownlint-cli2 is unavailable (npm missing): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     assert!(
         output.status.success(),
         "generated Markdown failed Docs Lint (command stderr):\n{}\nstdout:\n{}",
@@ -62,9 +70,9 @@ fn assert_markdownlint_clean_with_npx(repo_root: &Path, files: &[&Path], npx: &s
 
 #[cfg(unix)]
 #[test]
-fn generated_docs_lint_skips_when_npx_is_missing() {
+fn generated_docs_lint_skips_when_python_is_missing() {
     let repo_root = cas::test_paths::workspace_root();
-    assert_markdownlint_clean_with_npx(&repo_root, &[], "cas-test-missing-npx");
+    assert_markdownlint_clean_with_python(&repo_root, &[], "cas-test-missing-python");
 }
 
 #[cfg(unix)]

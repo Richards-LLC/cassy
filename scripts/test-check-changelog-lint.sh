@@ -16,13 +16,11 @@ fail=0
 ok() { printf 'ok   %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 
-# 1. The check pins the same markdownlint-cli2 as the Docs Lint job.
-check_version="$(sed -n 's/^MARKDOWNLINT_CLI2_VERSION="\(.*\)"$/\1/p' "$check")"
-ci_version="$(grep -o 'markdownlint-cli2@[0-9.]*' "$repo_root/.github/workflows/ci.yml" | head -n 1 | cut -d@ -f2)"
-if [[ -n "$check_version" && "$check_version" == "$ci_version" ]]; then
-    ok "check and Docs Lint pin markdownlint-cli2@$ci_version"
+# 1. The check runs the one pinned linter (the root devDependency), not npx.
+if grep -q 'markdownlint.py' "$check" && ! grep -q 'npx' "$check"; then
+    ok "check resolves markdownlint-cli2 through scripts/markdownlint.py"
 else
-    bad "check pins '$check_version' but Docs Lint pins '$ci_version'"
+    bad "check must resolve the linter through scripts/markdownlint.py only"
 fi
 
 fixture() {
@@ -65,7 +63,7 @@ fi
 
 # 3. The real linter: it catches the historical debt shape, and the repo's
 #    CHANGELOG.md is clean. Skipped only when Node is not installed.
-if command -v npx >/dev/null 2>&1; then
+if command -v npm >/dev/null 2>&1; then
     debt_dir="$(fixture debt $'# Changelog\n\n## [0.5.1]\n### Fixed\n- a fix\n')"
     status=0
     out="$("$check" "$debt_dir" 2>&1)" || status=$?
@@ -82,7 +80,7 @@ if command -v npx >/dev/null 2>&1; then
         bad "repository CHANGELOG.md has markdownlint findings: $out"
     fi
 else
-    printf 'skip real-linter checks: npx is not on PATH\n'
+    printf 'skip real-linter checks: npm is not on PATH\n'
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

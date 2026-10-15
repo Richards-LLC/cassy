@@ -91,10 +91,10 @@ runs:
         esac
 
         # Web tests read hub-web/ plus named repo-level inputs (the journey
-        # catalog, scripts/visual-qa.mjs, the worker-memory wrapper, design
-        # tokens); scripts/classify-web-inputs.py owns that list (cas-7822). A
-        # ci.yml-only edit is not an input (cas-c846); scripts/test-hub-web-gate.py
-        # pins the step's wiring instead. Decide coverage by paths independently of
+        # catalog, scripts/visual-qa.mjs, design tokens);
+        # scripts/classify-web-inputs.py owns that list (cas-7822). A ci.yml-only
+        # edit is not an input (cas-c846), nor is release plumbing (cas-a1b0).
+        # Decide coverage by paths independently of
         # Rust's class, including Markdown fixtures. An unavailable diff or a
         # failed classifier must still run the checks.
         web_check_needed=true

@@ -20,6 +20,23 @@ LANE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(LANE)
 
 
+def _pinned_linter():
+    """The repository's one markdownlint-cli2 (scripts/markdownlint.py), or None.
+
+    Fixture repositories have no node_modules, so their markdown-lint row runs
+    the real root's pinned linter through the MARKDOWNLINT_CLI2 seam instead of
+    a PATH or npx-cache lookup that a scrubbed HOME cannot see (cas-a677).
+    """
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/markdownlint.py"), "--resolve"],
+                            capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+LINTER = _pinned_linter()
+if LINTER:
+    os.environ["MARKDOWNLINT_CLI2"] = LINTER
+
+
 EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"
 VIOLET_SKILL = "---\nname: violet\ndescription: Use when posting to Slack.\n---\nShort body.\n"
 
@@ -95,7 +112,7 @@ class FastRows(unittest.TestCase):
         self.repo.mkdir()
         self.write(".gitignore", "/cargo-called\n")
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
-                       "check-workflow-run-interpolation.py", "check-changed-markdown.py",
+                       "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
@@ -398,8 +415,8 @@ sleep 2
         self.assertIn("FAIL ci-script-tests-changed", failing.stdout)
 
     def test_changed_markdown_failure(self):
-        if not shutil.which("npx") and not shutil.which("markdownlint-cli2"):
-            self.skipTest("pinned Markdown linter unavailable")
+        if not LINTER:
+            self.skipTest("pinned Markdown linter unavailable (npm missing)")
         self.write("docs/bad.md", "# Heading\n###Skipped level\n")
         self.commit()
         result = self.fast()
@@ -557,7 +574,7 @@ sleep 2
 
     def test_todays_late_failures_are_refused_at_park_with_the_fix_cas_7bce(self):
         shape = {"scripts/check-test-shape.py": (ROOT / "scripts/check-test-shape.py").read_text()}
-        linter = bool(shutil.which("npx") or shutil.which("markdownlint-cli2"))
+        linter = bool(LINTER)
         cases = [
             # 1. The merge queue rejected the two_machine tests: a compile-time
             # binary path does not exist on the archive shard runner.

@@ -1,0 +1,8 @@
+{
+  "name": "cassy-repo-tools",
+  "private": true,
+  "description": "Pinned repository tooling. scripts/markdownlint.py is the one way any check resolves markdownlint-cli2.",
+  "devDependencies": {
+    "markdownlint-cli2": "0.18.1"
+  }
+}

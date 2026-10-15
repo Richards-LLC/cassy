@@ -8531,11 +8531,16 @@ mod tests {
             .unwrap();
         assert_eq!(history.len(), 4, "{history:#?}");
         assert!(history.iter().all(|row| row.factory_session.as_deref() == Some("factory-7")));
+        // pin: these fixture messages distinguish the session-filter cases.
         assert!(history.iter().any(|row| row.prompt == "typed at terminal"));
+        // pin: this fixture checks the persisted operator-authored row.
         assert!(history.iter().any(|row| row.prompt == "operator message"));
         assert!(history.iter().any(|row| row.target == "operator"));
+        // pin: the second sender is deliberately isolated by device identity.
         assert!(history.iter().any(|row| row.prompt == "other device message"));
+        // pin: old-session contents must stay out of the current thread.
         assert!(!history.iter().any(|row| row.prompt.contains("older project session")));
+        // pin: sessionless rows must stay out of a scoped conversation.
         assert!(!history.iter().any(|row| row.prompt.contains("sessionless reply")));
         assert!(
             history.windows(2).all(|pair| pair[0].id > pair[1].id),
@@ -8842,6 +8847,7 @@ mod tests {
         let rows = store.peek_all(10).unwrap();
         let lifecycle = rows
             .iter()
+            // pin: the daemon outbox discriminator is part of this receipt test.
             .find(|r| r.source == "lifecycle-wake:9")
             .expect("lifecycle row");
         assert_eq!(lifecycle.origin, Some(QueueOrigin::Daemon));
@@ -8976,8 +8982,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .unwrap();
+        // pin: message_status must retain the authenticated Commander source.
         assert_eq!(source, "commander:Pippenz@Pippenz phone");
         assert_eq!(target, "worker-1");
+        // pin: this is the body whose durable attribution is under test.
         assert_eq!(prompt, "Please checkpoint now");
         assert_eq!(session, "factory-1");
         assert_eq!(urgent, 0);
@@ -10247,6 +10255,7 @@ mod tests {
         let prompts = store.poll_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "swift-fox");
+        // pin: this test verifies the exact body returned by the queue poll.
         assert_eq!(prompts[0].prompt, "Hello worker!");
 
         // Polling again should return empty (already processed)
@@ -10634,6 +10643,7 @@ mod tests {
             "peek and count must agree"
         );
         assert_eq!(peeked.len(), 2, "own row + broadcast, never worker-b's");
+        // pin: the reminder stays scoped to the recipient's unseen inbox.
         assert!(peeked[0].prompt.starts_with("Reminder #44:"));
         assert_eq!(peeked[1].target, "all_workers");
 
@@ -12079,10 +12089,13 @@ mod tests {
         let prompts = store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 3);
         // Critical (0) should come first, then High (1), then Normal (2)
+        // pin: priority order is asserted through each stored prompt body.
         assert_eq!(prompts[0].prompt, "Critical blocker");
         assert_eq!(prompts[0].priority, NotificationPriority::Critical);
+        // pin: the high-priority row is the middle item in this ordered queue.
         assert_eq!(prompts[1].prompt, "High priority");
         assert_eq!(prompts[1].priority, NotificationPriority::High);
+        // pin: the normal-priority row is the final item in this ordered queue.
         assert_eq!(prompts[2].prompt, "Normal update");
         assert_eq!(prompts[2].priority, NotificationPriority::Normal);
     }
@@ -12130,7 +12143,9 @@ mod tests {
             .unwrap();
         assert_eq!(prompts.len(), 2);
         // High priority should come first
+        // pin: the selected blocker body and order are this test's contract.
         assert_eq!(prompts[0].prompt, "BLOCKED: need help");
+        // pin: the lower-priority follow-up stays second.
         assert_eq!(prompts[1].prompt, "Status update");
     }
 
@@ -12735,6 +12750,7 @@ mod tests {
 
         let prompts = store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
+        // pin: urgent metadata must survive a store round trip.
         assert!(prompts[0].urgent, "urgent flag must round-trip as true");
         assert_eq!(prompts[0].priority, NotificationPriority::Critical);
 
@@ -14203,6 +14219,7 @@ mod tests {
 
         let pending = store.peek_all(10).unwrap();
         assert_eq!(pending.len(), 1);
+        // pin: the legacy table upgrade must preserve its original prompt.
         assert_eq!(pending[0].prompt, "hello legacy");
 
         // Idempotent enqueue works on upgraded schema.
@@ -15104,6 +15121,7 @@ mod tests {
             vec![id],
             "a post-drain message must reach the worker's next turn"
         );
+        // pin: the surfaced body is the durable next-turn contract.
         assert_eq!(surfaced[0].prompt, "start cas-7a01");
     }
 

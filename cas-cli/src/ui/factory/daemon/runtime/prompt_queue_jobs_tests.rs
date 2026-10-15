@@ -201,7 +201,7 @@ fn flv2_queue_stamps_on_writer() {
     let ran = writer.ran();
     assert_eq!(
         ran.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
-        vec!["QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueStamp", "QueueStamp"],
+        vec!["QueueSelect", "QueueStamp", "QueueStamp", "QueueStamp", "QueueSettle", "QueueSettle"],
         "the selection, then receipt, delivered, release and two settles: {ran:?}"
     );
     assert!(ran.iter().all(|(_, thread)| thread == "test-store-writer"), "{ran:?}");

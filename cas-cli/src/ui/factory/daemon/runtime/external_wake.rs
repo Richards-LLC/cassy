@@ -177,17 +177,25 @@ pub(crate) fn external_wake_candidates(
     candidates
 }
 
-/// Whether an agent's session is gone: no agent row, or no heartbeat for
-/// [`DEAD_SESSION_GRACE_SECS`] and no live process. A store error is not
-/// evidence of death.
+/// Whether an agent's session is gone for a reminder created at
+/// `reminder_created`: no heartbeat for [`DEAD_SESSION_GRACE_SECS`] and no
+/// live process, or no agent row and a reminder older than that grace. A
+/// store error is not evidence of death.
+///
+/// A missing row alone is not death: SessionEnd and factory teardown delete
+/// agent rows, so a restarted or resumed factory has no row for its owner
+/// until it registers again. Its durable reminders must survive that gap.
 fn session_gone(
     agents: &dyn cas_store::AgentStore,
     agent_id: &str,
+    reminder_created: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
     process_alive: &dyn Fn(&cas_types::Agent) -> bool,
 ) -> bool {
     match agents.get(agent_id) {
-        Err(cas_store::StoreError::NotFound(_)) => true,
+        Err(cas_store::StoreError::NotFound(_)) => {
+            (now - reminder_created).num_seconds() > DEAD_SESSION_GRACE_SECS
+        }
         Err(_) => false,
         Ok(agent) => {
             (now - agent.last_heartbeat).num_seconds() > DEAD_SESSION_GRACE_SECS
@@ -197,7 +205,8 @@ fn session_gone(
 }
 
 /// Expire pending external reminders (`branch_contained_in`, `tag_exists`,
-/// `ci_completed`) whose owner and target sessions are both gone. These rows
+/// `ci_completed`) whose owner and target sessions are both gone (see
+/// [`session_gone`]). These rows
 /// are durable by design, so without this a dead session's wake is re-probed
 /// forever, including one already satisfied whose target can never receive
 /// it. Returns the number expired.
@@ -222,10 +231,12 @@ pub(crate) fn expire_dead_session_reminders(
             continue;
         };
         for reminder in pending {
-            let owner_gone = session_gone(agents.as_ref(), &reminder.owner_id, now, process_alive);
+            let gone = |agent_id: &str| {
+                session_gone(agents.as_ref(), agent_id, reminder.created_at, now, process_alive)
+            };
+            let owner_gone = gone(&reminder.owner_id);
             let target_gone = owner_gone
-                && (reminder.target_id == reminder.owner_id
-                    || session_gone(agents.as_ref(), &reminder.target_id, now, process_alive));
+                && (reminder.target_id == reminder.owner_id || gone(&reminder.target_id));
             if !target_gone {
                 continue;
             }
@@ -569,7 +580,9 @@ mod tests {
     /// GH #1208: the issue's stale rows were cross-session, TTL 0 and owned by
     /// sessions dead for days, so nothing ever ended them. A row is expired
     /// once its owner and target are both gone; a live, recent or
-    /// process-backed session keeps it, as does any non-external reminder.
+    /// process-backed session keeps it, as does any non-external reminder. A
+    /// missing agent row counts as gone only for a reminder older than the
+    /// grace, so a factory restart does not expire its owner's wakes.
     #[test]
     fn dead_session_external_reminders_expire() {
         let dir = tempfile::tempdir().unwrap();
@@ -601,7 +614,11 @@ mod tests {
                 .unwrap()
         };
         let dead_self = create("dead", "dead", EXTERNAL_BRANCH_CONTAINED_EVENT);
-        let missing = create("pruned", "pruned", EXTERNAL_TAG_EXISTS_EVENT);
+        // No agent row: SessionEnd and teardown delete rows, so a restarted
+        // factory's owner is missing until it registers again. A recent
+        // reminder survives that gap; one older than the grace is expired.
+        let restarted = create("pruned", "pruned", EXTERNAL_TAG_EXISTS_EVENT);
+        let missing_old = create("pruned", "pruned", EXTERNAL_TAG_EXISTS_EVENT);
         // The #3042 shape: a ci_completed wake whose supervisor session died.
         let dead_ci = create("dead", "pruned", EXTERNAL_CI_COMPLETED_EVENT);
         let live = create("live", "live", EXTERNAL_BRANCH_CONTAINED_EVENT);
@@ -609,6 +626,14 @@ mod tests {
         let live_target = create("dead", "live", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let process_backed = create("zombie", "zombie", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let director_event = create("pruned", "pruned", "task_completed");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        for id in [missing_old, dead_ci, director_event] {
+            conn.execute(
+                "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![(now - chrono::Duration::hours(25)).to_rfc3339(), id],
+            )
+            .unwrap();
+        }
 
         let process_alive = |agent: &cas_types::Agent| agent.id == "zombie";
         assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 3);
@@ -621,8 +646,11 @@ mod tests {
             .map(|r| r.id)
             .collect();
         pending.sort_unstable();
-        assert_eq!(pending, vec![live, recent, live_target, process_backed, director_event]);
-        for expired in [dead_self, missing, dead_ci] {
+        assert_eq!(
+            pending,
+            vec![restarted, live, recent, live_target, process_backed, director_event]
+        );
+        for expired in [dead_self, missing_old, dead_ci] {
             assert!(!pending.contains(&expired));
         }
     }

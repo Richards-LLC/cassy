@@ -26,6 +26,39 @@ fn cas_8405_hidden_legacy_bool_alias_keeps_string_coercion() {
 }
 
 #[test]
+fn cas_8405_bool_coercion_does_not_grow_the_schema() {
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[schemars(title = "BooleanParameter")]
+    struct Strict {
+        #[serde(default)]
+        flag: Option<bool>,
+    }
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[schemars(title = "BooleanParameter")]
+    struct Coerced {
+        #[serde(default, deserialize_with = "crate::types::deser::option_bool")]
+        flag: Option<bool>,
+    }
+    assert!(
+        serde_json::from_str::<Strict>(r#"{"flag":true}"#)
+            .unwrap()
+            .flag
+            .unwrap()
+    );
+    assert!(
+        serde_json::from_str::<Coerced>(r#"{"flag":"true"}"#)
+            .unwrap()
+            .flag
+            .unwrap()
+    );
+    // Changing only this attribute must leave even the serialized bytes unchanged.
+    assert_eq!(
+        serde_json::to_string(&schemars::schema_for!(Strict)).unwrap(),
+        serde_json::to_string(&schemars::schema_for!(Coerced)).unwrap()
+    );
+}
+
+#[test]
 fn cas_8405_all_mcp_boolean_parameters_accept_string_forms() {
     use serde_json::{Value, json};
 

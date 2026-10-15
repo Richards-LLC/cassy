@@ -1366,7 +1366,9 @@ mod tests {
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, first);
-        assert_eq!(rows[0].kind.as_deref(), Some("worker_stall_nudge"));
+        // Match the daemon's full-row reread; legacy feed peeks omit kind.
+        let row = queue.queued_prompt(first).unwrap().unwrap();
+        assert_eq!(row.kind.as_deref(), Some("worker_stall_nudge"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }
 

@@ -846,6 +846,15 @@ impl<'a> ClaudeTeamsWorkerDouble<'a> {
         format!("{prompt}\n{}", self.tool_call())
     }
 
+    /// A teammate-message turn that ends without a tool call: no hook runs.
+    fn next_teammate_turn_without_tool_call(&mut self) -> Option<String> {
+        let copy = self.teams_inbox.pop_front()?;
+        let prompt =
+            format!("<teammate-message teammate_id=\"supervisor\">\n{copy}\n</teammate-message>");
+        self.begin_turn(&prompt);
+        Some(format!("{prompt}\n"))
+    }
+
     /// The turn boundary after the wake: Claude renders the queued copy.
     fn next_teammate_turn(&mut self) -> Option<String> {
         let copy = self.teams_inbox.pop_front()?;
@@ -965,19 +974,17 @@ fn ct2_p1_one_body_per_message_teams() {
 
     // 2. Busy recipient: the wake is declined, a tool boundary shows the
     // claimed row mid-turn (cas-b5ad), then the Teams copy renders.
+    // The count is over what the hooks actually output (cas-1f0c review).
     let busy = "Take (B), but keep the flag operator-only.";
+    let mut context = worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
     let id = store.enqueue_with_session("supervisor", WORKER, busy, SESSION).unwrap();
     claim_for_claude_teams(&store, &mut worker, id, busy);
     store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
-    let mid_turn = store
-        .surface_unseen_for_recipient_delivered_after(
-            WORKER,
-            Some(SESSION),
-            10,
-            chrono::Utc::now() - chrono::Duration::minutes(1),
-        )
-        .unwrap();
-    let mut context: String = mid_turn.iter().map(|row| row.prompt.clone()).collect();
+    let mid_turn = worker.tool_call();
+    assert_eq!(mid_turn.matches(busy).count(), 1, "{mid_turn}");
+    context.push_str(&mid_turn);
+    context.push_str(&worker.tool_call());
     context.push_str(&worker.next_teammate_turn().unwrap());
     assert_eq!(context.matches(busy).count(), 1, "{context}");
 
@@ -1200,6 +1207,85 @@ fn cas_1f0c_a_pointer_to_a_broadcast_already_shown_says_so() {
     let teammate_turn = worker.next_teammate_turn().unwrap();
     assert!(!teammate_turn.contains(body), "{teammate_turn}");
     assert!(teammate_turn.contains(&format!("[already shown] Message #{id}")), "{teammate_turn}");
+}
+
+/// cas-1f0c review round 2, H1: once the time fallback has re-sent a row's
+/// full body to the Teams inbox, no hook renders that row again. A later
+/// wake turn notes it instead, the teammate turn carrying the body records
+/// it, and the agent reads the body once.
+#[test]
+fn cas_1f0c_after_the_time_fallback_no_hook_renders_the_row_again() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+    let body = "Re-run the named tests after the rebase.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
+    // The pointer copy rendered in a turn that made no tool call: nothing
+    // showed the row.
+    worker.next_teammate_turn_without_tool_call().unwrap();
+
+    // The daemon's fallback claims the row and writes the full body.
+    assert!(store.claim_teams_body_fallback(id, WORKER).unwrap());
+    worker.teams_inbox.push_back(format!("[cas #{id} supervisor-authored 3m first]\n\n{body}"));
+
+    let wake_turn = worker.take_turn(&wake);
+    assert!(!wake_turn.contains(body), "{wake_turn}");
+    assert!(wake_turn.contains(&format!("[sent in full] Message #{id}")), "{wake_turn}");
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    let later = worker.take_turn("continuing my work");
+    let seen = format!("{wake_turn}{teammate_turn}{later}");
+    assert_eq!(seen.matches(body).count(), 1, "{seen}");
+    assert_eq!(
+        store.recipient_receipt(id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced),
+        "the teammate turn that carried the body records it"
+    );
+}
+
+/// cas-1f0c review round 2, H2: a broadcast pointer whose teammate turn made
+/// no tool call is not lost. The per-recipient fallback re-sends the body to
+/// this peer, and the agent reads it exactly once.
+#[test]
+fn cas_1f0c_a_broadcast_pointer_turn_without_a_tool_call_still_delivers_once() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+    let body = "All workers: the epic tip moved; rebase before parking.";
+    let id = store.enqueue_with_session("supervisor", "all_workers", body, SESSION).unwrap();
+    claim_for_claude_teams(&store, &mut worker, id, body);
+
+    let pointer_turn = worker.next_teammate_turn_without_tool_call().unwrap();
+    assert!(!pointer_turn.contains(body), "{pointer_turn}");
+    let quiet = worker.take_turn("continuing my work");
+    assert!(!quiet.contains(body), "no hook path reaches the row: {quiet}");
+
+    let candidates = store
+        .teams_pointer_fallback_candidates(
+            SESSION,
+            chrono::Utc::now() - chrono::Duration::hours(1),
+            chrono::Utc::now(),
+            10,
+        )
+        .unwrap();
+    assert!(
+        candidates.iter().any(|(row, recipient)| row.id == id && recipient == WORKER),
+        "the broadcast peer is a fallback candidate: {candidates:?}"
+    );
+    assert!(store.claim_teams_body_fallback(id, WORKER).unwrap());
+    worker.teams_inbox.push_back(format!("[cas #{id} supervisor-authored 3m first]\n\n{body}"));
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    let later = worker.take_turn("continuing my work");
+    let seen = format!("{pointer_turn}{quiet}{teammate_turn}{later}");
+    assert_eq!(seen.matches(body).count(), 1, "{seen}");
+    assert_eq!(
+        store.recipient_receipt(id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
 }
 
 /// cas-ad92 boundaries: an ordinary turn still leaves a claimed row to its

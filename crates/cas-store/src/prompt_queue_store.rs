@@ -1726,11 +1726,12 @@ const PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_bytes INTEGER;
 "#;
 
-/// cas-1f0c: when the daemon wrote a row's full body to a Claude Teams inbox
-/// because no hook or poll showed the pointer copy in time. One-shot across
-/// daemon restarts.
-const PROMPT_QUEUE_TEAMS_BODY_FALLBACK_AT_MIGRATION: &str = r#"
-ALTER TABLE prompt_queue ADD COLUMN teams_body_fallback_at TEXT;
+/// cas-1f0c: when the daemon wrote a row's full body to this recipient's
+/// Claude Teams inbox because no hook or poll showed the pointer copy in time.
+/// Per recipient, so a broadcast has one marker per peer; one-shot across
+/// daemon restarts. Store-local `ensure_column` migration.
+const PROMPT_QUEUE_RECIPIENT_SEEN_TEAMS_BODY_FALLBACK_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue_recipient_seen ADD COLUMN teams_body_fallback_at TEXT;
 "#;
 
 /// cas-6853 (communication contract v2, P2.4/P3.7): broadcast audience
@@ -2175,23 +2176,34 @@ pub trait PromptQueueStore: Send + Sync {
     fn recipient_receipt(&self, prompt_id: i64, recipient: &str)
     -> Result<Option<SurfacingSource>>;
 
-    /// cas-1f0c: direct rows whose Claude Teams copy was a pointer and that no
-    /// hook or poll has shown since: the recipient holds only a transport
-    /// receipt taken between `handed_off_after` and `handed_off_before`, the
-    /// row is unacked, not urgent, not terminal and has no body fallback yet.
-    /// The daemon filters the recipients and rows it wrote pointers for.
+    /// cas-1f0c: `(row, recipient)` pairs whose Claude Teams copy was a
+    /// pointer that no hook or poll has shown since: the recipient (the
+    /// target of a direct row, or one peer of a broadcast) holds only a
+    /// transport receipt taken between `handed_off_after` and
+    /// `handed_off_before`, and has no body fallback yet. Urgent, terminal
+    /// and (for direct rows) acked rows are excluded. The daemon filters the
+    /// recipients and rows it wrote pointers for.
     fn teams_pointer_fallback_candidates(
         &self,
         factory_session: &str,
         handed_off_after: DateTime<Utc>,
         handed_off_before: DateTime<Utc>,
         limit: usize,
-    ) -> Result<Vec<QueuedPrompt>>;
+    ) -> Result<Vec<(QueuedPrompt, String)>>;
 
-    /// cas-1f0c: claim the one full-body Teams fallback for `prompt_id`.
-    /// `true` only for the first caller, and only while the row is still
-    /// unacked and its recipient still holds only a transport receipt.
-    fn claim_teams_body_fallback(&self, prompt_id: i64) -> Result<bool>;
+    /// cas-1f0c: claim the one full-body Teams fallback of `prompt_id` for
+    /// `recipient`. `true` only for the first caller, and only while the
+    /// recipient still holds nothing but a transport receipt (and a direct
+    /// row is unacked). From the claim on, no hook drain renders the row for
+    /// that recipient: its body travels in the Teams copy.
+    fn claim_teams_body_fallback(&self, prompt_id: i64, recipient: &str) -> Result<bool>;
+
+    /// cas-1f0c: undo a claim whose Teams write failed, so a later sweep
+    /// retries and hook drains may render the row again.
+    fn release_teams_body_fallback(&self, prompt_id: i64, recipient: &str) -> Result<()>;
+
+    /// cas-1f0c: whether `recipient` holds a body fallback for `prompt_id`.
+    fn teams_body_fallback_claimed(&self, prompt_id: i64, recipient: &str) -> Result<bool>;
 
     /// cas-ad92: the hook-free counterpart of
     /// [`Self::surface_wake_named_for_recipient`] for an `inbox_poll` that
@@ -3884,10 +3896,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "deferred_inbox_bytes",
                     PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION,
                 ),
-                (
-                    "teams_body_fallback_at",
-                    PROMPT_QUEUE_TEAMS_BODY_FALLBACK_AT_MIGRATION,
-                ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
@@ -3915,6 +3923,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "prompt_queue_recipient_seen",
                 "source",
                 PROMPT_QUEUE_RECIPIENT_SEEN_SOURCE_MIGRATION,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "prompt_queue_recipient_seen",
+                "teams_body_fallback_at",
+                PROMPT_QUEUE_RECIPIENT_SEEN_TEAMS_BODY_FALLBACK_MIGRATION,
             )?;
             crate::shared_db::ensure_column(
                 &conn,
@@ -5206,26 +5220,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         handed_off_after: DateTime<Utc>,
         handed_off_before: DateTime<Utc>,
         limit: usize,
-    ) -> Result<Vec<QueuedPrompt>> {
+    ) -> Result<Vec<(QueuedPrompt, String)>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(&format!(
             "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary,
                     q.priority, q.acked_at, q.urgent, q.factory_session, q.origin_agent_id,
-                    q.origin_kind
+                    q.origin_kind, seen.recipient
                FROM prompt_queue q
-               JOIN prompt_queue_recipient_seen seen
-                 ON seen.prompt_id = q.id AND seen.recipient = q.target
+               JOIN prompt_queue_recipient_seen seen ON seen.prompt_id = q.id
               WHERE q.factory_session = ?
-                AND q.target <> 'all_workers'
+                AND (seen.recipient = q.target OR q.target = 'all_workers')
                 AND q.urgent = 0
-                AND q.acked_at IS NULL
-                AND q.teams_body_fallback_at IS NULL
+                AND (q.target = 'all_workers' OR q.acked_at IS NULL)
+                AND seen.teams_body_fallback_at IS NULL
                 AND (q.highest_stage IS NULL
                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})
                 AND seen.source IN ('transport_claimed', 'transport_delivered')
                 AND julianday(seen.seen_at) >= julianday(?)
                 AND julianday(seen.seen_at) <= julianday(?)
-              ORDER BY q.id ASC
+              ORDER BY q.id ASC, seen.recipient ASC
               LIMIT ?"
         ))?;
         Ok(stmt
@@ -5236,29 +5249,55 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     handed_off_before.to_rfc3339(),
                     i64::try_from(limit).unwrap_or(i64::MAX)
                 ],
-                Self::prompt_from_row,
+                |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(13)?)),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    fn claim_teams_body_fallback(&self, prompt_id: i64) -> Result<bool> {
+    fn claim_teams_body_fallback(&self, prompt_id: i64, recipient: &str) -> Result<bool> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let changed = conn.execute(
-                "UPDATE prompt_queue
+                "UPDATE prompt_queue_recipient_seen
                     SET teams_body_fallback_at = ?
-                  WHERE id = ?
+                  WHERE prompt_id = ?
+                    AND recipient = ?
                     AND teams_body_fallback_at IS NULL
-                    AND acked_at IS NULL
+                    AND source IN ('transport_claimed', 'transport_delivered')
                     AND EXISTS (
-                        SELECT 1 FROM prompt_queue_recipient_seen seen
-                         WHERE seen.prompt_id = prompt_queue.id
-                           AND seen.recipient = prompt_queue.target
-                           AND seen.source IN ('transport_claimed', 'transport_delivered'))",
-                params![Utc::now().to_rfc3339(), prompt_id],
+                        SELECT 1 FROM prompt_queue q
+                         WHERE q.id = prompt_queue_recipient_seen.prompt_id
+                           AND (q.target = 'all_workers' OR q.acked_at IS NULL))",
+                params![Utc::now().to_rfc3339(), prompt_id, recipient],
             )?;
             Ok(changed == 1)
         })
+    }
+
+    fn release_teams_body_fallback(&self, prompt_id: i64, recipient: &str) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen
+                    SET teams_body_fallback_at = NULL
+                  WHERE prompt_id = ? AND recipient = ?",
+                params![prompt_id, recipient],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn teams_body_fallback_claimed(&self, prompt_id: i64, recipient: &str) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM prompt_queue_recipient_seen
+                  WHERE prompt_id = ? AND recipient = ? AND teams_body_fallback_at IS NOT NULL",
+                params![prompt_id, recipient],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     fn surface_unseen_from_sources_for_recipient(
@@ -5338,7 +5377,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute(
                 "DELETE FROM prompt_queue_recipient_seen
-                 WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'",
+                 WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'
+                   -- cas-1f0c: a Teams body fallback already handed the body over.
+                   AND teams_body_fallback_at IS NULL",
                 params![prompt_id, recipient],
             )?;
             Ok(())
@@ -7150,6 +7191,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             tx.execute(
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE prompt_id = ?1 AND source = 'transport_claimed'
+                   AND teams_body_fallback_at IS NULL
                    AND recipient = (SELECT target FROM prompt_queue WHERE id = ?1)",
                 params![prompt_id],
             )?;
@@ -7698,6 +7740,22 @@ impl SqlitePromptQueueStore {
             };
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&tx)?);
+            // cas-1f0c: once a Teams body fallback carries the row, no hook
+            // renders it: any marker for a direct row, this recipient's for a
+            // broadcast. The unbudgeted paths (inbox_poll, the turn recorder)
+            // still reach it.
+            let fallback_sql = if budget_chars.is_some() {
+                format!(
+                    "AND NOT EXISTS (
+                         SELECT 1 FROM prompt_queue_recipient_seen fb
+                          WHERE fb.prompt_id = q.id
+                            AND fb.teams_body_fallback_at IS NOT NULL
+                            AND (q.target <> 'all_workers' OR fb.recipient = {}))",
+                    sql_literal(recipient)
+                )
+            } else {
+                String::new()
+            };
             let receipt_sql = match transport {
                 TransportEligibility::Any => UNCLAIMED_RECIPIENT_RECEIPT_SQL,
                 TransportEligibility::NoneRecorded => UNSEEN_RECIPIENT_RECEIPT_SQL,
@@ -7779,6 +7837,7 @@ impl SqlitePromptQueueStore {
                            {daemon_nudge_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
+                           {fallback_sql}
                            {source_sql}
                            {ids_sql}
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
@@ -7826,6 +7885,7 @@ impl SqlitePromptQueueStore {
                            {daemon_nudge_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
+                           {fallback_sql}
                            {source_sql}
                            {ids_sql}
                            AND q.factory_session IS NULL
@@ -16363,5 +16423,84 @@ mod stall_nudge_hook_exclusion_tests {
             let polled = store.poll_unseen_for_recipient("worker", session, 10).unwrap();
             assert_eq!(polled.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
         }
+    }
+}
+
+#[cfg(test)]
+mod cas_1f0c_teams_body_fallback_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store() -> (TempDir, SqlitePromptQueueStore) {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    fn render(store: &SqlitePromptQueueStore, recipient: &str, id: i64) -> Vec<i64> {
+        let mut ids: Vec<i64> = Vec::new();
+        for drain in [HookDrain::WakeNamed(&[id]), HookDrain::Unseen] {
+            ids.extend(
+                store
+                    .surface_for_recipient_within_budget(recipient, Some("s"), drain, 10, 5_000)
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .map(|row| row.id),
+            );
+        }
+        ids
+    }
+
+    /// cas-1f0c: the fallback is claimed once per recipient, a failed write
+    /// can release it, and while it is held no hook drain renders the row for
+    /// that recipient. The turn recorder (an unbudgeted wake drain) still
+    /// records it, and a broadcast's other peers are unaffected.
+    #[test]
+    fn a_held_fallback_hides_the_row_from_every_hook_drain_for_that_recipient() {
+        let (_temp, store) = store();
+        let direct = store.enqueue_with_session("supervisor", "w1", "direct body", "s").unwrap();
+        let broadcast = store.enqueue_with_session("supervisor", "all_workers", "shared body", "s").unwrap();
+        for (id, recipient) in [(direct, "w1"), (broadcast, "w1"), (broadcast, "w2")] {
+            assert!(store.claim_recipient_transport(id, recipient).unwrap());
+        }
+
+        assert!(!store.teams_body_fallback_claimed(direct, "w1").unwrap());
+        assert!(store.claim_teams_body_fallback(direct, "w1").unwrap());
+        assert!(!store.claim_teams_body_fallback(direct, "w1").unwrap(), "one-shot");
+        assert!(store.teams_body_fallback_claimed(direct, "w1").unwrap());
+        assert!(render(&store, "w1", direct).is_empty());
+
+        // A failed write releases the claim; the row is renderable again.
+        store.release_teams_body_fallback(direct, "w1").unwrap();
+        assert!(store.claim_teams_body_fallback(direct, "w1").unwrap());
+
+        // A held claim survives a transport release: the body was handed over.
+        store.release_recipient_transport(direct, "w1").unwrap();
+        assert!(store.teams_body_fallback_claimed(direct, "w1").unwrap());
+
+        // Per recipient for a broadcast.
+        assert!(store.claim_teams_body_fallback(broadcast, "w1").unwrap());
+        assert!(render(&store, "w1", broadcast).is_empty());
+        assert_eq!(render(&store, "w2", broadcast), vec![broadcast]);
+
+        // The turn recorder still records the carried row.
+        assert_eq!(
+            store
+                .surface_wake_named_for_recipient("w1", Some("s"), &[direct])
+                .unwrap()
+                .len(),
+            1
+        );
+        let candidates = store
+            .teams_pointer_fallback_candidates(
+                "s",
+                Utc::now() - chrono::Duration::hours(1),
+                Utc::now(),
+                10,
+            )
+            .unwrap();
+        assert!(candidates.is_empty(), "nothing left to re-send: {candidates:?}");
     }
 }

@@ -245,14 +245,28 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
         receipt.remember(key);
         receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
         changed = true;
-        if let Some(packet) =
+        // cas-1f0c: mail above is already receipted; recall may not take it
+        // down (panic) or push the output past Claude Code's cap.
+        if let Some(packet) = super::handlers::handlers_middle::factory_inbox::after_mail(|| {
             crate::ambient_recall::build_local_ambient_recall_context(input, root, prompt)
-        {
-            parts.push(packet.full);
+        }) {
+            let mut joined = parts.join("\n\n");
+            if super::handlers::handlers_middle::factory_inbox::push_within_hook_cap(
+                &mut joined,
+                &packet.full,
+            ) {
+                parts.push(packet.full);
+            }
         }
     }
-    if changed {
-        receipt.save()?;
+    // cas-1f0c: a failed save must not drop mail that is already receipted;
+    // the turn is then simply re-examined at the next tool call.
+    if changed && receipt.save().is_none() {
+        tracing::warn!(
+            target: "cas::coordination",
+            session = %input.session_id,
+            "cas-1f0c: turn-context receipt not saved; returning the rendered context anyway"
+        );
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }

@@ -461,17 +461,21 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
 /// learns a message exists and can `inbox_poll` it, instead of being woken to
 /// silence.
 ///
-/// cas-1f0c (contract v2 P1.4): the wording is what actually happens. The
-/// turn-start hook expands the named id into the turn's `[incoming messages]`
-/// block, once; the Teams inbox carries only this pointer
-/// ([`claude_teams_inbox_text`]). The old "(body not repeated here)" was false:
-/// the hook expanded the body and the Teams copy then rendered it again.
+/// cas-1f0c (contract v2 P1.4): the wording is what actually happens. A hook
+/// expands the named id into an `[incoming messages]` block once (at turn
+/// start, or at the first tool call of a turn no prompt hook served), or a
+/// body too long for a hook, or re-sent by the time fallback, comes as its own
+/// Teams message; a note in the block says which. A turn may end before any
+/// block appears, so the wake makes no promise about "this turn" and names
+/// the `inbox_poll` that always reads the body. The old "(body not repeated
+/// here)" was false: the hook expanded the body and the Teams copy then
+/// rendered it again.
 pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
     match notification_id {
         Some(id) => format!(
             "CAS wake: message {id} from {source}. CAS shows its body once, in an \
-             [incoming messages] block this turn (at its start or first tool call), or a note \
-             there says why not; if you have not seen it, run inbox_poll notification_id={id}."
+             [incoming messages] block or as its own message, or a note in that block says why \
+             not. If neither is in front of you, run inbox_poll notification_id={id}."
         ),
         None => format!(
             "CAS wake: a message from {source} is in your inbox; read it with inbox_poll."
@@ -2214,9 +2218,34 @@ mod tests {
         assert_eq!(inbox.len(), 4, "one fallback write: {inbox:?}");
         assert!(inbox[3].text.contains(&format!("[cas #{id} ")), "{}", inbox[3].text);
         assert!(inbox[3].text.contains(body), "{}", inbox[3].text);
+        assert!(queue.teams_body_fallback_claimed(id, worker).unwrap());
 
         daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
         assert_eq!(read_inbox().len(), 4, "the fallback is one-shot");
+
+        // A broadcast pointer gets the same fallback for this peer, five
+        // hours on: the window follows the queue's stale TTL, not one hour.
+        let shared = "All workers: the epic tip moved.";
+        let broadcast = queue
+            .enqueue_with_session("supervisor", "all_workers", shared, &session)
+            .unwrap();
+        let text = format!("[cas #{broadcast} supervisor-authored 0s first]\n\n{shared}");
+        daemon
+            .deliver_queued_to_worker(worker, "supervisor", &text, None, broadcast, shared)
+            .await
+            .unwrap();
+        assert!(!read_inbox()[4].text.contains(shared), "a broadcast copy is a pointer too");
+        assert!(queue.claim_recipient_transport(broadcast, worker).unwrap());
+        conn.execute(
+            "UPDATE prompt_queue_recipient_seen SET seen_at = ?1 WHERE prompt_id = ?2",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::hours(5)).to_rfc3339(), broadcast],
+        )
+        .unwrap();
+        daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+        let inbox = read_inbox();
+        assert_eq!(inbox.len(), 6, "{inbox:?}");
+        assert!(inbox[5].text.contains(shared), "{}", inbox[5].text);
+        assert!(queue.teams_body_fallback_claimed(broadcast, worker).unwrap());
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

@@ -209,6 +209,35 @@ pub(crate) fn surface_factory_inbox_after_tool_result(
     .and_then(|outcome| outcome.text)
 }
 
+/// cas-1f0c: what one hook's additional context may hold in total. Claude
+/// Code keeps hook context whole only up to about 10,000 characters and shows
+/// a short preview past that. Mail is bounded by
+/// [`cas_store::HOOK_SURFACE_BUDGET_CHARS`] plus its frames and notes; the
+/// rest (supervisor reminder, ambient recall) must fit what is left.
+pub(crate) const HOOK_CONTEXT_CAP_CHARS: usize = 9_500;
+
+/// cas-1f0c: append `addition` to a hook's context only if the whole stays
+/// within [`HOOK_CONTEXT_CAP_CHARS`]. Returns whether it was appended.
+pub(crate) fn push_within_hook_cap(context: &mut String, addition: &str) -> bool {
+    let separator = if context.is_empty() { 0 } else { 2 };
+    if context.chars().count() + separator + addition.chars().count() > HOOK_CONTEXT_CAP_CHARS {
+        return false;
+    }
+    if separator > 0 {
+        context.push_str("\n\n");
+    }
+    context.push_str(addition);
+    true
+}
+
+/// cas-1f0c: build optional context after mail was already receipted. A
+/// panic here must not take the rendered mail down with the hook process.
+pub(crate) fn after_mail<T>(build: impl FnOnce() -> Option<T>) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(build))
+        .ok()
+        .flatten()
+}
+
 /// cas-1f0c: what one hook surfacing did.
 pub(crate) struct SurfacingOutcome {
     /// The `[incoming messages]` block, if anything was shown or noted.
@@ -414,6 +443,22 @@ fn surface_factory_inbox_with_transport_delivery(
             .collect();
         block_notes.extend(withdrawn_note(&withdrawn));
         block_notes.extend(over_budget_note(&over_budget));
+        // cas-1f0c: a named row whose full body was re-sent as a Teams copy
+        // is not rendered here (the copy carries it).
+        let sent_in_full: Vec<i64> = wake_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                !rows.iter().any(|row| row.id == *id)
+                    && !already_shown.contains(id)
+                    && aliases.iter().any(|alias| {
+                        queue
+                            .teams_body_fallback_claimed(*id, alias)
+                            .unwrap_or(false)
+                    })
+            })
+            .collect();
+        block_notes.extend(sent_in_full_note(&sent_in_full));
     }
     if !rows.is_empty() {
         // cas-3bf1 (GH #176): a surfacing retires the row for the WHOLE
@@ -476,6 +521,19 @@ fn withdrawn_note(ids: &[i64]) -> Option<String> {
     ))
 }
 
+/// cas-1f0c: named rows whose body the daemon re-sent in full as a Teams
+/// copy after no hook showed it in time.
+fn sent_in_full_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[sent in full] Message {} was re-sent to you in full as its own teammate message; \
+         read it there, or with inbox_poll notification_id=<id> if it is not in front of you.",
+        id_list(ids)
+    ))
+}
+
 /// cas-1f0c: rows left unread because their bodies did not fit this block.
 fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
     if rows.is_empty() {
@@ -497,9 +555,8 @@ fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
     }
     if !no_room.is_empty() {
         notes.push(format!(
-            "[not shown here] Message {} did not fit in this block and stays unread. CAS shows \
-             it at a later tool call or turn; to read it now, run inbox_poll \
-             notification_id=<id>.",
+            "[not shown here] Message {} did not fit in this block and stays unread; read it \
+             with inbox_poll notification_id=<id>.",
             ids(&no_room)
         ));
     }
@@ -566,8 +623,10 @@ pub(crate) fn record_turn_prompt_envelopes(
 }
 
 /// Whether the turn `prompt` delivered queue row `id` to one of `aliases`:
-/// a direct row addressed to them, with a transport receipt, whose body text
-/// is in the prompt (cas-7bfa).
+/// a row addressed to them, directly or as a broadcast, for which one of
+/// them holds a transport receipt, and whose body text is in the prompt
+/// (cas-7bfa). cas-1f0c: the receipt is read per alias, so a broadcast's
+/// full-body Teams copy is recorded too.
 fn turn_prompt_carries_row(
     queue: &dyn cas_store::PromptQueueStore,
     prompt: &str,
@@ -580,23 +639,20 @@ fn turn_prompt_carries_row(
     let body = row.prompt.trim();
     if body.is_empty()
         || !prompt.contains(body)
-        || !aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&row.target))
+        || !(row.target == "all_workers"
+            || aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&row.target)))
     {
         return false;
     }
-    queue
-        .message_delivery_report(id)
-        .ok()
-        .flatten()
-        .is_some_and(|report| {
-            matches!(
-                report.recipient_receipt,
-                Some(
-                    cas_store::SurfacingSource::TransportClaimed
-                        | cas_store::SurfacingSource::TransportDelivered
-                )
-            )
-        })
+    aliases.iter().any(|alias| {
+        matches!(
+            queue.recipient_receipt(id, alias),
+            Ok(Some(
+                cas_store::SurfacingSource::TransportClaimed
+                    | cas_store::SurfacingSource::TransportDelivered
+            ))
+        )
+    })
 }
 
 /// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon

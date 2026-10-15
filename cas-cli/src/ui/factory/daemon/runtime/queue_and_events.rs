@@ -17,9 +17,11 @@ const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// cas-1f0c: how long a Claude Teams pointer copy may go unexpanded (no hook
 /// or poll showing its row) before the daemon writes the full body instead.
 const TEAMS_POINTER_FALLBACK_AFTER_SECS: i64 = 3 * 60;
-/// cas-1f0c: pointer handoffs older than this are left to the stall notices;
-/// a body re-sent long after the fact would read as new.
-const TEAMS_POINTER_FALLBACK_WINDOW_SECS: i64 = 60 * 60;
+/// cas-1f0c: how far back the sweep looks for unexpanded pointer copies:
+/// the queue's own stale TTL, so a daemon that was down for hours still
+/// covers every row a hook could still show. The re-sent copy keeps the
+/// row's `[cas #N … age]` line, so an old message does not read as new.
+const TEAMS_POINTER_FALLBACK_WINDOW_SECS: i64 = cas_store::PROMPT_QUEUE_STALE_TTL_SECS;
 const SPAWN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Registration proves that the MCP child answered, not that the interactive
 /// harness accepted the selected model. Keep watching the pane for this long
@@ -3118,18 +3120,21 @@ impl FactoryDaemon {
         }
     }
 
-    /// cas-1f0c (review item 2): the time fallback for a Claude Teams pointer
-    /// copy. The pointer names a row whose body the CAS hooks show; when no
-    /// hook or `inbox_poll` has shown it within
+    /// cas-1f0c: the time fallback for a Claude Teams pointer copy. The
+    /// pointer names a row whose body the CAS hooks show; when no hook or
+    /// `inbox_poll` has shown it to a recipient within
     /// [`TEAMS_POINTER_FALLBACK_AFTER_SECS`] (a failed or absent hook, or a
     /// teammate turn that never reached a tool call), the daemon writes the
-    /// full body to the recipient's Teams inbox once. The teammate turn that
-    /// renders it records the row (cas-7bfa), so nothing shows it again.
+    /// full body to that recipient's Teams inbox once. Direct rows and each
+    /// peer of a broadcast are handled alike. From the claim on, no hook drain
+    /// renders the row for that recipient, and the teammate turn that carries
+    /// the body records it (cas-7bfa).
     ///
-    /// Only rows this daemon wrote a pointer for qualify: a direct, non-urgent
-    /// row to a Claude Teams recipient whose body a hook can show. The store
-    /// claims each fallback once, durably, and only while the recipient still
-    /// holds nothing but a transport receipt.
+    /// Only rows this daemon wrote a pointer for qualify: a non-urgent row to
+    /// a Claude Teams recipient whose body a hook can show. The store claims
+    /// each fallback once, durably; a failed write releases the claim so a
+    /// later sweep retries. (A crash between claim and write leaves the claim
+    /// held: the row is then read by `inbox_poll`, which the pointer names.)
     pub(super) async fn fallback_unsurfaced_teams_pointers(
         &mut self,
         queue: &dyn cas_store::PromptQueueStore,
@@ -3152,11 +3157,11 @@ impl FactoryDaemon {
         };
         let supervisor_name = self.app.supervisor_name().to_string();
         let worker_names = self.app.worker_names().to_vec();
-        for queued in candidates {
-            let pane_target = if queued.target == "supervisor" {
+        for (queued, recipient) in candidates {
+            let pane_target = if recipient == "supervisor" {
                 supervisor_name.as_str()
             } else {
-                queued.target.as_str()
+                recipient.as_str()
             };
             let harness = self.app.harness_for(pane_target);
             if harness != cas_mux::SupervisorCli::Claude
@@ -3166,7 +3171,7 @@ impl FactoryDaemon {
             {
                 continue;
             }
-            match queue.claim_teams_body_fallback(queued.id) {
+            match queue.claim_teams_body_fallback(queued.id, &recipient) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(error) => {
@@ -3176,9 +3181,9 @@ impl FactoryDaemon {
             }
             let source = self.inbox_source_name(&queued.source, &worker_names, &supervisor_name);
             let text = teams_body_fallback_text(&queued);
-            match self
+            let written = self
                 .deliver_to_worker(
-                    &queued.target,
+                    &recipient,
                     &source,
                     &text,
                     queued.summary.as_deref(),
@@ -3187,21 +3192,26 @@ impl FactoryDaemon {
                     None,
                     None,
                 )
-                .await
-            {
-                Ok(outcome) => tracing::warn!(
+                .await;
+            match written {
+                Ok(cas_mux::InjectOutcome::Delivered) => tracing::warn!(
                     target: "cas::coordination",
                     stage = "teams_pointer_body_fallback",
                     message_id = queued.id,
-                    recipient = %queued.target,
-                    ?outcome,
+                    recipient = %recipient,
                     "cas-1f0c: no hook showed the Teams pointer's row; wrote the full body once"
                 ),
-                Err(error) => tracing::warn!(
-                    message_id = queued.id,
-                    %error,
-                    "cas-1f0c: Teams body fallback write failed"
-                ),
+                other => {
+                    tracing::warn!(
+                        message_id = queued.id,
+                        recipient = %recipient,
+                        outcome = ?other.as_ref().map_err(ToString::to_string),
+                        "cas-1f0c: Teams body fallback write failed; claim released for a later sweep"
+                    );
+                    if let Err(error) = queue.release_teams_body_fallback(queued.id, &recipient) {
+                        tracing::warn!(message_id = queued.id, %error, "cas-1f0c: could not release a Teams body fallback claim");
+                    }
+                }
             }
         }
     }

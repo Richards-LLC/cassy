@@ -189,6 +189,155 @@ impl Drop for InboxFileLock<'_> {
     }
 }
 
+/// The retraction tags on the unread rows of one inbox, read without the
+/// inbox lock (factory loop v2, cas-d2a2). A retraction decides from these
+/// before it takes the lock, so a slow freshness check (git) never runs while
+/// the lock is held. The prune itself re-reads the file under the lock and
+/// removes only rows whose tag was judged stale.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RetractionKeys {
+    pub(crate) workers: std::collections::BTreeSet<String>,
+    pub(crate) tasks: std::collections::BTreeSet<String>,
+    pub(crate) epics: std::collections::BTreeSet<String>,
+}
+
+/// Prunes one session's Teams inboxes from a job lane. Cheap to clone and
+/// `Send`; holds no lock between calls.
+#[derive(Debug, Clone)]
+pub(crate) struct InboxPruner {
+    inboxes_dir: PathBuf,
+}
+
+impl InboxPruner {
+    #[cfg(test)]
+    pub(crate) fn for_dir(inboxes_dir: PathBuf) -> Self {
+        Self { inboxes_dir }
+    }
+
+    /// Retraction tags of `target`'s unread rows, read without the lock. A
+    /// missing or unreadable inbox has none.
+    pub(crate) fn unread_retraction_keys(&self, target: &str) -> RetractionKeys {
+        let path = self.inboxes_dir.join(format!("{target}.json"));
+        let messages: Vec<InboxMessage> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default();
+        let mut keys = RetractionKeys::default();
+        for message in messages.iter().filter(|message| !message.read) {
+            if let Some(worker) = &message.retract_worker {
+                keys.workers.insert(worker.clone());
+            }
+            if let Some(task) = &message.retract_task {
+                keys.tasks.insert(task.clone());
+            }
+            if let Some(epic) = &message.retract_epic {
+                keys.epics.insert(epic.clone());
+            }
+        }
+        keys
+    }
+
+    /// Remove `target`'s unread rows whose tag is in `stale`, under the inbox
+    /// lock. Returns the rows removed per alert kind (idle, merge, epic).
+    pub(crate) fn retract(
+        &self,
+        target: &str,
+        stale: &RetractionKeys,
+    ) -> anyhow::Result<(usize, usize, usize)> {
+        let idle = if stale.workers.is_empty() {
+            0
+        } else {
+            prune_stale_rows_in(
+                &self.inboxes_dir,
+                target,
+                |message| message.retract_worker.as_deref(),
+                |worker| stale.workers.contains(worker),
+                "WorkerIdle",
+                "worker gained a real assignment before this row was read",
+            )?
+        };
+        let merge = if stale.tasks.is_empty() {
+            0
+        } else {
+            prune_stale_rows_in(
+                &self.inboxes_dir,
+                target,
+                |message| message.retract_task.as_deref(),
+                |task| stale.tasks.contains(task),
+                "MergeRequired",
+                "merge already landed (or task left AwaitingMerge) before this row was read",
+            )?
+        };
+        let epic = if stale.epics.is_empty() {
+            0
+        } else {
+            prune_stale_rows_in(
+                &self.inboxes_dir,
+                target,
+                |message| message.retract_epic.as_deref(),
+                |epic| stale.epics.contains(epic),
+                "EpicAllSubtasksClosed",
+                "epic closed or a subtask reopened before this row was read",
+            )?
+        };
+        Ok((idle, merge, epic))
+    }
+}
+
+/// The lock/read/retain/write body shared by every stale-row prune.
+fn prune_stale_rows_in(
+    inboxes_dir: &std::path::Path,
+    target: &str,
+    extract_key: impl Fn(&InboxMessage) -> Option<&str>,
+    is_stale: impl Fn(&str) -> bool,
+    alert_kind: &'static str,
+    log_reason: &'static str,
+) -> anyhow::Result<usize> {
+    let inbox_path = inboxes_dir.join(format!("{}.json", target));
+    if !inbox_path.exists() {
+        return Ok(0);
+    }
+
+    TeamsManager::with_exclusive_inbox_lock(&inbox_path, || {
+        let mut messages: Vec<InboxMessage> = {
+            let content =
+                std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
+            serde_json::from_str(&content).unwrap_or_default()
+        };
+
+        let before = messages.len();
+        messages.retain(|m| {
+            if m.read {
+                return true;
+            }
+            match extract_key(m) {
+                Some(key) if is_stale(key) => {
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "retract_stale_alert",
+                        channel = "teams_inbox",
+                        alert_kind = alert_kind,
+                        key = %key,
+                        target_agent = target,
+                        reason = log_reason,
+                        "retracting queued alert before this row was read"
+                    );
+                    false
+                }
+                _ => true,
+            }
+        });
+        let removed = before - messages.len();
+
+        if removed > 0 {
+            let json = serde_json::to_string_pretty(&messages)?;
+            std::fs::write(&inbox_path, json)?;
+        }
+
+        Ok(removed)
+    })
+}
+
 /// Manages the native Agent Teams file structure for a factory session.
 pub struct TeamsManager {
     team_name: String,
@@ -1414,49 +1563,22 @@ impl TeamsManager {
         alert_kind: &'static str,
         log_reason: &'static str,
     ) -> anyhow::Result<usize> {
-        let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
-        if !inbox_path.exists() {
-            return Ok(0);
+        prune_stale_rows_in(
+            &self.inboxes_dir,
+            target,
+            extract_key,
+            is_stale,
+            alert_kind,
+            log_reason,
+        )
+    }
+
+    /// A handle that prunes this session's inboxes off the loop (factory loop
+    /// v2 `InboxPrune`, cas-d2a2): it carries only the inbox directory.
+    pub(crate) fn inbox_pruner(&self) -> InboxPruner {
+        InboxPruner {
+            inboxes_dir: self.inboxes_dir.clone(),
         }
-
-        Self::with_exclusive_inbox_lock(&inbox_path, || {
-            let mut messages: Vec<InboxMessage> = {
-                let content =
-                    std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
-                serde_json::from_str(&content).unwrap_or_default()
-            };
-
-            let before = messages.len();
-            messages.retain(|m| {
-                if m.read {
-                    return true;
-                }
-                match extract_key(m) {
-                    Some(key) if is_stale(key) => {
-                        tracing::info!(
-                            target: "cas::coordination",
-                            stage = "retract_stale_alert",
-                            channel = "teams_inbox",
-                            alert_kind = alert_kind,
-                            key = %key,
-                            target_agent = target,
-                            reason = log_reason,
-                            "retracting queued alert before this row was read"
-                        );
-                        false
-                    }
-                    _ => true,
-                }
-            });
-            let removed = before - messages.len();
-
-            if removed > 0 {
-                let json = serde_json::to_string_pretty(&messages)?;
-                std::fs::write(&inbox_path, json)?;
-            }
-
-            Ok(removed)
-        })
     }
 
     /// Ensure an inbox file exists for the given agent.

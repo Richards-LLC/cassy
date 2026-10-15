@@ -2138,6 +2138,8 @@ impl FactoryDaemon {
         metadata.team_name = teams.as_ref().map(|t| t.team_name().to_string());
         session_manager.save_metadata(&metadata)?;
 
+        // cas-d2a2: the prompt queue's store work runs on its own job lanes.
+        let queue_jobs = crate::ui::factory::daemon::runtime::prompt_queue_jobs::QueueJobs::start(app.cas_dir().to_path_buf(), app.project_scope());
         Ok(Self {
             session_name: config.session_name,
             app,
@@ -2183,7 +2185,7 @@ impl FactoryDaemon {
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
-            commander_mirror_state: Default::default(),
+            queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
@@ -2455,7 +2457,13 @@ impl FactoryDaemon {
 
             // Poll prompt queue (on notification or timer)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
-            if prompt_notified || last_prompt_poll.elapsed() >= poll_interval {
+            let prompt_tick = prompt_notified || last_prompt_poll.elapsed() >= poll_interval;
+            if !prompt_tick && self.queue_jobs.has_ready() {
+                // cas-d2a2: a QueueSelect finished between ticks; deliver it
+                // now rather than on the next tick.
+                let _ = self.process_prompt_queue().await;
+            }
+            if prompt_tick {
                 if prompt_notified {
                     if let Some(ref mut notify) = self.notify_rx {
                         notify.drain();
@@ -2973,6 +2981,13 @@ impl FactoryDaemon {
             }
         }
 
+        // cas-d2a2: queue stamps run on the StoreWorker through the queue
+        // job lanes; drain the lanes first so no critical stamp is still
+        // waiting on a lane while the StoreWorker reports idle (jobs.rs).
+        let queue_cas_dir = self.app.cas_dir().to_path_buf();
+        if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, Duration::from_secs(5)) {
+            tracing::warn!("prompt-queue job lanes still busy at shutdown");
+        }
         // Let queued store writes land before cleanup tears the session down.
         if !store_worker.wait_idle(Duration::from_secs(5)) {
             tracing::warn!(
@@ -3201,7 +3216,7 @@ impl FactoryDaemon {
         store_worker: &super::store_worker::StoreWorker,
         loop_progress: &super::loop_watchdog::LoopProgress,
     ) {
-        let (delivery_events, prompts, unfiltered_data_for_sweep) = delivery;
+        let (delivery_events, prompts, _unfiltered_data) = delivery;
         tracing::debug!(
             target: "cas::coordination",
             stage = "director_refresh",
@@ -3283,102 +3298,28 @@ impl FactoryDaemon {
         // is the live-evidence-quoted-a-superseded-tip class of
         // bug (three workers announced idle/ready ~7 minutes
         // after each had a genuine InProgress assignment).
-        if let (Some(teams), Some(unfiltered_data)) =
-            (self.teams.as_ref(), unfiltered_data_for_sweep.as_ref())
-        {
-            match teams.prune_stale_idle_alerts("supervisor", |worker| {
-                crate::ui::factory::director::worker_now_has_real_assignment(
-                    unfiltered_data,
-                    worker,
-                )
-            }) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "retract_stale_idle_alert",
-                    channel = "teams_inbox",
-                    retracted = n,
-                    "swept stale WorkerIdle alert(s) from supervisor inbox before delivery"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "cas::coordination",
-                    error = %e,
-                    "prune_stale_idle_alerts failed — non-fatal, stale alerts may still be delivered"
-                ),
-            }
-
-            // cas-e48f: retract stale MERGE REQUIRED alerts the
-            // same way, keyed on task_id rather than worker name
-            // — see `InboxMessage::retract_task` / `Prompt::
-            // retract_task` doc for why `worker_now_has_real_
-            // assignment` above is the WRONG predicate for this
-            // alert class. `check_merge_alert_freshness_for_task`
-            // re-reads the CURRENT epic tip at sweep time (never
-            // the tip captured when the row was written) — the
-            // exact live incident this closes: an alert quoting
-            // "checked against epic tip 811377c" delivered after
-            // the epic had already advanced past that tip.
+        //
+        // cas-d2a2 (factory loop v2 §4.3): the sweep is a job. The decision
+        // comes from a fresh read issued for it (RevalidateFresh, on the
+        // queue jobs' read connection), never the cached director snapshot
+        // (app/mod.rs:1541–1547). The merge-freshness checks (cas-e48f re-reads
+        // the CURRENT epic tip) and the epic-completion check (cas-06ca) then
+        // run on the blocking lane, before the inbox lock is taken; missing
+        // state preserves every row.
+        if let Some(teams) = self.teams.as_ref() {
             let repo_root = self
                 .app
                 .cas_dir()
                 .parent()
                 .unwrap_or(self.app.cas_dir())
                 .to_path_buf();
-            match teams.prune_stale_merge_alerts("supervisor", |task_id| {
-                matches!(
-                    crate::ui::factory::director::check_merge_alert_freshness_for_task(
-                        task_id,
-                        unfiltered_data,
-                        &repo_root,
-                    ),
-                    crate::ui::factory::director::MergeAlertFreshness::Stale
-                )
-            }) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "retract_stale_merge_alert",
-                    channel = "teams_inbox",
-                    retracted = n,
-                    "swept stale MERGE REQUIRED alert(s) from supervisor inbox before delivery"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "cas::coordination",
-                    error = %e,
-                    "prune_stale_merge_alerts failed — non-fatal, stale alerts may still be delivered"
-                ),
-            }
-
-            // cas-06ca: EpicAllSubtasksClosed bypasses the durable
-            // prompt_queue and is written directly to the Teams
-            // inbox. Carrying epic_id on that row lets this existing
-            // generic retraction mechanism re-check the same live
-            // predicate used before transport. This block only runs
-            // with an authoritative store snapshot; missing state is
-            // uncertainty and preserves the row.
-            match teams.prune_stale_epic_completion_alerts("supervisor", |epic_id| {
-                !crate::ui::factory::director::epic_completion_is_current(
-                    unfiltered_data,
-                    epic_id,
-                )
-            }) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "retract_stale_epic_completion",
-                    channel = "teams_inbox",
-                    retracted = n,
-                    "swept stale epic-completion alert(s) before delivery"
-                ),
-                // Retraction is best-effort. A lock/read failure
-                // must never interrupt delivery or surface as a
-                // user-facing error.
-                Err(error) => tracing::debug!(
-                    target: "cas::coordination",
-                    error = %error,
-                    "epic-completion inbox retraction skipped"
-                ),
-            }
+            let request = self.app.delivery_request();
+            self.queue_jobs.submit_inbox_retraction(
+                "supervisor",
+                teams.inbox_pruner(),
+                repo_root,
+                Box::new(move |stores| request.read(stores).into_data()),
+            );
         }
 
         // Inject prompts (config already checked in generate_prompt)

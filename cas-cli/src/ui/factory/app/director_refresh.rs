@@ -96,6 +96,14 @@ pub(crate) struct DeliveryInputs {
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
 }
 
+impl DeliveryInputs {
+    /// The fresh unfiltered snapshot alone (cas-d2a2: inbox retraction's
+    /// `RevalidateFresh` read).
+    pub(crate) fn into_data(self) -> anyhow::Result<DirectorData> {
+        self.data
+    }
+}
+
 impl DeliveryRequest {
     /// Read the delivery snapshot. Runs on any thread.
     pub(crate) fn read(&self, stores: Option<&DirectorStores>) -> DeliveryInputs {

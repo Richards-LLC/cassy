@@ -29,6 +29,7 @@ mod shutdown_tests;
 pub(super) mod session_summarizer;
 pub(crate) mod store_worker;
 pub(crate) mod jobs;
+pub(crate) mod prompt_queue_jobs;
 pub(crate) mod teams;
 pub(super) mod terminal_exchange;
 pub(crate) mod violet_activity;

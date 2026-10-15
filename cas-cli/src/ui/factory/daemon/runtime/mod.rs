@@ -1,5 +1,5 @@
 pub(crate) mod ci_watch;
-pub(crate) mod merge_queue_recovery;
+pub(crate) mod merge_queue_ejection;
 mod client_input;
 mod cloud;
 mod commander_mirror;
@@ -15,7 +15,6 @@ mod loop_latency_tests;
 #[cfg(test)]
 mod peer_mailbox_wake_tests;
 pub(crate) mod loop_watchdog;
-pub(super) mod merge_sweep;
 mod output;
 pub(super) mod pane_size;
 #[cfg(test)]

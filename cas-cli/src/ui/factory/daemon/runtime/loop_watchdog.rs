@@ -43,7 +43,6 @@ pub(crate) enum LoopPhase {
     PromptQueue,
     SpawnQueue,
     PendingSpawns,
-    MergeSweep,
     Refresh,
     Render,
     Idle,
@@ -57,7 +56,7 @@ pub(crate) enum LoopPhase {
 }
 
 impl LoopPhase {
-    const ALL: [LoopPhase; 17] = [
+    const ALL: [LoopPhase; 16] = [
         LoopPhase::Start,
         LoopPhase::ClientInput,
         LoopPhase::PtyOutput,
@@ -65,7 +64,6 @@ impl LoopPhase {
         LoopPhase::PromptQueue,
         LoopPhase::SpawnQueue,
         LoopPhase::PendingSpawns,
-        LoopPhase::MergeSweep,
         LoopPhase::Refresh,
         LoopPhase::Render,
         LoopPhase::Idle,
@@ -86,7 +84,6 @@ impl LoopPhase {
             LoopPhase::PromptQueue => "prompt queue",
             LoopPhase::SpawnQueue => "spawn queue poll",
             LoopPhase::PendingSpawns => "pending spawns",
-            LoopPhase::MergeSweep => "merge sweep",
             LoopPhase::Refresh => "refresh",
             LoopPhase::Render => "render",
             LoopPhase::Idle => "idle",

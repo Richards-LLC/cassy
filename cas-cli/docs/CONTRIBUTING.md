@@ -225,21 +225,6 @@ The taste lane admits **one** positively bounded worker run beside a proof:
   below the floor, which means some estimate was exceeded, and never because
   the proof is at its peak.
 
-The rolling-integration sweep also waits `[factory].merge_sweep_quiet_secs`
-(default 300 s) after the last epic merge before starting. Each merge still
-cancels a stale running sweep at once, which releases the proof's admission
-in the gap, so a burst of merges runs one proof of the newest tip instead of
-a proof per merge.
-
-The default was measured on 2026-10-11's 21 epic merges, which arrived 1 to
-8 minutes apart, with a proof run of about 13 minutes:
-
-| Quiet period | Proofs started | Cancelled | Completed | Proof lock held |
-| --- | --- | --- | --- | --- |
-| 0 s (before) | 21 | 19 | 2 | 91% of 115 min |
-| 120 s | 16 | 14 | 2 | 61% |
-| 300 s | 7 | 5 | 2 | 38% |
-
 Verified frontend tests default to one Playwright worker, honour explicit requests
 up to four, and enforce two Vitest workers. A proof's own child script tests reuse
 its admitted budget rather than waiting on themselves. Use `TMPDIR` on the
@@ -820,13 +805,10 @@ instead of its worktree path; ignored local environment/config files are keyed
 by contents too. New exclusions require confirming that they cannot change the
 compiled candidate or test behavior.
 
-Rolling integration runs the release gate's no-build rows before builder
-admission, plus `ci-script-tests` with every declared release-train control
-exported. `integration.json` records each named row as PASS or FAIL under
-`no_build`, bound to the integration tip. Train preflight refuses a missing,
-stale or failed row before assembly and names the blocker; rerun
-`cas factory integration-recover` after fixing the tip. Generic projects
-without Cassy's release gate keep their existing runner.
+Since 3.54.0 (cas-fd0a) the factory daemon runs no suite, gate or journey
+evaluation after a merge: the rolling integration sweep, background epic gate
+and `cas factory integration-recover` are retired. The merge queue run on the
+epic PR is the integration proof.
 
 All gate suite children use `scripts/release-test-env.sh`: it removes harness
 identity, train/gate control namespaces and receipt destinations, provides a
@@ -834,14 +816,6 @@ clean temporary HOME and disables global Git configuration. Cargo and Rustup
 locations remain explicit. The parent retains its orchestration environment;
 validated host memory admission and compiler linker resource context survive
 so nested suites and linkers remain admitted without inheriting release knobs.
-
-For daemon-initiated sweeps, persist the scratch base with
-`cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
-in the project's `.cas/config.toml`. The daemon passes this key to assembly
-as `CAS_RELEASE_GATE_HOME_DIR`, overriding inherited shell and sweep env values.
-An unset or blank key reports `NOT CONFIGURED`, names the key, and skips
-the suite and failure attribution. Other projects and configured sweep commands
-retain their detected or configured runner without requiring this key.
 
 Manual assembly commands need no exported scratch base or Zig (cas-9f61).
 `scripts/release_env.py` resolves both for every release tool (assembly-proof,

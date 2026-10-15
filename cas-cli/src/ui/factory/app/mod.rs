@@ -2195,6 +2195,14 @@ impl FactoryApp {
         let _ = self.sync_pane_sizes();
     }
 
+    /// Track a live worker pane the way a finished spawn does, for tests that
+    /// drive shutdown against a real PTY process.
+    #[cfg(test)]
+    pub(crate) fn adopt_worker_pane_for_test(&mut self, pane: cas_mux::Pane) {
+        self.worker_names.push(pane.id().to_string());
+        self.mux.add_pane(pane);
+    }
+
     /// Remove a worker from the pending set (called on spawn success or failure)
     pub fn remove_pending_worker(&mut self, name: &str) {
         self.pending_workers.retain(|pw| pw.name != name);

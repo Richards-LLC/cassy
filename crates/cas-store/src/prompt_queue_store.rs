@@ -12984,17 +12984,21 @@ mod tests {
                 .unwrap(),
             PromptRetryDisposition::Abandoned { .. }
         ));
+        // GH #1196: the second abandonment folds into the still-unread
+        // notice, but each keeps its own individual line.
         let notices = store.poll_unseen_for_recipient("sender", None, 10).unwrap();
-        assert_eq!(notices.len(), 2);
+        assert_eq!(notices.len(), 1);
         assert!(
             notices[0]
                 .prompt
                 .starts_with(&format!("Message {manual} to worker-a was abandoned"))
         );
         assert!(
-            notices[1]
+            notices[0]
                 .prompt
-                .starts_with(&format!("Message {deadline} to worker-b was abandoned"))
+                .contains(&format!("\nAlso: Message {deadline} to worker-b was abandoned")),
+            "{}",
+            notices[0].prompt
         );
     }    #[test]
     fn explicit_age_remediation_abandons_only_old_pending_rows() {

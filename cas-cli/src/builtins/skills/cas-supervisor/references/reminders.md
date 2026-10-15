@@ -63,7 +63,9 @@ External conditions survive daemon/session restart. When `remind_ttl_secs` is
 omitted they expire after seven days (`0` means no expiry), and they also
 expire once both their owner and target have had no heartbeat or live process
 for 24 hours. They require `cross_session=true` and a JSON filter.
-`target_branch` is the bare origin branch; `origin/main` is stored as `main`:
+`target_branch` is the bare origin branch; `origin/main` is stored as `main`.
+`branch_contained_in` also accepts `sha` for `commit`; other filter keys are
+refused, and one refusal lists every missing requirement:
 
 ```text
 coordination action=remind remind_event=branch_contained_in \

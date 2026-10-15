@@ -110,9 +110,15 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "remind_event",
         "remind: fire on task_completed, task_blocked, worker_idle, epic_completed, \
-         branch_contained_in, tag_exists or ci_completed instead of a delay.",
+         branch_contained_in, tag_exists or ci_completed; the last three need cross_session=true.",
     ),
-    ("remind_filter", "remind: JSON filter for the event, e.g. {\"task_id\":\"cas-a1b2\"}."),
+    // GH #1207: each external event's required filter keys. The refusal
+    // names anything missing; this text stays within the 3,600 B cap.
+    (
+        "remind_filter",
+        "remind: JSON filter, e.g. {\"task_id\":\"cas-a1b2\"}; branch_contained_in \
+         {commit,target_branch}, tag_exists {tag}, ci_completed {sha,workflow?}.",
+    ),
     ("remind_id", "remind_cancel: the reminder id."),
     ("remind_ttl_secs", "remind: seconds an undelivered reminder lives (default 3600; 604800 for branch_contained_in, tag_exists and ci_completed; 0 = never)."),
     ("cross_session", "remind: keep the reminder across session end and task close."),

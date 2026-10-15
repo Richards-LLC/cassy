@@ -479,12 +479,14 @@ pub(crate) fn parse_external_wake_condition(
                 .get("commit")
                 .or_else(|| object.get("branch_tip"))
                 .or_else(|| object.get("branch"))
+                // GH #1207: `sha`, the key ci_completed uses for the same commit.
+                .or_else(|| object.get("sha"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
                 .map(str::to_string)
                 .ok_or_else(|| {
-                    "branch_contained_in remind_filter requires string field `commit` (or `branch_tip`/`branch`)".to_string()
+                    "branch_contained_in remind_filter requires string field `commit` (or `branch_tip`/`branch`/`sha`)".to_string()
                 })?;
             let target_branch = object
                 .get("target_branch")

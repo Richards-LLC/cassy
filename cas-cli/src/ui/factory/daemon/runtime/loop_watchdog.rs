@@ -19,7 +19,8 @@
 //! `cas::loop_watchdog` WARN and the TUI status line, which holds the worst
 //! one for 10 s (`slow: <lane>/<step> <n> ms`). The watchdog checks the
 //! lanes every 250 ms; a pass that has not finished in 1 s, or a job pending
-//! past its budget, is a wedge (lane, step, duration), written to
+//! past its budget (read from the job framework, [`super::jobs`], which owns
+//! job age and budget), is a wedge (lane, step, duration), written to
 //! `loop.json` at once with the thread's wait channel. The TUI shows only
 //! job wedges live (`wedged: jobs/<kind> for <n> s`); see
 //! [`LoopProgress::status_line`] for why a loop wedge cannot be drawn yet.
@@ -27,7 +28,7 @@
 //! [`cas_store::lane_guard`] (report mode).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -37,9 +38,9 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::factory_daemon_health::{
-    DaemonLoopStatus, LANE_HEARTBEAT_MS, LANE_WEDGE_MS, LOOP_WEDGED_SECS, LaneWedge, SLOW_RING_CAP,
-    SLOW_STATUS_SECS, SlowStepEvent, WATCHDOG_INTERVAL_SECS, pending_reset, status_path,
-    write_status,
+    DaemonLoopStatus, JobLaneHealth, LANE_HEARTBEAT_MS, LANE_WEDGE_MS, LOOP_WEDGED_SECS, LaneWedge,
+    RunningJobHealth, SLOW_RING_CAP, SLOW_STATUS_SECS, SlowStepEvent, WATCHDOG_INTERVAL_SECS,
+    pending_reset, status_path, write_status,
 };
 
 /// A helper must have run at least this long before a restart may kill it.
@@ -241,105 +242,106 @@ impl FakeClock {
     }
 }
 
-/// Jobs queued or running off the lanes, by kind, so the watchdog can name
-/// the oldest (factory loop v2 §6.5). A [`JobTicket`] is taken when a job is
-/// submitted and dropped when it finishes.
-#[derive(Debug, Default)]
-pub(crate) struct JobHealth {
-    next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, PendingJob>>,
+/// The step name of a wedge where a write job waits for a stalled store
+/// writer: the writer, not the waiting job, is stuck (cas-1240 `writer_stalled`).
+pub(crate) const STORE_WRITER_STEP: &str = "store writer";
+
+/// The daemon's job lanes as the watchdog reads them (factory loop v2 §6.5).
+/// The job framework (cas-1240, [`super::jobs`]) owns job age and budget;
+/// the watchdog only reads its occupancy, so there is one registry.
+pub(crate) trait JobLanes: Send + Sync {
+    /// Occupancy of every lane.
+    fn lane_stats(&self) -> Vec<super::jobs::LaneStats>;
+    /// Jobs running past their budget, logged at WARN by the framework.
+    fn over_budget_running(&self) -> Vec<super::jobs::RunningJob>;
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PendingJob {
-    kind: &'static str,
-    budget: Duration,
-    since: Instant,
-}
+const JOB_LANES: [super::jobs::Lane; 4] = [
+    super::jobs::Lane::Read,
+    super::jobs::Lane::Write,
+    super::jobs::Lane::Blocking,
+    super::jobs::Lane::External,
+];
 
-/// The oldest pending job of one kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OldestJob {
-    pub(crate) age: Duration,
-    pub(crate) budget: Duration,
-}
+impl<T: Send + 'static> JobLanes for super::jobs::JobRuntime<T> {
+    fn lane_stats(&self) -> Vec<super::jobs::LaneStats> {
+        JOB_LANES
+            .into_iter()
+            .map(|lane| super::jobs::JobRuntime::lane_stats(self, lane))
+            .collect()
+    }
 
-/// One pending job; dropping it marks the job finished.
-#[derive(Debug)]
-pub(crate) struct JobTicket {
-    health: Arc<JobHealth>,
-    id: u64,
-}
-
-impl Drop for JobTicket {
-    fn drop(&mut self) {
-        if let Ok(mut pending) = self.health.pending.lock() {
-            pending.remove(&self.id);
-        }
+    fn over_budget_running(&self) -> Vec<super::jobs::RunningJob> {
+        super::jobs::JobRuntime::over_budget_running(self)
     }
 }
 
-impl JobHealth {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+/// `loop.json`'s name for a job lane.
+fn job_lane_name(lane: super::jobs::Lane) -> &'static str {
+    match lane {
+        super::jobs::Lane::Read => "read",
+        super::jobs::Lane::Write => "write",
+        super::jobs::Lane::Blocking => "blocking",
+        super::jobs::Lane::External => "external",
     }
+}
 
-    /// The process's job registry, which the daemon's watchdog reads.
-    pub(crate) fn global() -> Arc<Self> {
-        static GLOBAL: std::sync::OnceLock<Arc<JobHealth>> = std::sync::OnceLock::new();
-        Arc::clone(GLOBAL.get_or_init(|| Arc::new(JobHealth::default())))
+/// The job lanes the watchdog reads, once the daemon has a job runtime.
+#[derive(Default)]
+struct JobSource(Option<Arc<dyn JobLanes>>);
+
+impl std::fmt::Debug for JobSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "JobSource(watched)"
+        } else {
+            "JobSource(none)"
+        })
     }
+}
 
-    /// Record a job of `kind` submitted now with its §4.4 `budget`.
-    pub(crate) fn begin(self: &Arc<Self>, kind: &'static str, budget: Duration) -> JobTicket {
-        self.begin_at(kind, budget, Instant::now())
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
+/// One job lane's occupancy as `loop.json` records it.
+fn job_lane_health(stats: &super::jobs::LaneStats) -> JobLaneHealth {
+    JobLaneHealth {
+        queued: stats.queued,
+        oldest_queued_ms: stats.oldest_queued_age.map(millis),
+        critical_backlog: stats.critical_backlog,
+        oldest_critical_ms: stats.oldest_critical_age.map(millis),
+        dropped_refresh: stats.dropped_refresh,
+        running: stats.running.as_ref().map(|job| RunningJobHealth {
+            kind: job.kind.to_string(),
+            key: job.key.clone(),
+            age_ms: millis(job.age),
+            budget_ms: millis(job.budget),
+            waiting_for_writer: job.waiting_for_writer,
+            writer_wait_ms: millis(job.writer_wait),
+        }),
     }
+}
 
-    pub(crate) fn begin_at(
-        self: &Arc<Self>,
-        kind: &'static str,
-        budget: Duration,
-        since: Instant,
-    ) -> JobTicket {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(
-                id,
-                PendingJob {
-                    kind,
-                    budget,
-                    since,
-                },
-            );
-        }
-        JobTicket {
-            health: Arc::clone(self),
-            id,
-        }
-    }
-
-    /// The oldest pending job of each kind at `now`.
-    pub(crate) fn oldest(&self, now: Instant) -> BTreeMap<&'static str, OldestJob> {
-        let mut oldest: BTreeMap<&'static str, OldestJob> = BTreeMap::new();
-        let Ok(pending) = self.pending.lock() else {
-            return oldest;
-        };
-        for job in pending.values() {
-            let age = now.saturating_duration_since(job.since);
-            let entry = oldest.entry(job.kind).or_insert(OldestJob {
-                age,
-                budget: job.budget,
-            });
-            if age > entry.age {
-                *entry = OldestJob {
-                    age,
-                    budget: job.budget,
-                };
+/// Running jobs wedged now: a job that has itself run past both its budget
+/// and [`LANE_WEDGE_MS`] is named by its kind; a write job that has waited
+/// that long for a stalled StoreWorker names [`STORE_WRITER_STEP`].
+fn job_wedges(stats: &[super::jobs::LaneStats]) -> Vec<(&'static str, Duration)> {
+    let wedge_after = Duration::from_millis(LANE_WEDGE_MS);
+    stats
+        .iter()
+        .filter_map(|lane| lane.running.as_ref())
+        .filter_map(|job| {
+            let limit = wedge_after.max(job.budget);
+            if job.writer_stalled() && job.writer_wait >= limit {
+                Some((STORE_WRITER_STEP, job.writer_wait))
+            } else if job.age >= limit {
+                Some((job.kind, job.age))
+            } else {
+                None
             }
-        }
-        oldest
-    }
+        })
+        .collect()
 }
 
 #[derive(Debug, Default)]
@@ -398,7 +400,7 @@ pub(crate) struct WedgeCheck {
 #[derive(Debug)]
 pub(crate) struct LoopProgress {
     clock: LoopClock,
-    jobs: Arc<JobHealth>,
+    jobs: Mutex<JobSource>,
     last_pass_ms: AtomicI64,
     passes: AtomicU64,
     loop_tid: AtomicI64,
@@ -513,14 +515,14 @@ impl Drop for StepScope {
 
 impl LoopProgress {
     pub(crate) fn new() -> Arc<Self> {
-        Self::with_clock(LoopClock::Real, JobHealth::global())
+        Self::with_clock(LoopClock::Real)
     }
 
-    pub(crate) fn with_clock(clock: LoopClock, jobs: Arc<JobHealth>) -> Arc<Self> {
+    pub(crate) fn with_clock(clock: LoopClock) -> Arc<Self> {
         let now = clock.now();
         Arc::new(Self {
             clock,
-            jobs,
+            jobs: Mutex::new(JobSource::default()),
             last_pass_ms: AtomicI64::new(Utc::now().timestamp_millis()),
             passes: AtomicU64::new(0),
             loop_tid: AtomicI64::new(current_tid()),
@@ -536,6 +538,28 @@ impl LoopProgress {
             badge: Mutex::new(Badge::default()),
             wedge: Mutex::new(None),
         })
+    }
+
+    /// Watch the daemon's job runtime: its lanes go into `loop.json` and the
+    /// wedge check. The daemon calls this when it starts its job runtime
+    /// (factory loop v2 C2/C3).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn watch_jobs(&self, lanes: Arc<dyn JobLanes>) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.0 = Some(lanes);
+        }
+    }
+
+    fn job_lanes(&self) -> Option<Arc<dyn JobLanes>> {
+        self.jobs.lock().ok().and_then(|jobs| jobs.0.clone())
+    }
+
+    /// The framework's own WARN for jobs running past their budget, called
+    /// on the status-write cadence rather than every heartbeat.
+    fn report_over_budget_jobs(&self) {
+        if let Some(lanes) = self.job_lanes() {
+            let _ = lanes.over_budget_running();
+        }
     }
 
     /// Mark this thread as `lane`, so sub-steps marked with [`mark`] and
@@ -686,8 +710,9 @@ impl LoopProgress {
     }
 
     /// Check the lanes' heartbeats (factory loop v2 §6.4). A pass running
-    /// for [`LANE_WEDGE_MS`] wedges the lane of its current step; a job
-    /// pending past both that and its kind's budget wedges the jobs lane.
+    /// for [`LANE_WEDGE_MS`] wedges the lane of its current step; a running
+    /// job past both that and its budget, or a store writer that has kept a
+    /// write job waiting that long, wedges the jobs lane.
     /// The watchdog calls this every [`LANE_HEARTBEAT_MS`].
     pub(crate) fn check_wedge(&self) -> Option<WedgeCheck> {
         let now = self.clock.now();
@@ -704,12 +729,11 @@ impl LoopProgress {
                 (step.lane, step.name, elapsed)
             });
         let found = pass.or_else(|| {
-            self.jobs
-                .oldest(now)
+            let stats = self.job_lanes()?.lane_stats();
+            job_wedges(&stats)
                 .into_iter()
-                .filter(|(_, job)| job.age >= wedge_after.max(job.budget))
-                .max_by_key(|(_, job)| job.age)
-                .map(|(kind, job)| (Lane::Jobs, kind, job.age))
+                .max_by_key(|(_, age)| *age)
+                .map(|(step, age)| (Lane::Jobs, step, age))
         });
         let Ok(mut wedge) = self.wedge.lock() else {
             return None;
@@ -784,20 +808,13 @@ impl LoopProgress {
             .ok()
             .and_then(|wedge| wedge.clone())
             .filter(|wedge| wedge.lane == Lane::Jobs);
-        if let Some(wedge) = job_wedge {
-            let wedge_after = Duration::from_millis(LANE_WEDGE_MS);
-            let still_pending = self
-                .jobs
-                .oldest(now)
-                .get(wedge.step)
-                .is_some_and(|job| job.age >= wedge_after.max(job.budget));
-            if still_pending {
-                return Some(format!(
-                    "wedged: jobs/{} for {} s",
-                    wedge.step,
-                    now.saturating_duration_since(wedge.since).as_secs()
-                ));
-            }
+        if let Some(wedge) = job_wedge
+            && let Some(lanes) = self.job_lanes()
+            && let Some((step, age)) = job_wedges(&lanes.lane_stats())
+                .into_iter()
+                .find(|(step, _)| *step == wedge.step)
+        {
+            return Some(format!("wedged: jobs/{step} for {} s", age.as_secs()));
         }
         let slow = self.slow.lock().ok()?;
         let (event, seen) = slow.held.as_ref()?;
@@ -886,11 +903,22 @@ impl LoopProgress {
                 detected_at: wedge.detected_at,
                 wchan: None,
             });
-        let job_oldest_ms = self
-            .jobs
-            .oldest(clock_now)
+        let job_stats = self
+            .job_lanes()
+            .map(|lanes| lanes.lane_stats())
+            .unwrap_or_default();
+        let mut wedge = wedge;
+        if let Some(wedge) = wedge.as_mut().filter(|wedge| wedge.lane == "jobs")
+            && let Some((_, age)) = job_wedges(&job_stats)
+                .into_iter()
+                .find(|(step, _)| *step == wedge.step)
+        {
+            wedge.duration_ms = age.as_millis() as u64;
+        }
+        let job_lanes = JOB_LANES
             .into_iter()
-            .map(|(kind, job)| (kind.to_string(), job.age.as_millis() as u64))
+            .zip(job_stats.iter())
+            .map(|(lane, stats)| (job_lane_name(lane).to_string(), job_lane_health(stats)))
             .collect();
         DaemonLoopStatus {
             pid,
@@ -912,7 +940,7 @@ impl LoopProgress {
             phase_latency: Default::default(),
             slow_steps: self.slow_events(),
             wedge,
-            job_oldest_ms,
+            job_lanes,
             lane_violations: cas_store::lane_guard::total_violations(),
             lane_violation_sites: cas_store::lane_guard::violation_sites()
                 .iter()
@@ -1060,6 +1088,7 @@ pub(crate) fn spawn_watchdog(
                     // The pass windows span the regular interval; a write on a
                     // new wedge repeats the last one.
                     if ticks_since_write >= ticks_per_write {
+                        progress.report_over_budget_jobs();
                         window = progress.take_pass_window();
                         phase_latency = progress.take_phase_window();
                         ticks_since_write = 0;
@@ -1120,8 +1149,7 @@ mod tests {
     #[test]
     fn flv2_watchdog_names_slow_step() {
         let clock = FakeClock::new();
-        let progress =
-            LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)), JobHealth::new());
+        let progress = LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)));
         let log = capture_logs(|| {
             let _lane = progress.attach(Lane::Control);
             progress.begin_pass();
@@ -1277,43 +1305,165 @@ mod tests {
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap();
 
-        // A job pending past its budget and the 1 s wedge names the jobs lane.
+        // A job running past its budget and the 1 s wedge names the jobs
+        // lane, read from the job framework (cas-1240), the one registry.
         let clock = FakeClock::new();
-        let jobs = JobHealth::new();
-        let progress =
-            LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)), Arc::clone(&jobs));
-        let ticket = jobs.begin_at("store write", Duration::from_millis(100), clock.now());
-        clock.advance(Duration::from_millis(900));
+        let progress = LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)));
+        let lanes = Arc::new(FakeJobLanes::default());
+        progress.watch_jobs(Arc::clone(&lanes) as Arc<dyn JobLanes>);
+        lanes.run_on_write(running_write_job(900, 0, false));
         assert_eq!(progress.check_wedge(), None, "under the 1 s wedge");
-        clock.advance(Duration::from_millis(600));
+        lanes.run_on_write(running_write_job(1_500, 0, false));
         let check = progress.check_wedge().expect("job wedge");
         assert_eq!(check.lane, Lane::Jobs);
-        assert_eq!(check.step, "store write");
+        assert_eq!(check.step, "QueueStamp");
         assert_eq!(check.duration, Duration::from_millis(1_500));
         assert!(check.new);
         assert_eq!(
             progress.status_line().as_deref(),
-            Some("wedged: jobs/store write for 1 s")
+            Some("wedged: jobs/QueueStamp for 1 s")
         );
         let status = progress.status(1, "s", Utc::now());
-        assert_eq!(status.job_oldest_ms.get("store write"), Some(&1_500));
+        let write = &status.job_lanes["write"];
+        assert_eq!(write.critical_backlog, 3);
+        assert_eq!(write.oldest_critical_ms, Some(2_000));
+        let running = write
+            .running
+            .as_ref()
+            .expect("the running job is in loop.json");
         assert_eq!(
-            status.wedge.as_ref().map(|wedge| wedge.lane.as_str()),
-            Some("jobs")
+            (running.kind.as_str(), running.age_ms),
+            ("QueueStamp", 1_500)
         );
+        assert_eq!(status.job_lanes.len(), 4, "{:?}", status.job_lanes);
+        let wedge = status.wedge.expect("wedge in loop.json");
+        assert_eq!(
+            (wedge.lane.as_str(), wedge.step.as_str()),
+            ("jobs", "QueueStamp")
+        );
+        assert_eq!(wedge.duration_ms, 1_500);
         assert!(
             !progress.check_wedge().unwrap().new,
             "logged once per wedge"
         );
-        drop(ticket);
+
+        // A write job kept waiting by a stalled StoreWorker blames the writer.
+        lanes.run_on_write(running_write_job(0, 2_000, true));
+        let check = progress.check_wedge().expect("writer wedge");
+        assert_eq!((check.step, check.new), (STORE_WRITER_STEP, true));
         clock.advance(BADGE_MIN_INTERVAL);
         assert_eq!(
-            progress.status_line(),
-            None,
-            "a finished job is not shown as wedged, even before the next heartbeat"
+            progress.status_line().as_deref(),
+            Some("wedged: jobs/store writer for 2 s")
         );
+
+        // The job finishes: no wedge, even before the next heartbeat.
+        lanes.run_on_write(None);
+        clock.advance(BADGE_MIN_INTERVAL);
+        assert_eq!(progress.status_line(), None);
         assert_eq!(progress.check_wedge(), None);
-        assert!(progress.status(1, "s", Utc::now()).job_oldest_ms.is_empty());
+        let status = progress.status(1, "s", Utc::now());
+        assert!(status.job_lanes["write"].running.is_none());
+    }
+
+    /// The job lanes as a test drives them: four lanes in `JOB_LANES` order,
+    /// with a settable running job on the write lane.
+    #[derive(Default)]
+    struct FakeJobLanes {
+        write_running: Mutex<Option<super::super::jobs::RunningJob>>,
+    }
+
+    impl FakeJobLanes {
+        fn run_on_write(&self, job: Option<super::super::jobs::RunningJob>) {
+            *self.write_running.lock().unwrap() = job;
+        }
+    }
+
+    impl JobLanes for FakeJobLanes {
+        fn lane_stats(&self) -> Vec<super::super::jobs::LaneStats> {
+            JOB_LANES
+                .into_iter()
+                .map(|lane| {
+                    if lane == super::super::jobs::Lane::Write {
+                        super::super::jobs::LaneStats {
+                            queued: 3,
+                            oldest_queued_age: Some(Duration::from_secs(2)),
+                            critical_backlog: 3,
+                            oldest_critical_age: Some(Duration::from_secs(2)),
+                            dropped_refresh: 0,
+                            running: self.write_running.lock().unwrap().clone(),
+                        }
+                    } else {
+                        super::super::jobs::LaneStats::default()
+                    }
+                })
+                .collect()
+        }
+
+        fn over_budget_running(&self) -> Vec<super::super::jobs::RunningJob> {
+            Vec::new()
+        }
+    }
+
+    fn running_write_job(
+        age_ms: u64,
+        writer_wait_ms: u64,
+        waiting_for_writer: bool,
+    ) -> Option<super::super::jobs::RunningJob> {
+        Some(super::super::jobs::RunningJob {
+            lane: super::super::jobs::Lane::Write,
+            kind: "QueueStamp",
+            key: "row-7".to_string(),
+            age: Duration::from_millis(age_ms),
+            budget: Duration::from_millis(100),
+            waiting_for_writer,
+            writer_wait: Duration::from_millis(writer_wait_ms),
+        })
+    }
+
+    /// The daemon's real job runtime (cas-1240) is what the watchdog reads:
+    /// a job running on a lane appears in `loop.json`'s `job_lanes`.
+    #[test]
+    fn flv2_watchdog_reads_the_job_framework_lanes() {
+        use super::super::jobs::{Criticality, JobRuntime, JobSpec};
+        let runtime: Arc<JobRuntime<()>> = Arc::new(JobRuntime::start(4));
+        let progress = LoopProgress::new();
+        progress.watch_jobs(Arc::clone(&runtime) as Arc<dyn JobLanes>);
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        runtime.submit(
+            JobSpec {
+                kind: "WorkerHealthProbe",
+                key: "worker-a".to_string(),
+                lane: super::super::jobs::Lane::Blocking,
+                criticality: Criticality::Refresh,
+                generation: 1,
+                budget: Duration::from_millis(100),
+            },
+            move || {
+                started_tx.send(()).unwrap();
+                let _ = released.recv_timeout(Duration::from_secs(10));
+            },
+        );
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let status = progress.status(1, "s", Utc::now());
+        let running = status.job_lanes["blocking"]
+            .running
+            .as_ref()
+            .expect("the running probe is in loop.json");
+        assert_eq!(running.kind, "WorkerHealthProbe");
+        assert_eq!(running.key, "worker-a");
+        assert_eq!(running.budget_ms, 100);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.drain_completions().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            progress.status(1, "s", Utc::now()).job_lanes["blocking"]
+                .running
+                .is_none()
+        );
     }
 
     /// cas-6931 review: the badge holds the worst slow step of its 10 s
@@ -1323,8 +1473,7 @@ mod tests {
     #[test]
     fn flv2_badge_holds_worst_step_and_changes_at_most_once_a_second() {
         let clock = FakeClock::new();
-        let progress =
-            LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)), JobHealth::new());
+        let progress = LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)));
         let slow_step = |name: &'static str, ms: u64| {
             progress.enter_step(Step::prompt_queue(name));
             clock.advance(Duration::from_millis(ms));

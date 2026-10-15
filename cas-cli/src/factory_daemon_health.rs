@@ -100,15 +100,44 @@ pub struct DaemonLoopStatus {
     /// The lane wedged now, if any (cas-6931).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wedge: Option<LaneWedge>,
-    /// Age of the oldest pending job of each kind, in milliseconds.
+    /// Occupancy of each job lane (`read`, `write`, `blocking`, `external`)
+    /// as the job framework (cas-1240) reports it, once the daemon runs one.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub job_oldest_ms: std::collections::BTreeMap<String, u64>,
+    pub job_lanes: std::collections::BTreeMap<String, JobLaneHealth>,
     /// Blocking calls made on the io or control lane so far (factory loop v2
     /// §6.6, report mode), and the call sites that made them.
     #[serde(default)]
     pub lane_violations: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lane_violation_sites: Vec<String>,
+}
+
+/// One job lane's occupancy (factory loop v2 §4.2, §6.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobLaneHealth {
+    /// Jobs waiting, on the queue or behind a busy key.
+    pub queued: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_queued_ms: Option<u64>,
+    /// Critical jobs waiting; never dropped, so their age is the metric.
+    pub critical_backlog: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_critical_ms: Option<u64>,
+    pub dropped_refresh: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<RunningJobHealth>,
+}
+
+/// The job a lane is running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningJobHealth {
+    pub kind: String,
+    pub key: String,
+    /// How long the job itself has run; zero while it waits for the writer.
+    pub age_ms: u64,
+    pub budget_ms: u64,
+    pub waiting_for_writer: bool,
+    pub writer_wait_ms: u64,
 }
 
 /// One step that ran over its budget (factory loop v2 §6.3).
@@ -379,7 +408,7 @@ mod tests {
             phase_latency: Default::default(),
             slow_steps: Vec::new(),
             wedge: None,
-            job_oldest_ms: Default::default(),
+            job_lanes: Default::default(),
             lane_violations: 0,
             lane_violation_sites: Vec::new(),
         }

@@ -976,18 +976,25 @@ impl TaskDeliverables {
     pub fn decline_factory_branch_anchor(&mut self) {
         let anchor = self.factory_branch_anchor.clone();
         self.retain_factory_branch_anchor_as_history();
-        if let Some(anchor) = anchor.map(|anchor| anchor.trim().to_string())
+        if let Some(anchor) = anchor
+            .map(|anchor| anchor.trim().to_string())
             .filter(|anchor| !anchor.is_empty())
         {
-            let declined = self.declined_factory_branch_anchors.get_or_insert_with(Vec::new);
-            if !declined.iter().any(|known| known.eq_ignore_ascii_case(&anchor)) {
+            let declined = self
+                .declined_factory_branch_anchors
+                .get_or_insert_with(Vec::new);
+            if !declined
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&anchor))
+            {
                 declined.push(anchor);
             }
         }
     }
 
     pub fn declined_factory_anchors(&self) -> &[String] {
-        self.declined_factory_branch_anchors.as_deref()
+        self.declined_factory_branch_anchors
+            .as_deref()
             .unwrap_or(&self.historical_factory_branch_anchors)
     }
 
@@ -1460,18 +1467,33 @@ mod tests {
         let mut deliverables: TaskDeliverables = serde_json::from_value(serde_json::json!({
             "historical_factory_branch_anchors": ["old-declined-tip"],
             "factory_branch_anchor": "unreviewed-tip"
-        })).unwrap();
-        assert_eq!(deliverables.declined_factory_anchors(), ["old-declined-tip"]);
+        }))
+        .unwrap();
+        assert_eq!(
+            deliverables.declined_factory_anchors(),
+            ["old-declined-tip"]
+        );
         deliverables.retain_factory_branch_anchor_as_history();
-        let mut decoded: TaskDeliverables = serde_json::from_value(serde_json::to_value(&deliverables).unwrap()).unwrap();
-        assert_eq!(decoded.historical_factory_branch_anchors, ["old-declined-tip", "unreviewed-tip"]);
+        let mut decoded: TaskDeliverables =
+            serde_json::from_value(serde_json::to_value(&deliverables).unwrap()).unwrap();
+        assert_eq!(
+            decoded.historical_factory_branch_anchors,
+            ["old-declined-tip", "unreviewed-tip"]
+        );
         assert_eq!(decoded.declined_factory_anchors(), ["old-declined-tip"]);
         decoded.factory_branch_anchor = Some("unreviewed-tip".into());
         decoded.decline_factory_branch_anchor();
-        assert_eq!(decoded.declined_factory_anchors(), ["old-declined-tip", "unreviewed-tip"]);
-        let mut first = TaskDeliverables { factory_branch_anchor: Some("first-unreviewed-tip".into()), ..Default::default() };
+        assert_eq!(
+            decoded.declined_factory_anchors(),
+            ["old-declined-tip", "unreviewed-tip"]
+        );
+        let mut first = TaskDeliverables {
+            factory_branch_anchor: Some("first-unreviewed-tip".into()),
+            ..Default::default()
+        };
         first.retain_factory_branch_anchor_as_history();
-        let first: TaskDeliverables = serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+        let first: TaskDeliverables =
+            serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
         assert_eq!(first.declined_factory_branch_anchors, Some(vec![]));
     }
 

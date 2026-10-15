@@ -43,18 +43,23 @@ pub(crate) enum Lane {
     Read,
     /// SQLite writes: the daemon's single writer.
     Write,
-    /// Everything else that can block: git, gh, `/proc`, transcripts, HTTP.
+    /// Local blocking work: `/proc` scans, transcript and file reads.
     Blocking,
+    /// Slow external calls: git (fetch, rev-parse), gh, HTTP. Kept apart from
+    /// [`Lane::Blocking`] so a 5 s fetch or a 10 s CI poll never stalls
+    /// worker health probes (review round 1, item 5).
+    External,
 }
 
 impl Lane {
-    const ALL: [Lane; 3] = [Lane::Read, Lane::Write, Lane::Blocking];
+    const ALL: [Lane; 4] = [Lane::Read, Lane::Write, Lane::Blocking, Lane::External];
 
     fn thread_name(self) -> &'static str {
         match self {
             Lane::Read => "factory-jobs-read",
             Lane::Write => "factory-jobs-write",
             Lane::Blocking => "factory-jobs-blocking",
+            Lane::External => "factory-jobs-external",
         }
     }
 }
@@ -186,6 +191,52 @@ impl GenerationGate {
 
     pub(crate) fn len(&self) -> usize {
         self.applied.len()
+    }
+}
+
+/// Exponential backoff per key for jobs whose outcome keeps failing
+/// (spec §4.2; review round 1, item 11). The caller asks
+/// [`Backoff::ready`] before submitting and reports each outcome. Time is
+/// passed in, so tests use a fake clock.
+#[derive(Debug)]
+pub(crate) struct Backoff {
+    base: Duration,
+    max: Duration,
+    /// key -> (consecutive failures, not before)
+    failures: HashMap<String, (u32, Instant)>,
+}
+
+impl Backoff {
+    pub(crate) fn new(base: Duration, max: Duration) -> Self {
+        Self {
+            base,
+            max,
+            failures: HashMap::new(),
+        }
+    }
+
+    /// Whether `key` may run at `now`.
+    pub(crate) fn ready(&self, key: &str, now: Instant) -> bool {
+        self.failures
+            .get(key)
+            .is_none_or(|(_, not_before)| now >= *not_before)
+    }
+
+    /// Record a failure at `now`; returns the delay before the next attempt.
+    pub(crate) fn record_failure(&mut self, key: &str, now: Instant) -> Duration {
+        let entry = self.failures.entry(key.to_string()).or_insert((0, now));
+        entry.0 = entry.0.saturating_add(1);
+        let delay = self
+            .base
+            .saturating_mul(1u32 << (entry.0 - 1).min(16))
+            .min(self.max);
+        entry.1 = now + delay;
+        delay
+    }
+
+    /// A success clears the key's backoff.
+    pub(crate) fn record_success(&mut self, key: &str) {
+        self.failures.remove(key);
     }
 }
 
@@ -823,6 +874,51 @@ mod tests {
         gate.forget("row-1");
         gate.retain(|key| key != "row-2");
         assert_eq!(gate.len(), 0, "keys stay bounded");
+    }
+
+    /// spec §4.2 / review round 1, item 11: a failing key backs off
+    /// exponentially up to the cap; a success clears it. Fake clock.
+    #[test]
+    fn flv2_job_backoff_is_exponential_and_capped() {
+        let mut backoff = Backoff::new(Duration::from_secs(5), Duration::from_secs(60));
+        let t0 = Instant::now();
+        assert!(backoff.ready("fetch", t0));
+        let delays: Vec<u64> = (0..6)
+            .map(|_| backoff.record_failure("fetch", t0).as_secs())
+            .collect();
+        assert_eq!(delays, vec![5, 10, 20, 40, 60, 60]);
+        assert!(!backoff.ready("fetch", t0 + Duration::from_secs(59)));
+        assert!(backoff.ready("fetch", t0 + Duration::from_secs(60)));
+        assert!(backoff.ready("other", t0), "keys back off independently");
+        backoff.record_success("fetch");
+        assert!(backoff.ready("fetch", t0));
+    }
+
+    /// Review round 1, item 5: a slow external call never stalls local
+    /// blocking work.
+    #[test]
+    fn flv2_job_external_lane_does_not_block_local_probes() {
+        let runtime: JobRuntime<&'static str> = JobRuntime::start(4);
+        let release = Arc::new(Barrier::new(2));
+        let r = Arc::clone(&release);
+        runtime.submit(
+            spec("git-fetch", Lane::External, Criticality::Refresh, 1),
+            move || {
+                r.wait();
+                "fetched"
+            },
+        );
+        runtime.submit(
+            spec("health-probe", Lane::Blocking, Criticality::Refresh, 1),
+            || "probed",
+        );
+        let first = wait_for(&runtime, 1);
+        assert_eq!(
+            first[0].key, "health-probe",
+            "the probe finished while the fetch was stuck"
+        );
+        release.wait();
+        assert_eq!(wait_for(&runtime, 1)[0].key, "git-fetch");
     }
 
     /// Review round 1, item 4: a panicking job posts a result and frees its key.

@@ -5,11 +5,12 @@ use cas_types::{
 use std::path::PathBuf;
 
 const SESSION: &str = "provision-test";
+const SUPERVISOR: &str = "test-supervisor";
 
 fn env() -> crate::test_support::TestEnvGuard {
     crate::test_support::TestEnvGuard::with_vars(&[
         ("CAS_FACTORY_SESSION", SESSION),
-        ("CAS_AGENT_NAME", "supervisor"),
+        ("CAS_AGENT_NAME", SUPERVISOR),
         ("CAS_AGENT_ROLE", "supervisor"),
     ])
 }
@@ -27,7 +28,7 @@ impl Fixture {
         let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
         let agents = open_agent_store(&cas_dir).unwrap();
         for (name, role) in [
-            ("supervisor", AgentRole::Supervisor),
+            (SUPERVISOR, AgentRole::Supervisor),
             ("worker", AgentRole::Worker),
         ] {
             let mut agent = Agent::new_with_role(format!("{name}-id"), name.into(), role);
@@ -43,6 +44,11 @@ impl Fixture {
     }
 
     fn aged(&self, source: &str, target: &str, body: &str) -> i64 {
+        let target = if target == "supervisor" {
+            SUPERVISOR
+        } else {
+            target
+        };
         let id = self
             .queue
             .enqueue_urgent_with_outcome(
@@ -295,7 +301,7 @@ fn cas_07ee_informational_approval_does_not_raise_idle_unread() {
     ] {
         let mut f = Fixture::new();
         f.aged("supervisor", "worker", body);
-        f.daemon.relay_idle_unacked_messages(f.queue.as_ref());
+        f.scan();
         assert!(
             !f.queue.peek_all(20).unwrap().iter().any(|row| row
                 .summary
@@ -312,7 +318,7 @@ fn cas_07ee_teammate_surface_confirms_supervisor_and_never_alerts() {
     let mut f = Fixture::new();
     let body = "ready: request 2574 complete";
     let id = f.aged("worker", "supervisor", body);
-    assert!(f.queue.claim_recipient_transport(id, "supervisor").unwrap());
+    assert!(f.queue.claim_recipient_transport(id, SUPERVISOR).unwrap());
     let input = crate::hooks::HookInput {
         session_id: "sup-session".into(),
         agent_role: Some("supervisor".into()),

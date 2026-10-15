@@ -26698,6 +26698,78 @@ mod merge_state_gate_tests {
         }
     }
 
+    fn transferred_delivery_gh1180() -> (TempDir, Task, String) {
+        let dir = init_factory_repo("original");
+        let p = dir.path();
+        std::fs::write(p.join("delivered.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "finished delivery"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "-b", "factory/receiver", "main"]);
+        std::fs::write(p.join("other.rs"), "fn other() {}\n").unwrap();
+        git(p, &["add", "other.rs"]);
+        git(p, &["commit", "-q", "-m", "other work (cas-0906)"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/original", "-m", "merge delivery"]);
+        let mut task = worker_task("receiver");
+        task.deliverables.parked_branch = Some("factory/original".into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        (dir, task, anchor)
+    }
+
+    #[test]
+    fn transferred_merged_delivery_resolves_parked_branch_gh1180() {
+        let (dir, task, anchor) = transferred_delivery_gh1180();
+        let p = dir.path();
+        assert_eq!(
+            resolve_close_delivery_branch(p, &task, "receiver").unwrap(),
+            "factory/original",
+        );
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(anchor.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task, &req, "main", p,
+            TaskCommitAttribution { receipt: Some(&anchor), window: Some(&window) },
+        );
+        assert!(matches!(out, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)), "{out:?}");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_resolves_remote_handoff_branch_gh1180() {
+        let (dir, mut task, anchor) = transferred_delivery_gh1180();
+        let p = dir.path();
+        git(p, &["update-ref", "refs/remotes/origin/factory/original", &anchor]);
+        git(p, &["branch", "-D", "factory/original"]);
+        task.deliverables.parked_branch = None;
+        task.deliverables.record_handoff_branch("factory/original");
+        assert_eq!(
+            resolve_close_delivery_branch(p, &task, "receiver").unwrap(),
+            "origin/factory/original",
+        );
+        let out = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        assert!(matches!(out, MergeStateGateOutcome::Proceed), "{out:?}");
+    }
+
+    #[test]
+    fn transferred_merged_delivery_identity_survives_new_lease_gh1180() {
+        let (dir, mut task, receipt) = transferred_delivery_gh1180();
+        // Legacy handoffs may retain the branch without a parked SHA. Its
+        // exact tip still links a prior-cycle receipt to this task.
+        task.deliverables.factory_branch_anchor = None;
+        let known = current_factory_branch_receipt_for_identity(dir.path(), &task, &receipt);
+        assert_eq!(known.as_deref(), Some(receipt.as_str()));
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            supervisor_override_reason: None,
+            identity: task_commit_identity(&task, known),
+        };
+        validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect("transfer must preserve attribution of the merged delivery");
+    }
+
     /// cas-a44a: a task reopened and reassigned keeps the previous worker's
     /// `parked_branch`. When the new worker re-parks from its own per-task
     /// branch, the merge-request, close and QA readers all name that branch,

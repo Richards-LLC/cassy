@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect, journeyPart } from "./journey";
+import { test, expect, journeyPart, holdPageClock } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import { HubDouble, SCOPES } from "./hub-double";
 import { ProtocolClock } from "./protocol-clock";
@@ -755,27 +755,38 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     // QA F02: the visible label is the accessible name.
     const copy = dialog.getByRole("button", { name: "Copy command", exact: true });
+    // The label reverts two seconds after the copy, on the page clock. Hold
+    // that clock, so the checks below cannot outlast "Copied" on a loaded
+    // host (cas-c4b2): the label is set when the clipboard write resolves,
+    // and the status speaks 50 ms after it empties.
+    await holdPageClock(page);
     await copy.click();
+    await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    await page.clock.runFor(50);
     await expect(dialog.locator(".pair-command-status")).toHaveText("Command copied");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command);
-    await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
-    // The label reverts after two seconds; hold it at "Copied" through the
-    // sweep, the state in which the block used to reflow.
+    // Hold it at "Copied" through the sweep, the state in which the block
+    // used to reflow.
     await sweep("while Copy reads Copied", "Copied");
     await dialog.locator(".pair-command-copy").evaluate((button) => { button.textContent = "Copy command"; });
+    await page.clock.resume();
     await page.setViewportSize({ width: 1280, height: 720 });
     // QA F03: a second copy is announced again (the status empties, then speaks).
     await expect(dialog.getByRole("button", { name: "Copy command", exact: true })).toBeVisible({ timeout: 5_000 });
-    // Two copies in a row: each one sets the status anew, so each is spoken.
-    const announcements = await dialog.locator(".pair-command-status").evaluate((status) => new Promise<string[]>((resolve) => {
+    // Two copies in a row, 400 ms apart on the page clock: each one sets the
+    // status anew, so each is spoken. The announcements are polled until both
+    // are in, not collected over a fixed window a slow clipboard can outlast
+    // (cas-c4b2).
+    await dialog.locator(".pair-command-status").evaluate((status) => {
       const seen: string[] = [];
+      (window as unknown as { __copyAnnouncements: string[] }).__copyAnnouncements = seen;
       new MutationObserver(() => seen.push(status.textContent ?? "")).observe(status, { childList: true, characterData: true, subtree: true });
       const button = status.parentElement!.querySelector("button") as HTMLButtonElement;
       button.click();
       setTimeout(() => button.click(), 400);
-      setTimeout(() => resolve(seen), 900);
-    }));
-    expect(announcements.filter((text) => text === "Command copied"), JSON.stringify(announcements)).toHaveLength(2);
+    });
+    const announcements = () => page.evaluate(() => (window as unknown as { __copyAnnouncements: string[] }).__copyAnnouncements);
+    await expect.poll(async () => (await announcements()).filter((text) => text === "Command copied").length, { message: "both copies are spoken" }).toBe(2);
   });
 
   await journey.stage("Re-pair with a code anyway", async () => {

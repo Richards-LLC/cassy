@@ -107,14 +107,15 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     const skip = page.getByRole("button", { name: "Skip to the conversation", exact: true });
     await expect(skip).toBeFocused();
     await expect(skip).toBeVisible();
+    // Each ring is polled as a whole condition, not read once (cas-c4b2).
     const ring = (locator: Locator) => locator.evaluate((node) => { const style = getComputedStyle(node); return style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0; });
-    expect(await ring(skip), "the skip link shows its focus ring").toBe(true);
+    await expect.poll(() => ring(skip), { message: "the skip link shows its focus ring" }).toBe(true);
     await page.keyboard.press("Enter");
     const raw = page.getByRole("button", { name: "Raw output", exact: true });
     await expect(raw).toBeFocused();
-    expect(await ring(raw), "Raw output shows its focus ring").toBe(true);
+    await expect.poll(() => ring(raw), { message: "Raw output shows its focus ring" }).toBe(true);
     expect(await tabTo(page, interrupt)).toBe(1);
-    expect(await ring(interrupt), "Interrupt shows its focus ring").toBe(true);
+    await expect.poll(() => ring(interrupt), { message: "Interrupt shows its focus ring" }).toBe(true);
     await expect(interrupt).toBeFocused();
     await page.keyboard.press("Enter");
     await hub.waitFor(() => interrupts(hub).length === 1);

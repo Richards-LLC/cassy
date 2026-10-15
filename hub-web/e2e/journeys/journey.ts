@@ -22,7 +22,21 @@ export { expect };
 // journey-eval.sh passes its own fresh JOURNEY_RECEIPTS directory.
 export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? join(process.env.JOURNEY_OUTPUT ?? fileURLToPath(new URL("../.results", import.meta.url)), "journeys"));
 
-type Stage = { title: string; slug: string; ms: number; screenshot: string };
+/**
+ * Whether this run records the visual receipt: the screencast with its chapter
+ * and action overlays, and a screenshot per stage (cas-c4b2). journey-eval.sh
+ * (worker and QA evidence) always asks for receipts with JOURNEY_RECEIPTS, and
+ * a local run records by default. A CI run that asks for none, the merge
+ * queue, skips them: nothing reads them there, and on a 4-vCPU hosted runner
+ * the encoder and each overlay's fixed pause (a second per chapter) pushed
+ * multi-stage journeys past the test timeout. JOURNEY_RECORD=1|0 overrides.
+ * The assertions, result.json, aria snapshots and frame checks always run.
+ */
+export const RECORD = process.env.JOURNEY_RECORD !== undefined
+  ? process.env.JOURNEY_RECORD === "1"
+  : process.env.JOURNEY_RECEIPTS !== undefined || !process.env.CI;
+
+type Stage = { title: string; slug: string; ms: number; screenshot?: string };
 
 export type Journey = {
   id: string;
@@ -108,8 +122,10 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     page.on("pageerror", (error) => errors.push(error.message));
     const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
     // Full-size frames need trace `screenshots: false` (see playwright.config.ts).
-    await page.screencast.start({ path: join(dir, "receipt.webm"), size: viewport });
-    await page.screencast.showActions({ position: "top-right", duration: 300 });
+    if (RECORD) {
+      await page.screencast.start({ path: join(dir, "receipt.webm"), size: viewport });
+      await page.screencast.showActions({ position: "top-right", duration: 300 });
+    }
     let double: HubDouble | undefined;
     const frames = await watchConversationFrames(page);
 
@@ -117,10 +133,14 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
       id,
       async stage(title, body) {
         await test.step(title, async () => {
-          await page.screencast.showChapter(title, { duration: 1000 });
+          if (RECORD) await page.screencast.showChapter(title, { duration: 1000 });
           const started = performance.now();
           await body();
           const ms = performance.now() - started;
+          if (!RECORD) {
+            stages.push({ title, slug: slug(title), ms });
+            return;
+          }
           const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
           await settle(page);
           await page.screenshot({ path: join(dir, screenshot) });
@@ -149,7 +169,7 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
     let ariaJson: unknown = null;
     try { ariaJson = await page.locator("body").ariaSnapshotJSON(); } catch (error) { ariaJson = { error: String(error) }; }
     writeFileSync(join(dir, "final.aria.json"), JSON.stringify(ariaJson, null, 2) + "\n");
-    await page.screencast.stop().catch(() => undefined);
+    if (RECORD) await page.screencast.stop().catch(() => undefined);
     const status = testInfo.status === "passed" && errors.length === 0 ? "PASS" : "FAIL";
     writeFileSync(join(dir, "result.json"), JSON.stringify({
       id,
@@ -197,6 +217,28 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
     return { outline: style.outlineStyle, fits: across && down };
   }, options.vertical === true);
   expect(ring, "the focused field shows its whole focus ring").toEqual({ outline: "solid", fits: true });
+}
+
+/**
+ * Hold the page clock a moment ahead of the page's own now (cas-c4b2). Time
+ * then moves only through page.clock.runFor/fastForward, so a step that
+ * stands for a measured delay is counted on the page clock alone, never
+ * stretched by a loaded host. Resume with page.clock.resume().
+ *
+ * The page's now is its installed clock's origin plus the ticks run since
+ * (journeys never set the system time). It is read just before the hold, and
+ * read again if a slow round trip let the clock pass it.
+ */
+export async function holdPageClock(page: Page, ahead = 250): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    const now = await page.evaluate(() => performance.timeOrigin + performance.now());
+    try {
+      await page.clock.pauseAt(now + ahead);
+      return;
+    } catch (error) {
+      if (attempt === 3 || !String(error).includes("Cannot fast-forward to the past")) throw error;
+    }
+  }
 }
 
 /** Two animation frames: let the UI paint before a screenshot. */

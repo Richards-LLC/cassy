@@ -205,8 +205,9 @@ for (const scheme of ["light", "dark"] as const) {
         await summary.tap();
 
         await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
-        // Let the tap's click task and the rebuild it released both run.
-        await page.evaluate(() => new Promise((resolve) => setTimeout(() => requestAnimationFrame(() => resolve(null)), 50)));
+        // Let the tap's click task and the rebuild it released both run: on the
+        // page clock, timers and frames included, not a fixed pause (cas-c4b2).
+        await page.clock.runFor(100);
         await expect(dialog.locator("details.pair-technical")).toHaveAttribute("open", "");
         for (const scope of ["machine:read", "session:read", "pane:read"]) {
           await expect(dialog.getByRole("checkbox", { name: scope, exact: true })).toBeChecked();

@@ -1263,6 +1263,7 @@ mod cas_3dcb_death_relay_tests {
         );
         assert_eq!(summary.recovered_task_ids, vec!["cas-requested"]);
         assert_eq!(tasks.get("cas-requested").unwrap().assignee, None);
+        // pin: a requested stop must enqueue no death relay at all.
         assert!(fixture.prompt_relays().is_empty(), "no death relay");
         assert_eq!(fixture.durable_notices(), 0, "no Critical worker_died notice");
     }
@@ -1278,6 +1279,7 @@ mod cas_3dcb_death_relay_tests {
             &[],
             "harness exited",
         );
+        // pin: an unexpected death must still enqueue exactly one relay.
         assert_eq!(fixture.prompt_relays().len(), 1, "one death relay");
         assert_eq!(fixture.durable_notices(), 1);
     }

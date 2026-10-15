@@ -152,6 +152,41 @@ fn rendered_prompt_names_sender_machine_repo_and_how_to_reply() {
 }
 
 #[test]
+fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
+    let mut reply = message("pm-reply", "supervisor", REPO, "yes");
+    reply.in_reply_to = Some("pm-question".into());
+    assert!(
+        render_prompt(&reply)
+            .lines()
+            .next()
+            .unwrap()
+            .contains("in_reply_to=\"pm-question\"")
+    );
+    for kind in ["ask", "blocker"] {
+        let action = message(
+            "pm-action",
+            "supervisor",
+            REPO,
+            &format!("<cas-peer-intent kind=\"{kind}\"/>\nPlease coordinate this."),
+        );
+        let prompt = render_prompt(&action);
+        assert!(
+            prompt
+                .lines()
+                .next()
+                .unwrap()
+                .contains(&format!("kind=\"{kind}\"")),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("<cas-peer-intent"),
+            "transport metadata is consumed: {prompt}"
+        );
+        assert!(prompt.ends_with("Please coordinate this."));
+    }
+}
+
+#[test]
 fn delivery_admits_in_order_once_daemon_stamped_and_never_urgent() {
     let machine = Machine::new();
     machine.register(

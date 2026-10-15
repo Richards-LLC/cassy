@@ -513,7 +513,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
 
     let sent = coordinate(
         &service_a,
-        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?"}),
+        json!({"action": "message", "target": "sup-b@machine-beta", "summary": "take cas-1234?", "message": "can you take cas-1234?", "kind": "ask"}),
     )
     .await
     .unwrap();
@@ -531,6 +531,8 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .await
     .unwrap();
     assert_eq!(rows.len(), 1);
+
+    assert!(rows[0].prompt.lines().next().unwrap().contains("kind=\"ask\""), "peer kind must survive the actual Cloud route: {}", rows[0].prompt);
 
     let replied = coordinate(
         &service_b,
@@ -560,6 +562,7 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .unwrap();
     assert_eq!(replies.len(), 1);
     assert!(replies[0].prompt.ends_with("yes"));
+    assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
 }
 
 fn public_outbox_status(root: &Path, id: &str) -> String {

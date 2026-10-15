@@ -376,6 +376,12 @@ pub struct FactoryDaemon {
     /// GH #1208: background scan of durable external reminder conditions;
     /// the loop only collects finished scans.
     external_wake: runtime::external_wake::ExternalWakeScanner,
+    /// Factory loop v2 (cas-223f): the job runtime that runs director
+    /// snapshots, fresh re-checks, worker health probes and reminder scans
+    /// off the loop. Started on first use.
+    jobs: runtime::factory_jobs::FactoryJobs,
+    /// Generation of the last `ReminderScan` job.
+    reminder_scan_generation: u64,
     /// cas-0f05: satisfied `ci_completed` reminders from the GitHub watcher,
     /// fired on the next reminder pass.
     pending_ci_wakes: Vec<runtime::ci_watch::CiWake>,

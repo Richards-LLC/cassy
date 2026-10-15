@@ -7,6 +7,13 @@
 //! thread, and returns a [`DirectorRefreshLoad`] the app applies on the loop.
 //! The delivery stage's own fresh read is split the same way
 //! ([`DeliveryRequest`] and [`DeliveryInputs`]).
+//!
+//! Factory loop v2 (cas-223f): the daemon runs these reads as jobs on the
+//! jobs runtime's read lane (`DirectorSnapshot`, `RevalidateFresh`). The
+//! snapshot also carries the supervisor-stall delivery evidence
+//! ([`super::delivery_evidence`]), the delivery read carries the idle-worker
+//! liveness observations, and [`DeliverabilityRequest`] is the inject loop's
+//! final fresh re-check. None of them decides from cached data.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,10 +21,12 @@ use std::time::Instant;
 
 use cas_factory::SourceChangesInfo;
 
+use super::delivery_evidence::{DeliveryEvidenceMap, StallEvidenceRequest};
 use super::{
     CasDbFingerprint, FactoryApp, merge_director_data_preserving_git, unfiltered_snapshot_from,
 };
-use crate::ui::factory::director::{DirectorData, DirectorEvent, DirectorStores};
+use crate::mcp::tools::service::worker_liveness::Observation;
+use crate::ui::factory::director::{DirectorData, DirectorEvent, DirectorStores, Prompt};
 
 /// Everything a director refresh read needs, captured on the loop.
 #[derive(Debug, Clone)]
@@ -32,6 +41,9 @@ pub(crate) struct DirectorRefreshRequest {
     /// clock no longer matches is older than a refresh applied since, and is
     /// discarded rather than rolling panel data back.
     requested_after: Instant,
+    /// The supervisor-stall delivery evidence to compute with the snapshot
+    /// (`None` without a factory session or focused epic).
+    stall: Option<StallEvidenceRequest>,
 }
 
 /// The result of a director refresh read.
@@ -40,6 +52,7 @@ pub(crate) struct DirectorRefreshLoad {
     git_due: bool,
     director: DirectorLoad,
     requested_after: Instant,
+    evidence: Option<DeliveryEvidenceMap>,
 }
 
 enum DirectorLoad {
@@ -72,11 +85,20 @@ impl DirectorRefreshRequest {
         } else {
             DirectorLoad::Unchanged
         };
+        let fresh = match &director {
+            DirectorLoad::Loaded(Ok(data)) => Some(data),
+            _ => None,
+        };
+        let evidence = self
+            .stall
+            .as_ref()
+            .map(|stall| stall.evidence(fresh, stores));
         DirectorRefreshLoad {
             fingerprint,
             git_due: self.git_due,
             director,
             requested_after: self.requested_after,
+            evidence,
         }
     }
 }
@@ -87,6 +109,11 @@ pub(crate) struct DeliveryRequest {
     cas_dir: PathBuf,
     worktree_root: Option<PathBuf>,
     project_id: Option<String>,
+    /// Workers named by `WorkerIdle` events, whose liveness (agent store,
+    /// config, `/proc`) is observed with the read.
+    idle_workers: Vec<String>,
+    /// Delivery evidence for revalidating a `SupervisorStalled` event.
+    stall: Option<StallEvidenceRequest>,
 }
 
 /// The delivery stage's fresh read: the unfiltered snapshot events are
@@ -94,6 +121,10 @@ pub(crate) struct DeliveryRequest {
 pub(crate) struct DeliveryInputs {
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
+    /// Liveness of each idle worker, observed off the loop.
+    pub(super) idle_liveness: HashMap<String, Option<Observation>>,
+    /// Supervisor-stall delivery evidence against the fresh read.
+    pub(super) evidence: Option<DeliveryEvidenceMap>,
 }
 
 impl DeliveryRequest {
@@ -115,7 +146,75 @@ impl DeliveryRequest {
                 .ok()
             })
             .unwrap_or_default();
-        DeliveryInputs { data, blocks_deps }
+        let idle_liveness = self
+            .idle_workers
+            .iter()
+            .map(|worker| {
+                (
+                    worker.clone(),
+                    crate::ui::factory::director::idle_worker_liveness(&self.cas_dir, worker),
+                )
+            })
+            .collect();
+        let evidence = match (&self.stall, &data) {
+            (Some(stall), Ok(fresh)) => Some(stall.evidence(Some(fresh), stores)),
+            _ => None,
+        };
+        DeliveryInputs {
+            data,
+            blocks_deps,
+            idle_liveness,
+            evidence,
+        }
+    }
+}
+
+/// Whether a director prompt must be re-checked against a fresh read right
+/// before transport (retractable epic or merge alerts, and taskless-worker
+/// alerts that drop once the worker is assigned).
+pub(crate) fn prompt_needs_fresh_recheck(prompt: &Prompt) -> bool {
+    prompt.retract_epic.is_some()
+        || prompt.retract_task.is_some()
+        || prompt.drop_if_worker_assigned.is_some()
+}
+
+/// The inject loop's final re-check (`RevalidateFresh`): one fresh read for a
+/// batch of prompts, taken after the tick's epic merges.
+#[derive(Debug, Clone)]
+pub(crate) struct DeliverabilityRequest {
+    cas_dir: PathBuf,
+    worktree_root: Option<PathBuf>,
+    repo_root: PathBuf,
+}
+
+impl DeliverabilityRequest {
+    /// Whether each prompt is still deliverable. Runs on any thread. Always a
+    /// fresh read: a failed read is uncertainty, and an uncertain prompt is
+    /// delivered. Never retract a legitimate notification from cached data
+    /// (app/mod.rs, `prompt_is_still_deliverable`).
+    pub(crate) fn read(&self, stores: Option<&DirectorStores>, prompts: &[Prompt]) -> Vec<bool> {
+        if !prompts.iter().any(prompt_needs_fresh_recheck) {
+            return vec![true; prompts.len()];
+        }
+        let fresh = DirectorData::load_with_stores(
+            &self.cas_dir,
+            self.worktree_root.as_deref(),
+            false,
+            stores,
+        );
+        prompts
+            .iter()
+            .map(|prompt| {
+                !prompt_needs_fresh_recheck(prompt)
+                    || fresh.as_ref().map_or(true, |data| {
+                        crate::ui::factory::director::prompt_is_still_deliverable(
+                            prompt,
+                            data,
+                            &self.repo_root,
+                        )
+                    })
+            })
+            .collect()
     }
 }
 
@@ -156,15 +255,58 @@ impl FactoryApp {
             agent_id_to_name: self.director_data.agent_id_to_name.clone(),
             project_id: self.project_scope(),
             requested_after: self.last_refresh,
+            stall: self.stall_evidence_request(),
         }
     }
 
-    /// Capture what the delivery stage's fresh read needs.
-    pub(crate) fn delivery_request(&self) -> DeliveryRequest {
+    /// The supervisor-stall evidence request, when the stall check runs at
+    /// all: a factory session and a focused epic.
+    fn stall_evidence_request(&self) -> Option<StallEvidenceRequest> {
+        self.factory_session.as_ref()?;
+        let epic_id = self
+            .epic_state
+            .epic_id()
+            .or(self.current_epic_id.as_deref())?
+            .to_string();
+        Some(StallEvidenceRequest::new(
+            self.cas_dir.clone(),
+            self.delivery_repo_root(),
+            epic_id,
+            &self.unfiltered_director_data,
+            std::sync::Arc::clone(&self.lane_ci_pending),
+        ))
+    }
+
+    /// Capture what the delivery stage's fresh read needs to revalidate
+    /// `events`.
+    pub(crate) fn delivery_request(&self, events: &[DirectorEvent]) -> DeliveryRequest {
+        let idle_workers = events
+            .iter()
+            .filter_map(|event| match event {
+                DirectorEvent::WorkerIdle { worker, .. } => Some(worker.clone()),
+                _ => None,
+            })
+            .collect();
+        let stall = events
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::SupervisorStalled { .. }))
+            .then(|| self.stall_evidence_request())
+            .flatten();
         DeliveryRequest {
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),
+            idle_workers,
+            stall,
+        }
+    }
+
+    /// Capture what the inject loop's final fresh re-check needs.
+    pub(crate) fn deliverability_request(&self) -> DeliverabilityRequest {
+        DeliverabilityRequest {
+            cas_dir: self.cas_dir.clone(),
+            worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
+            repo_root: self.delivery_repo_root(),
         }
     }
 
@@ -182,6 +324,9 @@ impl FactoryApp {
             return Ok(Vec::new());
         }
         let git_due = load.git_due;
+        if let Some(evidence) = load.evidence {
+            self.delivery_evidence = evidence;
+        }
         let db_changed = match load.director {
             DirectorLoad::Loaded(loaded) => {
                 self.director_data =
@@ -205,27 +350,35 @@ impl FactoryApp {
                 false
             }
             DirectorLoad::Unchanged => {
-                timed("branch visibility", || self.refresh_branch_visibility_cache());
+                timed("branch visibility", || {
+                    self.refresh_branch_visibility_cache()
+                });
                 self.last_refresh = Instant::now();
                 // Worker holds live in session metadata rather than cas.db.
                 // They must be reconciled even on the unchanged-DB path;
                 // otherwise a just-written hold leaks one more WorkerIdle
                 // event before unrelated database activity occurs.
-                timed("worker holds", || self.apply_session_metadata_worker_holds());
+                timed("worker holds", || {
+                    self.apply_session_metadata_worker_holds()
+                });
                 return Ok(timed("supervisor stall", || self.detect_supervisor_stall())
                     .into_iter()
                     .collect());
             }
         };
 
-        timed("branch visibility", || self.refresh_branch_visibility_cache());
+        timed("branch visibility", || {
+            self.refresh_branch_visibility_cache()
+        });
         self.last_db_fingerprint = Some(load.fingerprint);
         self.last_refresh = Instant::now();
 
         // Sync session_id → pane_name mappings from agent store
         timed("session mappings", || self.sync_session_mappings());
         timed("epic focus", || self.apply_session_metadata_focus());
-        timed("worker holds", || self.apply_session_metadata_worker_holds());
+        timed("worker holds", || {
+            self.apply_session_metadata_worker_holds()
+        });
 
         // cas-e98e AC3: drop phantom worker panes when registry says the
         // worker is no longer supervision-live.

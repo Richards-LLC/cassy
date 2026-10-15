@@ -15,11 +15,12 @@
 //!   uncached `open_task_store` used to run, on a background schedule.
 //!
 //! Factory loop v2 (spec-4c5b §4) generalises this into the job framework in
-//! [`super::jobs`]: per-lane threads (reader, single writer, blocking), a
-//! completion queue, single-flight keys, generations and bounded queues that
-//! never drop critical writes. New off-loop work should use that API;
-//! [`StoreWorker`] stays for the existing ordered write jobs until children C2
-//! and C3 move them (cas-1240 adds the API only).
+//! [`super::jobs`]: lanes for reads (own connection), writes, local blocking
+//! work and external calls, a completion queue, single-flight keys,
+//! generations and bounded queues that never drop critical writes. Its write
+//! lane runs on this [`StoreWorker`], so the daemon keeps one writer. New
+//! off-loop work should use that API; children C2 and C3 move callers onto it
+//! (cas-1240 adds the API only).
 
 use std::collections::HashSet;
 use std::path::PathBuf;

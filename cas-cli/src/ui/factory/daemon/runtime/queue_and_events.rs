@@ -1,6 +1,14 @@
 use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
 
+#[path = "message_attention.rs"]
+mod message_attention;
+use message_attention::MessageAttention;
+
+#[cfg(test)]
+#[path = "message_attention_tests.rs"]
+mod message_attention_tests;
+
 /// What a delivery probe learned about recipient-authored activity (GH #1163).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecipientActivity {
@@ -3233,6 +3241,10 @@ impl FactoryDaemon {
                 return;
             }
         };
+        let decisions = self.message_attention_decisions(queue, &candidates);
+        let candidates: Vec<_> = candidates.into_iter()
+            .filter(|row| decisions.get(&row.id) == Some(&MessageAttention::Needed))
+            .collect();
 
         // cas-d9a8: the same scan already knows which supervisor-addressed
         // messages have gone unread past their threshold. Bouncing to the
@@ -3367,7 +3379,11 @@ impl FactoryDaemon {
             };
         let supervisor_name = self.app.supervisor_name().to_string();
         let now = chrono::Utc::now();
+        let decisions = self.message_attention_decisions(queue, &candidates);
         for queued in candidates {
+            if decisions.get(&queued.id) != Some(&MessageAttention::Needed) {
+                continue;
+            }
             let target = queued.target.as_str();
             if target == "supervisor" || target.eq_ignore_ascii_case(&supervisor_name) {
                 continue;

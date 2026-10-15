@@ -2,6 +2,7 @@ pub(crate) mod integration_batch;
 mod dependencies;
 pub(crate) mod lifecycle;
 mod notes;
+pub(crate) use notes::note_notification_ids;
 mod proposals;
 mod query;
 pub(crate) mod repo_context;

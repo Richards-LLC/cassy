@@ -1924,4 +1924,3 @@ fn issue_repo_cli_reads_show_origin_without_saving_cas_f398() {
         .success()
         .stdout("example/project\n");
 }
-

@@ -1457,4 +1457,3 @@ fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
             .is_none()
     );
 }
-

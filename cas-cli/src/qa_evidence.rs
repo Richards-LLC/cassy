@@ -2056,17 +2056,26 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 
 /// The commit range a delivery contributes: `merge-base(target, head)..head`
 /// before it merges; after it merges, the first merge on the ancestry path
-/// from `head` to `target` (`M^1..M`). An integrated merge receipt itself
-/// contributes `head^1..head`; later target merges cannot replace its diff.
+/// from `head` to `target` (`M^1..M`). A merge on the target's first-parent
+/// chain is the integration receipt itself and contributes `head^1..head`;
+/// later target merges cannot replace its diff.
 /// `None` when neither can be computed
 /// (for example a fast-forward merge, which leaves no merge commit).
 pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, String)> {
     let merged = git(repo, &["merge-base", "--is-ancestor", head, target]).is_some();
     if merged {
-        // GH #1181: an integration merge is already the receipt. Searching
-        // after it picked a later PR's UI paths (or no range at all).
+        // GH #1181: a merge on the target's first-parent chain is already
+        // the integration receipt. A worker-tip sync merge is not: its
+        // first-parent diff contains the incoming epic, so retain the
+        // ancestry-path search for that tip's later integration merge.
         if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_some() {
-            return Some((format!("{head}^1"), head.to_string()));
+            let full_head = git(repo, &["rev-parse", "--verify", head])?;
+            if git(repo, &["rev-list", "--first-parent", target])?
+                .lines()
+                .any(|commit| commit == full_head)
+            {
+                return Some((format!("{head}^1"), head.to_string()));
+            }
         }
         let merges = git(
             repo,

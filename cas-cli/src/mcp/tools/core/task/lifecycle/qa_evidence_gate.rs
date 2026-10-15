@@ -491,6 +491,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn worker_tip_merge_uses_its_integration_merge_range_gh1181() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        commit_file(&repo, "README.md", "base\n");
+        git(&repo, &["switch", "-q", "-c", "factory/worker"]);
+        commit_file(&repo, "src/service.ts", "backend delivery\n");
+        git(&repo, &["switch", "-q", "main"]);
+        commit_file(&repo, "hub-web/dist/epic.vue", "incoming epic UI\n");
+        git(&repo, &["switch", "-q", "factory/worker"]);
+        git(&repo, &["merge", "-q", "--no-ff", "main", "-m", "Sync epic into worker"]);
+        let worker_tip = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--no-ff", "factory/worker", "-m", "Integrate worker delivery"]);
+        let integration = git(&repo, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
+        let mut task = Task::new("cas-8105".into(), "Backend delivery after sync".into());
+        task.assignee = Some("worker".into());
+        qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&worker_tip))
+            .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
+        let (from, to) = delivery_range(&repo, &worker_tip, "main").unwrap();
+        assert_eq!(to, integration);
+        assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+    }
+
     /// cas-bde8 (GH #978): task A's UI commits on a reused factory branch were
     /// merged by PR, but the local `main` was never refreshed. Backend-only
     /// task B, next on the same branch, is judged against `origin/main`, where

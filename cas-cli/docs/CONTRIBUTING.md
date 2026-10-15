@@ -1378,6 +1378,8 @@ Named task commits and unclaimed unmerged changes still require delivery proof.
 QA classification of an integrated merge receipt uses that merge's own
 first-parent diff. Later PR merges cannot add their UI paths to the receipt's
 evidence requirements or hide UI that the receipt itself delivered.
+A worker tip that merged the epic into its lane uses its later integration
+merge's diff; only a merge on the target's first-parent chain is the receipt.
 
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`

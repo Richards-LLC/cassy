@@ -3229,6 +3229,22 @@ impl CasService {
             }
             rendered += 1;
         }
+        // cas-6ccb (GH #1215): a row this poll withheld as already done, or
+        // named without replaying it, is settled now, so the next turn's
+        // repeat of unacknowledged polled rows never brings back its body.
+        let settled: Vec<i64> = withheld
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(replays.iter().map(|(id, _)| *id))
+            .collect();
+        if let Err(error) = queue.settle_polled_rows(&settled) {
+            tracing::warn!(
+                target: "cas::coordination",
+                recipient = %recipient,
+                %error,
+                "cas-6ccb: could not settle withheld inbox rows; they may be repeated once"
+            );
+        }
 
         let replay_note = (!replays.is_empty()).then(|| {
             format!(

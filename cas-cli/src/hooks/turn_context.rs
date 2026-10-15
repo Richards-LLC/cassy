@@ -28,6 +28,9 @@ struct TurnState {
     /// their later tool boundaries stop re-checking the named rows.
     #[serde(default)]
     pointers_resolved: Vec<String>,
+    /// cas-6ccb: turns whose polled-but-unacknowledged rows were checked.
+    #[serde(default)]
+    polled_checked: Vec<String>,
 }
 
 struct Receipt {
@@ -180,24 +183,25 @@ pub(crate) fn fallback_context_within(
     }
     use super::handlers::handlers_middle::factory_inbox::{
         CurrentTurn, inbox_signal_stamp, names_wake_pointer, surface_factory_inbox_after_tool_result,
-        surface_turn_prompt_rows,
+        surface_polled_unacked, surface_turn_prompt_rows,
     };
     let turn = input
         .transcript_path
         .as_deref()
         .and_then(|path| latest_turn_with_start(Path::new(path), &input.session_id));
     let signal = inbox_signal_stamp(root, input);
-    let (turn_unserved, pointers_pending) = turn
+    let (turn_unserved, pointers_pending, polled_pending) = turn
         .as_ref()
-        .and_then(|(key, prompt, _)| {
+        .and_then(|(key, prompt, started_at)| {
             let receipt = Receipt::open(root, &input.session_id)?;
             Some((
                 !receipt.state.delivered.contains(key),
                 names_wake_pointer(prompt) && !receipt.state.pointers_resolved.contains(key),
+                started_at.is_some() && !receipt.state.polled_checked.contains(key),
             ))
         })
-        .unwrap_or((false, false));
-    if signal.is_none() && !turn_unserved && !pointers_pending {
+        .unwrap_or((false, false, false));
+    if signal.is_none() && !turn_unserved && !pointers_pending && !polled_pending {
         return None;
     }
     let mut receipt = Receipt::open(root, &input.session_id)?;
@@ -211,19 +215,38 @@ pub(crate) fn fallback_context_within(
     // "already shown". A Claude Teams copy is a pointer, and its teammate turn
     // fires no UserPromptSubmit; a pointer turn whose turn-start hook failed
     // or ran out of room is retried here until its rows resolve.
-    if let Some((key, prompt, _)) = &turn {
+    if let Some((key, prompt, started_at)) = &turn {
         let first_boundary = !receipt.state.delivered.contains(key);
         let pending = names_wake_pointer(prompt) && !receipt.state.pointers_resolved.contains(key);
+        // cas-6ccb: this turn's polled-but-unacknowledged rows go in the
+        // same block, so a row gets one note.
+        let polled_before = (*started_at).filter(|_| !receipt.state.polled_checked.contains(key));
         if (first_boundary || pending)
             && let Some(outcome) =
-                surface_turn_prompt_rows(root, input, prompt, first_boundary, &mut budget)
+                surface_turn_prompt_rows(root, input, prompt, first_boundary, polled_before, &mut budget)
         {
             parts.extend(outcome.text);
+            if polled_before.is_some() {
+                remember_recent(&mut receipt.state.polled_checked, key);
+                changed = true;
+            }
             if outcome.complete && names_wake_pointer(prompt) {
                 remember_recent(&mut receipt.state.pointers_resolved, key);
                 changed = true;
             }
         }
+    }
+
+    // cas-6ccb (GH #1215): once per turn, independent of new mail, a row
+    // read with inbox_poll before this turn and never acknowledged is shown
+    // once more (a teammate-message turn fires no turn-start hook).
+    if let Some((key, _, Some(started_at))) = &turn
+        && !receipt.state.polled_checked.contains(key)
+        && let Some(outcome) = surface_polled_unacked(root, input, *started_at, &mut budget)
+    {
+        parts.extend(outcome.text);
+        remember_recent(&mut receipt.state.polled_checked, key);
+        changed = true;
     }
 
     if let Some(signal) = signal

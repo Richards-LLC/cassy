@@ -194,15 +194,29 @@ enum TransportEligibility {
     /// the given turn start and never acknowledged. A hook shows them once
     /// more; its `hook_surfaced` receipt ends the resurfacing.
     PolledBefore(chrono::DateTime<Utc>),
+    /// cas-6ccb: the ids an `inbox_poll` names, whatever their receipt.
+    NamedRead,
 }
 
 /// cas-6ccb (GH #1215): eligibility for [`TransportEligibility::PolledBefore`];
 /// binds the turn start. An `inbox_poll` claims rows before its response is
-/// read, so a row polled mid-turn and not acted on was lost. It now comes back
-/// once, in a later turn, unless the recipient sent `message_ack`.
+/// read, so a row polled mid-turn and not acted on was lost. A direct row now
+/// comes back once, in a later turn, unless the recipient acknowledged it
+/// (`message_ack`, a reply with `in_reply_to`, or the poll settling a row it
+/// withheld) or a later message from it implied a reply (`assumed_seen_at`).
+/// Broadcasts are announcements with one shared ack; they are not repeated.
 const POLLED_UNACKED_RECEIPT_SQL: &str = "AND seen.source = 'inbox_poll'
           AND julianday(seen.seen_at) < julianday(?)
-          AND q.acked_at IS NULL";
+          AND q.target <> 'all_workers'
+          AND q.acked_at IS NULL
+          AND q.assumed_seen_at IS NULL";
+
+/// cas-6ccb (GH #1215): eligibility for [`TransportEligibility::NamedRead`].
+/// An `inbox_poll notification_id=<id>` is an explicit request for that row:
+/// it is returned whatever this recipient's receipt says, including a row it
+/// polled before or a hook already showed (CAS notes name these ids).
+const NAMED_READ_RECEIPT_SQL: &str = "AND (seen.prompt_id IS NULL
+          OR seen.source IN ('transport_delivered', 'transport_claimed', 'inbox_poll', 'hook_surfaced'))";
 
 /// cas-1f0c: the characters a hook may spend on message bodies in one output.
 ///
@@ -1508,6 +1522,9 @@ pub enum ConfirmationSource {
     /// recipient — unlike [`ConfirmationSource::InferredFromReply`], which is
     /// only evidence that some turn happened.
     HookSurfaced,
+    /// cas-6ccb: an `inbox_poll` claimed the row and withheld its body as
+    /// already done, or named it as an older delivery it did not replay.
+    PollSettled,
     /// Ack recorded before provenance was tracked, or by an unknown path.
     Unknown,
 }
@@ -1519,6 +1536,7 @@ impl ConfirmationSource {
             (Some("explicit_ack"), true) => Self::ExplicitAck,
             (Some("inferred_from_reply"), true) => Self::InferredFromReply,
             (Some("hook_surfaced"), true) => Self::HookSurfaced,
+            (Some("poll_settled"), true) => Self::PollSettled,
             (_, true) => Self::Unknown,
         }
     }
@@ -1541,6 +1559,7 @@ impl std::fmt::Display for ConfirmationSource {
             Self::ExplicitAck => write!(f, "explicit_ack"),
             Self::InferredFromReply => write!(f, "inferred_from_reply"),
             Self::HookSurfaced => write!(f, "hook_surfaced"),
+            Self::PollSettled => write!(f, "poll_settled"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -2441,6 +2460,12 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
+
+    /// cas-6ccb (GH #1215): confirm direct rows an `inbox_poll` claimed but
+    /// deliberately did not show in full (withheld as already done, or named
+    /// as an older delivery not replayed), so the next turn does not repeat
+    /// them. Recorded as `acked_via = 'poll_settled'`; broadcasts untouched.
+    fn settle_polled_rows(&self, prompt_ids: &[i64]) -> Result<()>;
 
     /// Acknowledge the prompt outbox row identified by `dedupe_key`.
     ///
@@ -5167,7 +5192,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             ids.len(),
             SurfacingSource::InboxPoll,
             None,
-            TransportEligibility::WakeNamed,
+            TransportEligibility::NamedRead,
             ids,
         )
     }
@@ -5901,6 +5926,32 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // rows_affected == 0 means either not found or already acked — both idempotent
             Ok(())
         }) // with_write_retry
+    }
+
+    fn settle_polled_rows(&self, prompt_ids: &[i64]) -> Result<()> {
+        if prompt_ids.is_empty() {
+            return Ok(());
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let now = Utc::now().to_rfc3339();
+            for prompt_id in prompt_ids {
+                let changed = conn.execute(
+                    "UPDATE prompt_queue SET acked_at = ?, acked_via = 'poll_settled' \
+                     WHERE id = ? AND acked_at IS NULL AND target <> 'all_workers'",
+                    params![now, prompt_id],
+                )?;
+                if changed == 1 {
+                    let _ = Self::atomic_stage_stamp(
+                        &conn,
+                        *prompt_id,
+                        DeliveryStage::Confirmed,
+                        AtomicStampOpts::clear_reason(),
+                    );
+                }
+            }
+            Ok(())
+        })
     }
 
     fn ack_by_dedupe_key(&self, dedupe_key: &str) -> Result<Option<i64>> {
@@ -7751,7 +7802,9 @@ impl SqlitePromptQueueStore {
         if source_filter.is_some() && normalized_sources.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        if matches!(transport, TransportEligibility::WakeNamed) && only_ids.is_empty() {
+        if matches!(transport, TransportEligibility::WakeNamed | TransportEligibility::NamedRead)
+            && only_ids.is_empty()
+        {
             return Ok((Vec::new(), Vec::new()));
         }
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -7806,6 +7859,7 @@ impl SqlitePromptQueueStore {
                 TransportEligibility::After(_) => DELIVERED_AFTER_TURN_START_RECEIPT_SQL,
                 TransportEligibility::WakeNamed => WAKE_NAMED_RECEIPT_SQL,
                 TransportEligibility::PolledBefore(_) => POLLED_UNACKED_RECEIPT_SQL,
+                TransportEligibility::NamedRead => NAMED_READ_RECEIPT_SQL,
             };
             // The receipt clause precedes every other bound predicate, so its
             // parameters follow the join's recipient. cas-b5ad: `After` binds
@@ -7988,7 +8042,9 @@ impl SqlitePromptQueueStore {
                 // claim over as the pointer wake's turn does.
                 let takes_claim = matches!(
                     transport,
-                    TransportEligibility::WakeNamed | TransportEligibility::After(_)
+                    TransportEligibility::WakeNamed
+                        | TransportEligibility::NamedRead
+                        | TransportEligibility::After(_)
                 );
                 // cas-6ccb: the resurfacing takes over the poll's receipt.
                 let resurfaces_poll =

@@ -6364,6 +6364,66 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     );
 }
 
+/// cas-6ccb (GH #1215): through MCP `inbox_poll`, a row the poll withholds as
+/// already done is settled, so the next turn's one-time repeat of polled but
+/// unacknowledged rows never brings back its body; a row shown in full is
+/// repeated. `inbox_poll notification_id=<id>` reads a row again on request.
+#[tokio::test]
+async fn inbox_poll_settles_withheld_rows_and_reads_a_named_row_again_cas_6ccb() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("registered-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id("registered-worker-id", "registered-worker", None);
+    let task_id = env.create_awaiting_merge_task("already parked", "registered-worker");
+    let queue = env.prompt_queue();
+    let brief = format!(
+        "You were spawned for task {task_id} — \"already parked\" — and it is assigned to you now.\n\
+         Start with `mcp__cas__task action=show id={task_id}`, then `mcp__cas__task action=start id={task_id}` before you change any code."
+    );
+    let stale = queue.enqueue("director", "registered-worker", &brief).unwrap();
+    let kept = queue
+        .enqueue("supervisor", "registered-worker", "rebase onto v43 before parking")
+        .unwrap();
+
+    let polled = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("inbox poll");
+    let text = get_text(&polled);
+    assert!(text.contains("rebase onto v43 before parking"), "{text}");
+    assert!(!text.contains("assigned to you now"), "{text}");
+
+    let later_turn = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let repeated: Vec<i64> = queue
+        .surface_for_recipient_within_budget(
+            "registered-worker",
+            None,
+            cas_store::HookDrain::PolledBefore(later_turn),
+            10,
+            cas_store::HOOK_SURFACE_BUDGET_CHARS,
+        )
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(repeated, vec![kept], "the withheld row {stale} is settled, not repeated");
+
+    let mut named = coord_req("inbox_poll");
+    named.notification_id = Some(kept);
+    let again = get_text(
+        &env.service
+            .coordination(Parameters(named))
+            .await
+            .expect("named inbox poll"),
+    );
+    assert!(again.contains("rebase onto v43 before parking"), "{again}");
+}
+
 /// cas-5255 / GH #719: a transport-delivered row must remain recoverable by
 /// the recipient's explicit poll until that poll claims it. The daemon's
 /// inbox write is not proof that the worker's harness surfaced the body: a

@@ -696,7 +696,7 @@ jobs:
   #   fast-validation-slack-bridge  Slack bridge build and tests (bridge inputs)
   #   fast-validation-web           Commander typecheck, unit tests, build,
   #                                 visual QA and dist drift (web inputs)
-  #   fast-validation-journeys      Commander journeys, 3 hosted shards (web inputs)
+  #   fast-validation-journeys      Commander journeys, 6 hosted shards (web inputs)
   # Steps inside a job use `!cancelled()` where a later step does not depend on
   # an earlier one, so one red step does not hide the next.
   # cas-4cb8: on a queue tree the release train's full gate already proved,
@@ -942,12 +942,13 @@ jobs:
           npm run visual-qa
 
   # User journeys (docs/qa/journeys.md) against the committed bundle, on the
-  # Chromium build pinned by @playwright/test, in three hosted shards of four
-  # workers each (one 141-journey job took 13.7-22 min, cas-a677). They run only
+  # Chromium build pinned by @playwright/test, in six hosted shards of two
+  # workers each (one 141-journey job took 13.7-22 min, cas-a677; four workers
+  # on a 4-vCPU hosted runner timed out, run 38674369439). They run only
   # when Commander inputs change (scripts/classify-web-inputs.py), and cas-9f70:
   # a full-gate queue tree skips them when the train also proved the journeys.
   fast-validation-journeys:
-    name: Fast Validation — Commander journeys ${{ matrix.shard }}/3
+    name: Fast Validation — Commander journeys ${{ matrix.shard }}/6
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
       && needs.ci-diff.outputs.web-check-needed == 'true'
@@ -964,14 +965,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Run Commander journeys shard ${{ matrix.shard }}/3
+      - name: Run Commander journeys shard ${{ matrix.shard }}/6
         working-directory: hub-web
         env:
           SHARD: ${{ matrix.shard }}
@@ -983,7 +984,7 @@ jobs:
           else
             npx playwright install chromium
           fi
-          npm run journeys -- --workers=4 --shard="$SHARD/3"
+          npm run journeys -- --workers=2 --shard="$SHARD/6"
 
       # cas-4ce5: a journey flake in the queue left no trace to diagnose.
       # Keep Playwright's traces, error-context.md and screenshots on failure.

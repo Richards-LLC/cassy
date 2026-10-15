@@ -2776,7 +2776,7 @@ mod tests {
     #[test]
     fn changelog_summarized_356_headings_count_changed_and_fixed_entries() {
         // These entries use the actual 3.56.0 CHANGELOG heading form.
-        let fixture = "# Changelog\n\n## [3.56.0] - 2026-10-15\n\n### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)\n- External reminder probes run off the daemon loop.\n\n### Changed — coordination and tools (#1188, #1197, #1207)\n- Verification accepts structured issues and artifact uploads support video/webm.\n\n## [3.55.0] - 2026-10-15\n";
+        let fixture = "# Changelog\n\n## [3.56.0] - 2026-10-15\n\n### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)\n- External reminder probes run off the daemon loop.\n\n### Changed — coordination and tools (#1188, #1197, #1207)\n- Verification accepts structured issues and artifact uploads support video/webm.\n\n## [9.99.1] - 2026-10-15\n";
         let changelog = parse_changelog_section(fixture, "3.56.0").expect("section");
         assert_eq!(changelog.entries[0].category, "Fixed");
         assert_eq!(changelog.entries[1].category, "Changed");

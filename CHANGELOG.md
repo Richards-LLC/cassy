@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.56.0] - 2026-10-15
+
 ### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)
 
 - External reminder probes (`branch_contained_in`, `tag_exists`, `ci_completed`)

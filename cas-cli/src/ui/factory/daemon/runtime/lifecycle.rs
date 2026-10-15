@@ -856,11 +856,11 @@ pub(super) fn enqueue_supervisor_unread_relay(
 ) -> WorkerAttentionRelayOutcome {
     let detail = if unread == 1 {
         format!(
-            "1 message addressed to you has gone unread past its delivery threshold — message {oldest_id}, from {oldest_sender}. It was delivered; it does not wake this pane because it carries no merge-request or lifecycle envelope."
+            "1 message addressed to you has gone unread past its delivery threshold — message {oldest_id}, from {oldest_sender}. No message-specific read or wake confirmation has been recorded."
         )
     } else {
         format!(
-            "{unread} messages addressed to you have gone unread past their delivery threshold. The oldest is message {oldest_id}, from {oldest_sender}. They were delivered; they do not wake this pane because they carry no merge-request or lifecycle envelope."
+            "{unread} messages addressed to you have gone unread past their delivery threshold. The oldest is message {oldest_id}, from {oldest_sender}. No message-specific read or wake confirmation has been recorded for this backlog."
         )
     };
     let key = format!("supervisor-unread:{oldest_id}");

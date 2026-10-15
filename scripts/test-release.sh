@@ -37,6 +37,8 @@ case "$1 $2" in
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit"|"pr merge") ;;
+  "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
+  "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
   "api graphql") cat "${FAKE_PR_STATE_JSON:?}" ;;
   *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
 esac
@@ -50,6 +52,8 @@ export RELEASE_DATE=2026-10-15
 export GIT_AUTHOR_NAME=Test GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME=Test GIT_COMMITTER_EMAIL=test@example.com
 mkdir -p "$FAKE_GH_STATE"
+export FAKE_PR_CHECKS_JSON="$tmp/checks-green.json"
+echo '[{"name":"Scoped Validation (fast)","bucket":"pass","link":"https://example.test/actions/runs/1/job/11"},{"name":"Scoped Validation (factory/PR)","bucket":"skipping","link":"https://example.test/actions/runs/1/job/12"}]' >"$FAKE_PR_CHECKS_JSON"
 
 crates=(cas-types cas-search cas-store cas-core cas-mcp)
 
@@ -136,7 +140,23 @@ check '[[ "$head_files" == *CHANGELOG.md* && "$head_files" == *Cargo.lock* && "$
 check '[[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$(git -C "$epic" rev-parse HEAD)" ]]' 'the release commit is pushed'
 check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.0: epic/alpha" "$FAKE_GH_LOG"' 'the PR to main is opened'
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
+checked="$(grep -n "^pr checks 77" "$FAKE_GH_LOG" | head -1 | cut -d: -f1 || true)"
+merged="$(grep -n "^pr merge 77" "$FAKE_GH_LOG" | head -1 | cut -d: -f1)"
+check '[[ -n "$checked" && -n "$merged" && "$checked" -lt "$merged" ]]' 'the PR CI is green before auto-merge is enabled (cas-2aef)'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
+
+# 3b. cas-2aef: a red PR CI is reported with its failing tests, and the PR never
+# gets auto-merge, so it never enters the queue.
+echo '[{"name":"Scoped Validation (fast)","bucket":"fail","link":"https://example.test/actions/runs/2/job/21"},{"name":"Scoped Validation (factory/PR)","bucket":"pass","link":"https://example.test/actions/runs/2/job/22"}]' >"$tmp/checks-red.json"
+printf 'Scoped Validation (fast)\tRun shards\t2026-10-15T14:02:03.1234567Z         FAIL [   0.012s] cas-mux opencode::tests::projection_config_is_deterministic\nScoped Validation (fast)\tRun shards\t2026-10-15T14:02:03.2Z test release::tests::bumps ... FAILED\nScoped Validation (fast)\tRun shards\t2026-10-15T14:02:04.0Z      FAIL [   0.012s] cas-mux opencode::tests::projection_config_is_deterministic\n' >"$tmp/red.log"
+: >"$FAKE_GH_LOG"
+set +e
+out="$(cd "$epic" && FAKE_PR_CHECKS_JSON="$tmp/checks-red.json" FAKE_RUN_LOG="$tmp/red.log" ./scripts/release.sh --no-watch 2>&1)"
+status=$?
+set -e
+check '[[ $status -eq 5 && "$out" == *"CI is red (Scoped Validation (fast))"* ]]' 'a red PR CI stops with exit 5 and names the failing check'
+check '[[ "$out" == *"Failing tests: cas-mux opencode::tests::projection_config_is_deterministic; release::tests::bumps"* ]]' 'the failing tests are named once, in one message'
+check '! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -q "^run view --job 21 --log-failed" "$FAKE_GH_LOG"' 'a red PR gets no auto-merge'
 
 # 4. Rerunning with nothing changed is a no-op.
 before="$(git -C "$epic" rev-parse HEAD)"

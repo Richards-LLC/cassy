@@ -1311,9 +1311,11 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    until it merges). It merges `main` in when the branch is behind, bumps the
    release crates and `Cargo.lock`, promotes `[Unreleased]` to
    `## [x.y.z] - <date>`, names the draft, commits `release: vx.y.z`, pushes,
-   opens the PR to `main` and enables auto-merge. When another release lands
-   first it merges it, takes the next version and re-enables auto-merge
-   itself. Exit 4 is a code conflict with `main`; exit 3 is a merge-queue
+   opens the PR to `main`, waits for its Scoped Validation run to go green,
+   and only then enables auto-merge. When another release lands first it
+   merges it, takes the next version and re-enables auto-merge itself. Exit 5
+   is a red PR CI, reported once with the failing tests (the PR never entered
+   the queue); exit 4 is a code conflict with `main`; exit 3 is a merge-queue
    ejection. Repair, push, then rerun the command.
 4. Hotfix: branch from `main`, commit the fix and its `[Unreleased]` entry,
    then `scripts/release.sh --hotfix` (the next patch version). It takes the

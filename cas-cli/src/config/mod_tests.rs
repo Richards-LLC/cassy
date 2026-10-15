@@ -1052,6 +1052,62 @@ fn factory_nice_cargo_round_trips_cas_f7b9() {
     assert!(loaded.factory().nice_cargo, "invalid input must preserve the value");
 }
 
+/// Discover fields from the serialized runtime configuration, independently
+/// of the registry, so an omitted registry entry cannot hide from coverage.
+#[test]
+fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
+    // Populate fields omitted when empty/None. Retired compatibility fields
+    // deliberately do not serialize and are not runtime settings.
+    let factory = FactoryConfig {
+        artifacts_root: Some("/mnt/factory-artifacts".into()),
+        epic_base_branch: Some("main".into()),
+        write_roots: vec!["/mnt/operator-approved".into()],
+        ..FactoryConfig::default()
+    };
+    let config = Config { factory: Some(factory.clone()), ..Config::default() };
+    let serialized = serde_json::to_value(factory).unwrap();
+    fn collect_keys(prefix: &str, value: &serde_json::Value, keys: &mut Vec<String>) {
+        if let Some(object) = value.as_object() {
+            for (field, value) in object {
+                collect_keys(&format!("{prefix}.{field}"), value, keys);
+            }
+        } else {
+            keys.push(prefix.to_string());
+        }
+    }
+    let mut keys = Vec::new();
+    collect_keys("factory", &serialized, &mut keys);
+    // Each exception must name an internal field and explain why operators
+    // cannot configure it. Currently every serialized field is public.
+    const INTERNAL: &[(&str, &str)] = &[];
+    for (key, reason) in INTERNAL {
+        assert!(!reason.trim().is_empty(), "{key}: internal exception needs a reason");
+        assert!(keys.iter().any(|field| field == key), "{key}: stale internal exception");
+    }
+    let registry = meta::registry();
+    let listed: std::collections::HashMap<_, _> = config.list().into_iter().collect();
+    let mut missing = Vec::new();
+    for key in keys {
+        if INTERNAL.iter().any(|(internal, _)| *internal == key) {
+            continue;
+        }
+        // The serialized legacy name remains settable; discovery lists its
+        // canonical worker_build_jobs name.
+        let canonical = if key == "factory.cargo_build_jobs" {
+            "factory.worker_build_jobs"
+        } else {
+            &key
+        };
+        if registry.get(canonical).is_none() {
+            missing.push(key);
+            continue;
+        }
+        assert!(config.get(&key).is_some(), "{key}: missing get support");
+        assert!(listed.contains_key(canonical), "{key}: missing list support");
+    }
+    assert!(missing.is_empty(), "serialized factory fields missing registry entries: {missing:?}");
+}
+
 /// GH #1182: `[factory] write_roots` lives in config.toml, is shown by `get`
 /// and `list`, survives a save and load, and is preserved by any later
 /// load-modify-save of another key; the generic setter (MCP, config editor,

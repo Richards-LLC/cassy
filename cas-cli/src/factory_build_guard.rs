@@ -265,6 +265,44 @@ mod tests {
     }
 
     #[test]
+    fn no_code_preassigned_spawn_at_builder_cap_needs_no_force() {
+        let mut task = cas_types::Task::new("cas-no-code".into(), "Triage an issue".into());
+        task.execution_note = Some("no-code".into());
+        let snapshot = evaluate_for_task(32, Some(2.0), 3, 1, 3, Some(&task));
+
+        assert!(snapshot.violations().is_empty(), "{:?}", snapshot.violations());
+        assert_eq!(snapshot.requested_builders, 0);
+        assert!(snapshot.receipt_notice(false).contains("expected_build=no-code"));
+    }
+
+    #[test]
+    fn docs_only_preassigned_spawn_at_builder_cap_needs_no_force() {
+        let mut task = cas_types::Task::new("cas-docs-only".into(), "Document a workflow".into());
+        task.labels = vec!["docs-only".into()];
+        let snapshot = evaluate_for_task(32, Some(2.0), 3, 1, 3, Some(&task));
+
+        assert!(snapshot.violations().is_empty(), "{:?}", snapshot.violations());
+        assert_eq!(snapshot.requested_builders, 0);
+        assert!(snapshot.receipt_notice(false).contains("expected_build=docs-only"));
+    }
+
+    #[test]
+    fn rust_preassigned_spawn_at_builder_cap_is_refused_with_named_retry() {
+        let mut task = cas_types::Task::new("cas-rust".into(), "Fix a Rust bug".into());
+        task.execution_note = Some("test-first".into());
+        let snapshot = evaluate_for_task(32, Some(2.0), 3, 1, 3, Some(&task));
+
+        assert_eq!(snapshot.requested_builders, 1);
+        assert!(!snapshot.violations().is_empty());
+        let refusal = snapshot.refusal_message();
+        assert!(refusal.contains("expected_build=yes"), "{refusal}");
+        assert!(
+            refusal.contains("Retry the same spawn_workers request after a Cargo worker releases a builder slot"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
     fn healthy_snapshot_has_no_guard_violation() {
         let snapshot = evaluate(32, Some(1.0), 2, 1, 4);
         assert!(snapshot.violations().is_empty());

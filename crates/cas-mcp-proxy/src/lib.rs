@@ -525,6 +525,7 @@ impl ProxyHealthSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailureVisibility {
     Error,
+    Info,
     Debug,
 }
 
@@ -843,6 +844,12 @@ impl ProxyEngine {
                         error_code = code,
                         proxy_session = %self.session_id,
                         "Optional MCP upstream unavailable; CAS will continue and retry"
+                    ),
+                    FailureVisibility::Info => tracing::info!(
+                        upstream = %public_name,
+                        error_code = code,
+                        proxy_session = %self.session_id,
+                        "Optional MCP upstream credential is unavailable; CAS will continue and retry"
                     ),
                     FailureVisibility::Debug => tracing::debug!(
                         upstream = %public_name,
@@ -1530,6 +1537,12 @@ impl ProxyEngine {
                 proxy_session = %self.session_id,
                 "Optional MCP upstream connection failed after startup; retry scheduled"
             ),
+            FailureVisibility::Info => tracing::info!(
+                upstream = %public_name,
+                error_code = code,
+                proxy_session = %self.session_id,
+                "Optional MCP upstream credential is unavailable; retry scheduled"
+            ),
             FailureVisibility::Debug => tracing::debug!(
                 upstream = %public_name,
                 error_code = code,
@@ -1652,7 +1665,13 @@ fn record_failure_with_detail(
     record.next_retry_at_ms =
         Some(now.saturating_add(Duration::from_secs(delay_secs).as_millis() as u64));
     record.state = UpstreamState::Backoff;
-    if record.consecutive_failures == 1 {
+    if error_code.starts_with(MISSING_CREDENTIAL_ENV_PREFIX) {
+        if record.consecutive_failures == 1 {
+            FailureVisibility::Info
+        } else {
+            FailureVisibility::Debug
+        }
+    } else if record.consecutive_failures == 1 {
         FailureVisibility::Error
     } else {
         FailureVisibility::Debug
@@ -3613,27 +3632,24 @@ for line in sys.stdin:
 
         let mut missing_health = initial_health("viktor", &config);
         assert_eq!(
-            format!("{:?}", record_failure(&mut missing_health, &missing_code, 1_000)),
-            "Info",
+            record_failure(&mut missing_health, &missing_code, 1_000),
+            FailureVisibility::Info,
             "an optional upstream missing its credential is expected to log once at info"
         );
         assert_eq!(
-            format!("{:?}", record_failure(&mut missing_health, &missing_code, 6_000)),
-            "Debug",
+            record_failure(&mut missing_health, &missing_code, 6_000),
+            FailureVisibility::Debug,
             "retries for an unchanged missing credential must not return to error"
         );
 
         let mut configured_failure_health = initial_health("viktor", &config);
         assert_eq!(
-            format!(
-                "{:?}",
-                record_failure(
-                    &mut configured_failure_health,
-                    "authentication_required",
-                    1_000
-                )
+            record_failure(
+                &mut configured_failure_health,
+                "authentication_required",
+                1_000
             ),
-            "Error",
+            FailureVisibility::Error,
             "a configured upstream that rejects its credentials remains an error"
         );
     }

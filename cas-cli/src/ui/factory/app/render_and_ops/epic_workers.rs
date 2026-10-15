@@ -1483,7 +1483,7 @@ fn reset_stale_preassign_holder(
     let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
         .filter(|agent| agent.name == holder).map(|agent| agent.id.clone()).collect();
     if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(cas_dir)
-        && let Err(error) = claims.release_local(&task.id, &|id| retired_ids.contains(id))
+        && let Err(error) = claims.release_reset_holder(&task.id, holder, &retired_ids)
     {
         tracing::debug!(task = %task.id, %error, "stale assignee cloud release failed; start will retry");
     }
@@ -5533,6 +5533,7 @@ mod tests {
             let server = MockServer::start().await;
             let holder = Arc::new(Mutex::new(Some(initial_owner.to_string())));
             let state = Arc::clone(&holder);
+            let originally_renewed = chrono::Utc::now();
             Mock::given(wiremock::matchers::path_regex("^/api/agents/tasks/"))
                 .respond_with(move |request: &wiremock::Request| {
                     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
@@ -5542,7 +5543,7 @@ mod tests {
                     let lock = |id: &str| serde_json::json!({
                         "id":"lock-id", "task_id":"cas-reset", "agent_id":id, "status":"active",
                         "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(),
-                        "renewed_at":chrono::Utc::now().to_rfc3339(), "renewal_count":0, "epoch":1,
+                        "renewed_at":originally_renewed.to_rfc3339(), "renewal_count":0, "epoch":1,
                         "claim_reason":null
                     });
                     let (status, answer) = match action {

@@ -21,7 +21,7 @@
 //! ([`PeerClaims::take_from_local`]). Every network call made for an async
 //! MCP handler runs off the runtime under one [`PeerBudget`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -255,6 +255,31 @@ pub enum Acquire {
     Unavailable(String),
 }
 
+/// Durable local SessionEnd evidence survives deletion of the registry row.
+#[derive(Clone)]
+pub(crate) struct RetiredLocalAgent {
+    pub name: String,
+    pub ended_at: DateTime<Utc>,
+}
+
+pub(crate) fn retired_local_agents(cas_root: &Path) -> HashMap<String, RetiredLocalAgent> {
+    let events = crate::store::open_event_store(cas_root).ok()
+        .and_then(|store| store.list_by_type(crate::types::EventType::AgentShutdown, 2000).ok())
+        .unwrap_or_default();
+    let mut retired = HashMap::new();
+    for event in events {
+        if event.entity_type == crate::types::EventEntityType::Agent
+            && let Some(name) = event.summary.strip_prefix("Agent unregistered: ")
+        {
+            // Events are newest first. Never replace the latest exit by an old one.
+            retired.entry(event.entity_id).or_insert_with(|| RetiredLocalAgent {
+                name: name.to_string(), ended_at: event.created_at,
+            });
+        }
+    }
+    retired
+}
+
 /// Cloud claims for one repository.
 #[derive(Clone)]
 pub struct PeerClaims {
@@ -262,6 +287,7 @@ pub struct PeerClaims {
     project: String,
     /// This machine's label, recorded on every claim it makes (cas-c7c7).
     label: String,
+    retired_local: HashMap<String, RetiredLocalAgent>,
 }
 
 /// `<task id>~<first 8 hex of sha256(canonical id)>`.
@@ -285,7 +311,14 @@ impl PeerClaims {
         }
         let project = crate::cloud::resolve_canonical_id(cas_root)?;
         let label = crate::cloud::peers::machine_label_for(cas_root);
-        Some(Self { config, project, label })
+        let mut retired_local = retired_local_agents(cas_root);
+        match crate::store::open_agent_store(cas_root).and_then(|store|
+            store.list(None).map_err(crate::error::CasError::from))
+        {
+            Ok(agents) => retired_local.retain(|id, _| !agents.iter().any(|agent| &agent.id == id)),
+            Err(_) => retired_local.clear(), // Unreadable registry cannot authorize a handoff.
+        }
+        Some(Self { config, project, label, retired_local })
     }
 
     pub fn project(&self) -> &str {
@@ -346,6 +379,14 @@ impl PeerClaims {
             return Acquire::Claimed;
         }
         if is_local(&held_by) {
+            return Acquire::LocalHolder(held_by);
+        }
+        if self.retired_local.contains_key(&held_by)
+            && let Ok(Some(lock)) = coordinator.get_lock(&key)
+            && lock.agent_id == held_by
+            && self.retired_local.get(&held_by).is_some_and(|ended| lock.renewed_at <= ended.ended_at)
+        {
+            // Still arbitrate locally before moving this pre-exit claim.
             return Acquire::LocalHolder(held_by);
         }
         let answer = self.conflict_answer(&key, &held_by, expires_at);
@@ -598,7 +639,9 @@ impl PeerClaims {
         let key = self.key(task_id);
         let lock = self.coordinator("peer-claims-reader")?.get_lock(&key)?;
         Ok(lock
-            .filter(|lock| !is_local(&lock.agent_id))
+            .filter(|lock| !is_local(&lock.agent_id)
+                && !self.retired_local.get(&lock.agent_id)
+                    .is_some_and(|ended| lock.renewed_at <= ended.ended_at))
             .map(|lock| self.hold(&key, &lock.agent_id))
             .filter(|hold| !hold.is_stale(Utc::now())))
     }
@@ -619,6 +662,19 @@ impl PeerClaims {
         }
         self.coordinator(&lock.agent_id)?.release(&key)?;
         Ok(true)
+    }
+
+    pub(crate) fn release_reset_holder(
+        &self, task_id: &str, name: &str, registered_ids: &HashSet<String>,
+    ) -> Result<bool, CasError> {
+        let key = self.key(task_id);
+        let Some(lock) = self.coordinator("peer-claims-reader")?.get_lock(&key)? else {
+            return Ok(false);
+        };
+        let ended = self.retired_local.get(&lock.agent_id).is_some_and(|ended|
+            ended.name == name && lock.renewed_at <= ended.ended_at);
+        if !registered_ids.contains(&lock.agent_id) && !ended { return Ok(false); }
+        self.release_own(task_id, &lock.agent_id)
     }
 
     /// The agent holding the active claim on `task_id`, if any.
@@ -919,13 +975,15 @@ pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Optio
     let duration = lease_duration_secs(cas_root);
     let answer = claims.acquire(epic_id, ClaimKind::Epic, agent_id, &name, duration, &is_local);
     let answer = match answer {
-        Acquire::LocalHolder(ref from) if agents.get(from).ok().is_some_and(|holder| {
-            !crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+        Acquire::LocalHolder(ref from) if match agents.get(from) {
+            Ok(holder) => !crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
                 &holder,
                 crate::mcp::tools::service::agent_liveness::agent_process_is_alive(&holder),
                 crate::cloud::peers::PEER_LIVE_SECS,
-            ).is_live()
-        }) => claims.take_from_local(epic_id, ClaimKind::Epic, from, agent_id, &name, duration),
+            ).is_live(),
+            Err(cas_store::StoreError::NotFound(_)) => claims.retired_local.contains_key(from),
+            Err(_) => false,
+        } => claims.take_from_local(epic_id, ClaimKind::Epic, from, agent_id, &name, duration),
         answer => answer,
     };
     Some(answer)

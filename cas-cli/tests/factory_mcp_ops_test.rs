@@ -670,10 +670,12 @@ async fn remind_auto_binds_issuer_single_in_progress_task_and_close_quarantines_
     );
 }
 
-/// GH #624: an external reminder is a durable event row, not a one-hour timer
-/// tied to the registering factory session.
+/// GH #624: an external reminder is a durable cross-session event row, not a
+/// one-hour timer tied to the registering factory session. GH #1208: when
+/// `remind_ttl_secs` is omitted it lives for a bounded default (seven days)
+/// rather than forever; an explicit `0` still opts into no expiry.
 #[tokio::test]
-async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() {
+async fn remind_external_condition_defaults_to_bounded_cross_session_row() {
     let env = FactoryTestEnv::new();
     let mut remind = factory_req("remind");
     remind.remind_message = Some("inspect the landed delivery".to_string());
@@ -688,15 +690,71 @@ async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() 
         .expect("external reminder should be accepted");
     assert!(get_text(&result).contains("event-based, fires on tag_exists"));
 
+    let mut forever = factory_req("remind");
+    forever.remind_message = Some("explicitly durable".to_string());
+    forever.remind_event = Some("tag_exists".to_string());
+    forever.remind_filter = Some(r#"{"tag":"v3.7.0"}"#.to_string());
+    forever.cross_session = Some(true);
+    forever.remind_ttl_secs = Some(0);
+    env.service
+        .factory_request(Parameters(forever))
+        .await
+        .expect("an explicit zero TTL is still accepted");
+
     let reminders = open_reminder_store(&env.cas_root).unwrap();
     let pending = reminders.list_pending("test-agent-id").unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 2);
     assert_eq!(pending[0].trigger_event.as_deref(), Some("tag_exists"));
-    assert_eq!(pending[0].ttl_secs, 0);
+    assert_eq!(pending[0].ttl_secs, 7 * 24 * 60 * 60);
     assert!(pending[0].cross_session);
     assert_eq!(
         pending[0].trigger_filter,
         Some(serde_json::json!({"tag": "v3.6.0"}))
+    );
+    assert_eq!(pending[1].ttl_secs, 0);
+}
+
+/// GH #1208: a remote-tracking `target_branch` such as `origin/staging` used
+/// to store a reminder whose fetch of `refs/heads/origin/staging` failed every
+/// minute forever. It is stored as the bare origin branch instead.
+#[tokio::test]
+async fn remind_branch_contained_in_normalises_origin_prefixed_target() {
+    let env = FactoryTestEnv::new();
+    for (filter, message) in [
+        (r#"{"commit":"abc123","target_branch":"origin/staging"}"#, "new shape"),
+        (r#"{"branch":"factory/x","target":"refs/remotes/origin/staging"}"#, "legacy shape"),
+    ] {
+        let mut remind = factory_req("remind");
+        remind.remind_message = Some(message.to_string());
+        remind.remind_event = Some("branch_contained_in".to_string());
+        remind.remind_filter = Some(filter.to_string());
+        remind.cross_session = Some(true);
+        env.service
+            .factory_request(Parameters(remind))
+            .await
+            .expect("an origin/-prefixed target is normalised, not refused");
+    }
+    let mut empty = factory_req("remind");
+    empty.remind_message = Some("no branch".to_string());
+    empty.remind_event = Some("branch_contained_in".to_string());
+    empty.remind_filter = Some(r#"{"commit":"abc123","target_branch":"origin/"}"#.to_string());
+    empty.cross_session = Some(true);
+    assert!(
+        env.service.factory_request(Parameters(empty)).await.is_err(),
+        "a target that names no branch is refused"
+    );
+
+    let pending = open_reminder_store(&env.cas_root)
+        .unwrap()
+        .list_pending("test-agent-id")
+        .unwrap();
+    let filters: Vec<_> = pending.iter().map(|r| r.trigger_filter.clone().unwrap()).collect();
+    assert_eq!(
+        filters,
+        vec![
+            serde_json::json!({"commit": "abc123", "target_branch": "staging"}),
+            serde_json::json!({"branch": "factory/x", "target": "staging"}),
+        ]
     );
 }
 

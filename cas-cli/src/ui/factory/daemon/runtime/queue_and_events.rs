@@ -8970,81 +8970,20 @@ impl FactoryDaemon {
             }
         };
 
-        // External conditions are deliberately polled less often than the
-        // normal two-second refresh. The reminder row remains pending until
-        // this probe observes true, so a daemon restart cannot lose the edge.
-        let external_ready = if self
-            .last_external_wake_scan
-            .is_none_or(|last| last.elapsed() >= super::ci_watch::EXTERNAL_WAKE_INTERVAL)
-        {
-            self.last_external_wake_scan = Some(std::time::Instant::now());
-            let mut ready = Vec::new();
-            for event_type in [
-                super::ci_watch::EXTERNAL_BRANCH_CONTAINED_EVENT,
-                super::ci_watch::EXTERNAL_TAG_EXISTS_EVENT,
-            ] {
-                let candidates = match reminder_store.get_event_reminders(event_type) {
-                    Ok(reminders) => reminders,
-                    Err(error) => {
-                        tracing::warn!(
-                            event_type,
-                            %error,
-                            "failed to load external reminder candidates"
-                        );
-                        continue;
-                    }
-                };
-                for reminder in candidates {
-                    if !reminder_matches_factory_session(
-                        reminder.session_id.as_deref(),
-                        reminder.cross_session,
-                        &self.session_name,
-                    ) {
-                        continue;
-                    }
-                    let Some(filter) = reminder.trigger_filter.as_ref() else {
-                        tracing::warn!(
-                            reminder_id = reminder.id,
-                            event_type,
-                            "external reminder has no condition filter"
-                        );
-                        continue;
-                    };
-                    let condition =
-                        match super::ci_watch::parse_external_wake_condition(event_type, filter) {
-                            Ok(condition) => condition,
-                            Err(error) => {
-                                tracing::warn!(
-                                    reminder_id = reminder.id,
-                                    event_type,
-                                    %error,
-                                    "external reminder has invalid condition filter"
-                                );
-                                continue;
-                            }
-                        };
-                    match super::ci_watch::external_wake_condition_observation(
-                        self.app.project_path(),
-                        &condition,
-                    ) {
-                        Ok(Some(observation)) => ready.push((
-                            reminder,
-                            ReminderTriggerContext::external(&condition, &observation),
-                        )),
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(
-                            reminder_id = reminder.id,
-                            event_type,
-                            %error,
-                            "external reminder probe unavailable; retaining pending row"
-                        ),
-                    }
-                }
-            }
-            ready
-        } else {
-            Vec::new()
-        };
+        // External conditions are polled less often than the two-second
+        // refresh, and never on this loop (GH #1208): the scanner fetches
+        // origin on its own thread and hands back the conditions it observed
+        // true. The reminder row remains pending until then, so a daemon
+        // restart cannot lose the edge.
+        let external_ready: Vec<_> = self
+            .external_wake
+            .poll(self.app.cas_dir(), self.app.project_path(), &self.session_name)
+            .into_iter()
+            .map(|wake| {
+                let context = ReminderTriggerContext::external(&wake.condition, &wake.observation);
+                (wake.reminder, context)
+            })
+            .collect();
 
         let ci_wakes = std::mem::take(&mut self.pending_ci_wakes);
         let any_due = !due_reminders.is_empty()

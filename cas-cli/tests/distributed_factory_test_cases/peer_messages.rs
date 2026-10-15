@@ -1075,7 +1075,21 @@ async fn cas_a19b_only_a_pending_local_spawn_can_wait_for_registration() {
         json!({"action": "message", "target": "new-fox-1", "summary": "hello", "message": "hello"});
     let service = service_for(&machine.cas_dir, "a");
     let sent = coordinate(&service, request.clone()).await.unwrap();
-    assert!(sent.contains("will deliver on registration"), "{sent}");
+    let rows = inbox(&machine.cas_dir);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        sent.starts_with(&format!("queued #{} → new-fox-1 (enqueued)\n", rows[0].id)),
+        "{sent}"
+    );
+    assert!(sent.contains("Target is not registered yet"), "{sent}");
+    assert!(
+        sent.contains("the row will deliver when it registers"),
+        "{sent}"
+    );
+    assert!(
+        sent.contains(&format!("message_status notification_id={}", rows[0].id)),
+        "{sent}"
+    );
     // Once the spawn fails, an empty cloud lookup can establish that the
     // name is unknown both locally and remotely.
     seed_project(&machine, &server.uri(), "github.com/acme/widgets");

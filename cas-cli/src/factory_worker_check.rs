@@ -902,24 +902,55 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     }
 
     #[cfg(unix)]
+    fn path_test_child(name: &str, path: &OsStr, bin: &Path) {
+        let test = format!("factory_worker_check::tests::{name}");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("PATH", path)
+            .env("CAS_A9FC_PATH_CHILD", bin)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let stdout = String::from_utf8(child.stdout).unwrap();
+        // pin: Rust's external harness must prove one exact selected child passed.
+        assert!(
+            stdout.contains(&format!("test {test} ... ok")) && stdout.contains("1 passed; 0 failed"),
+            "{stdout}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn named_test_path_hides_host_tools_beside_cargo_cas_a9fc() {
+        let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
+            let bin = tempfile::tempdir().unwrap();
+            for name in ["cas", "codex", "claude"] {
+                fake_cargo(&bin.path().join(name), "exit 0");
+            }
+            let original = std::env::var_os("PATH").unwrap();
+            let path = std::env::join_paths(
+                std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&original)),
+            )
+            .unwrap();
+            path_test_child(
+                "named_test_path_hides_host_tools_beside_cargo_cas_a9fc",
+                &path,
+                bin.path(),
+            );
+            return;
+        };
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
-        let bin = dir.path().join("host-bin");
-        std::fs::create_dir(&bin).unwrap();
-        for name in ["cas", "codex", "claude"] {
-            fake_cargo(&bin.join(name), "exit 0");
-        }
-        let host_path = std::env::var_os("PATH").unwrap();
-        let path =
-            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&host_path)))
-                .unwrap();
-        env.set("PATH", &path);
+        let bin = PathBuf::from(bin);
         let cargo = bin.join("cargo");
         fake_cargo(
             &cargo,
@@ -959,13 +990,21 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     #[cfg(unix)]
     #[test]
     fn host_path_opt_out_is_reasoned_and_receipted_cas_a9fc() {
+        let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
+            let cas = crate::test_support::fake_cas_on_path();
+            path_test_child(
+                "host_path_opt_out_is_reasoned_and_receipted_cas_a9fc",
+                cas.path(),
+                cas.bin(),
+            );
+            return;
+        };
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
-        let _cas = crate::test_support::fake_cas_on_path(&mut env);
         let cargo = dir.path().join("cargo");
         fake_cargo(
             &cargo,
@@ -993,7 +1032,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
                 .contains("[host PATH opt-out: exercise operator-installed harness integration]")
         );
         let selected = std::fs::read_to_string(repo.join("target/selected-cas")).unwrap();
-        assert_eq!(Path::new(selected.trim()), _cas.path().join("cas"));
+        assert_eq!(Path::new(selected.trim()), PathBuf::from(bin).join("cas"));
         env.set(HOST_PATH_OPT_OUT, " ");
         assert!(
             execute_at(&root, &args, &repo, &cargo)
@@ -1006,22 +1045,19 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
 
     #[cfg(unix)]
     #[test]
-    fn private_fake_cas_fixture_restores_path_cas_a9fc() {
+    fn private_fake_cas_fixture_preserves_process_path_cas_a9fc() {
         let original = std::env::var_os("PATH");
-        {
-            let mut env = crate::test_support::TestEnvGuard::new();
-            env.set("PATH", "/usr/bin:/bin");
-            let cas = crate::test_support::fake_cas_on_path(&mut env);
-            let found = Command::new("sh")
-                .args(["-c", "command -v cas; cas"])
-                .output()
-                .unwrap();
-            assert!(found.status.success());
-            assert_eq!(
-                String::from_utf8(found.stdout).unwrap().trim(),
-                cas.path().join("cas").to_str().unwrap()
-            );
-        }
+        let cas = crate::test_support::fake_cas_on_path();
+        let found = Command::new("sh")
+            .env("PATH", cas.path())
+            .args(["-c", "command -v cas; cas"])
+            .output()
+            .unwrap();
+        assert!(found.status.success());
+        assert_eq!(
+            String::from_utf8(found.stdout).unwrap().trim(),
+            cas.bin().join("cas").to_str().unwrap()
+        );
         assert_eq!(std::env::var_os("PATH"), original);
     }
 

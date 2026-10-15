@@ -591,9 +591,10 @@ directory with Cargo. Compile-only checks retain their ordinary PATH. The
 runner prints the PATH setup cost for measurement.
 
 Harness fixtures must supply their own fake executables. The shared
-`test_env_guard::fake_cas_on_path(&mut guard)` returns a private no-op Cassy
-stand-in and prepends it through `TestEnvGuard`; retain the returned directory
-until all children exit. This is for the PTY preflight and harmless hook calls;
+`test_env_guard::fake_cas_on_path()` returns a private no-op Cassy
+stand-in and a PATH value; pass `fixture.path()` through `Command.env` or
+`PtyConfig.env` and retain the fixture until all children exit. It does not
+mutate process-global PATH. This is for the PTY preflight and harmless hook calls;
 tests of Cassy behavior must use the built binary. The same guard source is
 compiled by cas, cas-pty and cas-mux. To deliberately test an installed host
 harness, set `CAS_WORKER_TEST_ALLOW_HOST_PATH` to a nonempty, single-line reason

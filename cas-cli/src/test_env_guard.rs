@@ -497,11 +497,27 @@ mod ambient_scrub_tests {
     }
 }
 
-/// Private no-op `cas` for harness tests that need only the PTY preflight or
-/// a harmless hook command. Keep the returned directory alive with the child.
-/// Tests of Cassy behavior must use the built binary instead of this stand-in.
+/// Private no-op `cas` for preflight/hook fixtures. Keep it alive with the
+/// child and pass `path()` through Command.env or PtyConfig.env. No process
+/// environment is changed; tests of Cassy behavior use the built binary.
 #[cfg(unix)]
-pub(crate) fn fake_cas_on_path(env: &mut TestEnvGuard) -> TempDir {
+pub(crate) struct FakeCasOnPath {
+    bin: TempDir,
+    path: OsString,
+}
+
+#[cfg(unix)]
+impl FakeCasOnPath {
+    pub(crate) fn path(&self) -> &OsStr {
+        &self.path
+    }
+    pub(crate) fn bin(&self) -> &Path {
+        self.bin.path()
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn fake_cas_on_path() -> FakeCasOnPath {
     use std::os::unix::fs::PermissionsExt;
     let bin = tempfile::tempdir().expect("private cas stand-in directory");
     let cas = bin.path().join("cas");
@@ -513,6 +529,5 @@ pub(crate) fn fake_cas_on_path(env: &mut TestEnvGuard) -> TempDir {
         std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&previous)),
     )
     .expect("join fixture PATH");
-    env.set("PATH", path);
-    bin
+    FakeCasOnPath { bin, path }
 }

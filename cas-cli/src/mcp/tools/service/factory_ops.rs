@@ -2727,9 +2727,9 @@ impl CasService {
                      message, so it is read before task start."
                 )
             }
-            _ => "\nSupervisor brief: none. Pass spawn_brief with task_id so the worker reads it \
-                  before task start; a message sent after registration can arrive after the worker \
-                  has started."
+            _ => "\nSupervisor brief: none supplied or delivered. Pass spawn_brief with task_id \
+                  so the worker reads it before task start; a message sent after registration can \
+                  arrive after the worker has started."
                 .to_string(),
         };
 

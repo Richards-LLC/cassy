@@ -83,13 +83,20 @@ pub(crate) struct JobSpec {
     pub(crate) budget: Duration,
 }
 
-/// A finished job, as posted to the completion queue.
+/// A job that panicked instead of returning (review round 1, item 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JobPanicked {
+    pub(crate) message: String,
+}
+
+/// A finished job, as posted to the completion queue. Every job that runs
+/// posts exactly one result, including one that panicked.
 #[derive(Debug)]
 pub(crate) struct JobResult<T> {
     pub(crate) kind: &'static str,
     pub(crate) key: String,
     pub(crate) generation: u64,
-    pub(crate) outcome: T,
+    pub(crate) outcome: Result<T, JobPanicked>,
     pub(crate) elapsed: Duration,
     /// True when the run took longer than its budget.
     pub(crate) over_budget: bool,
@@ -100,8 +107,13 @@ pub(crate) struct JobResult<T> {
 pub(crate) enum Submitted {
     /// Queued to run.
     Queued,
-    /// A job with the same key was already queued or running; not run again.
+    /// A refresh job whose key was already queued or running. The newest such
+    /// closure runs once more after the current job finishes (dirty flag), so
+    /// a newer generation is never lost.
     Coalesced,
+    /// A critical job whose key was already queued or running. It runs after
+    /// that job, in submission order; it is never dropped.
+    QueuedBehindKey,
     /// Queued; to make room, the oldest refresh job on the lane was dropped.
     QueuedDroppedOldest { dropped_key: String },
     /// The lane was full of critical work and this refresh job was dropped.
@@ -139,6 +151,23 @@ impl GenerationGate {
 
 type Work<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 
+/// Work waiting for a key that is queued or running.
+struct KeyFollowUps<T> {
+    /// Critical submits for the key, run in order after it.
+    critical: VecDeque<Queued<T>>,
+    /// The newest refresh submitted while the key was busy (dirty flag).
+    rerun: Option<Queued<T>>,
+}
+
+impl<T> Default for KeyFollowUps<T> {
+    fn default() -> Self {
+        Self {
+            critical: VecDeque::new(),
+            rerun: None,
+        }
+    }
+}
+
 struct Queued<T> {
     spec: JobSpec,
     work: Work<T>,
@@ -158,9 +187,28 @@ struct LaneSlot<T> {
 
 struct Shared<T> {
     lanes: HashMap<Lane, LaneSlot<T>>,
-    /// Keys queued or running (single-flight).
-    in_flight: Mutex<std::collections::HashSet<String>>,
+    /// Keys queued or running (single-flight), with the work waiting on each.
+    /// Lock order: a lane's state, then this map; never the reverse.
+    in_flight: Mutex<HashMap<String, KeyFollowUps<T>>>,
     capacity: usize,
+}
+
+impl<T> Shared<T> {
+    /// The key's job is done (run, or dropped from its queue). Returns the
+    /// next follow-up to queue for it, keeping the key in flight, or frees the
+    /// key when nothing waits on it.
+    fn release_key(&self, key: &str) -> Option<Queued<T>> {
+        let mut in_flight = lock(&self.in_flight);
+        let followups = in_flight.get_mut(key)?;
+        let next = followups
+            .critical
+            .pop_front()
+            .or_else(|| followups.rerun.take());
+        if next.is_none() {
+            in_flight.remove(key);
+        }
+        next
+    }
 }
 
 fn lock<M>(mutex: &Mutex<M>) -> std::sync::MutexGuard<'_, M> {
@@ -173,7 +221,7 @@ fn lock<M>(mutex: &Mutex<M>) -> std::sync::MutexGuard<'_, M> {
 pub(crate) struct JobRuntime<T: Send + 'static> {
     shared: Arc<Shared<T>>,
     completions: Mutex<mpsc::Receiver<JobResult<T>>>,
-    _threads: Vec<JoinHandle<()>>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> JobRuntime<T> {
@@ -199,33 +247,39 @@ impl<T: Send + 'static> JobRuntime<T> {
             .collect();
         let shared = Arc::new(Shared {
             lanes,
-            in_flight: Mutex::new(std::collections::HashSet::new()),
+            in_flight: Mutex::new(HashMap::new()),
             capacity: lane_capacity.max(1),
         });
         let (sender, receiver) = mpsc::channel();
         let threads = Lane::ALL
             .into_iter()
             .filter_map(|lane| {
-                let shared = Arc::clone(&shared);
+                let thread_shared = Arc::clone(&shared);
                 let sender = sender.clone();
-                std::thread::Builder::new()
+                match std::thread::Builder::new()
                     .name(lane.thread_name().into())
-                    .spawn(move || run_lane(&shared, lane, &sender))
-                    .map_err(|error| {
+                    .spawn(move || run_lane(&thread_shared, lane, &sender))
+                {
+                    Ok(handle) => Some(handle),
+                    Err(error) => {
+                        // A lane with no thread must refuse work, not swallow it
+                        // (review round 1, item 7).
                         tracing::error!(?lane, %error, "could not start a factory job lane");
-                    })
-                    .ok()
+                        lock(&shared.lanes[&lane].state).closed = true;
+                        None
+                    }
+                }
             })
             .collect();
         Self {
             shared,
             completions: Mutex::new(receiver),
-            _threads: threads,
+            threads,
         }
     }
 
     /// Queue `work` under `spec`. Never blocks the caller beyond two short
-    /// in-process mutexes.
+    /// in-process mutexes. All jobs for one key must use the same lane.
     pub(crate) fn submit(
         &self,
         spec: JobSpec,
@@ -234,43 +288,60 @@ impl<T: Send + 'static> JobRuntime<T> {
         let Some(slot) = self.shared.lanes.get(&spec.lane) else {
             return Submitted::Closed;
         };
-        if !lock(&self.shared.in_flight).insert(spec.key.clone()) {
-            return Submitted::Coalesced;
-        }
         let mut state = lock(&slot.state);
         if state.closed {
-            drop(state);
-            lock(&self.shared.in_flight).remove(&spec.key);
             return Submitted::Closed;
         }
+        let queued = Queued {
+            spec,
+            work: Box::new(work),
+            enqueued_at: Instant::now(),
+        };
+        {
+            let mut in_flight = lock(&self.shared.in_flight);
+            if let Some(followups) = in_flight.get_mut(&queued.spec.key) {
+                return match queued.spec.criticality {
+                    Criticality::Critical => {
+                        followups.critical.push_back(queued);
+                        Submitted::QueuedBehindKey
+                    }
+                    Criticality::Refresh => {
+                        followups.rerun = Some(queued);
+                        Submitted::Coalesced
+                    }
+                };
+            }
+            in_flight.insert(queued.spec.key.clone(), KeyFollowUps::default());
+        }
         let mut outcome = Submitted::Queued;
-        if state.queue.len() >= self.shared.capacity && spec.criticality == Criticality::Refresh {
+        if state.queue.len() >= self.shared.capacity
+            && queued.spec.criticality == Criticality::Refresh
+        {
             match state
                 .queue
                 .iter()
-                .position(|queued| queued.spec.criticality == Criticality::Refresh)
+                .position(|q| q.spec.criticality == Criticality::Refresh)
             {
                 Some(index) => {
                     let dropped = state.queue.remove(index).expect("index from position");
                     state.dropped_refresh += 1;
-                    lock(&self.shared.in_flight).remove(&dropped.spec.key);
+                    if let Some(next) = self.shared.release_key(&dropped.spec.key) {
+                        state.queue.push_back(next);
+                    }
                     outcome = Submitted::QueuedDroppedOldest {
                         dropped_key: dropped.spec.key,
                     };
                 }
                 None => {
                     state.dropped_refresh += 1;
-                    drop(state);
-                    lock(&self.shared.in_flight).remove(&spec.key);
+                    if let Some(next) = self.shared.release_key(&queued.spec.key) {
+                        state.queue.push_back(next);
+                    }
                     return Submitted::DroppedRefresh;
                 }
             }
         }
-        state.queue.push_back(Queued {
-            spec,
-            work: Box::new(work),
-            enqueued_at: Instant::now(),
-        });
+        state.queue.push_back(queued);
         drop(state);
         slot.ready.notify_one();
         outcome
@@ -300,15 +371,50 @@ impl<T: Send + 'static> JobRuntime<T> {
     }
 }
 
-impl<T: Send + 'static> Drop for JobRuntime<T> {
-    /// Stop taking work. Lane threads finish what is queued and exit; the
-    /// caller is not blocked waiting for them.
-    fn drop(&mut self) {
+impl<T: Send + 'static> JobRuntime<T> {
+    fn close(&self) {
         for slot in self.shared.lanes.values() {
             lock(&slot.state).closed = true;
             slot.ready.notify_all();
         }
     }
+
+    /// Stop taking work and wait up to `timeout` for the lanes to finish:
+    /// every queued and waiting critical job runs; queued refresh work is
+    /// skipped. Returns true when every lane thread exited in time. Used at
+    /// daemon shutdown, after the loop has stopped (like `StoreWorker::drain`).
+    pub(crate) fn drain(mut self, timeout: Duration) -> bool {
+        self.close();
+        let deadline = Instant::now() + timeout;
+        while self.threads.iter().any(|handle| !handle.is_finished()) {
+            if Instant::now() >= deadline {
+                tracing::warn!("factory job lanes still busy at shutdown; leaving them to finish");
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for handle in self.threads.drain(..) {
+            let _ = handle.join();
+        }
+        true
+    }
+}
+
+impl<T: Send + 'static> Drop for JobRuntime<T> {
+    /// Stop taking work. The lane threads still run every queued and waiting
+    /// critical job before they exit, even though nobody reads the results;
+    /// the caller is not blocked. Use [`JobRuntime::drain`] to wait.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
 fn run_lane<T: Send + 'static>(
@@ -322,6 +428,14 @@ fn run_lane<T: Send + 'static>(
             let mut state = lock(&slot.state);
             loop {
                 if let Some(queued) = state.queue.pop_front() {
+                    // After close, refresh work is skipped; critical work
+                    // still runs (review round 1, item 2).
+                    if state.closed && queued.spec.criticality == Criticality::Refresh {
+                        if let Some(follow_up) = shared.release_key(&queued.spec.key) {
+                            state.queue.push_back(follow_up);
+                        }
+                        continue;
+                    }
                     break Some(queued);
                 }
                 if state.closed {
@@ -337,43 +451,44 @@ fn run_lane<T: Send + 'static>(
             return;
         };
         let started = Instant::now();
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|panic| {
+                JobPanicked {
+                    message: panic_message(panic.as_ref()),
+                }
+            });
         let elapsed = started.elapsed();
-        // Free the key before posting, so a caller that drains this result
-        // can submit the key again at once.
-        lock(&shared.in_flight).remove(&spec.key);
-        match outcome {
-            Ok(outcome) => {
-                let over_budget = elapsed > spec.budget;
-                if over_budget {
-                    tracing::warn!(
-                        target: "cas::loop_watchdog",
-                        lane = ?lane,
-                        kind = spec.kind,
-                        key = %spec.key,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        budget_ms = spec.budget.as_millis() as u64,
-                        "factory job over budget"
-                    );
-                }
-                if completions
-                    .send(JobResult {
-                        kind: spec.kind,
-                        key: spec.key,
-                        generation: spec.generation,
-                        outcome,
-                        elapsed,
-                        over_budget,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            Err(panic) => {
-                tracing::error!(lane = ?lane, kind = spec.kind, key = %spec.key, ?panic, "factory job panicked");
-            }
+        if let Err(panicked) = &outcome {
+            tracing::error!(lane = ?lane, kind = spec.kind, key = %spec.key, message = %panicked.message, "factory job panicked");
         }
+        let over_budget = elapsed > spec.budget;
+        if over_budget {
+            tracing::warn!(
+                target: "cas::loop_watchdog",
+                lane = ?lane,
+                kind = spec.kind,
+                key = %spec.key,
+                elapsed_ms = elapsed.as_millis() as u64,
+                budget_ms = spec.budget.as_millis() as u64,
+                "factory job over budget"
+            );
+        }
+        // Release the key before posting, so a caller that drains this result
+        // can submit the key again at once. Work waiting on the key is queued
+        // now, critical first.
+        if let Some(follow_up) = shared.release_key(&spec.key) {
+            lock(&slot.state).queue.push_back(follow_up);
+        }
+        // A closed receiver (the runtime was dropped) must not stop the lane:
+        // queued critical work still runs.
+        let _ = completions.send(JobResult {
+            kind: spec.kind,
+            key: spec.key,
+            generation: spec.generation,
+            outcome,
+            elapsed,
+            over_budget,
+        });
     }
 }
 
@@ -404,9 +519,10 @@ mod tests {
         results
     }
 
-    /// spec-4c5b §7 gate test (C0): a second submit for an in-flight key
-    /// coalesces and its work never runs; a result older than the applied
-    /// generation is dropped by the gate.
+    /// spec-4c5b §7 gate test (C0): a refresh submit for a busy key is
+    /// coalesced into one rerun with the newest closure; a critical submit
+    /// queues behind the key and is never dropped; the runtime can deliver a
+    /// stale generation, and the gate drops it.
     #[test]
     fn flv2_job_single_flight_and_generations() {
         let runtime: JobRuntime<u64> = JobRuntime::start(8);
@@ -425,38 +541,75 @@ mod tests {
             ),
             Submitted::Queued
         );
-        let n = Arc::clone(&runs);
-        assert_eq!(
-            runtime.submit(
-                spec("snapshot", Lane::Read, Criticality::Refresh, 2),
-                move || {
-                    n.fetch_add(1, Ordering::SeqCst);
-                    2
-                }
-            ),
-            Submitted::Coalesced,
-            "a key in flight is not run twice"
-        );
+        for generation in [2, 3] {
+            let n = Arc::clone(&runs);
+            assert_eq!(
+                runtime.submit(
+                    spec("snapshot", Lane::Read, Criticality::Refresh, generation),
+                    move || {
+                        n.fetch_add(1, Ordering::SeqCst);
+                        generation
+                    }
+                ),
+                Submitted::Coalesced,
+                "a busy key is not run twice at once"
+            );
+        }
         release.wait();
-        let results = wait_for(&runtime, 1);
-        assert_eq!(results.len(), 1);
-        assert_eq!(runs.load(Ordering::SeqCst), 1);
-        assert_eq!(results[0].generation, 1);
-
-        // Once finished, the key is free again.
+        let results = wait_for(&runtime, 2);
+        let generations: Vec<u64> = results.iter().map(|r| r.generation).collect();
         assert_eq!(
-            runtime.submit(spec("snapshot", Lane::Read, Criticality::Refresh, 3), || 3),
-            Submitted::Queued
+            generations,
+            vec![1, 3],
+            "one rerun, with the newest closure"
         );
-        let newer = wait_for(&runtime, 1);
-        assert_eq!(newer[0].generation, 3);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "generation 2's closure never runs"
+        );
 
         let mut gate = GenerationGate::default();
-        assert!(gate.accept(&newer[0]), "the newest generation is applied");
-        assert!(!gate.accept(&results[0]), "an older generation is dropped");
+        assert!(gate.accept(&results[1]), "the newest generation is applied");
         assert!(
-            gate.accept(&newer[0]),
+            !gate.accept(&results[0]),
+            "a stale delivered result is dropped"
+        );
+        assert!(
+            gate.accept(&results[1]),
             "re-applying the same generation is allowed"
+        );
+
+        // Critical work for a busy key queues behind it, in order.
+        let release = Arc::new(Barrier::new(2));
+        let r = Arc::clone(&release);
+        assert_eq!(
+            runtime.submit(
+                spec("row-7", Lane::Write, Criticality::Critical, 1),
+                move || {
+                    r.wait();
+                    1
+                }
+            ),
+            Submitted::Queued
+        );
+        assert_eq!(
+            runtime.submit(spec("row-7", Lane::Write, Criticality::Critical, 2), || 2),
+            Submitted::QueuedBehindKey
+        );
+        assert_eq!(
+            runtime.submit(spec("row-7", Lane::Write, Criticality::Critical, 3), || 3),
+            Submitted::QueuedBehindKey
+        );
+        release.wait();
+        let stamps: Vec<u64> = wait_for(&runtime, 3)
+            .into_iter()
+            .map(|r| r.outcome.expect("no panic"))
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![1, 2, 3],
+            "critical writes run in order, none dropped"
         );
     }
 
@@ -466,22 +619,24 @@ mod tests {
     #[test]
     fn flv2_job_queue_never_blocks_submitter() {
         let runtime: JobRuntime<&'static str> = JobRuntime::start(2);
+        let started = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
-        let r = Arc::clone(&release);
+        let (s, r) = (Arc::clone(&started), Arc::clone(&release));
         assert_eq!(
             runtime.submit(
                 spec("blocker", Lane::Write, Criticality::Critical, 1),
                 move || {
+                    s.wait();
                     r.wait();
                     "blocker"
                 }
             ),
             Submitted::Queued
         );
-        // Wait until the blocker is running, so the queue below is the backlog.
-        std::thread::sleep(Duration::from_millis(50));
+        // The blocker is running, so everything below is backlog.
+        started.wait();
 
-        let started = Instant::now();
+        let submitting = Instant::now();
         assert_eq!(
             runtime.submit(
                 spec("refresh-a", Lane::Write, Criticality::Refresh, 1),
@@ -521,9 +676,9 @@ mod tests {
             );
         }
         assert!(
-            started.elapsed() < Duration::from_millis(50),
+            submitting.elapsed() < Duration::from_millis(50),
             "submitting to a blocked, full lane never waits: {:?}",
-            started.elapsed()
+            submitting.elapsed()
         );
         let stats = runtime.lane_stats(Lane::Write);
         assert_eq!(stats.dropped_refresh, 1);
@@ -536,5 +691,78 @@ mod tests {
         assert!(!keys.contains(&"refresh-a"), "{keys:?}");
         assert_eq!(keys.iter().filter(|k| k.starts_with("receipt-")).count(), 5);
         assert!(keys.contains(&"refresh-b") && keys.contains(&"refresh-c"));
+    }
+
+    /// Review round 1, item 4: a panicking job posts a result and frees its key.
+    #[test]
+    fn flv2_job_panic_posts_result() {
+        let runtime: JobRuntime<u8> = JobRuntime::start(4);
+        assert_eq!(
+            runtime.submit(
+                spec("probe", Lane::Blocking, Criticality::Refresh, 1),
+                || { panic!("probe exploded") }
+            ),
+            Submitted::Queued
+        );
+        let results = wait_for(&runtime, 1);
+        assert_eq!(
+            results[0]
+                .outcome
+                .as_ref()
+                .err()
+                .map(|p| p.message.as_str()),
+            Some("probe exploded")
+        );
+        assert_eq!(
+            runtime.submit(spec("probe", Lane::Blocking, Criticality::Refresh, 2), || 2),
+            Submitted::Queued,
+            "the key is free after a panic"
+        );
+    }
+
+    /// Review round 1, item 2: dropping or draining the runtime still runs
+    /// every queued and waiting critical job; queued refresh work is skipped.
+    #[test]
+    fn flv2_job_shutdown_runs_queued_critical_work() {
+        let runtime: JobRuntime<()> = JobRuntime::start(4);
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (s, r, log) = (Arc::clone(&started), Arc::clone(&release), Arc::clone(&ran));
+        runtime.submit(
+            spec("row-1", Lane::Write, Criticality::Critical, 1),
+            move || {
+                s.wait();
+                r.wait();
+                log.lock().unwrap().push("row-1");
+            },
+        );
+        started.wait();
+        for (key, criticality) in [
+            ("row-1", Criticality::Critical),
+            ("row-2", Criticality::Critical),
+            ("snapshot", Criticality::Refresh),
+        ] {
+            let log = Arc::clone(&ran);
+            runtime.submit(spec(key, Lane::Write, criticality, 2), move || {
+                log.lock().unwrap().push(key);
+            });
+        }
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            release.wait();
+        });
+        assert!(
+            runtime.drain(Duration::from_secs(5)),
+            "lanes exit after the backlog"
+        );
+        releaser.join().unwrap();
+        let ran = ran.lock().unwrap().clone();
+        assert_eq!(ran.iter().filter(|k| **k == "row-1").count(), 2, "{ran:?}");
+        assert!(ran.contains(&"row-2"), "{ran:?}");
+        assert!(
+            !ran.contains(&"snapshot"),
+            "refresh work is skipped at shutdown: {ran:?}"
+        );
     }
 }

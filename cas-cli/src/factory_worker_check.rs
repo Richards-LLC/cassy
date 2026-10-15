@@ -817,6 +817,41 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn named_test_path_hides_host_tools_beside_cargo_cas_a9fc() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let bin = dir.path().join("host-bin");
+        std::fs::create_dir(&bin).unwrap();
+        for name in ["cas", "codex", "claude"] {
+            fake_cargo(&bin.join(name), "exit 0");
+        }
+        let host_path = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&host_path))).unwrap();
+        env.set("PATH", &path);
+        let cargo = bin.join("cargo");
+        fake_cargo(&cargo, r#"for tool in cas codex claude; do
+    if command -v "$tool" > /dev/null; then
+        printf 'host tool leaked: %s\n' "$tool" >&2
+        exit 23
+    fi
+done
+command -v rustc > /dev/null || exit 24
+command -v git > /dev/null || exit 25
+printf '%s\n' "$PATH" > target/selected-path
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(selected)"].map(str::to_string);
+        execute_at(&root, &args, &repo, &cargo).expect("selected tests must not see tools beside host cargo");
+        let selected_path = std::fs::read_to_string(repo.join("target/selected-path")).unwrap();
+        assert!(!selected_path.contains(bin.to_str().unwrap()), "{selected_path}");
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(selected) 1"));
+    }
+
     #[test]
     fn worker_proof_diff_uses_integration_target_after_worker_push() {
         let _env = crate::test_support::TestEnvGuard::new();

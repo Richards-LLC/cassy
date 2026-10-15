@@ -1477,6 +1477,38 @@ async fn merge_hook_task_branch_binding_cas_3288() {
     assert!(cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3374").is_none());
 }
 
+/// If GitHub lookup is unavailable for a named branch, the merge hook must
+/// still inspect origin rather than accept an older, locally waived head.
+#[tokio::test]
+async fn merge_hook_fresh_origin_cas_3288() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core, repo, task_id) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(&repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    let branch = format!("factory/test-agent-{task_id}");
+    git(&repo, &["switch", "-q", "-c", &branch]);
+    let old = git(&repo, &["rev-parse", "HEAD"]);
+    cas_store::waive_qa_pass(&cas_dir, &task_id, "supervisor", "test-agent",
+        &branch, &old, "old reviewed head", chrono::Utc::now()).unwrap();
+    let head = commit_file(&repo, "web/task.css", "a{color:red}\n", "unreviewed origin head");
+    git(&repo, &["push", "-q", "origin", &branch]);
+    git(&repo, &["reset", "-q", "--hard", &old]);
+    git(&repo, &["update-ref", &format!("refs/remotes/origin/{branch}"), &old]);
+    let stub_dir = tempfile::tempdir().unwrap();
+    let gh = stub_dir.path().join("gh");
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
+    test_env.set("CAS_QA_GH", &gh);
+    let command = format!("gh pr merge {branch}");
+    let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, &command)
+        .expect("origin has new work that the local head's waiver cannot cover");
+    assert!(refusal.contains(&task_id), "{refusal}");
+    cas_store::waive_qa_pass(&cas_dir, &task_id, "supervisor", "test-agent",
+        &branch, &head, "origin head reviewed", chrono::Utc::now()).unwrap();
+    assert!(cas::qa_pass::github_merge_refusal(&cas_dir, &repo, &command).is_none());
+}
+
 #[tokio::test]
 async fn cas_dd29_refuses_a_head_that_is_not_the_pushed_branch_tip() {
     let mut test_env = TestEnvGuard::temp_home();

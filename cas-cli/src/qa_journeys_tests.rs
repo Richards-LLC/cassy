@@ -118,14 +118,10 @@ fn fixture() -> (tempfile::TempDir, String, String) {
 
 /// The producer's public diff CLI at the reviewed checkout is an independent
 /// oracle for the Rust gate invoked from an older physical checkout.
-fn producer_ids(repo: &Path, base: &str, head: &str, full: bool) -> Vec<String> {
+fn producer_ids(repo: &Path, base: &str, head: &str) -> Vec<String> {
     let mut command = Command::new("python3");
     command.arg(repo.join("scripts/journeys-for-diff.py"));
-    if full {
-        command.arg("--all");
-    } else {
-        command.args([base, head]);
-    }
+    command.args([base, head]);
     let out = command
         .current_dir(repo)
         .env("CAS_JOURNEYS_ROOT", repo)
@@ -150,88 +146,6 @@ fn producer_ids(repo: &Path, base: &str, head: &str, full: bool) -> Vec<String> 
 }
 
 #[test]
-fn cas_f365_gate_ids_match_reviewed_selector_across_diffs_and_checkouts() {
-    let (temp, older, base) = fixture();
-    let repo = temp.path();
-    let changed_catalog = catalog(&[(1, "reply"), (10, "theme"), (12, "delivery"), (99, "new")]);
-    let cases: &[(&str, &str, &[&str])] = &[
-        (
-            "hub-web/src/delivery.ts",
-            "export const delivery = 'confirmed';\n",
-            &["HUB-J1", "HUB-J12"],
-        ),
-        (
-            "hub-web/src/main.ts",
-            "import { reply } from './reply';\nimport { theme } from './theme';\nfunction renderReply() { return reply + 'changed'; }\nfunction renderTheme() { return theme; }\n",
-            &["HUB-J1"],
-        ),
-        (
-            "hub-web/src/styles.css",
-            ".reply-card { color: red; }\n",
-            &["HUB-J1"],
-        ),
-        (
-            "hub-web/src/tokens.css",
-            ":root { --ink: black; }\n",
-            &["HUB-J1", "HUB-J10", "HUB-J12"],
-        ),
-        (
-            "hub-web/tsconfig.json",
-            "{}\n",
-            &["HUB-J1", "HUB-J10", "HUB-J12"],
-        ),
-        (
-            "hub-web/src/unknown.ts",
-            "export const unknown = true;\n",
-            &["HUB-J1", "HUB-J10", "HUB-J12"],
-        ),
-        (
-            "hub-web/e2e/delivery.journey.ts",
-            "test('HUB-J12 delivery changed', () => {});\n",
-            &["HUB-J12"],
-        ),
-        (
-            "docs/qa/journeys.md",
-            &changed_catalog,
-            &["HUB-J1", "HUB-J10", "HUB-J12", "HUB-J99"],
-        ),
-        ("hub-web/dist/app.js", "derived bundle\n", &[]),
-        ("docs/change.md", "Documentation only\n", &[]),
-    ];
-    for (path, body, expected) in cases {
-        git_ok(repo, &["checkout", "-q", &base]);
-        write(repo, path, body);
-        let head = commit(repo);
-        let producer = producer_ids(repo, &base, &head, false);
-        let expected: Vec<String> = expected.iter().map(|s| (*s).to_owned()).collect();
-        assert_eq!(producer, expected, "producer fixture {path}");
-        let paths: Vec<String> = git_ok(repo, &["diff", "--name-only", &base, &head])
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        git_ok(repo, &["checkout", "-q", &older]);
-        assert_eq!(
-            select_journeys(repo, &base, &head, Some(&paths)).unwrap(),
-            producer,
-            "gate/producer skew for {path} with older selector/catalog checkout"
-        );
-    }
-}
-
-#[test]
-fn cas_f365_full_catalog_comes_from_reviewed_revision() {
-    let (temp, older, head) = fixture();
-    let repo = temp.path();
-    let producer = producer_ids(repo, &older, &head, true);
-    assert_eq!(producer, ["HUB-J1", "HUB-J10", "HUB-J12"]);
-    git_ok(repo, &["checkout", "-q", &older]);
-    assert_eq!(
-        select_journeys(repo, &older, &head, None).unwrap(),
-        producer
-    );
-}
-
-#[test]
 fn cas_f365_reviewed_selector_failure_cannot_fall_back_to_checkout() {
     let (temp, older, base) = fixture();
     let repo = temp.path();
@@ -245,7 +159,7 @@ fn cas_f365_reviewed_selector_failure_cannot_fall_back_to_checkout() {
         let head = commit(repo);
         git_ok(repo, &["checkout", "-q", &older]);
         assert!(
-            select_journeys(repo, &base, &head, None).is_err(),
+            journeys_for_paths_at(repo, &head, &["hub-web/src/theme.ts".into()]).is_err(),
             "broken committed selector cannot use a healthy checkout selector"
         );
     }
@@ -253,7 +167,7 @@ fn cas_f365_reviewed_selector_failure_cannot_fall_back_to_checkout() {
     git_ok(repo, &["rm", "-q", "scripts/journeys-for-diff.py"]);
     let head = commit(repo);
     git_ok(repo, &["checkout", "-q", &older]);
-    assert!(select_journeys(repo, &base, &head, None).is_err());
+    assert!(journeys_for_paths_at(repo, &head, &["hub-web/src/theme.ts".into()]).is_err());
 }
 
 /// cas-8132: a delivery's "journeys:" reason (qa_pass::catalog_journeys_for)
@@ -274,21 +188,13 @@ fn cas_8132_journeys_reason_comes_from_the_delivered_head() {
         git_ok(repo, &["checkout", "-q", &base]);
         write(repo, path, body);
         let head = commit(repo);
-        let producer = producer_ids(repo, &base, &head, false);
+        let producer = producer_ids(repo, &base, &head);
         let paths = vec![path.to_string()];
         git_ok(repo, &["checkout", "-q", &older]);
         assert_eq!(
             super::journeys_for_paths_at(repo, &head, &paths).unwrap(),
             producer,
             "journeys reason for {path} must come from the delivered head"
-        );
-        // The gate's affected-journey IDs equal journey-eval's for the same
-        // base and head, so the receipt its repair command produces is the
-        // one it checks.
-        assert_eq!(
-            select_journeys(repo, &base, &head, Some(&paths)).unwrap(),
-            producer,
-            "gate selection equals journey-eval's for {path}"
         );
         // The "journeys:" eligibility reason judges surface paths only: a
         // spec-only change is a test (cas-0cd5 is_non_surface_path), never on

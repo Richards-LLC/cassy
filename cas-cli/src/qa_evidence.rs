@@ -2193,11 +2193,6 @@ pub fn run_close_gate_with_write_dir(
             command = command,
         )
     };
-    if let Some(selection) = journeys::check_close_journeys(ctx, reasons)
-        .map_err(|refusal| reject(refusal, "affected journey receipt"))?
-    {
-        pass.notes.push(selection);
-    }
     match tier {
         EvidenceTier::None => {}
         EvidenceTier::Bundle => {

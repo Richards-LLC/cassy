@@ -4,8 +4,8 @@
 //! SessionStart, and not PreToolUse from `--settings`, project or user
 //! settings. Factory agents launch with `IS_DEMO=true`, which skips the
 //! interactive trust dialog without trusting the workspace, so every Claude
-//! worker ran with no CAS guard at all: no capped cargo runner, no
-//! worker-memory admission, no Slack/publication/browser guards. Measured in
+//! worker ran with no CAS guard at all: no capped cargo runner and no
+//! Slack/publication/browser guards. Measured in
 //! cas-0f5b probe round 2: same launch, no trust entry → the canary hook never
 //! ran; with `projects[<cwd>].hasTrustDialogAccepted = true` → it ran and its
 //! deny held.

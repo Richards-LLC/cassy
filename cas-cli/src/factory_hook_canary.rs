@@ -135,8 +135,8 @@ pub fn failure_detail_since(
 pub fn failure_detail(agent: &str, timeout: Duration, marker: &Path) -> String {
     format!(
         "Worker '{agent}' was refused: its Claude hooks did not run. No SessionStart canary at {} \
-         within {}s of launch. A worker without hooks has no capped cargo runner, no worker-memory \
-         admission and no Slack/publication/browser guards (cas-0f5b). Check that the worktree is \
+         within {}s of launch. A worker without hooks has no capped cargo runner and no \
+         Slack/publication/browser guards (cas-0f5b). Check that the worktree is \
          trusted in the worker's CLAUDE_CONFIG_DIR/.claude.json (projects[<cwd>].hasTrustDialogAccepted) \
          and that `cas hook SessionStart` is configured, then respawn.",
         marker.display(),

@@ -422,3 +422,33 @@ fn transcript_probe_reads_again_only_after_the_transcript_changes() {
     assert_eq!(resolves.load(Ordering::SeqCst), 2, "the path is re-resolved after its TTL");
     assert_eq!(probes.load(Ordering::SeqCst), 2, "re-resolving the same path keeps the result");
 }
+
+#[test]
+fn another_childs_jobs_share_the_runtime_and_come_back_typed() {
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    let spec = |kind: &'static str, lane| super::super::jobs::JobSpec {
+        kind,
+        key: kind.to_string(),
+        lane,
+        criticality: super::super::jobs::Criticality::Refresh,
+        generation: 1,
+        budget: Duration::from_millis(250),
+    };
+    jobs.submit_external(spec("DirectorSnapshot", Lane::Blocking), || Box::new(41_u32));
+    jobs.submit_external_read(spec("ReminderScan", Lane::Read), |stores| {
+        Box::new(stores.is_none())
+    });
+    let mut done = Vec::new();
+    settle(&mut jobs, |jobs| {
+        done.extend(jobs.take_external_completions());
+        done.len() == 2
+    });
+    done.sort_by_key(|result| result.kind);
+    assert_eq!(done[0].kind, "DirectorSnapshot");
+    let value = done.remove(0).outcome.unwrap();
+    assert_eq!(value.downcast_ref::<u32>(), Some(&41));
+    let read = done.remove(0).outcome.unwrap();
+    assert_eq!(read.downcast_ref::<bool>(), Some(&true), "no read context is wired in this test");
+    assert!(jobs.take_selection().is_none(), "external results never look like a selection");
+}

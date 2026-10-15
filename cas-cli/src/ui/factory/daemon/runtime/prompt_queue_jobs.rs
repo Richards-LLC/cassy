@@ -171,6 +171,9 @@ pub(crate) enum QueueJobOutcome {
     },
     Pruned(PruneReport),
     Mirrored(Box<super::MirrorScanState>),
+    /// Another daemon child's job on the same runtime (factory loop v2 C2):
+    /// its own result type, handed back by [`QueueJobs::take_external_completions`].
+    External(Box<dyn std::any::Any + Send>),
 }
 
 /// Where queue jobs run. `Inline` runs each job on the submitting thread
@@ -501,6 +504,8 @@ pub(crate) struct QueueJobs {
     claims: PassClaims,
     /// Retractions waiting for their fresh read: recipient -> (pruner, repo).
     retractions: HashMap<String, (InboxPruner, PathBuf)>,
+    /// Finished jobs other children submitted to this runtime, until taken.
+    external: Vec<JobResult<Box<dyn std::any::Any + Send>>>,
     mirror_in_flight: bool,
     mirror_state: Option<Box<super::MirrorScanState>>,
     config: ConfigCache,
@@ -544,6 +549,7 @@ impl QueueJobs {
             submitted_stamps: HashSet::new(),
             claims: PassClaims::default(),
             retractions: HashMap::new(),
+            external: Vec::new(),
             mirror_in_flight: false,
             mirror_state: Some(Box::default()),
             config: ConfigCache::default(),
@@ -878,7 +884,16 @@ impl QueueJobs {
                                 self.retractions.remove(recipient);
                             }
                         }
-                        _ => {}
+                        "QueueStamp" | "InboxPrune" => {}
+                        _ => self.external.push(JobResult {
+                            kind: result.kind,
+                            key: result.key,
+                            generation: result.generation,
+                            outcome: Err(panicked),
+                            elapsed: result.elapsed,
+                            writer_wait: result.writer_wait,
+                            over_budget: result.over_budget,
+                        }),
                     }
                     continue;
                 }
@@ -934,8 +949,51 @@ impl QueueJobs {
                     self.mirror_in_flight = false;
                     self.mirror_state = Some(state);
                 }
+                QueueJobOutcome::External(value) => self.external.push(JobResult {
+                    kind: result.kind,
+                    key: result.key,
+                    generation: result.generation,
+                    outcome: Ok(value),
+                    elapsed: result.elapsed,
+                    writer_wait: result.writer_wait,
+                    over_budget: result.over_budget,
+                }),
             }
         }
+        // A selection not yet delivered keeps the loop's fast path armed.
+        self.ready.store(self.selection.is_some(), Ordering::Release);
+    }
+
+    /// Submit another child's job (factory loop v2 C2) to the daemon's one
+    /// job runtime, so the watchdog sees every lane in one registry. Its
+    /// result comes back, typed by the caller, from
+    /// [`Self::take_external_completions`] after [`Self::apply_completions`].
+    /// Use kinds and keys distinct from this module's (`Queue*`,
+    /// `RevalidateFresh:inbox:*`, `InboxPrune:*`, `MirrorWrite`).
+    pub(crate) fn submit_external(
+        &mut self,
+        spec: JobSpec,
+        work: impl FnOnce() -> Box<dyn std::any::Any + Send> + Send + 'static,
+    ) -> Submitted {
+        self.exec.submit(spec, move || QueueJobOutcome::External(work()))
+    }
+
+    /// [`Self::submit_external`] on the read lane, with its dedicated
+    /// `DirectorStores` connection (`None` inline or when it could not open).
+    pub(crate) fn submit_external_read(
+        &mut self,
+        spec: JobSpec,
+        work: impl FnOnce(Option<&DirectorStores>) -> Box<dyn std::any::Any + Send> + Send + 'static,
+    ) -> Submitted {
+        self.exec
+            .submit_read(spec, move |stores| QueueJobOutcome::External(work(stores)))
+    }
+
+    /// Finished external jobs, including ones that panicked (`outcome` Err).
+    pub(crate) fn take_external_completions(
+        &mut self,
+    ) -> Vec<JobResult<Box<dyn std::any::Any + Send>>> {
+        std::mem::take(&mut self.external)
     }
 
     /// Close the lanes and wait up to `timeout` for queued critical work

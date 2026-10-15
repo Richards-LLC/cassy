@@ -152,6 +152,7 @@
         "reason",
         "session_id",
         "shared",
+        "spawn_brief",
         "stale_threshold_secs",
         "status",
         "summary_mode",

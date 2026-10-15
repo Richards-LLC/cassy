@@ -347,6 +347,8 @@ pub(crate) const WORKER_DEAD_SECS: i64 = 75;
 const WORKER_ACTIVITY_WINDOW_SECS: i64 = 600;
 const WORKER_FILE_WRITE_SCAN_LIMIT: usize = 2_000;
 pub(crate) const SPAWN_BOOT_VERIFICATION_WINDOW_SECS: i64 = 60;
+/// cas-ee68: a spawn brief is a short orientation, not a design document.
+pub(crate) const SPAWN_BRIEF_MAX_CHARS: usize = 2_000;
 
 /// Mark a just-registered spawn as failed when its harness PID has already
 /// disappeared and the daemon missed the pane-exit event. The state-at age
@@ -2106,6 +2108,33 @@ impl CasService {
             .as_deref()
             .map(parse_worker_name_list)
             .unwrap_or_default();
+        // cas-ee68 (communication contract v2, P3.7): a spawn brief rides on
+        // the pre-assigned task, so the worker reads it before task start.
+        let spawn_brief = req
+            .spawn_brief
+            .as_deref()
+            .map(str::trim)
+            .filter(|brief| !brief.is_empty())
+            .map(str::to_string);
+        if let Some(brief) = spawn_brief.as_deref() {
+            if req.task_id.is_none() {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "spawn_brief needs task_id: the brief is stored on the pre-assigned task. \
+                     For workers without a task, send a sticky all_workers broadcast instead.",
+                ));
+            }
+            if brief.chars().count() > SPAWN_BRIEF_MAX_CHARS {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "spawn_brief is {} characters; the limit is {SPAWN_BRIEF_MAX_CHARS}. \
+                         Put longer material in the task description or an artifact.",
+                        brief.chars().count()
+                    ),
+                ));
+            }
+        }
 
         // cas-6913: task_id pre-assigns a task to the (single) spawned
         // worker. Reject anything that would make "the spawned worker"
@@ -2677,6 +2706,33 @@ impl CasService {
         let requester_secure_storage_dir = (specs.len() == 1)
             .then(|| specs[0].requester_secure_storage_dir.as_deref())
             .flatten();
+        // cas-ee68: store the brief on the task before the worker exists, so
+        // the spawn message can quote it and task show/start list it.
+        let brief_delivery_note = match (spawn_brief.as_deref(), req.task_id.as_deref()) {
+            (Some(brief), Some(task_id)) => {
+                let note = crate::ui::factory::daemon::runtime::queue_and_events::spawn_brief_note(
+                    brief,
+                    chrono::Utc::now(),
+                );
+                task_store.append_note(task_id, &note).map_err(|e| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "spawn_brief could not be stored on {task_id}; no worker was queued: {e}"
+                        ),
+                    )
+                })?;
+                format!(
+                    "\nSupervisor brief: stored on {task_id} and quoted in the worker's spawn \
+                     message, so it is read before task start."
+                )
+            }
+            _ => "\nSupervisor brief: none. Pass spawn_brief with task_id so the worker reads it \
+                  before task start; a message sent after registration can arrive after the worker \
+                  has started."
+                .to_string(),
+        };
+
         let request_id = queue
             .enqueue_spawn_with_requester_account_dirs(
                 count,
@@ -2715,7 +2771,6 @@ impl CasService {
             .unwrap_or_default();
         // cas-0078: peer findings, measured before the queue row existed.
         let task_id_note = format!("{task_id_note}{peer_notice}");
-        let brief_delivery_note = "\nSupervisor brief: none supplied or delivered. To send a brief, use coordination action=message after the worker registers.";
         let request_id_text = request_id.to_string();
         let count_text = count.to_string();
         let worker_names_text = worker_names.join(",");
@@ -11370,6 +11425,69 @@ mod spawn_lifecycle_tests {
             out.len() < 140,
             "row must stay scannable, got {} chars",
             out.len()
+        );
+    }
+
+    /// Communication contract v2, P3.7 (cas-ee68): a spawn brief is stored on
+    /// the pre-assigned task before the worker is queued, and the receipt
+    /// says so. A brief without a task is refused, since nothing would carry
+    /// it to the worker before task start.
+    #[tokio::test]
+    async fn ct2_p3_spawn_brief_is_stored_on_the_preassigned_task() {
+        use cas_types::Task;
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let temp = tempfile::tempdir().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let task_store = core.open_task_store().expect("open task store");
+        task_store.init().expect("init task store");
+        task_store
+            .add(&Task::new("cas-brief1".to_string(), "Fix the sweep".to_string()))
+            .expect("add task");
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let orphan: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude",
+            "spawn_brief": "Rebase onto the epic first."
+        }))
+        .expect("valid request");
+        let refused = service
+            .factory_spawn_workers(orphan)
+            .await
+            .expect_err("a brief needs a task to ride on");
+        assert!(refused.message.contains("spawn_brief needs task_id"), "{}", refused.message);
+
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "claude",
+            "task_id": "cas-brief1",
+            "spawn_brief": "Rebase onto the epic first; tests are part of the task."
+        }))
+        .expect("valid spawn request");
+        let response = service
+            .factory_spawn_workers(request)
+            .await
+            .expect("queue worker spawn");
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
+        let notes = task_store.get("cas-brief1").expect("task").notes;
+        assert!(
+            notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),
+            "{notes}"
         );
     }
 

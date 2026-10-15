@@ -981,6 +981,8 @@ fn ct2_p1_one_body_per_message_teams() {
     let id = store.enqueue_with_session("supervisor", WORKER, busy, SESSION).unwrap();
     claim_for_claude_teams(&store, &mut worker, id, busy);
     store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
+    // The daemon stamps the held Teams copy after the write (cas-a1ed).
+    store.record_deferred_inbox(id, 0).unwrap();
     let mid_turn = worker.tool_call();
     assert_eq!(mid_turn.matches(busy).count(), 1, "{mid_turn}");
     context.push_str(&mid_turn);

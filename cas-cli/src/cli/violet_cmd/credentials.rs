@@ -37,7 +37,7 @@ fn missing(detail: impl AsRef<str>) -> VioletError {
     VioletError::local(
         "missing_credential",
         format!(
-            "{}; tried the process environment and {path}; set VIOLET_SLACK_TOKEN_ENV or run `cas integrate violet`",
+            "{}; tried the process environment and {path}; check the named variable and registration with `cas doctor`",
             detail.as_ref()
         ),
     )
@@ -125,7 +125,7 @@ fn selected_token(
         return value(VIOLET_DEFAULT_TOKEN_ENV, env, removed);
     }
     Err(missing(format!(
-        "multiple Violet token variables found ({}); selection is ambiguous",
+        "multiple Violet token variables found ({}); selection is ambiguous; set VIOLET_SLACK_TOKEN_ENV",
         candidates.into_iter().collect::<Vec<_>>().join(", ")
     )))
 }

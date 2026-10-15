@@ -739,3 +739,22 @@ async fn empty_promotion_receipt_refuses_before_parking_gh1202() {
     assert!(rejected.deliverables.factory_branch_anchor.is_none(), "{response}");
     assert!(!rejected.deliverables.merge_conflicted, "{response}");
 }
+
+#[tokio::test]
+async fn unresolved_delivery_without_promotion_receipt_does_not_park_gh1202() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-b305";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Missing delivery",
+    })).await;
+    assert!(response.contains("DELIVERY BRANCH UNRESOLVED"), "{response}");
+    let rejected = f.task(id);
+    assert_eq!(rejected.status, TaskStatus::InProgress, "{response}");
+    assert!(rejected.deliverables.parked_branch.is_none(), "{response}");
+    assert!(rejected.deliverables.factory_branch_anchor.is_none(), "{response}");
+    assert!(!rejected.deliverables.merge_conflicted, "{response}");
+    assert!(!response.contains("merge-tree"), "{response}");
+}

@@ -4965,8 +4965,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     /// cas-7a01 (GH #155): the turn-start counterpart of the inbox drain.
-    /// Identical eligibility and identical atomicity; the receipt it writes
-    /// carries different provenance and the row is acked as hook-surfaced.
+    /// Ordinary mail shares poll eligibility and atomicity; daemon stall
+    /// nudges stay on their premise-checked transport lane. The receipt carries
+    /// hook provenance and acknowledges the surfaced row.
     fn surface_unseen_for_recipient(
         &self,
         recipient: &str,

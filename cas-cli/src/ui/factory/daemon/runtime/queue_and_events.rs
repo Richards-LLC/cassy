@@ -17572,12 +17572,16 @@ mod stall_nudge_rework_tests {
     }
 
     async fn make_worker_ready(daemon: &mut FactoryDaemon) {
+        make_worker_ready_for(daemon, cas_mux::SupervisorCli::Codex).await;
+    }
+
+    async fn make_worker_ready_for(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli) {
         let pty = cas_mux::Pty::spawn("worker-a", cas_mux::PtyConfig {
             command: "sh".into(), args: vec!["-c".into(), "printf ready; sleep 30".into()],
             cwd: Some(std::env::temp_dir()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
         }).unwrap();
         let pane = cas_mux::Pane::with_pty("worker-a", cas_mux::PaneKind::Worker,
-            pty, 24, 80, cas_mux::SupervisorCli::Codex).unwrap();
+            pty, 24, 80, harness).unwrap();
         daemon.app.adopt_worker_pane_for_test(pane);
         tokio::time::sleep(Duration::from_millis(5100)).await;
         for pane in daemon.app.mux.panes_mut() { pane.drain_output(); }
@@ -17605,6 +17609,35 @@ mod stall_nudge_rework_tests {
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         let next: Option<String> = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id = ?", [id], |r| r.get(0)).unwrap();
         assert!(next.is_some(), "exhausted hold budget must park the row");
+    }
+
+    #[tokio::test]
+    async fn stalled_nudge_successful_recheck_keeps_cadence_after_transport_retry() {
+        let (root, cas_dir, _worker, id) = fixture(false);
+        let blocked_config = root.path().join("blocked-claude-config");
+        std::fs::write(&blocked_config, "a file cannot contain a team inbox").unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_CONFIG_DIR", blocked_config.to_str()),
+        ]);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        make_worker_ready_for(&mut daemon, cas_mux::SupervisorCli::Claude).await;
+        daemon.teams = Some(super::super::teams::TeamsManager::new("provision-test"));
+        daemon.process_prompt_queue().await.unwrap();
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(),
+            "a real team-inbox adapter failure must retain the row");
+        assert!(daemon.stall_nudge_gate_checks.contains_key(&id),
+            "successful premise validation must survive downstream retry");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute("UPDATE tasks SET title=x'00' WHERE id='cas-stall'", []).unwrap();
+        conn.execute("UPDATE prompt_queue SET next_attempt_at=NULL WHERE id=?", [id]).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        assert_eq!(daemon.stall_nudge_gate_checks[&id].2, 0,
+            "a retry inside the cadence must not reread the now-unreadable task");
+        daemon.stall_nudge_gate_checks.get_mut(&id).unwrap().0 = Instant::now() - Duration::from_secs(1);
+        daemon.process_prompt_queue().await.unwrap();
+        assert_eq!(daemon.stall_nudge_gate_checks[&id].2, 1,
+            "after the cadence expires, the premise is revalidated");
     }
 
     #[tokio::test]

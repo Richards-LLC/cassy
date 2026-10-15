@@ -1068,6 +1068,49 @@ mod tests {
     }
 
     #[test]
+    fn cas_678d_round1_unset_canonical_account_is_never_rebound() {
+        let (env, probe) = update_fixture();
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let raw = std::fs::read_to_string(&path).unwrap().replace(
+            "MECHA_SLACK_TOKEN_CASSY_PROXY",
+            "VIOLET_SLACK_TOKEN_ACCOUNT",
+        );
+        std::fs::write(&path, raw).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(probe.calls.borrow().is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(_, warning)| warning.contains("VIOLET_SLACK_TOKEN_ACCOUNT"))
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_ACCOUNT}"
+        );
+    }
+
+    #[test]
+    fn cas_678d_round1_preferred_token_does_not_break_ambiguity() {
+        let (mut env, probe) = update_fixture();
+        env.set("VIOLET_SLACK_TOKEN_ACCOUNT", "fixture-account");
+        env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_SOUNDWAVE");
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(probe.calls.borrow().is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(_, warning)| warning.contains("ambiguous"))
+        );
+    }
+
+    #[test]
     fn cas_678d_update_preserves_working_account_credentials_and_custom_endpoints() {
         let (mut env, probe) = update_fixture();
         env.set("VIOLET_SLACK_TOKEN_ACCOUNT", "fixture-account");

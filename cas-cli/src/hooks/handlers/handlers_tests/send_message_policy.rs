@@ -123,7 +123,8 @@ fn factory_supervisor_send_message_to_worker_is_denied_with_cas_guidance() {
 
 #[test]
 fn send_message_outside_factory_falls_through() {
-    let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", None), ("CAS_AGENT_NAME", None)]);
+    let _env =
+        TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", None), ("CAS_AGENT_NAME", None)]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let input = send_message_input(Some(serde_json::json!({

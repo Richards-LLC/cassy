@@ -16,12 +16,15 @@
 //! slow. Each lane marks the [`Step`] it runs, including the prompt queue's
 //! sub-steps ([`mark`]) and the director apply's `timed()` steps
 //! ([`scoped`]). A step over its budget lands in a 32-event ring, a
-//! `cas::loop_watchdog` WARN and the TUI status line
-//! (`slow: <lane>/<step> <n> ms`). The watchdog checks the lanes every
-//! 250 ms; a pass that has not finished in 1 s, or a job pending past its
-//! budget, is `wedged: <lane>/<step> for <n> s`, written to `loop.json` at
-//! once with the thread's wait channel. An attached lane thread also reports
-//! blocking calls through [`cas_store::lane_guard`] (report mode).
+//! `cas::loop_watchdog` WARN and the TUI status line, which holds the worst
+//! one for 10 s (`slow: <lane>/<step> <n> ms`). The watchdog checks the
+//! lanes every 250 ms; a pass that has not finished in 1 s, or a job pending
+//! past its budget, is a wedge (lane, step, duration), written to
+//! `loop.json` at once with the thread's wait channel. The TUI shows only
+//! job wedges live (`wedged: jobs/<kind> for <n> s`); see
+//! [`LoopProgress::status_line`] for why a loop wedge cannot be drawn yet.
+//! An attached lane thread also reports blocking calls through
+//! [`cas_store::lane_guard`] (report mode).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -52,8 +55,12 @@ pub(crate) const IO_STEP_BUDGET_MS: u64 = 5;
 pub(crate) const PROMPT_QUEUE_STEP_BUDGET_MS: u64 = 20;
 pub(crate) const CONTROL_STEP_BUDGET_MS: u64 = 10;
 /// An over-budget step is logged at most this often per step name; the ring
-/// and the status line still record every event.
+/// still records every event.
 const SLOW_LOG_INTERVAL: Duration = Duration::from_secs(1);
+/// The status-line badge changes at most this often (cas-6931 review): a
+/// redraw can itself be a slow io step, so a badge that followed every event
+/// would feed itself.
+const BADGE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A lane of the daemon (factory loop v2 §3). Today one loop thread runs the
 /// io and control steps in turn; jobs run on the store worker and pools.
@@ -349,13 +356,23 @@ struct CurrentStep {
     started: Instant,
 }
 
-/// Over-budget steps: the last [`SLOW_RING_CAP`] events, the newest one for
-/// the status line, and the per-step log throttle.
+/// Over-budget steps: the last [`SLOW_RING_CAP`] events, the worst one in
+/// the status-line window, and the per-step log throttle.
 #[derive(Debug, Default)]
 struct SlowSteps {
     ring: VecDeque<SlowStepEvent>,
-    newest: Option<(SlowStepEvent, Instant)>,
+    /// The worst event since it was taken, and when; a later event replaces
+    /// it only when it is larger or the held one has expired.
+    held: Option<(SlowStepEvent, Instant)>,
     logged: HashMap<&'static str, (Instant, u64)>,
+}
+
+/// The badge text the TUI shows and when it last changed. Each change marks
+/// a frame dirty, so it changes at most once per [`BADGE_MIN_INTERVAL`].
+#[derive(Debug, Default)]
+struct Badge {
+    shown: Option<String>,
+    changed_at: Option<Instant>,
 }
 
 /// A wedge the watchdog has detected and not yet seen clear.
@@ -397,6 +414,7 @@ pub(crate) struct LoopProgress {
     phase_window:
         Mutex<std::collections::BTreeMap<&'static str, crate::factory_daemon_health::PhaseLatency>>,
     slow: Mutex<SlowSteps>,
+    badge: Mutex<Badge>,
     wedge: Mutex<Option<WedgeState>>,
 }
 
@@ -466,6 +484,14 @@ pub(crate) fn mark(step: Step) {
 
 /// Run `step` until the returned scope drops, then return to the step that
 /// was running. A no-op off a lane thread.
+///
+/// Timing is per segment: entering the scope closes the enclosing step's
+/// current segment, and leaving it starts a fresh one. The enclosing step's
+/// budget check, `phase_latency` entry count and max therefore apply to each
+/// segment and exclude the nested step's time, which is charged to the
+/// nested step alone. A step split by nested scopes can spend more than its
+/// budget in total without being reported, as long as no single segment
+/// does.
 pub(crate) fn scoped(step: Step) -> Option<StepScope> {
     let progress = attached()?;
     let previous = progress.current_step();
@@ -507,6 +533,7 @@ impl LoopProgress {
             }),
             phase_window: Mutex::new(std::collections::BTreeMap::new()),
             slow: Mutex::new(SlowSteps::default()),
+            badge: Mutex::new(Badge::default()),
             wedge: Mutex::new(None),
         })
     }
@@ -613,7 +640,13 @@ impl LoopProgress {
             slow.ring.pop_front();
         }
         slow.ring.push_back(event.clone());
-        slow.newest = Some((event, now));
+        let window = Duration::from_secs(SLOW_STATUS_SECS);
+        let replace = slow.held.as_ref().is_none_or(|(held, seen)| {
+            now.saturating_duration_since(*seen) >= window || elapsed_ms > held.elapsed_ms
+        });
+        if replace {
+            slow.held = Some((event, now));
+        }
         let log = match slow.logged.get_mut(step.name) {
             Some((last, suppressed))
                 if now.saturating_duration_since(*last) < SLOW_LOG_INTERVAL =>
@@ -713,21 +746,61 @@ impl LoopProgress {
         })
     }
 
-    /// The TUI status-line badge: `wedged: <lane>/<step> for <n> s` while a
-    /// lane is wedged, else `slow: <lane>/<step> <n> ms` for
-    /// [`SLOW_STATUS_SECS`] after a step over budget.
+    /// The TUI status-line badge.
+    ///
+    /// `slow: <lane>/<step> <n> ms` names the worst over-budget step of the
+    /// last [`SLOW_STATUS_SECS`]; a smaller event never replaces it. The text
+    /// changes at most once per [`BADGE_MIN_INTERVAL`], since each change
+    /// redraws the frame.
+    ///
+    /// `wedged: jobs/<kind> for <n> s` shows only while a job is still
+    /// pending past its budget. An io or control wedge is never shown: today
+    /// the loop draws this badge itself, so whenever it can draw, its own
+    /// wedge has already ended (the stalled step then shows as `slow:`). A
+    /// live loop wedge is visible in `loop.json` (written by the watchdog
+    /// thread within a heartbeat) and `worker_status`; live TUI display waits
+    /// for the io lane on its own thread (C4b) or a client-side "daemon
+    /// silent" signal.
     pub(crate) fn status_line(&self) -> Option<String> {
         let now = self.clock.now();
-        if let Some(wedge) = self.wedge.lock().ok().and_then(|wedge| wedge.clone()) {
-            return Some(format!(
-                "wedged: {}/{} for {} s",
-                wedge.lane.name(),
-                wedge.step,
-                now.saturating_duration_since(wedge.since).as_secs()
-            ));
+        let candidate = self.badge_candidate(now);
+        let Ok(mut badge) = self.badge.lock() else {
+            return candidate;
+        };
+        let may_change = badge
+            .changed_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= BADGE_MIN_INTERVAL);
+        if candidate != badge.shown && may_change {
+            badge.shown = candidate;
+            badge.changed_at = Some(now);
+        }
+        badge.shown.clone()
+    }
+
+    fn badge_candidate(&self, now: Instant) -> Option<String> {
+        let job_wedge = self
+            .wedge
+            .lock()
+            .ok()
+            .and_then(|wedge| wedge.clone())
+            .filter(|wedge| wedge.lane == Lane::Jobs);
+        if let Some(wedge) = job_wedge {
+            let wedge_after = Duration::from_millis(LANE_WEDGE_MS);
+            let still_pending = self
+                .jobs
+                .oldest(now)
+                .get(wedge.step)
+                .is_some_and(|job| job.age >= wedge_after.max(job.budget));
+            if still_pending {
+                return Some(format!(
+                    "wedged: jobs/{} for {} s",
+                    wedge.step,
+                    now.saturating_duration_since(wedge.since).as_secs()
+                ));
+            }
         }
         let slow = self.slow.lock().ok()?;
-        let (event, seen) = slow.newest.as_ref()?;
+        let (event, seen) = slow.held.as_ref()?;
         (now.saturating_duration_since(*seen) < Duration::from_secs(SLOW_STATUS_SECS)).then(|| {
             format!(
                 "slow: {}/{} {} ms",
@@ -1109,6 +1182,9 @@ mod tests {
         }
         let ring = progress.slow_events();
         assert_eq!(ring.len(), SLOW_RING_CAP);
+        // The badge changed to "none" under a second ago; it waits.
+        assert_eq!(progress.status_line(), None);
+        clock.advance(BADGE_MIN_INTERVAL);
         assert!(
             ring.iter()
                 .all(|event| event.lane == "io" && event.step == "pty output")
@@ -1170,13 +1246,13 @@ mod tests {
             "a 1 s wedge is written on the heartbeat, not at the next 5 s write: \
              {detected_after:?}"
         );
-        let line = progress.status_line().expect("the TUI shows the wedge");
-        let secs: u64 = line
-            .strip_prefix("wedged: control/prompt queue: urgent inject for ")
-            .and_then(|rest| rest.strip_suffix(" s"))
-            .and_then(|secs| secs.parse().ok())
-            .unwrap_or_else(|| panic!("{line}"));
-        assert!(secs >= 1, "{line}");
+        // The loop draws its own badge, so it can only draw once its wedge
+        // is over: the badge never claims a loop wedge (C4b draws it live).
+        assert_eq!(
+            progress.status_line(),
+            None,
+            "no stale or unreachable wedged: badge"
+        );
 
         let remaining = Duration::from_millis(1_500).saturating_sub(started.elapsed());
         std::thread::sleep(remaining);
@@ -1190,6 +1266,13 @@ mod tests {
             .expect("the blocked step is in the slow ring");
         assert_eq!(blocked_step.lane, "control");
         assert!(blocked_step.elapsed_ms >= 1_500, "{blocked_step:?}");
+        let badge = progress
+            .status_line()
+            .expect("the stalled step shows as slow");
+        assert!(
+            badge.starts_with("slow: control/prompt queue: urgent inject 1"),
+            "{badge}"
+        );
 
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap();
@@ -1223,8 +1306,90 @@ mod tests {
             "logged once per wedge"
         );
         drop(ticket);
+        clock.advance(BADGE_MIN_INTERVAL);
+        assert_eq!(
+            progress.status_line(),
+            None,
+            "a finished job is not shown as wedged, even before the next heartbeat"
+        );
         assert_eq!(progress.check_wedge(), None);
         assert!(progress.status(1, "s", Utc::now()).job_oldest_ms.is_empty());
+    }
+
+    /// cas-6931 review: the badge holds the worst slow step of its 10 s
+    /// window and changes at most once a second, so a stream of small slow
+    /// steps (each change is a redraw, itself a possible slow step) cannot
+    /// make it churn. Fake clock.
+    #[test]
+    fn flv2_badge_holds_worst_step_and_changes_at_most_once_a_second() {
+        let clock = FakeClock::new();
+        let progress =
+            LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)), JobHealth::new());
+        let slow_step = |name: &'static str, ms: u64| {
+            progress.enter_step(Step::prompt_queue(name));
+            clock.advance(Duration::from_millis(ms));
+            progress.enter(LoopPhase::Idle);
+        };
+        fn observe(shown: &mut Vec<Option<String>>, line: Option<String>) {
+            if shown.last() != Some(&line) {
+                shown.push(line);
+            }
+        }
+        let mut shown = Vec::new();
+
+        slow_step("prompt queue: a", 30);
+        observe(&mut shown, progress.status_line());
+        // Thirty smaller slow steps of other names within the next second.
+        for i in 0..30 {
+            slow_step(
+                if i % 2 == 0 {
+                    "prompt queue: b"
+                } else {
+                    "prompt queue: c"
+                },
+                21 + (i % 8),
+            );
+            observe(&mut shown, progress.status_line());
+        }
+        assert_eq!(
+            shown,
+            vec![Some("slow: control/prompt queue: a 30 ms".to_string())]
+        );
+
+        // A worse step replaces it, but not before a second has passed
+        // since the last change.
+        let since_change = Duration::from_millis(30 + 30 * 25);
+        slow_step("prompt queue: worst", 80);
+        observe(&mut shown, progress.status_line());
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        clock.advance(BADGE_MIN_INTERVAL.saturating_sub(since_change));
+        observe(&mut shown, progress.status_line());
+        assert_eq!(
+            shown.last().cloned().flatten().as_deref(),
+            Some("slow: control/prompt queue: worst 80 ms")
+        );
+
+        // Smaller steps over the next seconds never displace the worst.
+        for _ in 0..40 {
+            slow_step("prompt queue: b", 40);
+            clock.advance(Duration::from_millis(60));
+            observe(&mut shown, progress.status_line());
+        }
+        assert_eq!(shown.len(), 2, "{shown:?}");
+
+        // It expires 10 s after the worst step; nothing newer is worse
+        // than the newest small step, which then takes over.
+        clock.advance(Duration::from_secs(SLOW_STATUS_SECS));
+        slow_step("prompt queue: b", 25);
+        observe(&mut shown, progress.status_line());
+        assert_eq!(
+            shown.last().cloned().flatten().as_deref(),
+            Some("slow: control/prompt queue: b 25 ms")
+        );
+        clock.advance(Duration::from_secs(SLOW_STATUS_SECS));
+        observe(&mut shown, progress.status_line());
+        assert_eq!(shown.last(), Some(&None));
+        assert_eq!(shown.len(), 4, "{shown:?}");
     }
 
     #[test]

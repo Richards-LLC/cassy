@@ -520,6 +520,15 @@ in the TUI. v2 extends these pieces rather than replacing them.
    (today 60 s) is wedged: the
    TUI shows `wedged: <lane>/<step> for <n> s`, and `loop.json` records the
    step, the duration and `/proc/<tid>/wchan` (today's `loop_thread_wait`).
+   *C1 status (cas-6931):* until the io lane runs on its own thread (C4b),
+   the loop draws the status line itself, so it can never draw its own
+   wedge; by the time it draws, the wedge is over and the stalled step shows
+   as `slow:`. C1 therefore shows `wedged:` live only for jobs, and a live io
+   or control wedge is visible in `loop.json` (written within one heartbeat)
+   and `worker_status`. Live TUI display of a loop wedge waits for C4b or a
+   client-side "daemon silent" signal. The `slow:` badge holds the worst
+   step of its 10 s window and changes at most once a second, since every
+   change is a redraw.
 5. **Job health.** The oldest pending job age per kind is in `loop.json` and
    in the wedge check. A store worker stuck on a flock is a named job wedge,
    not a frozen TUI.

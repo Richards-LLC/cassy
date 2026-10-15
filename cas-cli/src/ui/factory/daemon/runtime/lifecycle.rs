@@ -2857,7 +2857,9 @@ impl FactoryDaemon {
             }
 
             let spawning = self.app.spawning_count > 0;
-            // cas-6931: the watchdog's `slow:`/`wedged:` badge.
+            // cas-6931: the watchdog's badge (worst slow step, or a live job
+            // wedge). It changes at most once a second. This loop cannot show
+            // its own wedge: when it gets here, the wedge is over.
             let loop_health_changed = self.app.set_loop_health(loop_progress.status_line());
             let dirty = had_output
                 || loop_health_changed

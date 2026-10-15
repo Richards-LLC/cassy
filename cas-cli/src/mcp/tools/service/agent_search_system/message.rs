@@ -1754,7 +1754,7 @@ impl CasService {
                         task.delivery_mode,
                     )
                 {
-                    return Ok(Self::tool_error(message));
+                    return Ok(CallToolResult::error(vec![Content::text(message)]));
                 }
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its

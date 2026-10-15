@@ -730,6 +730,38 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn worker_proofs_include_fixed_guards_before_an_unrelated_filter() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir(repo.join("scripts")).unwrap();
+        for (name, source) in [
+            ("worker-proof-guards.py", include_str!("../../scripts/worker-proof-guards.py")),
+            ("check-test-shape.py", include_str!("../../scripts/check-test-shape.py")),
+            ("rust_test_source.py", include_str!("../../scripts/rust_test_source.py")),
+        ] {
+            std::fs::write(repo.join("scripts").join(name), source).unwrap();
+        }
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "guard fixture"]).unwrap();
+        let fake = dir.path().join("cargo");
+        fake_cargo(&fake, r#"printf '%s\n' "$*" >> target/invocations
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(unrelated)"].map(str::to_string);
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        let invocations = std::fs::read_to_string(repo.join("target/invocations")).unwrap();
+        assert!(invocations.contains("test_support::lib_test_process_env_mutation_is_isolated"), "{invocations}");
+        assert!(invocations.contains("serialized_factory_fields_have_registry_entries_cas_f7b9"), "{invocations}");
+        assert!(invocations.lines().last().unwrap().ends_with("test(unrelated)"), "{invocations}");
+        assert_eq!(invocations.lines().count(), 2);
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(unrelated) 2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn worker_memory_scope_runs_cargo_with_limit_and_preserves_context() {
         let mut env = crate::test_support::TestEnvGuard::new();
         env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");

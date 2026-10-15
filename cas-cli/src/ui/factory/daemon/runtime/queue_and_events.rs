@@ -4279,32 +4279,44 @@ impl FactoryDaemon {
                         // Registered, but the hook canary has not landed yet.
                         return None;
                     }
-                    let process_exited = active_agents.iter().any(|agent| {
-                        agent.name == *worker
-                            && agent.pid.is_some()
-                            && !crate::mcp::tools::service::factory_ops::agent_process_is_alive(
-                                agent,
-                            )
-                    });
-                    if process_exited {
-                        return Some((
-                            worker.clone(),
-                            VerificationAction::Failed(format!(
-                                "Worker harness process exited during post-registration boot verification.{}",
-                                pane_tail
-                                    .as_deref()
-                                    .map(|tail| format!("\n\nLast worker pane output:\n{tail}"))
-                                    .unwrap_or_default()
-                            )),
-                        ));
+                    let boot_window_elapsed = verification.registered_at.is_some_and(
+                        |registered_at| {
+                            now.saturating_duration_since(registered_at)
+                                >= SPAWN_BOOT_VERIFICATION_WINDOW
+                        },
+                    );
+                    // Registration can precede Claude's first successful CAS
+                    // MCP connection. The worker may spend 20 seconds waiting
+                    // for that server while its registered child is absent or
+                    // restarting. Treating one missing-process observation as
+                    // an exit bypasses this boot window and kills a live pane;
+                    // only judge the process after the full window has elapsed.
+                    if boot_window_elapsed {
+                        let process_exited = active_agents.iter().any(|agent| {
+                            agent.name == *worker
+                                && agent.pid.is_some()
+                                && !crate::mcp::tools::service::factory_ops::agent_process_is_alive(
+                                    agent,
+                                )
+                        });
+                        if process_exited {
+                            return Some((
+                                worker.clone(),
+                                VerificationAction::Failed(format!(
+                                    "Worker harness process exited during post-registration boot verification.{}",
+                                    pane_tail
+                                        .as_deref()
+                                        .map(|tail| format!("\n\nLast worker pane output:\n{tail}"))
+                                        .unwrap_or_default()
+                                )),
+                            ));
+                        }
                     }
                     if verification.registered_at.is_none() {
                         verification.registered_at = Some(now);
                         return Some((worker.clone(), VerificationAction::Confirmed));
                     }
-                    if now.saturating_duration_since(verification.registered_at.unwrap())
-                        >= SPAWN_BOOT_VERIFICATION_WINDOW
-                    {
+                    if boot_window_elapsed {
                         return Some((worker.clone(), VerificationAction::Expired));
                     }
                 } else if let Some(registered_at) = verification.registered_at {

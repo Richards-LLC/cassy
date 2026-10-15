@@ -557,6 +557,7 @@ test('a declared journey renders loading, submit-error and offline states and fa
   const markdown = await readFile(join(artifactDir, 'visual-qa.md'), 'utf8');
   assert.match(markdown, /## Journey states — start/);
   assert.match(markdown, /\*\*submit-error\*\* · light · phone — screenshot/);
+  // pin: this marker is the report contract for an unmet expected condition.
   assert.match(markdown, /UNMET — `expect #email focused=true`/);
   assert.match(markdown, /state submit-error · light/);
   const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));

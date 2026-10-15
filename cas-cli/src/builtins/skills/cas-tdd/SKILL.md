@@ -8,6 +8,21 @@ metadata:
 
 # Test-Driven Development
 
+## Test strategy
+
+Keep a test only when these eight answers justify its place:
+
+1. What defect has it caught?
+2. Where is its one place to run? Keep one canonical command and lane; remove duplicate runs.
+3. Is it a pin? Prefer behavior checks; mark a durable exact-text contract with `// pin: <reason>`.
+4. Product or tooling? A test of our own tooling earns its place by the same bar.
+5. Does it pass on a clean runner? Remove host state and shared mutable fixtures.
+6. What is its flake rate? Treat every flake as a defect to investigate; retries may diagnose it, never erase it.
+7. What is its cost × number of runs? Count every lane and repeated invocation.
+8. When it fails, does it say whose fault it is? Separate product, test, runner, and dependency failures.
+
+Select tests from the dependency graph, including downstream dependents, not from changed-file names. Delete tests of dead code.
+
 Imported and adapted from mattpocock/skills `tdd`, MIT © 2026 Matt Pocock.
 See [LICENSE](LICENSE) for the upstream permission notice.
 
@@ -18,7 +33,6 @@ Use a red → green loop to produce tests worth keeping. Keep durable decisions 
 - Agree the public seam before testing. A seam is the boundary where a caller observes behavior without reaching into internals.
 - Work vertical tracer bullets: one test, the smallest implementation that makes it pass, then the next learned slice. Do not write a horizontal wall of imagined tests.
 - Use the project’s scoped test command and record the actual proof result in the task. Do not treat a zero-test success as proof.
-- Factory workers run targeted Rust tests under `cas-worker` discipline: one package, a mandatory named-test `-E` filter, through the capped runner. Commit and run the failing test, then commit the fix and run the same filter for green proof. The supervisor's `ASSEMBLY_PROOF` covers the full suite at epic assembly; an older runtime without this exception requires naming the deferred run. Non-Rust suites still run in the worker.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

@@ -61,6 +61,23 @@ class Shapes(unittest.TestCase):
     def test_non_rust_text_is_clean(self):
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
+    def test_exact_prose_pin_needs_a_reasoned_escape(self):
+        # // pin: these fixtures exercise the exact prose pin and its intentional exception.
+        unpinned = '''def test_prompt_contract():
+    assert prompt == "When a test fails, name the responsible boundary and preserve its first result."
+def test_workflow_command():
+    assert "uses: actions/checkout@v4" in workflow_yaml
+'''
+        pinned = '''def test_prompt_contract():
+    # // pin: this exact wording is a third-party compatibility contract.
+    assert prompt == "When a test fails, name the responsible boundary and preserve its first result."
+'''
+        self.assertEqual(
+            shape.lint_text_pins(unpinned, 'tests/test_prompt.py'),
+            [(2, 'exact-text pin'), (4, 'exact-text pin')],
+        )
+        self.assertFalse(shape.lint_text_pins(pinned, 'tests/test_prompt.py'))
+
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
             'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',
@@ -138,6 +155,29 @@ class Shapes(unittest.TestCase):
             (root/'lib.rs').write_text('#[test] fn t() { assert_eq!(run(), 3); }')
             self.assertEqual(subprocess.run(cmd+['--changed-since', base], cwd=root, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(cmd+['--changed-since', 'missing-ref'], cwd=root, capture_output=True).returncode, 1)
+
+    def test_cli_changed_since_scans_non_rust_test_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.email', 'fixture@example.test')
+            git('config', 'user.name', 'fixture')
+            path = root/'tests/test_prompt.py'
+            path.parent.mkdir(parents=True)
+            path.write_text('def test_prompt():\n    assert prompt == "behavior"\n')
+            git('add', '.')
+            git('commit', '-qm', 'behavior baseline')
+            base = git('rev-parse', 'HEAD')
+            path.write_text('def test_prompt():\n    assert prompt == "The release gate should identify which component caused this failure."\n')
+            command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn('tests/test_prompt.py:2: exact-text pin', result.stdout)
+            path.write_text('def test_prompt():\n    # // pin: this phrase is an external compatibility contract.\n    assert prompt == "The release gate should identify which component caused this failure."\n')
+            clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(clean.returncode, 0, clean.stdout)
 
 
 if __name__ == '__main__':

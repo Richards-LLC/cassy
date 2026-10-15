@@ -5526,7 +5526,8 @@ mod tests {
     async fn cas_50713_stale_reset_releases_cloud_then_replacement_starts_without_claim_lost() {
         use std::sync::{Arc, Mutex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        for initial_owner in ["old-session", "new-session"] {
+        for (initial_owner, unregistered) in [("old-session", false), ("old-session", true),
+            ("new-session", false), ("new-session", true)] {
             let _env = crate::test_support::TestEnvGuard::temp_home();
             let (_temp, cas_dir) = seeded_cas_dir();
             let server = MockServer::start().await;
@@ -5591,6 +5592,7 @@ mod tests {
             old.pid = None;
             old.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(20);
             agents.register(&old).unwrap();
+            if unregistered { agents.unregister(&old.id).unwrap(); }
             agents
                 .register(&cas_types::Agent::new(
                     "new-session".into(),

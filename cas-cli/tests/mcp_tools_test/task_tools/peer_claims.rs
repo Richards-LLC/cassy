@@ -1014,3 +1014,31 @@ async fn cas_50713_recovery_keeps_a_revived_holder_or_raced_live_winner() {
         assert_eq!(open_task_store(&new.cas_dir).unwrap().get("cas-race").unwrap().status, TaskStatus::Open);
     }
 }
+
+#[tokio::test]
+async fn cas_50713_successor_focus_recognizes_an_unregistered_local_predecessor() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "predecessor");
+    old.put_task("cas-focus", TaskType::Epic);
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &old.agent_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    let agents = open_agent_store(&old.cas_dir).unwrap();
+    let mut ended = agents.get(&old.agent_id).unwrap();
+    ended.status = cas::types::AgentStatus::Shutdown;
+    ended.pid = None;
+    ended.last_heartbeat = Utc::now() - Duration::minutes(20);
+    agents.unregister(&ended.id).unwrap();
+    old.second_agent("successor");
+    let new_id = format!("successor-session-{}", std::process::id());
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &new_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    assert_eq!(cloud.active_lock("cas-focus").unwrap().1.agent_id, new_id);
+}
+
+

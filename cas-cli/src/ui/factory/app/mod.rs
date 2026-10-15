@@ -1138,6 +1138,9 @@ pub struct FactoryApp {
     /// Compact-mode PTY content rects (borderless supervisor content), updated
     /// by `render_compact` only.
     compact_pty_content_areas: HashMap<String, Rect>,
+    /// Panes that existed when the TUI was last drawn (cas-77f39). A pane
+    /// missing from it is new, and counts as on screen until it is drawn.
+    drawn_pane_ids: std::collections::HashSet<String>,
     /// Stored terminal dimensions (for daemon mode where crossterm::terminal::size() doesn't work)
     terminal_cols: u16,
     terminal_rows: u16,

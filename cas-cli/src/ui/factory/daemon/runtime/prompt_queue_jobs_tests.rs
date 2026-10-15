@@ -127,7 +127,7 @@ fn claim_source(cas_dir: &Path, row: i64, recipient: &str) -> Option<String> {
     .ok()
 }
 
-fn store_claim(cas_dir: &Path, row: i64, recipient: &str) -> anyhow::Result<Option<String>> {
+fn store_claim(cas_dir: &Path, row: i64, recipient: &str) -> anyhow::Result<Option<cas_store::ClaimToken>> {
     Ok(crate::store::open_prompt_queue_store(cas_dir)?.claim_recipient_transport_token(row, recipient)?)
 }
 
@@ -232,7 +232,7 @@ fn flv2_no_double_inject() {
         match jobs
             .admit(row_id, "worker-a", t0, move || {
                 let token = store_claim(&cas, row_id, "worker-a")?;
-                *seen.lock().unwrap() = token.clone();
+                *seen.lock().unwrap() = token;
                 Ok(token)
             })
             .unwrap()
@@ -261,7 +261,7 @@ fn flv2_no_double_inject() {
         &cas_dir,
         row_id,
         "worker-a",
-        QueueStamp::ReleaseClaim { token: "2000-01-01T00:00:00+00:00".into() },
+        QueueStamp::ReleaseClaim { claim_token: cas_store::ClaimToken::never_issued() },
     );
     writer.open();
     settle(&mut jobs, |jobs| !jobs.in_flight().holds_row(row_id));
@@ -273,7 +273,7 @@ fn flv2_no_double_inject() {
     );
     let stale_release = crate::store::open_prompt_queue_store(&cas_dir)
         .unwrap()
-        .release_recipient_transport_claim(row_id, "worker-a", "2000-01-01T00:00:00+00:00")
+        .release_recipient_transport_claim(row_id, "worker-a", cas_store::ClaimToken::never_issued())
         .unwrap();
     assert!(!stale_release, "a stale token releases nothing");
     assert_eq!(claim_source(&cas_dir, row_id, "worker-a").as_deref(), Some("transport_claimed"));
@@ -558,9 +558,13 @@ fn another_childs_jobs_share_the_runtime_and_come_back_typed() {
     });
     done.sort_by_key(|result| result.kind);
     assert_eq!(done[0].kind, "DirectorSnapshot");
-    let value = done.remove(0).outcome.unwrap();
+    let ExternalOutcome::Done(value) = done.remove(0).outcome.unwrap() else {
+        panic!("the job ran");
+    };
     assert_eq!(value.downcast_ref::<u32>(), Some(&41));
-    let read = done.remove(0).outcome.unwrap();
+    let ExternalOutcome::Done(read) = done.remove(0).outcome.unwrap() else {
+        panic!("the read ran");
+    };
     assert_eq!(read.downcast_ref::<bool>(), Some(&true), "no read context is wired in this test");
     assert!(jobs.take_selection().is_none(), "external results never look like a selection");
 }
@@ -631,4 +635,129 @@ fn flv2_retraction_reads_fresh_through_the_daemon() {
     daemon.queue_jobs.apply_completions();
     assert_eq!(daemon.queue_jobs.prunes_done, 2);
     assert!(pruner.unread_alerts("supervisor").is_empty(), "a fresh read showing the assignment retracts it");
+}
+
+/// Review round 2: a stamp the lane refuses (closed at shutdown) is handed
+/// to the StoreWorker, never dropped and never written on the caller.
+#[test]
+fn a_refused_stamp_is_handed_to_the_store_worker() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "handed off");
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    jobs.close_lanes_for_test();
+    jobs.stamp(&cas_dir, row_id, "worker-a", QueueStamp::TransportDelivered);
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while queue.queued_prompt(row_id).unwrap().unwrap().processed_at.is_none() {
+        assert!(Instant::now() < deadline, "the refused stamp never landed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(writer.ran().is_empty(), "the closed lane ran nothing");
+}
+
+/// Review round 2: a stamp that failed every retry is deferred, as
+/// `persist_or_defer` did before C3.
+#[test]
+fn an_exhausted_stamp_is_deferred_not_dropped() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "deferred");
+    let token = store_claim(&cas_dir, row_id, "worker-a").unwrap().unwrap();
+    let persisted = defer_stamp(
+        &cas_dir,
+        row_id,
+        "worker-a",
+        &QueueStamp::ReleaseClaim { claim_token: token },
+        "store busy",
+    );
+    assert_ne!(persisted, super::super::store_worker::Persisted::Dropped);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while claim_source(&cas_dir, row_id, "worker-a").is_some() {
+        assert!(Instant::now() < deadline, "the deferred release never landed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn refresh_spec(kind: &'static str, key: &str, lane: Lane, generation: u64) -> super::super::jobs::JobSpec {
+    super::super::jobs::JobSpec {
+        kind,
+        key: key.to_string(),
+        lane,
+        criticality: super::super::jobs::Criticality::Refresh,
+        generation,
+        budget: Duration::from_secs(5),
+    }
+}
+
+/// C2 review: a full lane that drops a queued refresh job tells that job's
+/// owner, not only the submitter that displaced it, so its in-flight slot
+/// clears.
+#[test]
+fn a_dropped_job_is_reported_to_its_owner() {
+    let writer = TestWriter::start(false);
+    let mut jobs = QueueJobs::start_with_capacity(
+        LaneWiring {
+            reader: None,
+            writer: Arc::new(SharedWriter(Arc::clone(&writer))),
+        },
+        1,
+    );
+    // Hold the blocking lane busy so the next jobs queue.
+    let (release, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    jobs.submit_external(refresh_spec("Busy", "busy", Lane::Blocking, 1), move || {
+        let _ = held.lock().unwrap().recv();
+        Box::new(())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    jobs.submit_external(
+        refresh_spec("WorkerHealthProbe", "WorkerHealthProbe:worker-a", Lane::Blocking, 2),
+        || Box::new(()),
+    );
+    // A third refresh job on the full lane displaces the queued probe.
+    let displaced = jobs.submit_external(
+        refresh_spec("DirectorSnapshot", "DirectorSnapshot", Lane::Blocking, 3),
+        || Box::new(()),
+    );
+    assert_eq!(
+        displaced,
+        super::super::jobs::Submitted::QueuedDroppedOldest {
+            dropped_key: "WorkerHealthProbe:worker-a".into()
+        }
+    );
+    jobs.apply_completions();
+    let dropped = jobs.take_external_completions();
+    assert_eq!(dropped.len(), 1, "exactly the displaced job is reported");
+    assert_eq!(dropped[0].key, "WorkerHealthProbe:worker-a");
+    assert_eq!(dropped[0].kind, "WorkerHealthProbe");
+    assert_eq!(dropped[0].generation, 2);
+    assert!(matches!(dropped[0].outcome, Ok(ExternalOutcome::Dropped)));
+    release.send(()).unwrap();
+
+    // The queue's own owner: a dropped retraction read clears its slot, so
+    // the next retraction is not refused forever.
+    let (release, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    jobs.submit_external_read(refresh_spec("Busy", "busy-read", Lane::Read, 4), move |_| {
+        let _ = held.lock().unwrap().recv();
+        Box::new(())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let inboxes = tempfile::tempdir().unwrap();
+    jobs.submit_inbox_retraction(
+        "supervisor",
+        InboxPruner::for_dir(inboxes.path().to_path_buf()),
+        inboxes.path().to_path_buf(),
+        Box::new(|_| Ok(data(Vec::new()))),
+    );
+    assert!(jobs.retractions.contains_key("supervisor"));
+    jobs.submit_external_read(refresh_spec("ReminderScan", "ReminderScan", Lane::Read, 5), |_| {
+        Box::new(())
+    });
+    jobs.apply_completions();
+    assert!(
+        !jobs.retractions.contains_key("supervisor"),
+        "the dropped retraction no longer holds its slot"
+    );
+    release.send(()).unwrap();
 }

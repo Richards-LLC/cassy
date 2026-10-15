@@ -59,7 +59,7 @@ const LANE_CAPACITY: usize = 256;
 pub(crate) enum QueueStamp {
     /// Release the transport claim `token` names, which was not handed off.
     /// A late release never drops a newer claim (review round 1, L10).
-    ReleaseClaim { token: String },
+    ReleaseClaim { claim_token: cas_store::ClaimToken },
     /// The row reached its recipient's transport.
     TransportDelivered,
     /// The recipient's transport receipt (`transport_claimed` surfacing).
@@ -93,8 +93,8 @@ impl QueueStamp {
 
     fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
-            Self::ReleaseClaim { token } => queue
-                .release_recipient_transport_claim(row, recipient, token)
+            Self::ReleaseClaim { claim_token } => queue
+                .release_recipient_transport_claim(row, recipient, *claim_token)
                 .map(drop),
             Self::TransportDelivered => queue.mark_transport_delivered(row),
             Self::TransportReceipt => queue.record_recipient_surfaced(
@@ -179,6 +179,28 @@ pub(crate) enum QueueJobOutcome {
     /// Another daemon child's job on the same runtime (factory loop v2 C2):
     /// its own result type, handed back by [`QueueJobs::take_external_completions`].
     External(Box<dyn std::any::Any + Send>),
+    /// The lane dropped this refresh job to make room (or the lane was full
+    /// of critical work). It never ran; its owner must clear its in-flight
+    /// state (C2 review).
+    Dropped,
+}
+
+/// A finished job submitted by another child through
+/// [`QueueJobs::submit_external`]. A job that panicked has `outcome` Err.
+pub(crate) enum ExternalOutcome {
+    /// The job ran and returned this value.
+    Done(Box<dyn std::any::Any + Send>),
+    /// The lane dropped the job before it ran: clear its in-flight slot.
+    Dropped,
+}
+
+/// Who learns a refresh job's result, kept so a drop can be reported to the
+/// job's owner rather than only to whoever's submit displaced it.
+#[derive(Debug, Clone, Copy)]
+struct JobOwner {
+    kind: &'static str,
+    generation: u64,
+    external: bool,
 }
 
 /// Where queue jobs run. `Inline` runs each job on the submitting thread
@@ -275,7 +297,7 @@ struct InFlight {
     since: Instant,
     phase: InjectPhase,
     /// The transport claim the inject holds, released by token.
-    token: Option<String>,
+    claim_token: Option<cas_store::ClaimToken>,
 }
 
 /// An inject whose outcome never arrived: release `token`'s claim.
@@ -284,7 +306,7 @@ pub(crate) struct ExpiredInject {
     pub(crate) row: i64,
     pub(crate) recipient: String,
     pub(crate) generation: u64,
-    pub(crate) token: Option<String>,
+    pub(crate) claim_token: Option<cas_store::ClaimToken>,
 }
 
 /// Rows control has injected whose stamps have not landed (spec §4.5 rule 2).
@@ -302,7 +324,7 @@ impl InFlightSet {
         recipient: &str,
         generation: u64,
         now: Instant,
-        token: Option<String>,
+        claim_token: Option<cas_store::ClaimToken>,
     ) {
         self.entries.insert(
             (row, recipient.to_string()),
@@ -310,16 +332,16 @@ impl InFlightSet {
                 generation,
                 since: now,
                 phase: InjectPhase::AwaitingOutcome,
-                token,
+                claim_token,
             },
         );
     }
 
     /// The transport claim token an in-flight inject holds.
-    pub(crate) fn token_of(&self, row: i64, recipient: &str) -> Option<String> {
+    pub(crate) fn token_of(&self, row: i64, recipient: &str) -> Option<cas_store::ClaimToken> {
         self.entries
             .get(&(row, recipient.to_string()))
-            .and_then(|entry| entry.token.clone())
+            .and_then(|entry| entry.claim_token)
     }
 
     /// Whether any recipient of `row` is in flight.
@@ -397,7 +419,7 @@ impl InFlightSet {
                 row: *row,
                 recipient: recipient.clone(),
                 generation: entry.generation,
-                token: entry.token.clone(),
+                claim_token: entry.claim_token,
             })
             .collect();
         for expired in &expired {
@@ -567,7 +589,11 @@ pub(crate) struct QueueJobs {
     /// Retractions waiting for their fresh read: recipient -> (pruner, repo).
     retractions: HashMap<String, (InboxPruner, PathBuf)>,
     /// Finished jobs other children submitted to this runtime, until taken.
-    external: Vec<JobResult<Box<dyn std::any::Any + Send>>>,
+    external: Vec<JobResult<ExternalOutcome>>,
+    /// The owner of each refresh key last submitted, by key.
+    job_owners: HashMap<String, JobOwner>,
+    /// Dropped jobs, reported as results on the next apply.
+    dropped: Vec<JobResult<QueueJobOutcome>>,
     mirror_in_flight: bool,
     mirror_state: Option<Box<super::MirrorScanState>>,
     config: ConfigCache,
@@ -594,6 +620,12 @@ impl QueueJobs {
         Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(LANE_CAPACITY, wiring))))
     }
 
+    /// Jobs on explicit wiring with a small lane capacity (tests: drops).
+    #[cfg(test)]
+    pub(crate) fn start_with_capacity(wiring: LaneWiring, capacity: usize) -> Self {
+        Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(capacity, wiring))))
+    }
+
     /// Every job runs on the submitting thread before `submit` returns.
     #[cfg(test)]
     pub(crate) fn inline() -> Self {
@@ -611,6 +643,8 @@ impl QueueJobs {
             submitted_stamps: HashSet::new(),
             retractions: HashMap::new(),
             external: Vec::new(),
+            job_owners: HashMap::new(),
+            dropped: Vec::new(),
             mirror_in_flight: false,
             mirror_state: Some(Box::default()),
             config: ConfigCache::default(),
@@ -671,7 +705,7 @@ impl QueueJobs {
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
-        let submitted = self.exec.submit(spec, move || {
+        let submitted = self.submit_job(spec, false, move || {
             let selection = select(&request, generation);
             ready.store(true, Ordering::Release);
             QueueJobOutcome::Selected(selection)
@@ -720,10 +754,24 @@ impl QueueJobs {
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
-        self.exec.submit(spec, move || {
-            let error = (stamp != QueueStamp::Settled)
-                .then(|| apply_stamp_with_retry(&cas_dir, row, &recipient, &stamp))
-                .flatten();
+        let refused = (stamp != QueueStamp::Settled)
+            .then(|| (cas_dir.clone(), recipient.clone(), stamp.clone()));
+        let submitted = self.submit_job(spec, false, move || {
+            let error = if stamp == QueueStamp::Settled {
+                None
+            } else {
+                // A stamp records something already done (a handoff, a
+                // claim): never drop it. Past its retries, or if it panics,
+                // the StoreWorker retries it as `persist_or_defer` did before
+                // C3 (review round 2).
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    apply_stamp_with_retry(&cas_dir, row, &recipient, &stamp)
+                }))
+                .unwrap_or_else(|_| Some("the stamp panicked".to_string()));
+                outcome.inspect(|error| {
+                    defer_stamp(&cas_dir, row, &recipient, &stamp, error);
+                })
+            };
             QueueJobOutcome::Stamped(StampDone {
                 row,
                 recipient,
@@ -731,7 +779,15 @@ impl QueueJobs {
                 stamp: stamp.label(),
                 error,
             })
-        })
+        });
+        if !accepted(&submitted)
+            && let Some((cas_dir, recipient, stamp)) = refused
+        {
+            // The lane refused it (closed at shutdown): the StoreWorker
+            // still takes it, never the loop.
+            defer_stamp(&cas_dir, row, &recipient, &stamp, "the queue job lane refused the stamp");
+        }
+        submitted
     }
 
     /// Decide whether control may inject `(row, recipient)` now (spec §4.5
@@ -745,16 +801,16 @@ impl QueueJobs {
         row: i64,
         recipient: &str,
         now: Instant,
-        claim: impl FnOnce() -> anyhow::Result<Option<String>>,
+        claim: impl FnOnce() -> anyhow::Result<Option<cas_store::ClaimToken>>,
     ) -> anyhow::Result<Admission> {
         if self.in_flight.holds_row(row) {
             return Ok(Admission::InFlight);
         }
-        let Some(token) = claim()? else {
+        let Some(claim_token) = claim()? else {
             return Ok(Admission::NotClaimed);
         };
         let generation = self.generation();
-        self.in_flight.begin(row, recipient, generation, now, Some(token));
+        self.in_flight.begin(row, recipient, generation, now, Some(claim_token));
         Ok(Admission::Inject { generation })
     }
 
@@ -767,8 +823,8 @@ impl QueueJobs {
     /// Release the transport claim the in-flight inject of `(row, recipient)`
     /// holds, by its token. No-op when there is none.
     pub(crate) fn release_inject_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
-        if let Some(token) = self.in_flight.token_of(row, recipient) {
-            self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { token });
+        if let Some(claim_token) = self.in_flight.token_of(row, recipient) {
+            self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { claim_token });
         }
     }
 
@@ -805,13 +861,13 @@ impl QueueJobs {
                 generation = inject.generation,
                 "factory loop v2: no inject outcome in time; releasing the transport claim so the row retries"
             );
-            if let Some(token) = inject.token.clone() {
+            if let Some(claim_token) = inject.claim_token {
                 self.submit_stamp(
                     cas_dir,
                     inject.row,
                     &inject.recipient,
                     inject.generation,
-                    QueueStamp::ReleaseClaim { token },
+                    QueueStamp::ReleaseClaim { claim_token },
                 );
             }
         }
@@ -852,7 +908,7 @@ impl QueueJobs {
             generation,
             budget: REVALIDATE_FRESH_BUDGET,
         };
-        let submitted = self.exec.submit_read(spec, move |stores| {
+        let submitted = self.submit_job_read(spec, false, move |stores| {
             let data = fresh(stores);
             QueueJobOutcome::Revalidated {
                 recipient: owned,
@@ -878,7 +934,7 @@ impl QueueJobs {
             generation,
             budget: INBOX_PRUNE_BUDGET,
         };
-        self.exec.submit(spec, move || {
+        self.submit_job(spec, false, move || {
             let report = prune_inbox_from_fresh(&pruner, &recipient, &data, &repo_root);
             QueueJobOutcome::Pruned(report)
         });
@@ -904,7 +960,7 @@ impl QueueJobs {
             generation,
             budget: MIRROR_WRITE_BUDGET,
         };
-        let submitted = self.exec.submit(spec, move || {
+        let submitted = self.submit_job(spec, false, move || {
             scan(&mut state);
             QueueJobOutcome::Mirrored(state)
         });
@@ -921,7 +977,9 @@ impl QueueJobs {
     /// waits for [`Self::take_selection`], a fresh read starts its prune.
     pub(crate) fn apply_completions(&mut self) {
         self.ready.store(false, Ordering::Release);
-        for result in self.exec.drain() {
+        let mut finished = std::mem::take(&mut self.dropped);
+        finished.extend(self.exec.drain());
+        for result in finished {
             let outcome = match result.outcome {
                 Ok(outcome) => outcome,
                 Err(panicked) => {
@@ -984,13 +1042,13 @@ impl QueueJobs {
                 }
                 QueueJobOutcome::Stamped(done) => {
                     if let Some(error) = &done.error {
-                        tracing::error!(
+                        tracing::warn!(
                             target: "cas::coordination",
                             message_id = done.row,
                             recipient = %done.recipient,
                             stamp = done.stamp,
                             %error,
-                            "factory loop v2: queue stamp failed after retries"
+                            "factory loop v2: queue stamp failed its retries; handed to the store worker"
                         );
                     }
                     if done.stamp == "settled" {
@@ -1021,11 +1079,48 @@ impl QueueJobs {
                     self.mirror_in_flight = false;
                     self.mirror_state = Some(state);
                 }
+                QueueJobOutcome::Dropped => {
+                    let external = self
+                        .job_owners
+                        .get(&result.key)
+                        .is_some_and(|owner| owner.external);
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        kind = result.kind,
+                        key = %result.key,
+                        "factory loop v2: a full lane dropped a queued refresh job"
+                    );
+                    if external {
+                        self.external.push(JobResult {
+                            kind: result.kind,
+                            key: result.key,
+                            generation: result.generation,
+                            outcome: Ok(ExternalOutcome::Dropped),
+                            elapsed: Duration::ZERO,
+                            writer_wait: Duration::ZERO,
+                            over_budget: false,
+                        });
+                        continue;
+                    }
+                    match result.kind {
+                        "RevalidateFresh" => {
+                            if let Some(recipient) = result.key.strip_prefix("RevalidateFresh:inbox:") {
+                                self.retractions.remove(recipient);
+                            }
+                        }
+                        "MirrorWrite" => {
+                            // Its cursor state went with the dropped job.
+                            self.mirror_in_flight = false;
+                            self.mirror_state = Some(Box::default());
+                        }
+                        _ => {}
+                    }
+                }
                 QueueJobOutcome::External(value) => self.external.push(JobResult {
                     kind: result.kind,
                     key: result.key,
                     generation: result.generation,
-                    outcome: Ok(value),
+                    outcome: Ok(ExternalOutcome::Done(value)),
                     elapsed: result.elapsed,
                     writer_wait: result.writer_wait,
                     over_budget: result.over_budget,
@@ -1034,6 +1129,71 @@ impl QueueJobs {
         }
         // A selection not yet delivered keeps the loop's fast path armed.
         self.ready.store(self.selection.is_some(), Ordering::Release);
+    }
+
+    fn submit_job(
+        &mut self,
+        spec: JobSpec,
+        external: bool,
+        work: impl FnOnce() -> QueueJobOutcome + Send + 'static,
+    ) -> Submitted {
+        let owner = self.owner_of(&spec, external);
+        let submitted = self.exec.submit(spec, work);
+        self.track(owner, &submitted);
+        submitted
+    }
+
+    fn submit_job_read(
+        &mut self,
+        spec: JobSpec,
+        external: bool,
+        work: impl FnOnce(Option<&DirectorStores>) -> QueueJobOutcome + Send + 'static,
+    ) -> Submitted {
+        let owner = self.owner_of(&spec, external);
+        let submitted = self.exec.submit_read(spec, work);
+        self.track(owner, &submitted);
+        submitted
+    }
+
+    fn owner_of(&self, spec: &JobSpec, external: bool) -> Option<(String, JobOwner)> {
+        (spec.criticality == Criticality::Refresh).then(|| {
+            (
+                spec.key.clone(),
+                JobOwner {
+                    kind: spec.kind,
+                    generation: spec.generation,
+                    external,
+                },
+            )
+        })
+    }
+
+    /// Record a refresh job's owner, and report every job a submit dropped
+    /// to that job's owner (C2 review): the displaced one, or the submitted
+    /// one itself when the lane was full of critical work.
+    fn track(&mut self, owner: Option<(String, JobOwner)>, submitted: &Submitted) {
+        let submitted_key = owner.as_ref().map(|(key, _)| key.clone());
+        if let Some((key, owner)) = owner {
+            self.job_owners.insert(key, owner);
+        }
+        let dropped_key = match submitted {
+            Submitted::QueuedDroppedOldest { dropped_key } => Some(dropped_key.clone()),
+            Submitted::DroppedRefresh => submitted_key,
+            _ => None,
+        };
+        if let Some(key) = dropped_key
+            && let Some(owner) = self.job_owners.get(&key).copied()
+        {
+            self.dropped.push(JobResult {
+                kind: owner.kind,
+                key,
+                generation: owner.generation,
+                outcome: Ok(QueueJobOutcome::Dropped),
+                elapsed: Duration::ZERO,
+                writer_wait: Duration::ZERO,
+                over_budget: false,
+            });
+        }
     }
 
     /// Submit another child's job (factory loop v2 C2) to the daemon's one
@@ -1047,7 +1207,7 @@ impl QueueJobs {
         spec: JobSpec,
         work: impl FnOnce() -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
-        self.exec.submit(spec, move || QueueJobOutcome::External(work()))
+        self.submit_job(spec, true, move || QueueJobOutcome::External(work()))
     }
 
     /// [`Self::submit_external`] on the read lane, with its dedicated
@@ -1057,14 +1217,11 @@ impl QueueJobs {
         spec: JobSpec,
         work: impl FnOnce(Option<&DirectorStores>) -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
-        self.exec
-            .submit_read(spec, move |stores| QueueJobOutcome::External(work(stores)))
+        self.submit_job_read(spec, true, move |stores| QueueJobOutcome::External(work(stores)))
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).
-    pub(crate) fn take_external_completions(
-        &mut self,
-    ) -> Vec<JobResult<Box<dyn std::any::Any + Send>>> {
+    pub(crate) fn take_external_completions(&mut self) -> Vec<JobResult<ExternalOutcome>> {
         std::mem::take(&mut self.external)
     }
 
@@ -1094,6 +1251,14 @@ impl QueueJobs {
                 }
             },
             Exec::Inline(_) => true,
+        }
+    }
+
+    /// Stop the lanes taking work, as at shutdown (tests).
+    #[cfg(test)]
+    pub(crate) fn close_lanes_for_test(&self) {
+        if let Exec::Lanes(runtime) = &self.exec {
+            runtime.close();
         }
     }
 
@@ -1169,6 +1334,38 @@ pub(crate) fn job_thread_prompt_queue(
     job_thread_store("prompt_queue", cas_dir, |dir| {
         Ok(crate::store::open_prompt_queue_store(dir)?)
     })
+}
+
+/// Hand a stamp that could not land to the StoreWorker, which retries it
+/// without a budget (GH #1165 `defer`). Never runs the write on the caller.
+pub(crate) fn defer_stamp(
+    cas_dir: &Path,
+    row: i64,
+    recipient: &str,
+    stamp: &QueueStamp,
+    first_error: &str,
+) -> super::store_worker::Persisted {
+    let label = stamp.label();
+    let cas_dir = cas_dir.to_path_buf();
+    let deferred_recipient = recipient.to_string();
+    let stamp = stamp.clone();
+    let persisted = super::store_worker::defer("queue stamp", first_error, move || {
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|error| error.to_string())?;
+        stamp
+            .apply(queue.as_ref(), row, &deferred_recipient)
+            .map_err(|error| error.to_string())
+    });
+    if persisted == super::store_worker::Persisted::Dropped {
+        tracing::error!(
+            target: "cas::coordination",
+            message_id = row,
+            %recipient,
+            stamp = label,
+            error = %first_error,
+            "factory loop v2: queue stamp failed and could not be handed to the store worker"
+        );
+    }
+    persisted
 }
 
 /// Run one stamp, retrying a busy store a few times on the writer. Returns

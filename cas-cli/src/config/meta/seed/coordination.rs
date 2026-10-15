@@ -39,7 +39,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          ConfigType::Int, "75", Constraint::Range(0, 100)),
         ("factory.target_cache_min_idle_secs", "Cargo Cache Minimum Idle Time",
          "Preserve caches and previews written more recently than this many seconds during explicit garbage collection.",
-         ConfigType::Int, "3600", Constraint::Min(0)),
+         ConfigType::Int, "7200", Constraint::Min(0)),
         ("factory.target_cache_retention_count", "Warm Cargo Cache Retention",
          "Number of newest stale worker caches retained warm, also bounding parked deliveries with warm target/debug caches.",
          ConfigType::Int, "1", Constraint::Min(0)),
@@ -97,6 +97,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             advanced: false, requires_feature: None,
             keywords: &["factory", "worker", "supervisor", "mcp", "credentials", "environment"],
             use_cases: &["Keep deployment and production database access on the supervisor"],
+        });
+    }
+    // cas-d757 (GH #1219): operator-authenticated CLIs and tools, denied to
+    // factory workers by the pre-tool hook.
+    for (key, name, default, description) in [
+        ("factory.worker_denied_clis", "Worker-denied CLIs", "vercel", "Operator-only. Executables a factory worker's shell may not run (matched on basename, through env/sudo/sh -c/npx-style wrappers), because without credentials they start a login that prompts the operator. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
+        ("factory.worker_denied_mcp_tools", "Worker-denied MCP Tools", "*vercel*", "Operator-only. MCP and connector tool-name patterns a factory worker may not call (case-insensitive; `*` matches any characters), including calls dispatched through mcp_execute. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description,
+            value_type: ConfigType::StringList, default, constraint: Constraint::None,
+            advanced: false, requires_feature: None,
+            keywords: &["factory", "worker", "supervisor", "vercel", "auth", "deny", "mcp"],
+            use_cases: &["Keep operator-authenticated CLIs such as vercel away from workers"],
         });
     }
     registry.register(ConfigMeta {
@@ -203,6 +217,34 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         requires_feature: None,
         keywords: &["factory", "cargo", "build", "memory", "systemd", "scope", "workers"],
         use_cases: &["Keep worker compilation from swapping out the supervisor and daemon"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.render_max_fps",
+        section: "factory",
+        name: "Factory TUI Output Frame Cap (focused pane)",
+        description: "Most frames per second the factory TUI draws for output from the focused pane. Input echo and layout changes are drawn at once; read when the factory daemon starts.",
+        value_type: ConfigType::Int,
+        default: "15",
+        constraint: Constraint::Range(1, 120),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "tui", "render", "fps", "frames", "terminal", "latency"],
+        use_cases: &["Lower the repaint rate when the host terminal is busy painting worker output"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.render_unfocused_fps",
+        section: "factory",
+        name: "Factory TUI Output Frame Cap (other panes)",
+        description: "Most frames per second the factory TUI draws for output from visible panes other than the focused one. Panes not on screen never draw. The two caps add up, so output frames reach at most render_max_fps + render_unfocused_fps per second (20 by default); read when the factory daemon starts.",
+        value_type: ConfigType::Int,
+        default: "5",
+        constraint: Constraint::Range(1, 120),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "tui", "render", "fps", "frames", "terminal", "workers"],
+        use_cases: &["Keep busy worker panes from repainting the whole factory TUI"],
     });
 
     registry.register(ConfigMeta {

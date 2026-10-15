@@ -3650,6 +3650,11 @@ fn strip_envelope(line: &str) -> Option<&str> {
     if rest.starts_with("[cas #") {
         rest = rest.find(']').map_or("", |end| rest[end + 1..].trim());
     }
+    // cas-1f0c: a daemon pointer wake is one envelope line whose wording says
+    // how the body is shown, never what the request is.
+    if rest.starts_with("CAS wake: ") {
+        return None;
+    }
     (!rest.is_empty()).then_some(rest)
 }
 
@@ -4695,6 +4700,17 @@ mod tests {
             )
             .is_empty(),
             "a bare wake envelope carries no recall terms"
+        );
+        // cas-1f0c: the daemon's current pointer wake, with or without the
+        // Teams copy's provenance line, leaves no request text.
+        let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload(
+            "supervisor",
+            Some(33981),
+        );
+        assert_eq!(redact_prompt(&wake), "", "{wake}");
+        assert_eq!(
+            redact_prompt(&format!("[cas #33981 supervisor-authored 4s first]\n\n{wake}")),
+            ""
         );
         // Real content still counts, including a commit-sha prefix and a task id.
         assert!(lexical_match_is_eligible(&["you", "prompt_queue_store"]));

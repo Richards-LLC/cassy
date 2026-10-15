@@ -321,6 +321,7 @@ impl FactoryApp {
             sidecar_area: None,
             full_pty_content_areas: HashMap::new(),
             compact_pty_content_areas: HashMap::new(),
+            drawn_pane_ids: std::collections::HashSet::new(),
             terminal_cols: cols,
             terminal_rows: rows,
             auto_prompt: config.auto_prompt.clone(),
@@ -502,6 +503,7 @@ impl FactoryApp {
             sidecar_area: None,
             full_pty_content_areas: HashMap::new(),
             compact_pty_content_areas: HashMap::new(),
+            drawn_pane_ids: std::collections::HashSet::new(),
             terminal_cols: cols,
             terminal_rows: rows,
             auto_prompt,
@@ -611,6 +613,13 @@ impl FactoryApp {
 
     /// Track a live worker pane the way a finished spawn does, for tests that
     /// drive shutdown against a real PTY process (cas-00d5).
+    /// Name a roster worker without a pane, for daemon sweeps that read
+    /// only the roster (cas-1f0c).
+    #[cfg(test)]
+    pub(crate) fn add_worker_name_for_test(&mut self, name: &str) {
+        self.worker_names.push(name.to_string());
+    }
+
     #[cfg(test)]
     pub(crate) fn adopt_worker_pane_for_test(&mut self, pane: cas_mux::Pane) {
         self.worker_names.push(pane.id().to_string());
@@ -738,6 +747,7 @@ impl FactoryApp {
             sidecar_area: None,
             full_pty_content_areas: HashMap::new(),
             compact_pty_content_areas: HashMap::new(),
+            drawn_pane_ids: std::collections::HashSet::new(),
             terminal_cols: 80,
             terminal_rows: 24,
             auto_prompt: AutoPromptConfig::default(),

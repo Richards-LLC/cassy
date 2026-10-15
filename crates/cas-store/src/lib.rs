@@ -265,6 +265,8 @@ pub use surfaced_artifact_store::{
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
     AdmissionOutcome, OperatorCommandAdmission,
+    BudgetedSurface, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
+    fits_hook_surface, hook_surface_cost,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
     session_routing_id,
@@ -273,7 +275,7 @@ pub use prompt_queue_store::{
     OperatorTurn, OperatorTurnMetadata, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
     ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
     MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
-    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptRetentionSweep, RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, PromptQueueStore, PromptRetryDisposition,
+    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptRetentionSweep, RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, PromptQueueStore, PromptRetryDisposition, ClaimToken,
     OperatorStamp, QueueOrigin, QueuedPrompt, RelayAlertState, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
     UndeliveredLifecycleRelay, WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt,
     WorkerPeerMessageEnqueue, inbox_signal_file_name, read_inbox_signal,

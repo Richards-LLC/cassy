@@ -14,13 +14,47 @@ use crate::cli::config::operator_ops::guard_operator_config;
 use crate::cli::config::util::{format_constraint, truncate_description};
 use crate::config::operator_policy::InvocationContext;
 
-pub(crate) fn execute_get(args: &ConfigGetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let config = Config::load(cas_root)?;
-    execute_get_internal(&config, &args.key, cli)
+// Plain `get` stays a machine-readable scalar for `gh --repo "$(cas config get
+// issues.repo)"`. Structured and human multi-field views expose provenance.
+fn origin_note(config: &Config, key: &str, value: &str) -> &'static str {
+    if key == "issues.repo" && !value.is_empty() && config.issue_repo_registry().project.is_none() {
+        " (from origin; unset in config)"
+    } else {
+        ""
+    }
 }
 
-fn execute_get_internal(config: &Config, key: &str, cli: &Cli) -> anyhow::Result<()> {
-    if let Some(value) = config.get(key) {
+fn with_issue_repo_source(
+    mut json: serde_json::Value,
+    config: &Config,
+    key: &str,
+    value: &str,
+) -> serde_json::Value {
+    if key == "issues.repo" {
+        json["source"] = serde_json::json!(if !origin_note(config, key, value).is_empty() {
+            "origin"
+        } else if config.issue_repo_registry().project.is_some() {
+            "config"
+        } else {
+            "unset"
+        });
+        json["configured"] = serde_json::json!(config.issue_repo_registry().project.is_some());
+    }
+    json
+}
+
+pub(crate) fn execute_get(args: &ConfigGetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    let config = Config::load(cas_root)?;
+    execute_get_internal(&config, &args.key, cli, cas_root)
+}
+
+fn execute_get_internal(
+    config: &Config,
+    key: &str,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<()> {
+    if let Some(value) = config.get_resolved(key, cas_root) {
         if cli.json {
             let meta = registry().get(key);
             let json = serde_json::json!({
@@ -30,7 +64,10 @@ fn execute_get_internal(config: &Config, key: &str, cli: &Cli) -> anyhow::Result
                 "default": meta.map(|m| m.default),
                 "modified": meta.map(|m| m.is_modified(&value)).unwrap_or(false)
             });
-            println!("{}", serde_json::to_string_pretty(&json)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, &value))?
+            );
         } else {
             println!("{value}");
         }
@@ -83,7 +120,13 @@ fn execute_set_internal(
     cas_root: &std::path::Path,
     cli: &Cli,
 ) -> anyhow::Result<()> {
-    let old_value = set_config_value(config, key, value, cas_root, InvocationContext::from_process)?;
+    let old_value = set_config_value(
+        config,
+        key,
+        value,
+        cas_root,
+        InvocationContext::from_process,
+    )?;
 
     if cli.json {
         let json = serde_json::json!({
@@ -115,7 +158,13 @@ pub(crate) fn execute_list(
     let reg = registry();
 
     // Get all current values
-    let items: HashMap<String, String> = config.list().into_iter().collect();
+    let mut items: HashMap<String, String> = config.list().into_iter().collect();
+    items.insert(
+        "issues.repo".into(),
+        config
+            .get_resolved("issues.repo", cas_root)
+            .unwrap_or_default(),
+    );
 
     if cli.json {
         let mut result = serde_json::Map::new();
@@ -145,13 +194,18 @@ pub(crate) fn execute_list(
 
                 section_items.insert(
                     meta.key.to_string(),
-                    serde_json::json!({
-                        "value": value,
-                        "default": meta.default,
-                        "type": meta.value_type.name(),
-                        "modified": is_modified,
-                        "description": meta.description
-                    }),
+                    with_issue_repo_source(
+                        serde_json::json!({
+                            "value": value,
+                            "default": meta.default,
+                            "type": meta.value_type.name(),
+                            "modified": is_modified,
+                            "description": meta.description
+                        }),
+                        &config,
+                        meta.key,
+                        &value,
+                    ),
                 );
             }
 
@@ -232,6 +286,7 @@ pub(crate) fn execute_list(
                     fmt.write_raw(" = ")?;
                     fmt.write_muted(&value)?;
                 }
+                fmt.write_muted(origin_note(&config, meta.key, &value))?;
                 if !advanced_marker.is_empty() {
                     fmt.write_muted(advanced_marker)?;
                 }
@@ -267,7 +322,7 @@ pub(crate) fn execute_describe(
 
     if let Some(meta) = reg.get(&args.key) {
         let current_value = config
-            .get(&args.key)
+            .get_resolved(&args.key, cas_root)
             .unwrap_or_else(|| meta.default.to_string());
         let is_modified = meta.is_modified(&current_value);
 
@@ -286,7 +341,15 @@ pub(crate) fn execute_describe(
                 "constraint": format_constraint(&meta.constraint),
                 "examples": meta.examples()
             });
-            println!("{}", serde_json::to_string_pretty(&json)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&with_issue_repo_source(
+                    json,
+                    &config,
+                    &args.key,
+                    &current_value
+                ))?
+            );
         } else {
             let theme = ActiveTheme::default();
             let mut out = std::io::stdout();
@@ -309,7 +372,13 @@ pub(crate) fn execute_describe(
             } else {
                 current_value.clone()
             };
-            fmt.field("Current", &current_display)?;
+            fmt.field(
+                "Current",
+                &format!(
+                    "{current_display}{}",
+                    origin_note(&config, &args.key, &current_value)
+                ),
+            )?;
             fmt.write_raw("Default:     ")?;
             fmt.write_muted(meta.default)?;
             fmt.newline()?;
@@ -502,16 +571,21 @@ pub(crate) fn execute_search(
             .iter()
             .map(|meta| {
                 let current = config
-                    .get(meta.key)
+                    .get_resolved(meta.key, cas_root)
                     .unwrap_or_else(|| meta.default.to_string());
-                serde_json::json!({
-                    "key": meta.key,
-                    "name": meta.name,
-                    "description": meta.description,
-                    "current_value": current,
-                    "default": meta.default,
-                    "type": meta.value_type.name()
-                })
+                with_issue_repo_source(
+                    serde_json::json!({
+                        "key": meta.key,
+                        "name": meta.name,
+                        "description": meta.description,
+                        "current_value": current,
+                        "default": meta.default,
+                        "type": meta.value_type.name()
+                    }),
+                    &config,
+                    meta.key,
+                    &current,
+                )
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&json)?);
@@ -522,11 +596,16 @@ pub(crate) fn execute_search(
         println!();
         for meta in results {
             let current = config
-                .get(meta.key)
+                .get_resolved(meta.key, cas_root)
                 .unwrap_or_else(|| meta.default.to_string());
             let modified = if meta.is_modified(&current) { "*" } else { " " };
             println!("{}{}", modified, meta.key);
-            println!("    {} = {}", meta.name, current);
+            println!(
+                "    {} = {}{}",
+                meta.name,
+                current,
+                origin_note(&config, meta.key, &current)
+            );
             println!("    {}", truncate_description(meta.description, 60));
             println!();
         }

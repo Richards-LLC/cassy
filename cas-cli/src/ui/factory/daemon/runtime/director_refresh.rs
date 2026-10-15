@@ -133,6 +133,7 @@ pub(crate) struct DirectorRefresh {
     reader: Option<RefreshReader>,
     director: Option<Pending<DirectorRefreshLoad>>,
     delivery: Option<Pending<(Vec<DirectorEvent>, DeliveryInputs)>>,
+    deliverability_ready: Vec<DeliverabilityBatch>,
     /// Test hook: sleep this long inside every background read.
     read_delay: Duration,
 }
@@ -143,6 +144,7 @@ impl DirectorRefresh {
             reader: None,
             director: None,
             delivery: None,
+            deliverability_ready: Vec::new(),
             read_delay: Duration::ZERO,
         }
     }
@@ -221,6 +223,42 @@ impl DirectorRefresh {
     pub(crate) fn take_delivery_read(&mut self) -> Option<(Vec<DirectorEvent>, DeliveryInputs)> {
         take_finished(&mut self.delivery)
     }
+
+    /// Factory loop v2 C2 (cas-223f) API skeleton: the jobs runtime. Not
+    /// implemented yet; the reads still run on `factory-refresh-reader`.
+    #[cfg(test)]
+    pub(crate) fn jobs(&self) -> Option<&std::sync::Arc<super::jobs::JobRuntime<()>>> {
+        None
+    }
+
+    /// API skeleton: the inject loop's re-check. Not implemented as a job
+    /// yet; it re-reads on the caller's thread as the inject loop does.
+    pub(crate) fn start_deliverability_check(
+        &mut self,
+        app: &FactoryApp,
+        prompts: Vec<crate::ui::factory::director::Prompt>,
+        _events: Vec<DirectorEvent>,
+        _refresh_started: std::time::Instant,
+    ) -> Result<(), Vec<crate::ui::factory::director::Prompt>> {
+        let prompts = prompts
+            .into_iter()
+            .map(|prompt| {
+                let deliverable = app.prompt_is_still_deliverable(&prompt);
+                (prompt, deliverable)
+            })
+            .collect();
+        self.deliverability_ready.push(DeliverabilityBatch { prompts });
+        Ok(())
+    }
+
+    pub(crate) fn take_deliverability(&mut self) -> Vec<DeliverabilityBatch> {
+        std::mem::take(&mut self.deliverability_ready)
+    }
+}
+
+/// API skeleton: re-checked prompts.
+pub(crate) struct DeliverabilityBatch {
+    pub(crate) prompts: Vec<(crate::ui::factory::director::Prompt, bool)>,
 }
 
 #[cfg(test)]

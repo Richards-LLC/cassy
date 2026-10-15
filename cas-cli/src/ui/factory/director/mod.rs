@@ -34,6 +34,7 @@ pub(crate) use events::{
     FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
 };
 pub(crate) use events::MergedCloseBlockedTask;
+pub(crate) use events::{WorkerHealthReport, WorkerHealthRequest};
 pub use panel::PanelRegistry;
 pub use prompts::{
     check_merge_alert_freshness, check_merge_alert_freshness_for_task, compute_gated_task_ids,

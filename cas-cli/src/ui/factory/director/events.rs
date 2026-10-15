@@ -1176,6 +1176,35 @@ struct StallProbeCache {
     fingerprint: Option<(std::time::SystemTime, u64)>,
 }
 
+/// Factory loop v2 C2 (cas-223f): a worker health probe the detector asks the
+/// daemon to run off the loop. API skeleton; not implemented yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerHealthRequest {
+    pub(crate) worker: String,
+    pub(crate) task: String,
+    pub(crate) threshold_secs: u64,
+    pub(crate) delay_secs: i64,
+    pub(crate) requested_at: DateTime<Utc>,
+}
+
+/// A finished worker health probe. API skeleton; not implemented yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerHealthReport {
+    pub(crate) worker: String,
+    pub(crate) task: String,
+    pub(crate) confirmed: bool,
+}
+
+impl WorkerHealthReport {
+    pub(crate) fn verdict(request: &WorkerHealthRequest, confirmed: bool) -> Self {
+        Self {
+            worker: request.worker.clone(),
+            task: request.task.clone(),
+            confirmed,
+        }
+    }
+}
+
 fn stall_transcript_fingerprint(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
@@ -1443,6 +1472,20 @@ impl DirectorEventDetector {
     #[cfg(test)]
     pub(crate) fn set_transcript_in_flight_override(&mut self, in_flight: HashMap<String, bool>) {
         self.transcript_in_flight_override = Some(in_flight);
+    }
+
+    /// Factory loop v2 C2 (cas-223f): defer health probes to jobs. Not
+    /// implemented yet: probes still run inline.
+    pub(crate) fn set_deferred_health_probes(&mut self, _deferred: bool) {}
+
+    /// Not implemented yet: no probe is ever deferred.
+    pub(crate) fn take_worker_health_requests(&mut self) -> Vec<WorkerHealthRequest> {
+        Vec::new()
+    }
+
+    /// Not implemented yet.
+    pub(crate) fn apply_worker_health_report(&mut self, report: WorkerHealthReport) -> bool {
+        report.confirmed
     }
 
     /// Initialize with current state (call after first data load)

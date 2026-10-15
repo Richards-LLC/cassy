@@ -48,7 +48,7 @@ fn set_string(item: &mut toml_edit::Item, text: &str) {
     }
 }
 
-/// Point the production proxy entry at the canonical URL and credential names.
+/// Point a production entry at the canonical URL; optionally rename proxy refs.
 fn modernize_toml_entry(
     document: &mut toml_edit::DocumentMut,
     key: &str,
@@ -542,6 +542,13 @@ impl<'a> UpdateMigration<'a> {
             .and_then(|path| cmcp_core::config::Config::load_from(&path).ok())
             .and_then(|mut config| {
                 config.retire_legacy_hub_registration();
+                let production = match config.servers.get(VIOLET_SERVER)? {
+                    cmcp_core::config::ServerConfig::Http { url, .. } => is_violet_hub_url(url),
+                    _ => false,
+                };
+                if !production {
+                    return None;
+                }
                 config.violet_env_names().and_then(|(token, _)| token)
             });
         let claude_token = ifs::read_capped(&home.join(".claude.json"))
@@ -559,14 +566,18 @@ impl<'a> UpdateMigration<'a> {
                     .and_then(|s| s.strip_suffix('}'))
                     .map(str::to_owned)
             });
-        let preferred = [proxy_token, claude_token]
+        let selector = values
+            .get("VIOLET_SLACK_TOKEN_ENV")
+            .or_else(|| values.get(&violet_compatibility().legacy_token_selector_env))
+            .cloned();
+        let preferred = [selector, proxy_token, claude_token]
             .into_iter()
             .flatten()
             .map(|name| canonical_violet_credential_name(&name))
-            .find(|name| usable(name));
+            .find(|name| Self::managed_token(name) && usable(name));
         let candidates: Vec<_> = values
             .keys()
-            .filter(|name| name.starts_with("VIOLET_SLACK_TOKEN_") && usable(name))
+            .filter(|name| Self::managed_token(name) && usable(name))
             .cloned()
             .collect();
         let machine_token = preferred.or_else(|| {
@@ -587,12 +598,17 @@ impl<'a> UpdateMigration<'a> {
         self.values.get(name).is_some_and(|v| !v.trim().is_empty())
     }
 
+    fn managed_token(name: &str) -> bool {
+        (name == "VIOLET_SLACK_TOKEN" || name.starts_with("VIOLET_SLACK_TOKEN_"))
+            && name != "VIOLET_SLACK_TOKEN_ENV"
+    }
+
     fn rename(&self, name: &str, path: &Path, report: &mut ProfileRetirement) -> String {
         let mut canonical = canonical_violet_credential_name(name);
         // A historical CASSY_PROXY label may no longer exist at all. Use the
         // established machine token only for an unusable managed reference;
         // unknown/custom variables and ambiguous machines remain actionable errors.
-        if canonical.starts_with("VIOLET_SLACK_TOKEN_")
+        if Self::managed_token(&canonical)
             && !self.usable(&canonical)
             && !self.usable(name)
             && let Some(machine) = &self.machine_token
@@ -730,10 +746,17 @@ impl<'a> UpdateMigration<'a> {
             .map(|(name, value)| value.map(|value| (name, value)))
             .collect::<Result<_>>()?;
         let auth = auth.transpose()?;
-        let header_auth = headers
+        let authorization = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-            .and_then(|(_, value)| value.strip_prefix("Bearer "));
+            .map(|(_, value)| value.as_str());
+        let header_auth = authorization.and_then(|value| value.strip_prefix("Bearer "));
+        if authorization.is_some() {
+            anyhow::ensure!(
+                header_auth.is_some_and(|v| !v.trim().is_empty()),
+                "Violet Authorization header has an empty bearer; no request sent"
+            );
+        }
         anyhow::ensure!(
             auth.as_deref()
                 .or(header_auth)
@@ -976,7 +999,7 @@ mod tests {
 
     #[test]
     fn cas_678d_update_diagnoses_missing_ambiguous_and_rejected_credentials() {
-        for mode in ["empty", "unset", "ambiguous", "rejected"] {
+        for mode in ["empty", "unset", "selector-only", "ambiguous", "rejected"] {
             let (mut env, mut probe) = update_fixture();
             let path = env
                 .home()
@@ -993,6 +1016,9 @@ mod tests {
                 .unwrap();
                 if mode == "empty" {
                     env.set("VIOLET_SLACK_TOKEN_CASSY_PROXY", "");
+                }
+                if mode == "selector-only" {
+                    env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_MISSING");
                 }
                 if mode == "ambiguous" {
                     env.set("VIOLET_SLACK_TOKEN_ONE", "fixture-one");
@@ -1026,6 +1052,9 @@ mod tests {
     fn cas_678d_update_preserves_working_account_credentials_and_custom_endpoints() {
         let (mut env, probe) = update_fixture();
         env.set("VIOLET_SLACK_TOKEN_ACCOUNT", "fixture-account");
+        env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_SOUNDWAVE");
+        let stale = env.home().join(".claude-stale/.claude.json");
+        stale_claude(&stale);
         let path = env.home().join(".claude-account/.claude.json");
         stale_claude(&path);
         let raw = std::fs::read_to_string(&path).unwrap().replace(
@@ -1041,13 +1070,19 @@ mod tests {
         std::fs::write(&custom, &custom_raw).unwrap();
         let report = migrate_installed_hub_with_probe(&probe).unwrap();
         assert!(report.warnings.is_empty());
-        assert_eq!(report.authenticated.len(), 1);
+        assert_eq!(report.authenticated.len(), 2);
         assert_eq!(std::fs::read_to_string(custom).unwrap(), custom_raw);
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(
             doc["mcpServers"]["violet"]["headers"]["Authorization"],
             "Bearer ${VIOLET_SLACK_TOKEN_ACCOUNT}"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(stale).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_SOUNDWAVE}"
         );
     }
 

@@ -659,6 +659,47 @@ async fn wait_for_claude_interrupt_delivery(
 }
 
 impl CasService {
+    /// cas-207e: the deadline of a Commander ask is a time reminder owned by
+    /// the supervisor; `fire_reminder` delivers it as a blocker-class wake.
+    fn schedule_ask_deadline(
+        &self,
+        ask_id: i64,
+        secs: i64,
+        default: &str,
+        factory_session: &str,
+    ) -> Result<i64, McpError> {
+        let internal = |what: &str, error: String| {
+            Self::error(ErrorCode::INTERNAL_ERROR, format!("{what}: {error}"))
+        };
+        let owner_id = self
+            .inner
+            .get_agent_id()
+            .map_err(|e| internal("Failed to get agent ID", e.to_string()))?;
+        let origin_session = std::env::var("CAS_SESSION_ID")
+            .ok()
+            .filter(|session| !session.trim().is_empty())
+            .unwrap_or_else(|| owner_id.clone());
+        crate::store::open_reminder_store(&self.inner.cas_root)
+            .map_err(|e| internal("Failed to open reminder store", e.to_string()))?
+            .create_with_scope(
+                &owner_id,
+                None,
+                &format!(
+                    "Operator ask #{ask_id} reached its deadline unanswered. Proceed now with the default: {default}. Then report what you did to the operator."
+                ),
+                cas_store::ReminderTriggerType::Time,
+                Some(chrono::Utc::now() + chrono::Duration::seconds(secs)),
+                None,
+                Some(&serde_json::json!({ "operator_ask": ask_id })),
+                0,
+                Some(factory_session),
+                Some(&origin_session),
+                false,
+                None,
+            )
+            .map_err(|e| internal("Failed to schedule the ask deadline", e.to_string()))
+    }
+
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
         req: AgentRequest,
@@ -1237,6 +1278,28 @@ impl CasService {
                     ));
                 }
             };
+            // cas-207e: an ask may carry a deadline (remind_delay_secs) and the
+            // default action it proceeds with (remind_message). At the
+            // deadline a blocker-class wake tells the supervisor to proceed.
+            let ask_deadline = match (
+                req.remind_delay_secs,
+                req.remind_message.as_deref().map(str::trim),
+            ) {
+                (None, None) => None,
+                (Some(secs), Some(default))
+                    if kind == crate::ui::factory::OperatorTurnKind::Ask
+                        && secs > 0
+                        && !default.is_empty() =>
+                {
+                    Some((secs, default.to_string()))
+                }
+                _ => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "a Commander deadline needs kind=ask, remind_delay_secs > 0 (the deadline) and remind_message (the default action)",
+                    ));
+                }
+            };
             let prior = if kind == crate::ui::factory::OperatorTurnKind::Answer {
                 let notification_id = req.in_reply_to.ok_or_else(|| {
                     Self::error(
@@ -1444,10 +1507,21 @@ impl CasService {
                 })?;
             let reply_id = reply.id();
             crate::mcp::tools::service::mutation_receipt::message_committed(reply_id);
+            let deadline = match ask_deadline {
+                Some((secs, default)) => {
+                    let id =
+                        self.schedule_ask_deadline(reply_id, secs, &default, factory_session)?;
+                    format!(
+                        "\nDeadline: reminder #{id} wakes you in {secs}s to proceed with the default; cancel it (remind_cancel remind_id={id}) if the operator answers first"
+                    )
+                }
+                None => String::new(),
+            };
             return Ok(Self::success(format!(
-                "Commander {} queued\n\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}",
+                "Commander {} queued\n\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}{deadline}",
                 kind.as_str(),
-                req.in_reply_to.map_or_else(|| "none".to_string(), |id| id.to_string())
+                req.in_reply_to
+                    .map_or_else(|| "none".to_string(), |id| id.to_string())
             )));
         }
 
@@ -5420,6 +5494,85 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(payload.reply_to, None);
         assert_eq!(payload.device_id, "phone-9");
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Ask);
+    }
+
+    /// cas-207e: an ask with a deadline and a default schedules the
+    /// supervisor's proceed wake; half a deadline is refused before any write.
+    #[tokio::test(flavor = "current_thread")]
+    async fn operator_ask_with_deadline_schedules_the_proceed_wake_cas_207e() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-ask-deadline".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let ask = |extra: serde_json::Value| -> AgentRequest {
+            let mut request = serde_json::json!({
+                "action": "message",
+                "target": "operator",
+                "kind": "ask",
+                "summary": "approve the cut",
+                "message": "Cut 3.54 now?",
+            });
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(request).expect("operator ask request")
+        };
+
+        let refused = service
+            .message_send(ask(serde_json::json!({ "remind_delay_secs": 900 })))
+            .await
+            .expect_err("a deadline without a default is refused");
+        assert!(refused.message.contains("remind_message"), "{refused:?}");
+
+        let response = response_text(
+            service
+                .message_send(ask(serde_json::json!({
+                    "remind_delay_secs": 900,
+                    "remind_message": "cut 3.54 from release-flow/d-354",
+                })))
+                .await
+                .expect("ask with a deadline queues"),
+        );
+        assert!(response.contains("Deadline: reminder #"), "{response}");
+        let reminders = crate::store::open_reminder_store(&cas_root)
+            .expect("reminder store")
+            .list_pending("supervisor-id")
+            .expect("pending reminders");
+        assert_eq!(reminders.len(), 1);
+        let reminder = &reminders[0];
+        assert_eq!(reminder.trigger_type, cas_store::ReminderTriggerType::Time);
+        assert!(
+            reminder
+                .message
+                .contains("Proceed now with the default: cut 3.54 from release-flow/d-354")
+        );
+        assert!(
+            reminder
+                .trigger_filter
+                .as_ref()
+                .is_some_and(|f| f.get("operator_ask").is_some())
+        );
+        let due_in = reminder.trigger_at.unwrap() - chrono::Utc::now();
+        assert!(
+            due_in > chrono::Duration::seconds(890) && due_in <= chrono::Duration::seconds(900)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

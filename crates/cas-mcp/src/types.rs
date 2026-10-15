@@ -1054,6 +1054,16 @@ pub struct AgentRequest {
     #[serde(default)]
     pub attachment: Option<String>,
 
+    /// cas-207e: a Commander ask's deadline in seconds (from `remind_delay_secs`).
+    #[schemars(description = "message kind=ask: deadline in seconds; needs remind_message")]
+    #[serde(default)]
+    pub remind_delay_secs: Option<i64>,
+
+    /// cas-207e: the default action a Commander ask proceeds with at its deadline.
+    #[schemars(description = "message kind=ask: default action at the deadline")]
+    #[serde(default)]
+    pub remind_message: Option<String>,
+
     /// Loop prompt (for loop_start)
     #[schemars(description = "The prompt to repeat each iteration")]
     #[serde(default)]

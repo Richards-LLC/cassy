@@ -838,6 +838,73 @@ mod tests {
     /// in the terminal. Their question and the supervisor's answer must both
     /// reach the conversation, the answer threaded under the question, once.
     #[test]
+    fn enrolled_terminal_conversation_reaches_history_and_cloud_once_cas_5c89() {
+        let question = "What changed in Violet today?";
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "turn-enrolled",
+            question,
+            "**Two fixes landed.**",
+            Utc::now(),
+        ));
+        queue
+            .bind_operator_feed(&cas_store::OperatorFeedBinding {
+                account_id: "acct-1".into(),
+                machine_id: "machine-1".into(),
+                hub_id: "hub-1".into(),
+                project_id: "violet_ps".into(),
+                bound_at: Utc::now().to_rfc3339(),
+            })
+            .unwrap();
+        let terminal = queue
+            .record_terminal_operator_turn("factory-1", question)
+            .unwrap();
+
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+
+        let claims = queue
+            .claim_operator_cloud("machine-1", Utc::now(), 100, 30)
+            .unwrap();
+        assert_eq!(claims.len(), 2, "cloud gets the question and answer once");
+        let snapshots: Vec<Value> = claims
+            .iter()
+            .map(|claim| serde_json::from_str(&claim.payload_snapshot).unwrap())
+            .collect();
+        assert_eq!(snapshots[0]["prompt_id"], terminal);
+        assert_eq!(snapshots[0]["source"], "terminal");
+        assert_eq!(snapshots[0]["target"], "terminal-history");
+        assert_eq!(snapshots[0]["prompt"], question);
+        assert!(
+            snapshots[0]["operator"].is_null(),
+            "no paired-device stamp is invented"
+        );
+        let payload: Value =
+            serde_json::from_str(snapshots[1]["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(snapshots[1]["target"], "operator");
+        assert_eq!(payload["reply_to"], terminal);
+        assert_eq!(payload["message"], "**Two fixes landed.**");
+        assert_eq!(payload["kind"], "answer");
+
+        for device in ["phone", "laptop"] {
+            let mut history = queue
+                .conversation_history("factory-1", device, None, 50)
+                .unwrap();
+            history.reverse();
+            assert_eq!(history.len(), 2);
+            for (row, snapshot) in history.iter().zip(&snapshots) {
+                assert_eq!(row.id, snapshot["prompt_id"].as_i64().unwrap());
+                assert_eq!(row.prompt, snapshot["prompt"].as_str().unwrap());
+            }
+        }
+        assert!(
+            queue
+                .peek_for_targets(&["terminal-history"], Some("factory-1"), 50)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_terminal_only_operator_gets_the_supervisors_answers_cas_5c89() {
         let question = "What changed in Violet today?";
         let now = Utc::now();

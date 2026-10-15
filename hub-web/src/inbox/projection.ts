@@ -82,6 +82,17 @@ function positiveInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+/** Mirrors and explicit replies freeze the wire payload as the queue prompt. */
+function replyPayload(prompt: unknown): Record<string, unknown> | null {
+  if (typeof prompt !== "string") return null;
+  try {
+    const payload = asRecord(JSON.parse(prompt));
+    return payload && (payload.schema_version === 1 || payload.schema_version === 2) && typeof payload.message === "string" ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 /** One verified session event as a conversation turn, or null when it is not one. */
 export function projectInboxEvent(event: InboxEvent): InboxTurn | null {
   if (event.verification !== "verified" || event.scope !== "session") return null;
@@ -106,27 +117,31 @@ export function projectInboxEvent(event: InboxEvent): InboxTurn | null {
   const target = (text(snapshot.target) ?? "").trim().toLowerCase();
   const operator = asRecord(snapshot.operator);
   if (target === "operator") {
-    const kind = text(snapshot.kind);
+    const payload = replyPayload(snapshot.prompt);
+    const kind = text(payload?.kind) ?? text(snapshot.kind) ?? (payload ? "answer" : undefined);
+    const attachments = payload?.attachments ?? snapshot.attachments;
     return {
       kind: "reply",
       ...base,
       notificationId: promptId,
-      message: text(snapshot.prompt) ?? "",
-      summary: text(snapshot.summary) ?? "",
-      deviceId: text(snapshot.recipient_device_id) ?? "",
-      replyTo: positiveInt(snapshot.acknowledge_prompt_id) ?? null,
+      message: text(payload?.message) ?? text(snapshot.prompt) ?? "",
+      summary: text(payload?.summary) ?? text(snapshot.summary) ?? "",
+      deviceId: text(payload?.device_id) ?? text(snapshot.recipient_device_id) ?? "",
+      replyTo: positiveInt(payload?.reply_to) ?? positiveInt(snapshot.acknowledge_prompt_id) ?? null,
       turnKind: kind && TURN_KINDS.has(kind) ? kind : undefined,
-      attachments: Array.isArray(snapshot.attachments) ? snapshot.attachments : [],
+      attachments: Array.isArray(attachments) ? attachments : [],
     };
   }
-  if (operator) {
+  // Terminal history has local provenance, not a paired-device credential.
+  const terminal = snapshot.source === "terminal" && target === "terminal-history";
+  if (operator || terminal) {
     return {
       kind: "message",
       ...base,
       notificationId: promptId,
       text: text(snapshot.prompt) ?? "",
-      deviceId: text(operator.device_id) ?? "",
-      operatorLabel: text(operator.operator),
+      deviceId: terminal ? "terminal" : text(operator?.device_id) ?? "",
+      operatorLabel: terminal ? "Terminal" : text(operator?.operator),
     };
   }
   return null;

@@ -267,6 +267,65 @@ impl Rig {
 }
 
 #[tokio::test]
+async fn terminal_question_and_mirrored_answer_relay_once_in_order_cas_5c89() {
+    let rig = rig();
+    let question = rig
+        .store
+        .record_terminal_operator_turn("factory-1", "What changed?")
+        .unwrap();
+    let now = Utc::now();
+    let payload = json!({"schema_version": 2, "reply_to": question, "message": "Two fixes landed.",
+        "summary": "Two fixes", "device_id": "*", "kind": "answer", "attachments": []})
+    .to_string();
+    let answer = rig
+        .store
+        .mirror_supervisor_turn(
+            "factory-1",
+            "turn-1",
+            now,
+            now,
+            &payload,
+            "Two fixes",
+            "*",
+            "answer",
+        )
+        .unwrap()
+        .unwrap();
+    assert!(
+        rig.store
+            .mirror_supervisor_turn(
+                "factory-1",
+                "turn-1",
+                now,
+                now,
+                &payload,
+                "Two fixes",
+                "*",
+                "answer"
+            )
+            .unwrap()
+            .is_none()
+    );
+
+    let report = rig.drain().await.unwrap();
+    assert_eq!((report.claimed, report.sealed, report.stored), (2, 2, 2));
+    assert_eq!(rig.drain().await.unwrap().claimed, 0);
+    let state = rig.cloud.state.lock().unwrap();
+    let mut events: Vec<_> = state.events.values().collect();
+    events.sort_by_key(|(_, sequence, _, _)| *sequence);
+    assert_eq!(events.len(), 2);
+    let question_snapshot = &events[0].3["snapshot"];
+    assert_eq!(question_snapshot["prompt_id"], question);
+    assert_eq!(question_snapshot["source"], "terminal");
+    assert_eq!(question_snapshot["prompt"], "What changed?");
+    let answer_snapshot = &events[1].3["snapshot"];
+    assert_eq!(answer_snapshot["prompt_id"], answer);
+    let reply: Value = serde_json::from_str(answer_snapshot["prompt"].as_str().unwrap()).unwrap();
+    assert_eq!(reply["reply_to"], question);
+    assert_eq!(reply["message"], "Two fixes landed.");
+}
+
+#[tokio::test]
 async fn bound_turns_are_sealed_once_and_the_cloud_opens_them() {
     let rig = rig();
     for prompt in ["one", "two", "three"] {

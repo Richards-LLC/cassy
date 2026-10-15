@@ -63,6 +63,54 @@ fn session_routing_ids_are_opaque_stable_and_valid() {
 }
 
 #[test]
+fn terminal_questions_follow_enrollment_without_backfill_cas_5c89() {
+    let (_dir, store) = fixture();
+    let before = store
+        .record_terminal_operator_turn("factory-1", "before consent")
+        .unwrap();
+    assert!(store.operator_delivery_event(before).unwrap().is_some());
+    assert_eq!(store.operator_cloud_backlog().unwrap().pending, 0);
+
+    store.bind_operator_feed(&binding()).unwrap();
+    let first = store
+        .record_terminal_operator_turn("factory-1", "yes")
+        .unwrap();
+    let second = store
+        .record_terminal_operator_turn("factory-1", "yes")
+        .unwrap();
+    assert_ne!(first, second, "repeated keyboard turns are distinct events");
+    let claims = store
+        .claim_operator_cloud(&binding().machine_id, Utc::now(), 100, 30)
+        .unwrap();
+    assert_eq!(
+        claims.len(),
+        2,
+        "no history from before enrollment is uploaded"
+    );
+    for (claim, id) in claims.iter().zip([first, second]) {
+        let snapshot: serde_json::Value = serde_json::from_str(&claim.payload_snapshot).unwrap();
+        assert_eq!(snapshot["prompt_id"], id);
+        assert_eq!(snapshot["source"], "terminal");
+        assert_eq!(snapshot["target"], "terminal-history");
+        assert!(snapshot["operator"].is_null());
+        assert!(
+            store
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
+    }
+    store.detach_operator_feed(Utc::now()).unwrap();
+    let after = store
+        .record_terminal_operator_turn("factory-1", "after detach")
+        .unwrap();
+    assert!(store.operator_delivery_event(after).unwrap().is_some());
+    assert_eq!(store.operator_cloud_backlog().unwrap().pending, 2);
+}
+
+#[test]
 fn turns_before_binding_never_enter_the_cloud_lane() {
     let (_dir, store) = fixture();
     store.record_operator_turn(&turn("before consent")).unwrap();

@@ -124,15 +124,20 @@ fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool 
     } else {
         std::borrow::Cow::Borrowed(&qa.terminal_render_paths)
     };
-    let cli = ["**/cli/**".to_string()];
+    let required_output = [
+        "**/cli/**".to_string(),
+        "**/cas-mux/src/render.rs".to_string(),
+        "**/cas-mux/src/pane/**".to_string(),
+    ];
     paths
         .iter()
         .filter(|path| !is_non_surface_path(path))
         .any(|path| {
             let one = std::slice::from_ref(path);
             // Existing config files can retain the older default output globs,
-            // without **/cli/**. Do not let an input exemption hide CLI output.
-            first_user_facing_path(one, &cli).is_some()
+            // without **/cli/**. A blanket cas-mux interaction glob likewise
+            // must not hide pane drawing/styles behind an input exemption.
+            first_user_facing_path(one, &required_output).is_some()
                 || (first_user_facing_path(one, &render_paths).is_some()
                     && first_user_facing_path(one, &qa.terminal_interaction_paths).is_none())
         })
@@ -422,6 +427,12 @@ mod tests {
             ] {
                 assert!(requires_terminal_qa(&[path.into()], &qa), "{path}: {qa:?}");
             }
+            for input in [
+                "crates/cas-mux/src/input_stream.rs",
+                "crates/cas-mux/src/pty.rs",
+            ] {
+                assert!(!requires_terminal_qa(&[input.into()], &qa));
+            }
             qa.terminal_render_paths = vec!["src/shared/status.rs".into()];
             assert!(requires_terminal_qa(&["src/shared/status.rs".into()], &qa));
             assert!(!requires_terminal_qa(
@@ -430,6 +441,10 @@ mod tests {
             ));
             qa.terminal_render_paths.clear();
             assert!(!requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+            assert!(!requires_terminal_qa(
+                &["crates/cas-mux/src/render.rs".into()],
+                &qa
+            ));
         }
     }
 

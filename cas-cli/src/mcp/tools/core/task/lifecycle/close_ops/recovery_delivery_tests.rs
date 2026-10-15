@@ -597,7 +597,9 @@ async fn backend_renderer_log_only_close_parks_and_dispatches_qa_cas_2de9() {
 async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
     let mut env = TestEnvGuard::temp_home();
     for surface in [
-        "src/cli/status.rs", "src/tui/status.rs", "src/doctor.rs",
+        "src/cli/status.rs",
+        "src/tui/status.rs",
+        "src/doctor.rs",
         "crates/cas-mux/src/render.rs",
         "crates/ghostty_vt/src/lib.rs",
         "crates/ghostty_vt_sys/src/lib.rs",

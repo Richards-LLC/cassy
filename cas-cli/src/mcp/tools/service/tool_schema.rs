@@ -92,7 +92,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("in_reply_to", "message: notification_id of the direct message this answers."),
     (
         "kind",
-        "message: target=operator Commander kind: answer, status, receipt, ask or blocker. Worker to same-session supervisor: status or ready requests a typed action wake.",
+        "Commander; worker status/ready wakes same-session supervisor.",
     ),
     ("attachment", "Published artifact id to attach to a Commander turn."),
     // cas-6853: kept terse; the coordination schema has a 3,600 B budget.

@@ -137,11 +137,24 @@ fn flv2_queue_stamps_on_writer() {
 
     // QueueSelect runs on the writer and returns the batch with its claims,
     // taken in the selecting transaction.
-    jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    let select_threads = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&select_threads);
+    jobs.submit_select(request(&cas_dir), move |request, generation| {
+        recorded
+            .lock()
+            .unwrap()
+            .push(std::thread::current().name().unwrap_or("").to_string());
+        super::super::queue_and_events::run_queue_select(request, generation)
+    });
     assert!(jobs.select_in_flight());
     settle(&mut jobs, |jobs| jobs.has_ready() || !jobs.select_in_flight());
     jobs.apply_completions();
     let selection = jobs.take_selection().expect("the selection lands as a completion");
+    assert_eq!(
+        select_threads.lock().unwrap().as_slice(),
+        ["test-store-writer"],
+        "the selection's store work ran on the writer, not the caller"
+    );
     let ids: Vec<i64> = selection.rows.iter().map(|row| row.prompt.id).collect();
     assert_eq!(ids, vec![delivered, released]);
     for row in &selection.rows {

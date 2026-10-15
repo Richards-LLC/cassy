@@ -1412,6 +1412,11 @@ impl FactoryApp {
         // render time would assert a freshness the data may not have.
         let snapshot_at = self.director_data_loaded_at;
         let delivery_state_is_authoritative = loaded_data.is_ok();
+        // cas-223f review round 2, M3: revalidation never decides from the
+        // cache. The daemon retries a failed fresh read first; when it keeps
+        // failing, every event is delivered as detected. The cached snapshot
+        // (the one the events were detected from) then only renders prompt
+        // text: it never filters, retracts or suppresses an event.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
@@ -1420,13 +1425,11 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
-                // cas-06ca: an unavailable store snapshot is uncertainty,
-                // never positive evidence that an epic-completion occurrence
-                // is stale. Preserve the event rather than suppressing it
+                // cas-06ca / cas-223f: an unavailable store snapshot is
+                // uncertainty, never positive evidence that an event is
+                // stale. Preserve every event rather than suppressing it
                 // against cached data that may itself be out of date.
-                if !delivery_state_is_authoritative
-                    && matches!(event, DirectorEvent::EpicAllSubtasksClosed { .. })
-                {
+                if !delivery_state_is_authoritative {
                     return Some(event.clone());
                 }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
@@ -1438,11 +1441,6 @@ impl FactoryApp {
                         self.event_detector.worker_idle_since(worker),
                     )
                 } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
-                    if !delivery_state_is_authoritative {
-                        // The fresh read failed: uncertain, so deliver it,
-                        // as before cas-223f. Never decide from the cache.
-                        return Some(event.clone());
-                    }
                     let evidence = evidence.clone().unwrap_or_default();
                     self.supervisor_stall_event_is_current(event, &unfiltered_data, &evidence)
                         .then(|| event.clone())
@@ -1494,8 +1492,15 @@ impl FactoryApp {
             // `NotApplicable` (wrong event shape, task no longer
             // AwaitingMerge, or no resolvable epic branch) falls through to
             // `generate_prompt` unaffected, exactly as before this fix.
+            // cas-223f: without a fresh read there is nothing to check the
+            // alert against; it is delivered as detected.
+            let freshness = if delivery_state_is_authoritative {
+                check_merge_alert_freshness(event, &unfiltered_data, &repo_root)
+            } else {
+                MergeAlertFreshness::NotApplicable
+            };
             let merge_alert_evidence =
-                match check_merge_alert_freshness(event, &unfiltered_data, &repo_root) {
+                match freshness {
                     MergeAlertFreshness::NotApplicable => None,
                     // AC1: branch already carries zero unmerged commits vs
                     // the epic — drop the alert entirely rather than

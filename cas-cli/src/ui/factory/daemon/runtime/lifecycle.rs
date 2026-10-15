@@ -3324,7 +3324,19 @@ impl FactoryDaemon {
                 }
             }
         }
-        if let Some((events, inputs)) = refresh.take_delivery_read(&mut self.queue_jobs) {
+        let mut delivery = refresh.take_delivery_read(&mut self.queue_jobs);
+        // cas-223f review round 2, M3: a read without fresh data is retried
+        // before its events are delivered unrevalidated; never revalidated
+        // against the cache.
+        if let Some((events, inputs)) = delivery.take() {
+            if inputs.is_fresh() {
+                refresh.note_fresh_delivery_read();
+                delivery = Some((events, inputs));
+            } else if let Some(events) = refresh.retry_stale_delivery(events) {
+                delivery = Some((events, inputs));
+            }
+        }
+        if let Some((events, inputs)) = delivery {
             // cas-627f: one unfiltered read, taken after detection, shared by
             // revalidation and prompt generation. See
             // `revalidate_and_prompt_for_delivery` doc comment.
@@ -3342,11 +3354,13 @@ impl FactoryDaemon {
                 loop_progress,
             )
             .await;
-            // Events detected while that read ran are revalidated next.
-            if let Err(events) = refresh.start_delivery_backlog(&self.app, &mut self.queue_jobs) {
-                self.deliver_without_jobs(refresh, events, refresh_started, tick_interval_ms, store_worker, loop_progress)
-                    .await;
-            }
+        }
+        // Events waiting for a delivery read (detected while one ran, or
+        // re-queued after one failed) start on any pass where the slot is
+        // free, not only after a successful read (review round 2, M2).
+        if let Err(events) = refresh.start_delivery_backlog(&self.app, &mut self.queue_jobs) {
+            self.deliver_without_jobs(refresh, events, refresh_started, tick_interval_ms, store_worker, loop_progress)
+                .await;
         }
         // cas-223f: prompts whose fresh re-check (`RevalidateFresh`) finished.
         for batch in refresh.take_deliverability(&mut self.queue_jobs) {

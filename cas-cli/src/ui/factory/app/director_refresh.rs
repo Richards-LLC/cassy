@@ -137,6 +137,23 @@ pub(crate) struct DeliveryInputs {
 impl DeliveryInputs {
     /// The fresh unfiltered snapshot alone (cas-d2a2: inbox retraction's
     /// `RevalidateFresh` read).
+    /// A delivery read whose fresh read failed.
+    #[cfg(test)]
+    pub(crate) fn failed_for_test() -> Self {
+        Self {
+            data: Err(anyhow::anyhow!("test: the fresh read failed")),
+            blocks_deps: Vec::new(),
+            idle_liveness: HashMap::new(),
+            facts: None,
+        }
+    }
+
+    /// Whether the fresh read succeeded. A failed read is retried before
+    /// its events are delivered unrevalidated (cas-223f review round 2, M3).
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.data.is_ok()
+    }
+
     pub(crate) fn into_data(self) -> anyhow::Result<DirectorData> {
         self.data
     }

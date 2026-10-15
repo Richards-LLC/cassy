@@ -40,6 +40,10 @@ use crate::ui::factory::director::{
     DirectorEvent, DirectorStores, Prompt, WorkerHealthReport, WorkerHealthRequest,
 };
 
+/// Consecutive failed delivery reads before their events are delivered as
+/// detected (review round 2, M3).
+const MAX_FAILED_DELIVERY_READS: u32 = 3;
+
 /// A job whose result the loop is waiting for.
 struct Slot<T> {
     /// The generation in flight, and when it was submitted.
@@ -149,6 +153,12 @@ pub(crate) struct DirectorRefresh {
     /// Probes that will not report (refused, dropped, panicked or timed out).
     health_failed: Vec<(String, String)>,
     ci_status: Slot<GitEvidenceMap>,
+    /// Consecutive delivery reads that came back without fresh data.
+    failed_delivery_reads: u32,
+    /// Test hook: give up in-flight jobs after this instead of
+    /// [`factory_jobs::in_flight_timeout`].
+    #[cfg(test)]
+    timeout_override: Option<Duration>,
     /// Test hook: sleep this long inside every background read.
     read_delay: Duration,
     /// Test hook: every background read panics.
@@ -170,6 +180,9 @@ impl DirectorRefresh {
             health_ready: Vec::new(),
             health_failed: Vec::new(),
             ci_status: Slot::default(),
+            failed_delivery_reads: 0,
+            #[cfg(test)]
+            timeout_override: None,
             read_delay: Duration::ZERO,
             #[cfg(test)]
             panic_reads: false,
@@ -329,26 +342,76 @@ impl DirectorRefresh {
         self.delivery_backlog = events;
     }
 
+    #[cfg(test)]
+    fn timeout(&self, budget: Duration) -> Duration {
+        self.timeout_override
+            .unwrap_or_else(|| factory_jobs::in_flight_timeout(budget))
+    }
+
+    #[cfg(not(test))]
+    fn timeout(&self, budget: Duration) -> Duration {
+        factory_jobs::in_flight_timeout(budget)
+    }
+
+    /// Model a short in-flight timeout.
+    #[cfg(test)]
+    pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout_override = Some(timeout);
+        self
+    }
+
+    /// A delivery read came back without fresh data (review round 2, M3).
+    /// Its events wait for another fresh read, up to
+    /// [`MAX_FAILED_DELIVERY_READS`] in a row; after that they are handed
+    /// back to be delivered as detected, so a store that keeps failing cannot
+    /// hold supervisor notices forever.
+    pub(crate) fn retry_stale_delivery(
+        &mut self,
+        events: Vec<DirectorEvent>,
+    ) -> Option<Vec<DirectorEvent>> {
+        if self.failed_delivery_reads < MAX_FAILED_DELIVERY_READS {
+            self.failed_delivery_reads += 1;
+            tracing::warn!(
+                attempt = self.failed_delivery_reads,
+                "delivery read failed; its events wait for another fresh read"
+            );
+            let mut retry = events;
+            retry.append(&mut self.delivery_backlog);
+            self.delivery_backlog = retry;
+            return None;
+        }
+        self.failed_delivery_reads = 0;
+        Some(events)
+    }
+
+    /// A delivery read came back fresh.
+    pub(crate) fn note_fresh_delivery_read(&mut self) {
+        self.failed_delivery_reads = 0;
+    }
+
     /// Give up every job that outlived its timeout, logging it.
     fn expire(&mut self) {
-        let timeout = factory_jobs::in_flight_timeout;
+        let snapshot_timeout = self.timeout(factory_jobs::DIRECTOR_SNAPSHOT_BUDGET);
+        let revalidate_timeout = self.timeout(factory_jobs::REVALIDATE_FRESH_BUDGET);
+        let ci_timeout = self.timeout(factory_jobs::CI_STATUS_BUDGET);
+        let health_timeout = self.timeout(factory_jobs::WORKER_HEALTH_PROBE_BUDGET);
         if self
             .director
-            .expire(timeout(factory_jobs::DIRECTOR_SNAPSHOT_BUDGET))
+            .expire(snapshot_timeout)
         {
             tracing::warn!("director snapshot never reported; retrying next pass");
         }
         if self
             .delivery
-            .expire(timeout(factory_jobs::REVALIDATE_FRESH_BUDGET))
+            .expire(revalidate_timeout)
         {
             tracing::warn!("delivery read never reported; its events wait for the next one");
             self.requeue_delivery_events();
         }
-        if self.ci_status.expire(timeout(factory_jobs::CI_STATUS_BUDGET)) {
+        if self.ci_status.expire(ci_timeout) {
             tracing::warn!("CI status job never reported; retrying next pass");
         }
-        let deliverability_timeout = timeout(factory_jobs::REVALIDATE_FRESH_BUDGET);
+        let deliverability_timeout = revalidate_timeout;
         let expired: Vec<u64> = self
             .deliverability_pending
             .iter()
@@ -361,7 +424,6 @@ impl DirectorRefresh {
                 self.deliverability_ready.push(pending.uncertain());
             }
         }
-        let health_timeout = timeout(factory_jobs::WORKER_HEALTH_PROBE_BUDGET);
         let expired: Vec<String> = self
             .health_in_flight
             .iter()
@@ -376,10 +438,12 @@ impl DirectorRefresh {
         }
     }
 
-    /// Whether a finished job is waiting to be applied.
+    /// Whether a finished job is waiting to be applied, or events wait for a
+    /// delivery read the loop can start now (review round 2, M2).
     pub(crate) fn has_finished(&mut self, jobs: &mut QueueJobs) -> bool {
         self.poll(jobs);
-        self.director.ready.is_some()
+        (!self.delivery_backlog.is_empty() && !self.delivery.busy())
+            || self.director.ready.is_some()
             || self.delivery.ready.is_some()
             || self.ci_status.ready.is_some()
             || !self.deliverability_ready.is_empty()

@@ -371,3 +371,201 @@ fn c2_dropped_then_done_applies_only_the_current_generation() {
     refresh.accept(result(2, ExternalOutcome::Done(load())));
     assert!(refresh.director.ready.is_some(), "the current generation applies");
 }
+
+/// Review round 2, M2: events re-queued after a failed delivery read start
+/// their next read on the next pass, even when nothing else happens (no
+/// refresh due, no other read finished).
+#[tokio::test]
+async fn c2_requeued_events_start_on_a_quiet_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let progress = super::super::loop_watchdog::LoopProgress::new();
+    let store_worker = super::super::store_worker::global();
+    let mut refresh = DirectorRefresh::new().with_panicking_reads();
+    let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "quiet-worker".into(),
+        active_task: None,
+    };
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+    assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
+    assert_eq!(refresh.delivery_backlog.len(), 1);
+    refresh.panic_reads = false;
+    assert!(
+        refresh.has_finished(&mut daemon.queue_jobs),
+        "waiting events wake the refresh pass"
+    );
+    // Two quiet passes: the first starts the read, the second delivers it.
+    for _ in 0..2 {
+        daemon
+            .director_refresh_pass(&mut refresh, false, store_worker, &progress)
+            .await;
+    }
+    assert!(refresh.delivery_backlog.is_empty(), "the backlog started");
+    assert!(!refresh.delivery.busy(), "and its read was delivered");
+}
+
+/// Review round 2, M3: a delivery read without fresh data is retried, and
+/// only after repeated failures are its events delivered as detected.
+#[test]
+fn c2_stale_delivery_read_retries_before_delivering() {
+    let mut refresh = DirectorRefresh::new();
+    let event = || crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "w".into(),
+        active_task: None,
+    };
+    for attempt in 1..=3 {
+        assert!(refresh.retry_stale_delivery(vec![event()]).is_none(), "attempt {attempt}");
+    }
+    assert_eq!(refresh.delivery_backlog.len(), 3);
+    assert_eq!(refresh.retry_stale_delivery(vec![event()]).map(|e| e.len()), Some(1));
+    refresh.note_fresh_delivery_read();
+    assert!(refresh.retry_stale_delivery(vec![event()]).is_none(), "a fresh read resets the count");
+}
+
+/// Review round 2, M3: when the fresh read fails, revalidation never
+/// filters an event against the cache; every event is delivered as detected.
+#[tokio::test]
+async fn c2_failed_fresh_read_never_revalidates_from_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let events = vec![
+        crate::ui::factory::director::DirectorEvent::WorkerIdle {
+            worker: "unknown-worker".into(),
+            active_task: None,
+        },
+        crate::ui::factory::director::DirectorEvent::WorkerIdle {
+            worker: "another-unknown".into(),
+            active_task: None,
+        },
+    ];
+    let (delivered, _prompts, sweep) = daemon.app.revalidate_and_prompt_for_delivery_from(
+        &events,
+        crate::ui::factory::app::DeliveryInputs::failed_for_test(),
+    );
+    assert_eq!(delivered.len(), events.len(), "nothing is filtered from the cache");
+    assert!(sweep.is_none(), "no retraction without a fresh read");
+}
+
+/// Review round 2, L3: a delivery read that outlives its timeout gives its
+/// events to the next read, and its late result is ignored.
+#[tokio::test]
+async fn c2_expired_delivery_read_requeues_and_ignores_the_late_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let mut refresh = DirectorRefresh::new()
+        .with_read_delay(Duration::from_millis(400))
+        .with_timeout(Duration::from_millis(50));
+    let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "slow-worker".into(),
+        active_task: None,
+    };
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
+    assert!(!refresh.delivery.busy(), "the timed-out read freed its slot");
+    assert_eq!(refresh.delivery_backlog.len(), 1, "its event waits for the next read");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        refresh.take_delivery_read(&mut daemon.queue_jobs).is_none(),
+        "the late result is ignored"
+    );
+}
+
+/// Review round 2, L3: a prompt re-check that outlives its timeout delivers
+/// its prompts (uncertainty delivers), and its late verdicts are ignored.
+#[tokio::test]
+async fn c2_expired_recheck_delivers_and_ignores_the_late_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let mut refresh = DirectorRefresh::new()
+        .with_read_delay(Duration::from_millis(400))
+        .with_timeout(Duration::from_millis(50));
+    let alert = crate::ui::factory::director::Prompt {
+        target: "supervisor".into(),
+        text: "worker-a is idle".into(),
+        stall_nudge_task: None,
+        retract_worker: None,
+        retract_task: None,
+        retract_epic: None,
+        drop_if_worker_assigned: Some("worker-a".into()),
+        durable_retry: false,
+    };
+    refresh
+        .start_deliverability_check(&daemon.app, &mut daemon.queue_jobs, vec![alert], Vec::new(), Instant::now())
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let batches = refresh.take_deliverability(&mut daemon.queue_jobs);
+    assert_eq!(batches.len(), 1);
+    assert!(batches[0].prompts.iter().all(|(_, deliverable)| *deliverable));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        refresh.take_deliverability(&mut daemon.queue_jobs).is_empty(),
+        "the late verdicts are ignored"
+    );
+}
+
+/// Review round 2, L3: a real lane drop. With the blocking lane busy and
+/// full, the oldest queued health probe is dropped and handed back to the
+/// detector to ask again, once.
+#[tokio::test]
+async fn c2_lane_drop_hands_the_probe_back_once() {
+    use std::sync::{Arc, Barrier};
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let (s, r) = (Arc::clone(&started), Arc::clone(&release));
+    daemon.queue_jobs.submit_external(
+        super::super::jobs::JobSpec {
+            kind: "TestBlocker",
+            key: "TestBlocker:c2".into(),
+            lane: super::super::jobs::Lane::Blocking,
+            criticality: super::super::jobs::Criticality::Critical,
+            generation: 1,
+            budget: Duration::from_secs(60),
+        },
+        move || {
+            s.wait();
+            r.wait();
+            Box::new(())
+        },
+    );
+    started.wait();
+    let mut refresh = DirectorRefresh::new();
+    let requests: Vec<_> = (0..=256)
+        .map(|n| crate::ui::factory::director::WorkerHealthRequest {
+            worker: format!("w{n}"),
+            task: "cas-t".into(),
+            threshold_secs: 300,
+            delay_secs: 5,
+            requested_at: chrono::Utc::now(),
+        })
+        .collect();
+    let refused = refresh.submit_health_probes(&daemon.app, &mut daemon.queue_jobs, requests);
+    assert_eq!(
+        refused,
+        vec![("w0".to_string(), "cas-t".to_string())],
+        "the oldest queued probe was dropped and handed back"
+    );
+    release.wait();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (reports, failed) = refresh.take_health_reports(&mut daemon.queue_jobs);
+        assert!(failed.is_empty(), "a dropped probe is handed back once: {failed:?}");
+        let _ = reports;
+        if refresh.health_in_flight.is_empty() || Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(refresh.health_in_flight.is_empty(), "every other probe reported");
+}

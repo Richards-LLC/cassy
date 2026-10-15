@@ -23938,6 +23938,81 @@ mod merge_state_gate_tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    fn close_relay_fixture_cas_3a82(
+        root: &std::path::Path,
+    ) -> (CasCore, cas_store::SqliteTaskStore, cas_store::SqliteSupervisorQueueStore, Task) {
+        use cas_store::{AgentStore, PromptQueueStore, SupervisorQueueStore, TaskStore};
+        use cas_types::{Agent, AgentRole};
+
+        let agents = cas_store::SqliteAgentStore::open(root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("relay-supervisor-id", "relay-supervisor", AgentRole::Supervisor),
+            ("relay-worker-id", "relay-worker", AgentRole::Worker),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("relay-fixture-session".into());
+            agents.register(&agent).unwrap();
+        }
+        let queue = cas_store::SqliteSupervisorQueueStore::open(root).unwrap();
+        queue.init().unwrap();
+        cas_store::SqlitePromptQueueStore::open(root).unwrap().init().unwrap();
+        let tasks = cas_store::SqliteTaskStore::open(root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-3a82-fixture".into(), "Single park relay".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("relay-worker".into());
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        core.set_agent_id_for_testing("relay-worker-id".into());
+        (core, tasks, queue, task)
+    }
+
+    #[test]
+    fn ct2_p1_park_sends_one_relay() {
+        use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
+
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let (core, tasks, queue, task) = close_relay_fixture_cas_3a82(dir.path());
+        core.park_task_awaiting_merge(
+            &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
+            Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+        );
+        let parked = tasks.get(&task.id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        let relays = queue.peek("relay-supervisor-id", 10).unwrap();
+        assert_eq!(relays.len(), 1, "one park must produce one supervisor relay: {relays:?}");
+        let payload: serde_json::Value = serde_json::from_str(&relays[0].payload).unwrap();
+        assert_eq!(payload["transition"], "task_awaiting_merge");
+        assert_eq!(payload["task_id"], task.id);
+        assert_eq!(payload["branch_tip"], "delivery-tip");
+        let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1, "one actionable body, not a misleading refusal twin");
+        assert!(prompts[0].prompt.contains("task_awaiting_merge"));
+    }
+
+    #[tokio::test]
+    async fn ct2_p1_real_close_refusal_has_no_lifecycle_relay() {
+        use cas_store::{PromptQueueStore, SupervisorQueueStore, TaskStore};
+
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let (core, tasks, queue, task) = close_relay_fixture_cas_3a82(dir.path());
+        let mut request = base_req(&task.id);
+        request.supervisor_override = Some(true);
+        request.reason = Some("worker cannot grant its own override".into());
+        let response = core.cas_task_close(Parameters(request)).await.unwrap();
+        assert_eq!(response.is_error, Some(true));
+        assert!(response.content.iter().any(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => text.text.contains("supervisor"),
+            _ => false,
+        }), "the worker must receive the actual refusal: {response:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert!(queue.peek("relay-supervisor-id", 10).unwrap().is_empty());
+        assert!(cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap().is_empty());
+    }
+
     fn git_command(dir: &std::path::Path, args: &[&str]) -> Command {
         let mut command = Command::new("git");
         command

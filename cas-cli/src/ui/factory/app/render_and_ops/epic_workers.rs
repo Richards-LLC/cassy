@@ -5648,7 +5648,9 @@ mod tests {
                     .peek_all(100)
                     .unwrap()
                     .iter()
-                    .any(|row| row.prompt.contains("PEER CLAIM LOST"))
+                    // pin: this alarm class is the externally observed false-conflict regression.
+                    // pin: this alarm class is the externally observed false-conflict regression.
+                .any(|row| row.prompt.contains("PEER CLAIM LOST"))
             );
         }
     }

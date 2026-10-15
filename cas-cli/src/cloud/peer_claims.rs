@@ -172,9 +172,9 @@ pub struct PeerHold {
     pub holder: Option<ClaimHolder>,
     pub expires_at: Option<DateTime<Utc>>,
     /// Whether Cassy Cloud lists the holder as a live agent: `Some(false)`
-    /// when it is missing from the user's agents or its last heartbeat is
-    /// older than [`crate::cloud::peers::PEER_LIVE_SECS`]; `None` when the
-    /// agent list could not be read.
+    /// for an explicitly ended/stale holder or a heartbeat older than
+    /// [`crate::cloud::peers::PEER_LIVE_SECS`]. Missing registration uses the
+    /// lock renewal as a fallback; `None` means neither signal was available.
     pub live: Option<bool>,
 }
 
@@ -206,8 +206,8 @@ impl PeerHold {
     }
 
     /// A claim nobody is keeping: it ran out, or its holder is not a live
-    /// agent. Until petra-stella-cloud#150 lands the cloud still reports it
-    /// held, so the client treats it as stale (a warning, never a refusal).
+    /// agent. Acquisition rechecks and recovers it with an owner-scoped release;
+    /// a stale observation alone never means a live competing worker.
     pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
         self.is_expired(now) || self.live == Some(false)
     }
@@ -248,9 +248,8 @@ pub enum Acquire {
     LocalHolder(String),
     /// A live peer on another machine holds it.
     PeerHolds(PeerHold),
-    /// A peer's claim ran out without being released (its holder stopped
-    /// renewing). The cloud still reports it held (petra-stella-cloud#150),
-    /// so this agent proceeds on its local lease only.
+    /// A stale holder observed during recovery (for example another stale
+    /// owner won a race). Retry recovery later; never emit a live-conflict alarm.
     StalePeer(PeerHold),
     /// The cloud could not be asked; only the local lease applies.
     Unavailable(String),
@@ -557,10 +556,9 @@ impl PeerClaims {
     /// One hold from whatever was learned: the lock (reason, expiry, last
     /// renewal), the 409's expiry, and the agent list.
     ///
-    /// cas-0078: only a running holder renews its claim, so a renewal within
-    /// the live window is a liveness signal of its own. A holder missing from
-    /// the agent list (its registration failed) is live while it renews and
-    /// stale once it stopped; without a lock to read, its liveness is unknown.
+    /// A listed shutdown/stale status or stale heartbeat is authoritative.
+    /// Renewal is a fallback when registration is missing or unreadable: a
+    /// registration failure must not cause a freshly renewed claim to be stolen.
     fn assemble(
         agent_id: String,
         lock: Option<&TaskLease>,

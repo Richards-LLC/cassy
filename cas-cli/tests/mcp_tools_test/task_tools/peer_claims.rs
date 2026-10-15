@@ -585,9 +585,8 @@ async fn in_progress_elsewhere_names_the_remote_assignee() {
     assert!(started.to_lowercase().contains("another machine"), "{started}");
 }
 
-/// Until the cloud expires claims itself (petra-stella-cloud#150), a claim
-/// whose holder Cassy Cloud does not list as a live agent is stale: the peer
-/// starts with a warning instead of being refused.
+/// A stopped, unregistered holder is recovered after its renewal goes stale;
+/// the replacement holds the cloud claim rather than working local-only.
 #[tokio::test]
 async fn a_claim_whose_holder_is_not_a_live_agent_is_stale() {
     let mut env = TestEnvGuard::temp_home();
@@ -921,6 +920,7 @@ async fn cas_50713_ended_or_stale_holder_is_taken_over_without_claim_lost() {
                 .peek_all(100)
                 .unwrap()
                 .iter()
+                // pin: this alarm class is the externally observed false-conflict regression.
                 .any(|row| row.prompt.contains("PEER CLAIM LOST"))
         );
     }

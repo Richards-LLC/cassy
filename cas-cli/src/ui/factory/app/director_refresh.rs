@@ -129,8 +129,16 @@ impl DeliveryRequest {
 
 /// Run one step of applying a refresh on the loop, and name it when it is
 /// slow: a pass budget is 100 ms, and the step that spends it must be
-/// findable from the log alone (cas-ee9ab).
+/// findable from the log alone (cas-ee9ab). On the daemon's lane the step
+/// is a watchdog step with the 10 ms control budget instead: the slow ring,
+/// the status line and the `cas::loop_watchdog` WARN name it, so this log
+/// only covers calls off the lane (cas-6931).
 pub(crate) fn timed<T>(step: &'static str, run: impl FnOnce() -> T) -> T {
+    use crate::ui::factory::daemon::runtime::loop_watchdog;
+    let watched = loop_watchdog::scoped(loop_watchdog::Step::control(step));
+    if watched.is_some() {
+        return run();
+    }
     let started = Instant::now();
     let value = run();
     let elapsed = started.elapsed();

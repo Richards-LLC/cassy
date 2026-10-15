@@ -10,6 +10,7 @@ use super::provisioning_tests::daemon;
 use cas_store::{SpawnLifecycleState, SpawnQueueStore};
 
 const SESSION: &str = "provision-test";
+const REPLACEMENT_STARTUP: &str = "REPLACEMENT CODEX: startup reached";
 
 fn idle_worker_pane(name: &str, harness: cas_mux::SupervisorCli) -> cas_mux::Pane {
     let pty = cas_mux::Pty::spawn(
@@ -396,4 +397,312 @@ fn receipts(
         })
         .map(|row| row.prompt)
         .collect()
+}
+
+/// cas-c1a2 (GH #1178): a recycle relaunches the SAME pane name, and the
+/// daemon's pane buffers are keyed by name and only ever appended to
+/// (relay.rs `buffer_pane_output`). The replacement's register-timeout
+/// diagnostic therefore quoted the previous session's transcript ("the pane
+/// still showed the old session's transcript"), so the operator could not see
+/// what the relaunched Codex actually printed. Stopping the old worker must
+/// drop its buffer, so whatever the diagnostic quotes is the new process.
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_drops_the_old_sessions_pane_buffer_cas_c1a2() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    let name = "idle-codex";
+    register_idle_worker(&cas_dir, name);
+    daemon
+        .app
+        .adopt_worker_pane_for_test(idle_worker_pane(name, cas_mux::SupervisorCli::Codex));
+    daemon.buffer_pane_output(name, b"OLD SESSION TRANSCRIPT: every prior delivery\r\n");
+
+    // A recipe routing refuses after the old worker stops, so no real
+    // harness launches; the shutdown half is what this test pins.
+    let refused = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Claude,
+        model: Some("claude-haiku-4-5".to_string()),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    open_spawn_queue_store(&cas_dir)
+        .unwrap()
+        .enqueue_recycle(
+            name,
+            Some(&serde_json::to_string(&refused).unwrap()),
+            Some(SESSION),
+        )
+        .unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+
+    let tail = daemon
+        .pane_buffers
+        .get(name)
+        .map(|buffer| buffer.as_plain_text())
+        .unwrap_or_default();
+    assert!(
+        !tail.contains("OLD SESSION TRANSCRIPT"),
+        "the stopped session's output must not be quoted for its replacement: {tail}"
+    );
+}
+
+/// Exercise a real same-name relaunch with more old output than the replay
+/// buffer can hold. The fake Codex emits one short startup line and stays
+/// alive without registering, so the real timeout path has to diagnose it.
+#[tokio::test(flavor = "current_thread")]
+async fn long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2() {
+    if !run_hermetic_recycle_child(
+        "long_transcript_recycle_timeout_quotes_only_replacement_cas_c1a2",
+    ) {
+        long_transcript_recycle(false).await;
+    }
+}
+
+/// The old output must also be gone when the replacement registers normally.
+/// This is the successful control for the deliberately unregistered child.
+#[tokio::test(flavor = "current_thread")]
+async fn long_transcript_recycle_registers_fresh_session_cas_c1a2() {
+    if !run_hermetic_recycle_child("long_transcript_recycle_registers_fresh_session_cas_c1a2") {
+        long_transcript_recycle(true).await;
+    }
+}
+
+/// Keep harness discovery local to a child process, including the CAS binary
+/// required by the Codex PTY preflight. Neither stand-in uses the host install.
+fn run_hermetic_recycle_child(test_name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("CAS_C1A2_RECYCLE_CHILD").is_some() {
+        return false;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for (name, script) in [
+        (
+            "codex",
+            format!(
+                "#!/bin/sh\nprintf '\\033[32m{REPLACEMENT_STARTUP}\\033[0m\\n'\nexec /bin/sleep 300\n"
+            ),
+        ),
+        ("cas", "#!/bin/sh\nexit 0\n".into()),
+    ] {
+        let executable = bin.join(name);
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths([bin, "/usr/bin".into(), "/bin".into()]).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("PATH", path)
+        .env("CAS_C1A2_RECYCLE_CHILD", "1")
+        .arg(format!(
+            "ui::factory::daemon::runtime::shutdown_tests::{test_name}"
+        ))
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "hermetic {test_name}:\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
+    true
+}
+
+/// Reproduce the lane environment inside the capped test runner: no login
+/// profile, local bin directory, inherited CAS identity, or installed harness.
+#[test]
+fn shutdown_module_and_env_policy_pass_without_local_harnesses_cas_c1a2() {
+    if std::env::var_os("CAS_C1A2_CLEAN_SUITE").is_some() {
+        return; // The child runs this same module; do not recursively spawn it.
+    }
+    let home = tempfile::tempdir().unwrap();
+    for filter in [
+        "ui::factory::daemon::runtime::shutdown_tests::",
+        "test_support::lib_test_process_env_mutation_is_isolated",
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("CAS_C1A2_CLEAN_SUITE", "1")
+            .arg(filter)
+            .arg("--test-threads=1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "scrubbed {filter}:\n{stdout}\n{stderr}"
+        );
+        let summary = stdout
+            .lines()
+            .find(|line| line.starts_with("test result:"))
+            .unwrap();
+        assert!(
+            !summary.contains(" 0 passed;"),
+            "no tests executed: {summary}"
+        );
+        eprintln!("scrubbed {filter}: {summary}");
+    }
+}
+
+async fn long_transcript_recycle(register_replacement: bool) {
+    const NAME: &str = "long-history-codex";
+    const OLD: &str = "OLD SESSION TRANSCRIPT: prior delivery\r\n";
+    const NEW: &str = REPLACEMENT_STARTUP;
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    env.set_current_dir(dir.path());
+
+    let mut daemon = daemon(&cas_dir);
+    register_idle_worker(&cas_dir, NAME);
+    let old = idle_worker_pane(NAME, cas_mux::SupervisorCli::Codex);
+    let old_pid = old.process_group_id().unwrap();
+    daemon.app.adopt_worker_pane_for_test(old);
+    daemon.buffer_pane_output(NAME, OLD.repeat(4_000).as_bytes());
+    daemon.buffer_pane_output("unrelated-worker", b"unrelated live output");
+    assert!(
+        daemon.pane_buffers[NAME]
+            .as_plain_text()
+            .contains(OLD.trim())
+    );
+
+    let spec = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Codex,
+        model: Some("gpt-6.1-sol".into()),
+        effort: Some(cas_mux::Effort::High),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    let request_id = open_spawn_queue_store(&cas_dir)
+        .unwrap()
+        .enqueue_recycle(
+            NAME,
+            Some(&serde_json::to_string(&spec).unwrap()),
+            Some(SESSION),
+        )
+        .unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+    assert!(
+        !alive(old_pid),
+        "the old process stopped before the relaunch"
+    );
+    let verification = daemon.spawn_verifications.get(NAME).unwrap_or_else(|| {
+        panic!(
+            "relaunch awaits registration: {:?}",
+            shutdown_row_state(&cas_dir, request_id)
+        )
+    });
+    assert_eq!(verification.request_id, Some(request_id));
+    assert_eq!(daemon.app.harness_for(NAME), cas_mux::SupervisorCli::Codex);
+
+    // Drive the real mux output handler; the child, not the test, emits NEW.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, events) = daemon.app.mux.poll_batch();
+        for event in events {
+            daemon.handle_mux_event(event).await;
+        }
+        if daemon
+            .pane_buffers
+            .get(NAME)
+            .is_some_and(|buffer| buffer.as_plain_text().contains(NEW))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replacement startup line never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    if register_replacement {
+        let mut replacement = cas_types::Agent::new("replacement-session".into(), NAME.into());
+        replacement.role = cas_types::AgentRole::Worker;
+        replacement.factory_session = Some(SESSION.into());
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&replacement)
+            .unwrap();
+    } else {
+        // Expire verification without sleeping through the registration timeout.
+        daemon
+            .spawn_verifications
+            .get_mut(NAME)
+            .unwrap()
+            .launched_at = Instant::now() - Duration::from_secs(600);
+    }
+    daemon.reconcile_spawn_verifications().await;
+    let (state, detail) = shutdown_row_state(&cas_dir, request_id);
+    if register_replacement {
+        assert_eq!(
+            state.as_deref(),
+            Some(SpawnLifecycleState::Registered.as_str()),
+            "{detail:?}"
+        );
+        let output = daemon.pane_buffers[NAME].as_plain_text();
+        // A PTY can also echo its startup cursor-position reply. Assert the
+        // session boundary independently of that terminal handshake.
+        assert!(output.contains(NEW), "replacement output is retained");
+        assert!(
+            !output.contains(OLD.trim()),
+            "a registered replacement must not replay the old session"
+        );
+        assert!(
+            output.len() < 2_000,
+            "the short new output is not padded with old history"
+        );
+        daemon.app.shutdown_worker_for_recycle(NAME).await.unwrap();
+    } else {
+        assert_eq!(
+            state.as_deref(),
+            Some(SpawnLifecycleState::Failed.as_str()),
+            "{detail:?}"
+        );
+        let detail = detail.expect("timeout has a persisted reason");
+        assert!(detail.contains("did not register"), "{detail}");
+        assert!(
+            detail.contains(NEW),
+            "timeout names the replacement's startup line: {detail}"
+        );
+        assert!(
+            !detail.contains(OLD.trim()),
+            "timeout must exclude the old transcript: {detail}"
+        );
+        let notices: Vec<_> = open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.target == daemon.app.supervisor_name())
+            .map(|row| row.prompt)
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("stage=register") && notice.contains(NEW)),
+            "{notices:?}"
+        );
+        assert!(
+            notices.iter().all(|notice| !notice.contains(OLD.trim())),
+            "{notices:?}"
+        );
+    }
+    assert_eq!(
+        daemon.pane_buffers["unrelated-worker"].as_plain_text(),
+        "unrelated live output"
+    );
 }

@@ -297,6 +297,10 @@ pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> boo
 /// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
 /// the tip for a pure docs delivery. Both lookups are bounded and never poll.
 fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
+    cas_store::lane_guard::note_blocking_call(
+        cas_store::lane_guard::BlockingKind::Command,
+        "gh branch CI lookup",
+    );
     let (tip, code_sha) = match delivery_ci_commit(branch, target, cwd) {
         Ok(selected) => selected,
         Err(reason) => {

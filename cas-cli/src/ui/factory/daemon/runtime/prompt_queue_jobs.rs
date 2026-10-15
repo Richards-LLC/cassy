@@ -178,7 +178,7 @@ pub(crate) enum QueueJobOutcome {
 /// `process_prompt_queue` call still selects, delivers and stamps. The daemon
 /// itself always uses `Lanes`.
 enum Exec {
-    Lanes(JobRuntime<QueueJobOutcome>),
+    Lanes(Arc<JobRuntime<QueueJobOutcome>>),
     Inline(VecDeque<JobResult<QueueJobOutcome>>),
 }
 
@@ -515,16 +515,16 @@ impl QueueJobs {
     /// The daemon's queue jobs: lanes of their own, writes on the StoreWorker
     /// and reads on a dedicated connection.
     pub(crate) fn start(cas_dir: PathBuf, project_id: Option<String>) -> Self {
-        Self::with_exec(Exec::Lanes(JobRuntime::start_with(
+        Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(
             LANE_CAPACITY,
             LaneWiring::daemon(cas_dir, project_id),
-        )))
+        ))))
     }
 
     /// Jobs on explicit wiring (tests: a recording or gated writer).
     #[cfg(test)]
     pub(crate) fn start_with(wiring: LaneWiring) -> Self {
-        Self::with_exec(Exec::Lanes(JobRuntime::start_with(LANE_CAPACITY, wiring)))
+        Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(LANE_CAPACITY, wiring))))
     }
 
     /// Every job runs on the submitting thread before `submit` returns.
@@ -944,8 +944,38 @@ impl QueueJobs {
         self.close_pass_claims(cas_dir);
         self.settle_injects(cas_dir);
         match std::mem::replace(&mut self.exec, Exec::Inline(VecDeque::new())) {
-            Exec::Lanes(runtime) => runtime.drain(timeout),
+            Exec::Lanes(runtime) => match Arc::try_unwrap(runtime) {
+                Ok(runtime) => runtime.drain(timeout),
+                // The watchdog still holds the lanes: stop taking work. Lanes
+                // still run every queued critical stamp before they exit.
+                Err(shared) => {
+                    shared.close();
+                    let deadline = Instant::now() + timeout;
+                    while Instant::now() < deadline
+                        && [Lane::Read, Lane::Write, Lane::Blocking, Lane::External]
+                            .into_iter()
+                            .any(|lane| {
+                                let stats = shared.lane_stats(lane);
+                                stats.running.is_some() || stats.critical_backlog > 0
+                            })
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Instant::now() < deadline
+                }
+            },
             Exec::Inline(_) => true,
+        }
+    }
+
+    /// The lanes, for the loop watchdog (`loop.json` and wedge reports).
+    /// `None` inline.
+    pub(crate) fn job_lanes(&self) -> Option<Arc<dyn super::loop_watchdog::JobLanes>> {
+        match &self.exec {
+            Exec::Lanes(runtime) => {
+                Some(Arc::clone(runtime) as Arc<dyn super::loop_watchdog::JobLanes>)
+            }
+            Exec::Inline(_) => None,
         }
     }
 

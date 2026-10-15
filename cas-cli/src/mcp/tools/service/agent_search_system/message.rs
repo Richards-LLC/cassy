@@ -3697,6 +3697,18 @@ fn pending_deadline_narrative(
             pending_detail.unwrap_or("no detail was recorded")
         );
     }
+    // cas-a1ed: a row the daemon selected and then held behind a declined
+    // wake is not on the never-selected deadline either; the selection sweep
+    // does not touch it while its recipient is in the session.
+    if stage == DeliveryStage::Gated
+        && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
+    {
+        return format!(
+            "held for a busy recipient: still pending while it stays in the session — the pane nudge waits; \
+             the message surfaces at the recipient's next tool call or turn start — {}\n",
+            pending_detail.unwrap_or("no detail was recorded")
+        );
+    }
     match stage {
         DeliveryStage::Abandoned => format!(
             "undeliverable: this row was abandoned and will never be delivered — {}\n",

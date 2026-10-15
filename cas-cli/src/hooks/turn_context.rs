@@ -14,6 +14,12 @@ use sha2::{Digest, Sha256};
 use super::HookInput;
 
 const TAIL_BYTES: u64 = 256 * 1024;
+/// cas-a1ed: how far back a tool-boundary mail check looks for the start of
+/// the current turn. A long working turn writes far more than [`TAIL_BYTES`]
+/// of tool output after its first line (golden-stork-66 had none of 23 tool
+/// boundaries' turn starts inside the tail), and a check that cannot place the
+/// turn cannot tell a held message from the turn's own prompt.
+const TURN_START_SCAN_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const RECENT_TURNS: usize = 32;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -98,51 +104,92 @@ fn latest_turn(path: &Path, session: &str) -> Option<(String, String)> {
     latest_turn_with_start(path, session).map(|(key, prompt, _)| (key, prompt))
 }
 
+type TranscriptTurn = (String, String, Option<chrono::DateTime<chrono::Utc>>);
+
 /// [`latest_turn`] plus the turn's start time from the transcript entry's
-/// `timestamp`, when present.
-fn latest_turn_with_start(
-    path: &Path,
-    session: &str,
-) -> Option<(String, String, Option<chrono::DateTime<chrono::Utc>>)> {
+/// `timestamp`, when present. Reads only the transcript's last [`TAIL_BYTES`].
+fn latest_turn_with_start(path: &Path, session: &str) -> Option<TranscriptTurn> {
+    latest_turn_within(path, session, TAIL_BYTES)
+}
+
+/// The newest turn start in the transcript's last `limit` bytes, read
+/// backwards a [`TAIL_BYTES`] block at a time so a turn near the end costs one
+/// block (cas-a1ed).
+fn latest_turn_within(path: &Path, session: &str, limit: u64) -> Option<TranscriptTurn> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
-    let start = size.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    for line in text.lines().rev() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if value["type"] != "user" || value["isMeta"] == true || value["isSidechain"] == true {
-            continue;
+    let floor = size.saturating_sub(limit);
+    let mut end = size;
+    // The start of a line that began in an earlier, not yet read, block.
+    let mut carry: Vec<u8> = Vec::new();
+    while end > floor {
+        let start = end.saturating_sub(TAIL_BYTES).max(floor);
+        // One byte more, when there is one, says whether `start` begins a line.
+        let read_from = start.saturating_sub(1);
+        let mut block = vec![0; (end - read_from) as usize];
+        file.seek(SeekFrom::Start(read_from)).ok()?;
+        file.read_exact(&mut block).ok()?;
+        let starts_line = start == 0 || block[0] == b'\n';
+        if start > 0 {
+            block.remove(0);
         }
-        if value
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| id != session)
-        {
-            continue;
+        block.extend_from_slice(&carry);
+        let complete_from = if starts_line {
+            0
+        } else {
+            match block.iter().position(|byte| *byte == b'\n') {
+                Some(newline) => newline + 1,
+                None => {
+                    carry = block;
+                    end = start;
+                    continue;
+                }
+            }
+        };
+        for line in block[complete_from..].split(|byte| *byte == b'\n').rev() {
+            if let Some(turn) = turn_start_line(line, session) {
+                return Some(turn);
+            }
         }
-        // Claude emits operator prompts as strings. Arrays include tool_result
-        // and synthetic user messages; do not guess their provenance.
-        let Some(prompt) = value["message"]["content"].as_str() else {
-            continue;
-        };
-        let Some(key) = value["promptId"]
-            .as_str()
-            .or_else(|| value["uuid"].as_str())
-        else {
-            continue;
-        };
-        let started_at = value["timestamp"]
-            .as_str()
-            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-            .map(|at| at.with_timezone(&chrono::Utc));
-        return Some((key.to_string(), prompt.to_string(), started_at));
+        carry = block[..complete_from.saturating_sub(1)].to_vec();
+        end = start;
     }
     None
+}
+
+/// Whether one transcript line is a real external user message of `session`.
+fn turn_start_line(line: &[u8], session: &str) -> Option<TranscriptTurn> {
+    let line = String::from_utf8_lossy(line);
+    // Most of a long turn is tool output; skip lines that cannot be a user entry
+    // before parsing them.
+    if !line.contains("\"user\"") {
+        return None;
+    }
+    let line = line.trim_end_matches('\r');
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return None;
+    };
+    if value["type"] != "user" || value["isMeta"] == true || value["isSidechain"] == true {
+        return None;
+    }
+    if value
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| id != session)
+    {
+        return None;
+    }
+    // Claude emits operator prompts as strings. Arrays include tool_result
+    // and synthetic user messages; do not guess their provenance.
+    let prompt = value["message"]["content"].as_str()?;
+    let key = value["promptId"]
+        .as_str()
+        .or_else(|| value["uuid"].as_str())?;
+    let started_at = value["timestamp"]
+        .as_str()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&chrono::Utc));
+    Some((key.to_string(), prompt.to_string(), started_at))
 }
 
 /// Called by PostToolUse and by successful MCP responses.
@@ -185,7 +232,18 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
         // signal, so the next boundary checks again.
         receipt.state.mail_checked_at = chrono::Utc::now().timestamp_millis();
         changed = true;
-        let current = turn.as_ref().and_then(|(_, prompt, started_at)| {
+        // cas-a1ed: deep in a long turn its first line is outside the tail;
+        // look further back before checking mail without a turn.
+        let deep;
+        let turn_for_mail = if turn.is_some() {
+            turn.as_ref()
+        } else {
+            deep = input.transcript_path.as_deref().and_then(|path| {
+                latest_turn_within(Path::new(path), &input.session_id, TURN_START_SCAN_LIMIT_BYTES)
+            });
+            deep.as_ref()
+        };
+        let current = turn_for_mail.and_then(|(_, prompt, started_at)| {
             started_at.map(|started_at| CurrentTurn {
                 started_at,
                 prompt: prompt.as_str(),
@@ -253,6 +311,41 @@ mod tests {
             latest_turn(&path, "s"),
             Some(("p".into(), "question".into()))
         );
+    }
+
+    /// cas-a1ed: the turn's first line may sit anywhere behind a long run of
+    /// tool output, including across a block boundary of the backward read.
+    #[test]
+    fn a_turn_start_far_behind_the_tail_is_found_across_block_boundaries_cas_a1ed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let turn = "{\"type\":\"user\",\"sessionId\":\"s\",\"promptId\":\"deep\",\"timestamp\":\"2026-10-15T22:00:00Z\",\"message\":{\"content\":\"start cas-223f\"}}\n";
+        let tool = |bytes: usize| {
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"s\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"content\":\"{}\"}}]}}}}\n",
+                "x".repeat(bytes.saturating_sub(90).max(1))
+            )
+        };
+        let block = TAIL_BYTES as usize;
+        for after in [block - 40, block - 1, block, block + 1, block + 40, 3 * block + 7] {
+            let mut body = tool(5000).repeat(3);
+            body.push_str(turn);
+            let mut rest = String::new();
+            while rest.len() < after {
+                rest.push_str(&tool((after - rest.len()).min(7000)));
+            }
+            body.push_str(&rest);
+            fs::write(&path, &body).unwrap();
+            let found = latest_turn_within(&path, "s", TURN_START_SCAN_LIMIT_BYTES)
+                .unwrap_or_else(|| panic!("turn not found with {after} bytes after it"));
+            assert_eq!(found.0, "deep");
+            assert_eq!(found.1, "start cas-223f");
+            assert!(found.2.is_some());
+            if rest.len() > block {
+                assert!(latest_turn_with_start(&path, "s").is_none(), "the tail alone misses it");
+            }
+            assert!(latest_turn_within(&path, "s", (rest.len() - 1) as u64).is_none(), "bounded by the limit");
+        }
     }
 
     #[test]

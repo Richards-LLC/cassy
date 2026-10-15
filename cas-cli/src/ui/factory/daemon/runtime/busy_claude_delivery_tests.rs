@@ -97,9 +97,10 @@ async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_
         .join("inboxes")
         .join(format!("{WORKER}.json"));
     let written = std::fs::read_to_string(&inbox).unwrap_or_default();
+    let tree: Vec<_> = walk(&claude_config);
     assert!(
         written.contains(decision),
-        "the Teams inbox write must not wait on the silence gate: {written:?}"
+        "the Teams inbox write must not wait on the silence gate: {written:?}\nfiles: {tree:?}\nreport: {report:?}"
     );
 
     let surfaced = queue
@@ -110,4 +111,17 @@ async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_
         vec![id],
         "the worker's next tool boundary takes the held row"
     );
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }

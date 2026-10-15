@@ -498,8 +498,10 @@ mod ambient_scrub_tests {
 }
 
 /// Private no-op `cas` for preflight/hook fixtures. Keep it alive with the
-/// child and pass `path()` through Command.env or PtyConfig.env. No process
-/// environment is changed; tests of Cassy behavior use the built binary.
+/// child and pass `path()` through Command.env. Before calling Pty::spawn,
+/// re-execute the selected test in that child: the PTY preflight reads ambient
+/// PATH, not PtyConfig.env. No process environment is changed; tests of Cassy
+/// behavior use the built binary.
 #[cfg(unix)]
 pub(crate) struct FakeCasOnPath {
     bin: TempDir,

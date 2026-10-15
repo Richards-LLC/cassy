@@ -629,8 +629,10 @@ runner prints the PATH setup cost for measurement.
 
 Harness fixtures must supply their own fake executables. The shared
 `test_env_guard::fake_cas_on_path()` returns a private no-op Cassy
-stand-in and a PATH value; pass `fixture.path()` through `Command.env` or
-`PtyConfig.env` and retain the fixture until all children exit. It does not
+stand-in and a PATH value; pass `fixture.path()` through `Command.env` and retain
+the fixture until all children exit. For a PTY fixture, re-execute the selected
+test in that private child before calling `Pty::spawn`: its preflight reads
+ambient PATH, so `PtyConfig.env` alone is insufficient. The helper does not
 mutate process-global PATH. This is for the PTY preflight and harmless hook calls;
 tests of Cassy behavior must use the built binary. The same guard source is
 compiled by cas, cas-pty and cas-mux. To deliberately test an installed host

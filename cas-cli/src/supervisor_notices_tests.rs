@@ -81,7 +81,8 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].target, "operator");
     assert_eq!(rows[0].factory_session.as_deref(), Some("sender-session"));
-    assert!(rows[0].prompt.contains("Remote notice failed"));
+    assert!(is_action_envelope(&rows[0].prompt));
+    assert!(rows[0].prompt.contains("cas-remote") && rows[0].prompt.contains("503"));
     hold.live = Some(false);
     remote_focus_conflict(&root, &sender.id, "cas-stale", &hold).await;
     assert_eq!(

@@ -65,7 +65,9 @@ fn ct2_p3_integration_conflict_notifies_both() {
         assert!(
             row.prompt.contains("cas-lane-a")
                 && row.prompt.contains("cas-lane-b")
-                && row.prompt.contains("epic/shared-integration")
+                && row
+                    .prompt
+                    .contains(tasks.get("cas-lane-a").unwrap().branch.as_deref().unwrap())
         );
     }
     focus_epic(

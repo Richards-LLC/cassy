@@ -71,3 +71,55 @@ fn ct2_p3_dead_owner_notice_rerouted() {
         }
     }
 }
+
+#[test]
+fn pending_lifecycle_notice_follows_live_peer_after_owner_ends() {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecycleTransition, drain_lifecycle_outbox_with_agents, emit_task_lifecycle_transition,
+    };
+    let _env =
+        crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "old-session")]);
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    let sq = crate::store::open_supervisor_queue_store(&root).unwrap();
+    let pq = open_prompt_queue_store(&root).unwrap();
+    let mut owner =
+        Agent::new_with_role("former-id".into(), "former".into(), AgentRole::Supervisor);
+    owner.factory_session = Some("old-session".into());
+    agents.register(&owner).unwrap();
+    let result = emit_task_lifecycle_transition(
+        sq.as_ref(),
+        None,
+        agents.as_ref(),
+        "cas-pending",
+        "Pending",
+        cas_types::TaskStatus::InProgress,
+        cas_types::TaskStatus::AwaitingMerge,
+        "worker",
+        Some("ready"),
+        LifecycleTransition::AwaitingMerge,
+        "once",
+    );
+    assert!(
+        result.is_err(),
+        "the durable row remains pending without a prompt store"
+    );
+    agents.unregister(&owner.id).unwrap();
+    let mut peer = Agent::new_with_role("new-id".into(), "new-owner".into(), AgentRole::Supervisor);
+    peer.factory_session = Some("new-session".into());
+    agents.register(&peer).unwrap();
+    let report =
+        drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 10).unwrap();
+    assert_eq!(report.recovered, 1);
+    let rows = pq.peek_all(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target, peer.name);
+    assert_eq!(rows[0].factory_session, peer.factory_session);
+    assert_eq!(
+        drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 10)
+            .unwrap()
+            .attempted,
+        0
+    );
+}

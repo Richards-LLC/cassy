@@ -614,7 +614,7 @@ pub(crate) fn resolve_notice_recipient(
     agent_store: &dyn AgentStore,
     session: Option<&str>,
 ) -> crate::supervisor_notices::Recipient {
-    if let Some(owner) = resolve_worker_supervisor(agent_store, session)
+    if let Some(owner) = resolve_owning_supervisor(agent_store, session)
         && let Ok(agent) = agent_store.get(&owner.agent_id)
     {
         return crate::supervisor_notices::Recipient::agent(&agent);
@@ -1173,6 +1173,15 @@ pub fn deliver_lifecycle_outbox_row(
     prompt_queue: &dyn PromptQueueStore,
     notification: &SupervisorNotification,
 ) -> Result<LifecyclePushResult, String> {
+    deliver_lifecycle_outbox_row_with_agents(supervisor_queue, prompt_queue, notification, None)
+}
+
+fn deliver_lifecycle_outbox_row_with_agents(
+    supervisor_queue: &dyn SupervisorQueueStore,
+    prompt_queue: &dyn PromptQueueStore,
+    notification: &SupervisorNotification,
+    agents: Option<&dyn AgentStore>,
+) -> Result<LifecyclePushResult, String> {
     if notification.event_type != "task_lifecycle" {
         return Err(format!(
             "not a task_lifecycle row: event_type={}",
@@ -1244,6 +1253,16 @@ pub fn deliver_lifecycle_outbox_row(
         }
     };
 
+    // A pending durable row may outlive its saved destination. Resolve again
+    // immediately before admitting the prompt, including legacy outbox rows.
+    let recipient = match agents {
+        Some(agents) => Some(crate::supervisor_notices::resolve(
+            &agents.list(None).map_err(|e| format!("lifecycle recipient registry unavailable: {e}"))?,
+            payload.get("supervisor_name").and_then(|v| v.as_str()),
+            factory_session,
+        )),
+        None => None,
+    };
     deliver_prompt_for_notification(
         supervisor_queue,
         prompt_queue,
@@ -1259,10 +1278,13 @@ pub fn deliver_lifecycle_outbox_row(
         factory_session,
         occurrence_id,
         branch_tip,
-        payload.get("recipient_target").and_then(|v| v.as_str()).unwrap_or("supervisor"),
-        match payload.get("recipient_factory_session") {
-            Some(value) => value.as_str(),
-            None => factory_session,
+        recipient.as_ref().map(|r| r.name.as_str()).unwrap_or_else(|| payload.get("recipient_target").and_then(|v| v.as_str()).unwrap_or("supervisor")),
+        match recipient.as_ref() {
+            Some(recipient) => recipient.session.as_deref(),
+            None => match payload.get("recipient_factory_session") {
+                Some(value) => value.as_str(),
+                None => factory_session,
+            },
         },
     )
     .map_err(|error| error.to_string())?;
@@ -1280,6 +1302,25 @@ pub fn drain_lifecycle_outbox(
     prompt_queue: &dyn PromptQueueStore,
     limit: usize,
 ) -> Result<LifecycleOutboxDrainReport, String> {
+    drain_lifecycle_outbox_inner(supervisor_queue, prompt_queue, None, limit)
+}
+
+/// Production recovery rechecks liveness before enqueueing pending notices.
+pub fn drain_lifecycle_outbox_with_agents(
+    supervisor_queue: &dyn SupervisorQueueStore,
+    prompt_queue: &dyn PromptQueueStore,
+    agents: &dyn AgentStore,
+    limit: usize,
+) -> Result<LifecycleOutboxDrainReport, String> {
+    drain_lifecycle_outbox_inner(supervisor_queue, prompt_queue, Some(agents), limit)
+}
+
+fn drain_lifecycle_outbox_inner(
+    supervisor_queue: &dyn SupervisorQueueStore,
+    prompt_queue: &dyn PromptQueueStore,
+    agents: Option<&dyn AgentStore>,
+    limit: usize,
+) -> Result<LifecycleOutboxDrainReport, String> {
     let pending = supervisor_queue
         .list_pending_lifecycle_outbox(limit)
         .map_err(|e| format!("list pending lifecycle outbox: {e}"))?;
@@ -1290,7 +1331,7 @@ pub fn drain_lifecycle_outbox(
     };
 
     for n in pending {
-        match deliver_lifecycle_outbox_row(supervisor_queue, prompt_queue, &n) {
+        match deliver_lifecycle_outbox_row_with_agents(supervisor_queue, prompt_queue, &n, agents) {
             Ok(LifecyclePushResult::Recovered { .. })
             | Ok(LifecyclePushResult::Enqueued { .. }) => {
                 report.recovered += 1;
@@ -1410,7 +1451,8 @@ impl CasCore {
             .map_err(|e| format!("supervisor_queue open: {e}"))?;
         let pq = open_prompt_queue_store(&self.cas_root)
             .map_err(|e| format!("prompt_queue open: {e}"))?;
-        drain_lifecycle_outbox(sq.as_ref(), pq.as_ref(), 100)
+        let agents = self.open_agent_store().map_err(|e| format!("agent registry open: {e}"))?;
+        drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 100)
     }
 }
 

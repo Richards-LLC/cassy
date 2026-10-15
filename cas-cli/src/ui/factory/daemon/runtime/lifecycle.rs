@@ -551,9 +551,13 @@ fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
     let Ok(pq) = crate::store::open_prompt_queue_store(cas_dir) else {
         return;
     };
-    match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox(
+    let Ok(agents) = crate::store::open_agent_store(cas_dir) else {
+        return;
+    };
+    match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox_with_agents(
         sq.as_ref(),
         pq.as_ref(),
+        agents.as_ref(),
         50,
     ) {
         Ok(report) if report.recovered > 0 || report.failed > 0 => {

@@ -17,14 +17,8 @@ use std::path::Path;
 
 use crate::worktree::GitOperations;
 
-/// Red-first stub (cas-cf8e0): today's behaviour.
-const RED_STUB: bool = true;
-
 /// The explicit target an epic create adopts as its lane, if any.
 pub(crate) fn adopted_epic_lane(target_branch: Option<&str>) -> Option<&str> {
-    if RED_STUB {
-        return None;
-    }
     target_branch
         .map(str::trim)
         .filter(|branch| branch.len() > "epic/".len() && branch.starts_with("epic/"))
@@ -33,9 +27,6 @@ pub(crate) fn adopted_epic_lane(target_branch: Option<&str>) -> Option<&str> {
 /// The receipt note for an explicit target that is the epic's base rather
 /// than its lane.
 pub(crate) fn explicit_base_note(target_branch: Option<&str>, lane: &str) -> String {
-    if RED_STUB {
-        return String::new();
-    }
     match target_branch
         .map(str::trim)
         .filter(|branch| !branch.is_empty())

@@ -12,7 +12,7 @@ mod preferences_context;
 mod reload_skills;
 mod reviews;
 mod ripple_path_scope;
-mod send_message_autoroute;
+mod send_message_policy;
 mod session_title;
 mod slack_transport;
 mod publication_gate;

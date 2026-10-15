@@ -7270,8 +7270,7 @@ fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore) -> Vec<s
         .unwrap_or_default()
         .into_iter()
         .filter(|agent| {
-            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
-                .is_live()
+            crate::factory_target_cache::legacy::registered_live(agent)
         })
         .filter_map(|agent| {
             agent

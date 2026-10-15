@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 use crate::config::FactoryConfig;
 
 mod lane;
+pub(crate) mod legacy;
 #[cfg(unix)]
 pub(crate) mod owner;
 pub(crate) mod parked;
@@ -66,6 +67,7 @@ impl From<FactoryConfig> for TargetCachePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum CacheDisposition {
     LiveProcess,
+    Indeterminate,
     RecentWrite,
     Retained,
     Eligible,
@@ -203,13 +205,13 @@ pub fn inspect(
             .map(|age| age.as_secs());
         let (disposition, reason) = if let Some(reason) = cache.unsafe_reason {
             (CacheDisposition::UnsafePath, reason)
-        } else if canonical_live_roots.contains(&cache.worktree)
-            || live_process_uses(&cache.worktree, &cache.path)
-        {
-            (
-                CacheDisposition::LiveProcess,
-                "registered or OS-visible live process uses this worktree".to_string(),
-            )
+        } else if let Err((disposition, reason)) = cache_admission(
+            cas_root,
+            &cache.worktree,
+            &cache.path,
+            &canonical_live_roots,
+        ) {
+            (disposition, reason)
         } else if cache.newest_write.is_some_and(|modified| {
             now.duration_since(modified).unwrap_or_default()
                 < Duration::from_secs(policy.min_idle_secs)
@@ -330,13 +332,19 @@ pub fn cleanup_selected(
             record.reason = reason;
             continue;
         }
-        if canonical_live_roots.contains(&rescanned.worktree)
-            || live_process_uses(&rescanned.worktree, &rescanned.path)
-        {
-            record.disposition = CacheDisposition::LiveProcess;
-            record.reason = "liveness appeared during destructive revalidation".to_string();
-            continue;
-        }
+        let guard = match cache_admission(
+            cas_root,
+            &rescanned.worktree,
+            &rescanned.path,
+            &canonical_live_roots,
+        ) {
+            Ok(guard) => guard,
+            Err((disposition, reason)) => {
+                record.disposition = disposition;
+                record.reason = reason;
+                continue;
+            }
+        };
         if rescanned
             .newest_write
             .is_some_and(|modified| modified > cutoff)
@@ -346,6 +354,34 @@ pub fn cleanup_selected(
             continue;
         }
 
+        if guard
+            .as_ref()
+            .is_some_and(|guard| !guard.unchanged(&record.path))
+            || guard.is_some()
+                && (!legacy::lane_target(cas_root, &record.worktree, &record.path)
+                    || !legacy::registry_allows(cas_root, &record.worktree)
+                    || scan_cache(&record.worktree, &record.path, false).map_or(true, |scan| {
+                        scan.unsafe_reason.is_some()
+                            || scan.newest_write.is_none_or(|time| time > cutoff)
+                    }))
+        {
+            record.disposition = CacheDisposition::Indeterminate;
+            record.reason = "legacy lane guards changed before rename".into();
+            continue;
+        }
+        let descriptors = guard
+            .as_ref()
+            .map_or_else(Vec::new, legacy::Guard::descriptors);
+        if guarded_process_uses(
+            &record.worktree,
+            &record.path,
+            &descriptors,
+            guard.is_some(),
+        ) {
+            record.disposition = CacheDisposition::LiveProcess;
+            record.reason = "process evidence changed before rename".into();
+            continue;
+        }
         ordinal += 1;
         let quarantine = if record.interrupted_cleanup {
             record.path.clone()
@@ -367,7 +403,11 @@ pub fn cleanup_selected(
         // started against the worktree root is visible by cwd/cmdline. If a
         // live user appeared, restore the original name when possible and
         // leave the cache intact either way.
-        if live_process_uses(&record.worktree, &quarantine) {
+        if guard
+            .as_ref()
+            .is_some_and(|guard| !guard.unchanged(&quarantine))
+            || guarded_process_uses(&record.worktree, &quarantine, &descriptors, guard.is_some())
+        {
             if !record.interrupted_cleanup && !record.path.exists() {
                 let _ = fs::rename(&quarantine, &record.path);
             }
@@ -831,6 +871,99 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
     })
 }
 
+fn cache_admission(
+    cas_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    live: &HashSet<PathBuf>,
+) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
+    if live.contains(worktree) {
+        return Err((
+            CacheDisposition::LiveProcess,
+            "fresh registered owner with matching live PID".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_cache_admission(cas_root, worktree, cache, Path::new("/proc"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cas_root;
+        if live_process_uses(worktree, cache) {
+            Err((
+                CacheDisposition::Indeterminate,
+                "process evidence does not establish idle".into(),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cache_admission(
+    cas_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    proc_root: &Path,
+) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
+    use process_probe::Evidence;
+    let evidence = process_probe::linux_evidence_many(proc_root, worktree, cache, &[]);
+    if let Evidence::Live { pid, field } = evidence {
+        return Err((
+            CacheDisposition::LiveProcess,
+            format!("positive process evidence: pid={pid:?} field={field}"),
+        ));
+    }
+    if legacy::lane_target(cas_root, worktree, cache) {
+        let guard = legacy::acquire(cas_root, worktree, cache).map_err(|error| {
+            (
+                CacheDisposition::Indeterminate,
+                format!("legacy lane guard refused: {error}"),
+            )
+        })?;
+        if process_probe::linux_uses_many_owned(
+            proc_root,
+            worktree,
+            cache,
+            &guard.descriptors(),
+            true,
+        ) {
+            return Err((
+                CacheDisposition::Indeterminate,
+                "unverifiable process table or new positive process evidence".into(),
+            ));
+        }
+        return Ok(Some(guard));
+    }
+    if matches!(evidence, Evidence::Opaque { .. }) {
+        return Err((
+            CacheDisposition::Indeterminate,
+            "opaque process evidence; target is outside guarded worker-lane policy".into(),
+        ));
+    }
+    Ok(None)
+}
+
+fn guarded_process_uses(worktree: &Path, cache: &Path, descriptors: &[i32], guarded: bool) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        process_probe::linux_uses_many_owned(
+            Path::new("/proc"),
+            worktree,
+            cache,
+            descriptors,
+            guarded,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = guarded;
+        process_uses_many(worktree, cache, descriptors)
+    }
+}
+
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
     process_uses(worktree, cache, None)
 }
@@ -977,7 +1110,9 @@ mod tests {
         let path = probe.path().join("nonexistent-output");
         let available = !live_process_uses(&path, &path);
         if !available {
-            eprintln!("RECLAIM PROOF UNAVAILABLE: native process evidence is unreadable; asserting preservation only");
+            eprintln!(
+                "RECLAIM PROOF UNAVAILABLE: native process evidence is unreadable; asserting preservation only"
+            );
         }
         available
     }
@@ -1452,7 +1587,10 @@ mod tests {
             deserialized.caches[0].disposition,
             CacheDisposition::OwnershipChanged
         );
-        assert_eq!(fs::read(owned.join("target/after-replacement")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(owned.join("target/after-replacement")).unwrap(),
+            b"keep"
+        );
         assert_eq!(trusted_report.reclaimed_bytes, 0);
         assert_eq!(deserialized.reclaimed_bytes, 0);
     }

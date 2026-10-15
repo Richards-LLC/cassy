@@ -39,7 +39,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          ConfigType::Int, "75", Constraint::Range(0, 100)),
         ("factory.target_cache_min_idle_secs", "Cargo Cache Minimum Idle Time",
          "Preserve caches and previews written more recently than this many seconds during explicit garbage collection.",
-         ConfigType::Int, "3600", Constraint::Min(0)),
+         ConfigType::Int, "7200", Constraint::Min(0)),
         ("factory.target_cache_retention_count", "Warm Cargo Cache Retention",
          "Number of newest stale worker caches retained warm, also bounding parked deliveries with warm target/debug caches.",
          ConfigType::Int, "1", Constraint::Min(0)),

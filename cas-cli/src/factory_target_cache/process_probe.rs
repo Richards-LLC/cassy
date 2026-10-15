@@ -4,13 +4,56 @@ use super::*;
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Evidence {
     Idle,
-    Live { pid: Option<u32>, field: &'static str },
-    Opaque { pid: Option<u32> },
+    Live {
+        pid: Option<u32>,
+        field: &'static str,
+    },
+    Opaque {
+        pid: Option<u32>,
+    },
 }
 
-pub(super) fn linux_evidence_many(proc_root: &Path, worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> Evidence {
-    if linux_uses_many(proc_root, worktree, cache, own_lock_fds) {
-        Evidence::Live { pid: None, field: "unclassified" }
+pub(super) fn linux_evidence_many(
+    proc_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    own_lock_fds: &[i32],
+) -> Evidence {
+    if worktree.as_os_str().is_empty() || cache.as_os_str().is_empty() {
+        return Evidence::Opaque { pid: None };
+    }
+    let Ok(processes) = fs::read_dir(proc_root) else {
+        return Evidence::Opaque { pid: None };
+    };
+    let mut opaque = None;
+    let mut unavailable = false;
+    for entry in processes {
+        let Ok(entry) = entry else {
+            unavailable = true;
+            continue;
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let process = entry.path();
+        match process_evidence(&process, pid, worktree, cache, own_lock_fds) {
+            Ok(evidence @ Evidence::Live { .. }) => return evidence,
+            Ok(Evidence::Opaque { .. }) => {
+                opaque = Some(pid);
+            }
+            Ok(Evidence::Idle) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound && vanished(&process) => {}
+            Err(_) => unavailable = true,
+        }
+    }
+    if unavailable {
+        Evidence::Opaque { pid: None }
+    } else if let Some(pid) = opaque {
+        Evidence::Opaque { pid: Some(pid) }
     } else {
         Evidence::Idle
     }
@@ -43,30 +86,11 @@ pub(super) fn linux_uses_many_owned(
     own_lock_fds: &[i32],
     lease_managed: bool,
 ) -> bool {
-    if worktree.as_os_str().is_empty() || cache.as_os_str().is_empty() {
-        return true;
+    match linux_evidence_many(proc_root, worktree, cache, own_lock_fds) {
+        Evidence::Idle => false,
+        Evidence::Live { .. } => true,
+        Evidence::Opaque { pid } => !lease_managed || pid.is_none(),
     }
-    let Ok(processes) = fs::read_dir(proc_root) else {
-        return true;
-    };
-    for entry in processes {
-        let Ok(entry) = entry else {
-            return true;
-        };
-        let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
-            continue;
-        };
-        let process = entry.path();
-        match process_uses(&process, pid, worktree, cache, own_lock_fds, lease_managed) {
-            Ok(true) => return true,
-            Ok(false) => {}
-            // A process can exit between directory enumeration and probes.
-            Err(error) if error.kind() == io::ErrorKind::NotFound && vanished(&process) => {}
-            Err(_) => return true,
-        }
-    }
-    false
 }
 
 fn vanished(path: &Path) -> bool {
@@ -74,14 +98,13 @@ fn vanished(path: &Path) -> bool {
 }
 
 #[cfg(any(target_os = "linux", all(test, unix)))]
-fn process_uses(
+fn process_evidence(
     process: &Path,
     pid: u32,
     worktree: &Path,
     cache: &Path,
     own_lock_fds: &[i32],
-    lease_managed: bool,
-) -> io::Result<bool> {
+) -> io::Result<Evidence> {
     let stat = fs::read_to_string(process.join("stat"))?;
     let fields: Vec<_> = stat
         .rsplit_once(')')
@@ -97,12 +120,17 @@ fn process_uses(
     // cwd/exe links may legitimately be absent; all live userspace probes below
     // must succeed or the result stays unknown/live.
     if matches!(fields.first().copied(), Some("Z" | "X")) || flags & 0x0020_0000 != 0 {
-        return Ok(false);
+        return Ok(Evidence::Idle);
     }
     let mut unknown = false;
     for link in ["cwd", "exe"] {
         match fs::read_link(process.join(link)) {
-            Ok(path) if path.starts_with(worktree) || path.starts_with(cache) => return Ok(true),
+            Ok(path) if path.starts_with(worktree) || path.starts_with(cache) => {
+                return Ok(Evidence::Live {
+                    pid: Some(pid),
+                    field: link,
+                });
+            }
             Ok(_) => {}
             Err(_) => unknown = true,
         }
@@ -121,14 +149,20 @@ fn process_uses(
                 .windows(cache_bytes.len())
                 .any(|window| window == cache_bytes)
     }) {
-        return Ok(true);
+        return Ok(Evidence::Live {
+            pid: Some(pid),
+            field: "cmdline",
+        });
     }
     let maps = fs::read(process.join("maps")).unwrap_or_else(|_| {
         unknown = true;
         Vec::new()
     });
     if maps_use(&maps, worktree, cache) {
-        return Ok(true);
+        return Ok(Evidence::Live {
+            pid: Some(pid),
+            field: "maps",
+        });
     }
     let fds = match fs::read_dir(process.join("fd")) {
         Ok(fds) => Some(fds),
@@ -153,15 +187,24 @@ fn process_uses(
             continue; // Exempt only the eviction lock descriptor, never the PID.
         }
         match fs::read_link(fd.path()) {
-            Ok(path) if path.starts_with(worktree) || path.starts_with(cache) => return Ok(true),
+            Ok(path) if path.starts_with(worktree) || path.starts_with(cache) => {
+                return Ok(Evidence::Live {
+                    pid: Some(pid),
+                    field: "fd",
+                });
+            }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound && vanished(&fd.path()) => {}
             Err(_) => unknown = true,
         }
     }
-    // Only a validated target with its exclusive lifetime lease can tolerate
-    // opaque unrelated processes. All readable evidence was still inspected.
-    Ok(unknown && !lease_managed)
+    // Preserve uncertainty separately from positive evidence. Boolean callers
+    // choose whether a held lifetime lease or the narrow GC guard permits it.
+    Ok(if unknown {
+        Evidence::Opaque { pid: Some(pid) }
+    } else {
+        Evidence::Idle
+    })
 }
 
 #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -217,10 +260,16 @@ mod tests {
         let (_temp, root, process, cache) = fixture();
         fs::remove_file(process.join("maps")).unwrap();
         fs::create_dir(process.join("maps")).unwrap();
-        assert!(matches!(linux_evidence_many(&root, &cache, &cache, &[]), Evidence::Opaque { .. }));
+        assert!(matches!(
+            linux_evidence_many(&root, &cache, &cache, &[]),
+            Evidence::Opaque { .. }
+        ));
         fs::remove_file(process.join("cwd")).unwrap();
         symlink(&cache, process.join("cwd")).unwrap();
-        assert!(matches!(linux_evidence_many(&root, &cache, &cache, &[]), Evidence::Live { .. }));
+        assert!(matches!(
+            linux_evidence_many(&root, &cache, &cache, &[]),
+            Evidence::Live { .. }
+        ));
     }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {

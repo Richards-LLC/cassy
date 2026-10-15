@@ -7,6 +7,43 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — code merges wait for CI and late failures raise a blocker (cas-6c13)
+
+- `worktree_merge` refuses a code delivery while its lane CI is still
+  running, even with an override. A failed run on an already-merged lane
+  raises a critical blocker naming the integration branch that contains it.
+- The blast-radius proof check now includes workspace crates that depend
+  directly on a changed crate. Each untested dependent needs a passing
+  targeted test receipt at the delivered commit before the task can park.
+
+### Changed — releases wait for the PR's checks before entering the queue (cas-2aef)
+
+- `scripts/release.sh` waits for the PR's Scoped Validation checks before
+  enabling auto-merge. A failed or cancelled check stops the command with
+  exit 5, naming the failing checks and tests, without adding the PR to the
+  merge queue.
+
+### Changed — Commander questions can carry a deadline and a default (cas-207e)
+
+- A Commander ask can set `remind_delay_secs` and `remind_message` together
+  to name a deadline and a default action. If the deadline passes, a blocker
+  wake tells the sender to proceed with that default. The reply names the
+  reminder so it can be cancelled when an answer arrives first.
+- Ready work left waiting while capacity sits idle now raises a blocker wake.
+  Deliveries whose lane CI is still running are excluded from ready merges
+  and do not trigger that wake on their own.
+
+### Removed — OpenCode configuration tests no longer pin prompt wording (cas-2aef)
+
+- Removed the full prompt-text snapshot and its writer. The projection test
+  checks both primary agents' modes, models, variants, permissions and
+  non-empty prompts, plus the configuration's top-level structure.
+
+### Fixed — latency tests tolerate busy runners (cas-1518)
+
+- Internal: injected-latency tests retain their lower bounds and success
+  assertions, with upper bounds widened to 10-times-RTT hang guards.
+
 ## [3.54.0] - 2026-10-15
 
 ### Changed — one command releases; landing on main publishes and installs (cas-f95b)

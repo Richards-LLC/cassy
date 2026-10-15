@@ -4456,7 +4456,20 @@ printf 'fast-rows: PASS %s fixture\n' "$sha" >"$common/cas/fast-rows/$sha.pass"
 
         std::fs::write(wt.join("version.txt"), "fixture value: 9.99.7\n").unwrap();
         assert!(git(&wt, &["add", "version.txt"]).status.success());
-        assert!(git(&wt, &["commit", "-qm", "remove fixture next-version literal"]).status.success());
+        let repaired_commit = std::process::Command::new("git")
+            .args(["commit", "-qm", "remove fixture next-version literal"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(
+            repaired_commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&repaired_commit.stderr)
+        );
         let allowed = std::process::Command::new("git")
             .args(["push", "origin", "factory/w"])
             .env("CAS_AGENT_NAME", "w")

@@ -2068,7 +2068,7 @@ fn no_active_epic_guidance(why: &str) -> String {
 
 fn factory_provision_build_compatibility(
     session: &str,
-    provisioner_build: &str,
+    provisioner_build: Option<&str>,
 ) -> Result<(), String> {
     let metadata_path = crate::ui::factory::metadata_path(session);
     let raw = std::fs::read_to_string(&metadata_path).map_err(|_| {
@@ -2085,6 +2085,11 @@ fn factory_provision_build_compatibility(
     let Some(daemon_build) = metadata.daemon_build_hash.as_deref() else {
         return Err(format!(
             "provision_build_identity_missing: factory session {session} has no recorded daemon build ID. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+        ));
+    };
+    let Some(provisioner_build) = provisioner_build else {
+        return Err(format!(
+            "provision_build_identity_unavailable: cannot inspect the installed provisioner for factory session {session}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
         ));
     };
     if daemon_build != provisioner_build {
@@ -2133,11 +2138,7 @@ impl CasService {
         } else {
             option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string()
         };
-        self.factory_spawn_workers_in_with_provisioner_build(
-            ctx,
-            req,
-            &provisioner_build,
-        )
+        self.factory_spawn_workers_in_with_provisioner_build(ctx, req, Some(&provisioner_build))
         .await
     }
 
@@ -2145,7 +2146,7 @@ impl CasService {
         &self,
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
-        provisioner_build: &str,
+        provisioner_build: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
@@ -11521,6 +11522,104 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn spawn_build_check_case(
+        session: &str,
+        daemon_build_hash: Option<&str>,
+        provisioner_build: Option<&str>,
+    ) -> (String, Vec<cas_store::SpawnRequest>) {
+        use cas_store::SpawnQueueStore;
+        use cas_types::TaskType;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
+        tasks.init().expect("initialize task store");
+        let mut epic = cas_types::Task::new("cas-1174-epic".into(), "worker build check".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).expect("add active epic");
+
+        if let Some(daemon_build_hash) = daemon_build_hash {
+            let sessions = crate::ui::factory::SessionManager::new();
+            sessions.ensure_dir().expect("create session directory");
+            let mut metadata = crate::ui::factory::create_metadata(
+                session,
+                std::process::id(),
+                "supervisor",
+                &[],
+                None,
+                Some(cas_root.to_string_lossy().as_ref()),
+                None,
+            );
+            metadata.daemon_build_hash = Some(daemon_build_hash.to_string());
+            std::fs::write(
+                crate::ui::factory::metadata_path(session),
+                serde_json::to_vec(&metadata).expect("encode session metadata"),
+            )
+            .expect("write session metadata");
+        }
+
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1,
+            "cli": "grok"
+        }))
+        .expect("valid spawn request");
+        let response = service
+            .factory_spawn_workers_in_with_provisioner_build(
+                &crate::ops::fleet::FleetContext::operator(session),
+                req,
+                provisioner_build,
+            )
+            .await
+            .expect("spawn is queued when build identity is inconclusive");
+        let receipt = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
+        (receipt, queue.peek(10).expect("read spawn queue"))
+    }
+
+    #[tokio::test]
+    async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
+        let (receipt, queue) =
+            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"))
+                .await;
+
+        assert!(
+            receipt.contains(
+                "Build check: skipped (session build metadata unavailable); the provisioner still checks at spawn time"
+            ),
+            "receipt should explain why the early check was skipped: {receipt}"
+        );
+        assert_eq!(queue.len(), 1, "an unknown daemon build must not refuse spawn");
+    }
+
+    #[tokio::test]
+    async fn unprobeable_provisioner_identity_skips_build_check_and_queues_spawn() {
+        let (receipt, queue) =
+            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None).await;
+
+        assert!(
+            receipt.contains(
+                "Build check: skipped (provisioner build ID unavailable); the provisioner still checks at spawn time"
+            ),
+            "receipt should explain why the early check was skipped: {receipt}"
+        );
+        assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+    }
 
     #[tokio::test]
     async fn older_factory_daemon_build_is_reported_before_spawn_is_queued_gh_1174() {

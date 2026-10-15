@@ -4023,11 +4023,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "worker action cannot be sent to the operator".into(),
             ));
         }
-        let Some(origin_agent_id) = origin.agent_id() else {
+        let QueueOrigin::RegisteredAgent { agent_id } = origin else {
             return Err(StoreError::Other(
                 "worker action requires a registered-agent origin".into(),
             ));
         };
+        let origin_agent_id = agent_id.as_str();
 
         let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -4064,18 +4065,18 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             }
 
             // Read only undelivered rows stamped with this worker's registry
-            // id and factory session. Newer action messages supersede either
-            // status or ready, but never an action that has already reached
-            // transport or belongs to another worker/session.
+            // id and factory session. A worker has one action wake across its
+            // same-session supervisors; newer status or ready supersedes
+            // either kind, but never a transported action or another worker's.
             let mut stmt = tx.prepare_cached(
                 "SELECT id, prompt FROM prompt_queue
-                 WHERE target = ? AND factory_session = ? AND origin_agent_id = ?
+                 WHERE factory_session = ? AND origin_agent_id = ?
                    AND processed_at IS NULL AND transport_delivered_at IS NULL
                    AND COALESCE(highest_stage, 'enqueued')
                        NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
             )?;
             let pending = stmt
-                .query_map(params![target, factory_session, origin_agent_id], |row| {
+                .query_map(params![factory_session, origin_agent_id], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;

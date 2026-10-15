@@ -983,6 +983,35 @@ pub(crate) fn resolve_live_branch_tip(
     }
 }
 
+/// Refresh the published source before a typed request can be suppressed.
+/// A cached remote-tracking ref is not live origin evidence (GH #1179).
+/// Local delivery keeps its local authority; failed remote probes never turn
+/// a stale cached predecessor into an "already landed" decision.
+pub(crate) fn refresh_merge_request_source(
+    repo_path: &Path,
+    branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> Result<(), String> {
+    use crate::git_evidence::{BoundedFetch, git_text, is_safe_git_refname, run_bounded_git_fetch};
+
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge
+        || git_text(repo_path, &["remote", "get-url", "origin"]).is_none()
+    {
+        return Ok(());
+    }
+    let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+    if !is_safe_git_refname(branch) {
+        return Err("Merge request source freshness unavailable: unsafe source branch. No merge request was queued.".into());
+    }
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    match run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "origin", &refspec]) {
+        BoundedFetch::Succeeded => Ok(()),
+        outcome => Err(format!(
+            "Merge request source freshness unavailable: could not refresh origin/{branch} ({outcome:?}). No merge request was queued. Retry the merge request after fetching the published source; cached refs were not accepted as evidence that it landed."
+        )),
+    }
+}
+
 /// Resolve the integration branch tip a merge request is judged against
 /// (GH #986).
 ///

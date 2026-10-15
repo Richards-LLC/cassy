@@ -1747,6 +1747,15 @@ impl CasService {
                     Some(&task),
                     Some(&repo.repo_root),
                 );
+                if let Some(branch) = branch.as_deref()
+                    && let Err(message) = crate::prompt_revalidation::refresh_merge_request_source(
+                        &repo.repo_root,
+                        branch,
+                        task.delivery_mode,
+                    )
+                {
+                    return Ok(Self::tool_error(message));
+                }
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its
                 // delivery lands or the worker starts another task on this
@@ -4611,7 +4620,7 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
-    async fn stale_source_merge_request_gh1179(offline: bool) {
+    async fn stale_source_merge_request_gh1179(offline: bool, local_merge: bool) {
         let _env = TestEnvGuard::temp_home();
         let origin = tempfile::tempdir().unwrap();
         git(origin.path(), &["init", "-q", "--bare"]);
@@ -4667,6 +4676,9 @@ mod cas_89e1_post_merge_message_type_tests {
         let tasks = core.open_task_store().unwrap();
         let mut task = Task::new("cas-874e".into(), "live origin source".into());
         task.status = TaskStatus::AwaitingMerge;
+        if local_merge {
+            task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        }
         task.assignee = Some(worker.name);
         task.deliverables.parked_branch = Some(branch.into());
         task.deliverables.work_target = Some(WorkTarget {
@@ -4680,10 +4692,15 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id);
         let response = response_text(service.message_send(request).await.unwrap());
+        if local_merge {
+            assert!(response.contains("Merge already landed"), "{response}");
+            return;
+        }
         assert!(!response.contains("Merge already landed"), "{response}");
         if offline {
             assert!(response.contains("freshness unavailable"), "{response}");
             assert!(response.contains("No merge request was queued"), "{response}");
+            assert!(crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap().is_empty());
         } else {
             assert!(response.contains("Message queued"), "{response}");
             let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
@@ -4692,17 +4709,30 @@ mod cas_89e1_post_merge_message_type_tests {
             ).expect("live source merge request reaches supervisor queue");
             assert_eq!(envelope.branch_tip, published_tip);
             assert_eq!(envelope.target_branch_tip, target_tip);
+            // Once that exact published delivery lands, suppression is valid.
+            git(repo, &["merge", "-q", "--no-ff", &published_tip, "-m", "merge current delivery"]);
+            git(repo, &["push", "-q", "origin", "main"]);
+            let mut request = message_request(true);
+            request.task_id = Some("cas-874e".into());
+            let landed = response_text(service.message_send(request).await.unwrap());
+            assert!(landed.contains("Merge already landed"), "{landed}");
+            assert!(landed.contains(&published_tip), "{landed}");
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn merge_request_refreshes_stale_source_before_landed_suppression_gh1179() {
-        stale_source_merge_request_gh1179(false).await;
+        stale_source_merge_request_gh1179(false, false).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn merge_request_failed_source_refresh_never_claims_landed_gh1179() {
-        stale_source_merge_request_gh1179(true).await;
+        stale_source_merge_request_gh1179(true, false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_merge_request_keeps_local_authority_with_offline_origin_gh1179() {
+        stale_source_merge_request_gh1179(true, true).await;
     }
 
     /// GH #734: a worker in one factory session must not inherit the newest

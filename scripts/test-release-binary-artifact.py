@@ -17,6 +17,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# A git hook (the pre-push fast rows) exports GIT_DIR and friends; a fixture
+# `git init` would then reinitialise the real repository (cas-f95b).
+for _name in subprocess.run(['git', 'rev-parse', '--local-env-vars'], capture_output=True,
+                            text=True, check=False).stdout.split():
+    os.environ.pop(_name, None)
 HELPER = ROOT / 'scripts/release-binary-artifact.py'
 TARGET = 'x86_64-unknown-linux-gnu'
 

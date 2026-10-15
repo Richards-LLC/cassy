@@ -9,6 +9,11 @@
 # resolved: it exits 2 with an error rather than a found=false that would look
 # like a missing prebuild (cas-0906).
 set -euo pipefail
+# A git hook (the pre-push fast rows) exports GIT_DIR and friends. A fixture
+# `git init` would then reinitialise the real repository (cas-f95b), so drop
+# every repository-local git variable before touching a fixture repository.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lookup="$script_dir/find-release-prebuild.sh"

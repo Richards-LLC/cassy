@@ -11,6 +11,11 @@
 # the release files stops with exit 4; an ejected PR stops the watch with
 # exit 3; a merged PR ends it with exit 0.
 set -euo pipefail
+# A git hook (the pre-push fast rows) exports GIT_DIR and friends. A fixture
+# `git init` would then reinitialise the real repository (cas-f95b), so drop
+# every repository-local git variable before touching a fixture repository.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp -d)"

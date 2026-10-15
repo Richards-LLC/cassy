@@ -11470,10 +11470,16 @@ mod tests {
     #[tokio::test]
     async fn older_factory_daemon_build_is_reported_before_spawn_is_queued_gh_1174() {
         use cas_store::SpawnQueueStore;
+        use cas_types::TaskType;
 
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().expect("temp project");
         let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
+        tasks.init().expect("initialize task store");
+        let mut epic = cas_types::Task::new("cas-1174-epic".into(), "worker build check".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).expect("add active epic");
         let session = "older-daemon-1174";
         let metadata = crate::ui::factory::create_metadata(
             session,

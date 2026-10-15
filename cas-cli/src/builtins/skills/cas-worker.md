@@ -62,8 +62,8 @@ use assigned work; `ready` and `available` are backlog
 
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries.
 - Worker peer lane: `coordination action=message target=<worker-name> summary="collision warning" message="Task cas-123 touches the same files."`
-  reaches only a registered worker in the same factory session. Cassy also sends
-  a copy to that session's supervisor. Use this narrow lane for collision
+  reaches only a registered worker in the same factory session. Cassy also sends a copy
+  to that session's supervisor. Use this narrow lane for collision
   warnings, not general chat or cross-session contact; send task status, blockers
   and handoffs to `target=supervisor`.
 - A worker can send `coordination action=message target=supervisor kind=status summary="status" message="Please review the current task update."`

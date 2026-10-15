@@ -753,6 +753,16 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub isolate: Option<bool>,
 
+    /// cas-ee68 (communication contract v2, P3.7): a supervisor brief for
+    /// the pre-assigned task. It is written to the task notes at spawn time
+    /// and quoted in the worker's spawn message, so the worker has it before
+    /// it starts the task.
+    #[schemars(
+        description = "spawn_workers with task_id: your brief for the worker. Stored on the task and shown in its spawn message, so it is read before task start."
+    )]
+    #[serde(default)]
+    pub spawn_brief: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -1138,9 +1148,9 @@ pub struct CoordinationRequest {
     pub session_id: Option<String>,
 
     /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
-    /// worker briefs must be sent with coordination message after registration.
+    /// a worker brief goes in spawn_brief with task_id (cas-ee68).
     #[schemars(
-        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration."
+        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; pass a worker brief as spawn_brief with task_id."
     )]
     #[serde(default)]
     pub prompt: Option<String>,
@@ -1280,6 +1290,16 @@ pub struct CoordinationRequest {
     )]
     #[serde(default)]
     pub workers: Option<String>,
+
+    /// cas-ee68 (communication contract v2, P3.7): a supervisor brief for
+    /// the pre-assigned task. It is written to the task notes at spawn time
+    /// and quoted in the worker's spawn message, so the worker has it before
+    /// it starts the task.
+    #[schemars(
+        description = "spawn_workers with task_id: your brief for the worker. Stored on the task and shown in its spawn message, so it is read before task start."
+    )]
+    #[serde(default)]
+    pub spawn_brief: Option<String>,
 
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
@@ -1511,6 +1531,7 @@ impl CoordinationRequest {
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,
             isolate: self.isolate,
+            spawn_brief: self.spawn_brief.clone(),
             remind_message: self.remind_message.clone(),
             remind_delay_secs: self.remind_delay_secs,
             remind_event: self.remind_event.clone(),

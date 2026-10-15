@@ -499,6 +499,36 @@ fn ensure_worker_preassignment(
         .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))
 }
 
+/// Marker of a supervisor spawn brief in task notes (cas-ee68).
+const SPAWN_BRIEF_MARKER: &str = "📌 SPAWN BRIEF ";
+
+/// The task-note form of a supervisor spawn brief (cas-ee68; communication
+/// contract v2, P3.7). It is written before the worker exists, so `task show`,
+/// `task start` and the spawn message all carry it before any work begins.
+pub(crate) fn spawn_brief_note(brief: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    format!("[{}] {SPAWN_BRIEF_MARKER}{}", at.format("%Y-%m-%d %H:%M"), brief.trim())
+}
+
+/// The newest spawn brief in `notes`. A brief runs to the next note header,
+/// which is a blank line followed by `[YYYY-`.
+fn latest_spawn_brief(notes: &str) -> Option<&str> {
+    let start = notes.rfind(SPAWN_BRIEF_MARKER)? + SPAWN_BRIEF_MARKER.len();
+    let rest = &notes[start..];
+    let end = rest
+        .match_indices("\n\n[")
+        .map(|(index, _)| index)
+        .find(|&index| {
+            rest[index + 3..]
+                .chars()
+                .take(5)
+                .enumerate()
+                .all(|(i, c)| if i < 4 { c.is_ascii_digit() } else { c == '-' })
+        })
+        .unwrap_or(rest.len());
+    let brief = rest[..end].trim();
+    (!brief.is_empty()).then_some(brief)
+}
+
 /// cas-28a4 (GH #84): tell the newly-registered worker what it was spawned for.
 ///
 /// A pre-assigned worker that boots with no message sits idle burning a seat —
@@ -522,6 +552,16 @@ fn deliver_worker_task_brief(
          {test_policy}",
         test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
     );
+    // cas-ee68: the supervisor's spawn brief reaches the worker in this
+    // message, before it can start the task.
+    if let Some(brief) = crate::store::open_task_store_cached(cas_dir)
+        .ok()
+        .and_then(|store| store.get(task_id).ok())
+        .and_then(|task| latest_spawn_brief(&task.notes).map(str::to_string))
+    {
+        message.push_str("\n\nYour supervisor's brief for this task (read it before you start):\n");
+        message.push_str(&brief);
+    }
     append_workspace_contract_brief(cas_dir, worker_name, task_id, &mut message);
     if let Some(clone_path) = open_agent_store(cas_dir)
         .ok()
@@ -10616,6 +10656,53 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, message_id);
         assert_eq!(queued[0].target, "worker-1");
+    }
+
+    /// Communication contract v2, P3.7 (cas-ee68): the worker's spawn message
+    /// quotes the newest supervisor spawn brief stored on its task, and only
+    /// that brief, so the worker has it before it can start the task.
+    #[test]
+    fn ct2_p3_spawn_message_carries_the_supervisor_brief() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut task = cas_types::Task::new("cas-brief2".into(), "Fix the sweep".into());
+        let at = chrono::Utc::now();
+        task.notes = [
+            super::spawn_brief_note("Old brief, superseded.", at),
+            "[2026-10-15 10:00] 📝 PROGRESS unrelated progress".to_string(),
+            super::spawn_brief_note("Rebase onto the epic.\n\nThen run the named tests.", at),
+            "[2026-10-15 11:00] 💡 DISCOVERY a later note".to_string(),
+        ]
+        .join("\n\n");
+        crate::store::open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "worker-1",
+            "cas-brief2",
+            "Fix the sweep",
+            cas_mux::SupervisorCli::Claude,
+        )
+        .unwrap();
+        let prompt = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .remove(0)
+            .prompt;
+        // pin: the header tells the worker the brief must be read before it starts.
+        assert!(prompt.contains("read it before you start"), "{prompt}");
+        assert!(
+            // pin: the supervisor's brief reaches the worker verbatim, blank lines included.
+            prompt.contains("Rebase onto the epic.\n\nThen run the named tests."),
+            "{prompt}"
+        );
+        // pin: only the newest brief is quoted, never an older one.
+        assert!(!prompt.contains("Old brief"), "{prompt}");
+        // pin: a note after the brief is not part of it.
+        assert!(!prompt.contains("a later note"), "{prompt}");
+        assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }
 
     /// cas-ea9c (GH #1005): the spawn brief points the worker at the issues

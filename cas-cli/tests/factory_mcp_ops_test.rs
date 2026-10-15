@@ -495,6 +495,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         branch: None,
         older_than_secs: None,
         isolate: None,
+        spawn_brief: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,
@@ -572,6 +573,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         effort: None,
         config_dir: None,
         workers: None,
+        spawn_brief: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,
@@ -1416,7 +1418,8 @@ async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
     let err = env.service.coordination(Parameters(req)).await.unwrap_err();
     assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
     assert!(err.message.contains("loop_start"), "{err:?}");
-    assert!(err.message.contains("action=message"), "{err:?}");
+    // pin: the refusal names spawn_brief, the path that reaches the worker before task start (cas-ee68).
+    assert!(err.message.contains("spawn_brief"), "{err:?}");
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
 }
 
@@ -6731,6 +6734,7 @@ fn coord_msg(
         effort: None,
         config_dir: None,
         workers: None,
+        spawn_brief: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,

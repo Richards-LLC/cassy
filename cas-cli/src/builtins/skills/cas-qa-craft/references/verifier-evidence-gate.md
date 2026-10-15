@@ -99,5 +99,5 @@ count, rate), with or without a demo:
    missing), or `INCONCLUSIVE` (the pair exists but variance or a changed
    input hides the delta). `VERIFIED` meets the criterion, and so does
    `NOT VERIFIED` when the close names an owner by design (a factory worker's
-   Rust measurement goes to the supervisor's `ASSEMBLY_PROOF`). Reject the
+   full Rust execution goes to the merge queue's integration proof). Reject the
    rest, naming the claim and the missing or ambiguous run.

@@ -2335,3 +2335,38 @@ fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_do_not_re
         &source_change
     ));
 }
+
+#[test]
+fn non_visual_bundle_omits_screencast_cas_7e91() {
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| {
+        manifest["visual_change"] = serde_json::json!(false);
+        manifest["files"].as_object_mut().unwrap().remove("receipt");
+        manifest["files"]["a11y"] = serde_json::json!([]);
+    });
+    std::fs::remove_file(fx.bundle_dir().join("receipt.webm")).unwrap();
+    let receipt = fx.validate(&fx.notes()).expect("non-visual evidence needs no screencast or media-mode captures");
+    assert_eq!(receipt.passed_expects, 1);
+    assert_eq!(receipt.head_sha, fx.head);
+}
+
+#[test]
+fn visual_bundle_requires_screencast_cas_7e91() {
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| {
+        manifest["files"].as_object_mut().unwrap().remove("receipt");
+    });
+    let refusal = fx.validate(&fx.notes()).expect_err("a visual bundle needs its screencast");
+    assert!(refusal.problem.contains("files.receipt"), "{refusal:?}");
+    assert!(refusal.command.contains("receipt"), "{refusal:?}");
+    assert!(refusal.problem.contains("visual_change is true"), "{refusal:?}");
+}
+
+#[test]
+fn non_visual_listed_screencast_is_still_validated_cas_7e91() {
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| manifest["visual_change"] = serde_json::json!(false));
+    std::fs::write(fx.bundle_dir().join("receipt.webm"), "").unwrap();
+    let refusal = fx.validate(&fx.notes()).expect_err("a listed optional capture must be valid");
+    assert!(refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"), "{refusal:?}");
+}

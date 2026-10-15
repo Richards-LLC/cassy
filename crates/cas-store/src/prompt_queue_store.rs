@@ -1826,6 +1826,22 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue>;
 
+    /// Atomically enqueue a worker's typed status/ready action and supersede
+    /// older pending action rows from that registered worker. This bounds an
+    /// idle supervisor to one pending action wake per worker.
+    fn enqueue_worker_action_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        worker_name: &str,
+        factory_session: &str,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        origin: &QueueOrigin,
+    ) -> Result<EnqueueOutcome>;
+
     /// Record a complete operator turn and its immutable local outbox event in
     /// one transaction. Display labels never establish a cloud audience.
     fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
@@ -3987,6 +4003,144 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             None,
             origin,
         )
+    }
+
+    fn enqueue_worker_action_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        worker_name: &str,
+        factory_session: &str,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        origin: &QueueOrigin,
+    ) -> Result<EnqueueOutcome> {
+        require_operator_session(target, Some(factory_session))?;
+        if target.trim().eq_ignore_ascii_case("operator") {
+            return Err(StoreError::Other(
+                "worker action cannot be sent to the operator".into(),
+            ));
+        }
+        let Some(origin_agent_id) = origin.agent_id() else {
+            return Err(StoreError::Other(
+                "worker action requires a registered-agent origin".into(),
+            ));
+        };
+
+        let outcome = crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now();
+            let now_text = now.to_rfc3339();
+            let duplicate_cutoff =
+                (now - chrono::Duration::seconds(PROMPT_DUPLICATE_WINDOW_SECS)).to_rfc3339();
+            let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
+            let urgent_flag: i64 = i64::from(urgent);
+
+            // Keep the ordinary exact-resend suppression contract for action
+            // messages too. A new body is the event that supersedes pending
+            // action rows; a delivery already acknowledged by this fast path
+            // is not a newer event.
+            if !urgent && source != "supervisor" {
+                let delivered_duplicate = tx
+                    .query_row(
+                        "SELECT id FROM prompt_queue
+                         WHERE source = ? AND target = ? AND prompt = ?
+                           AND factory_session IS ? AND urgent = 0
+                           AND transport_delivered_at IS NOT NULL AND acked_at IS NULL
+                           AND highest_stage IS NOT 'confirmed'
+                           AND transport_delivered_at >= ?
+                         ORDER BY transport_delivered_at DESC, id DESC LIMIT 1",
+                        params![source, target, prompt, factory_session, duplicate_cutoff],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                if let Some(existing_id) = delivered_duplicate {
+                    tx.commit()?;
+                    return Ok(EnqueueOutcome::SuppressedDuplicate(existing_id));
+                }
+            }
+
+            // Read only undelivered rows stamped with this worker's registry
+            // id and factory session. Newer action messages supersede either
+            // status or ready, but never an action that has already reached
+            // transport or belongs to another worker/session.
+            let mut stmt = tx.prepare_cached(
+                "SELECT id, prompt FROM prompt_queue
+                 WHERE target = ? AND factory_session = ? AND origin_agent_id = ?
+                   AND processed_at IS NULL AND transport_delivered_at IS NULL
+                   AND COALESCE(highest_stage, 'enqueued')
+                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
+            )?;
+            let pending = stmt
+                .query_map(params![target, factory_session, origin_agent_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            let escaped_worker: String = worker_name
+                .chars()
+                .filter(|ch| !matches!(ch, '"' | '<' | '>' | '\n' | '\r'))
+                .collect();
+            let superseded = pending
+                .into_iter()
+                .filter(|(_, old_prompt)| {
+                    old_prompt.ends_with("</cas-worker-action>")
+                        && ["status", "ready"].iter().any(|kind| {
+                            old_prompt.contains(&format!(
+                                "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
+                            ))
+                        })
+                })
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>();
+
+            let origin_kind = origin.kind_str();
+            tx.execute(
+                "INSERT INTO prompt_queue
+                    (source, target, prompt, created_at, factory_session, summary,
+                     priority, urgent, origin_agent_id, origin_kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    source,
+                    target,
+                    prompt,
+                    now_text,
+                    factory_session,
+                    summary,
+                    prio,
+                    urgent_flag,
+                    origin_agent_id,
+                    origin_kind
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            let detail = format!("newer worker action message {id} superseded this pending wake");
+            for superseded_id in superseded {
+                Self::atomic_stage_stamp_in_tx(
+                    &tx,
+                    superseded_id,
+                    DeliveryStage::Suppressed,
+                    AtomicStampOpts {
+                        reason: Some(PendingReason::SupersededStale),
+                        detail: Some(&detail),
+                        set_processed: true,
+                        broadcast_attempted: None,
+                        broadcast_succeeded: None,
+                        broadcast_failed: None,
+                    },
+                )?;
+            }
+            let _ = capture_message_event(&tx, source, target);
+            tx.commit()?;
+            Ok(EnqueueOutcome::Created(id))
+        })?;
+        if matches!(outcome, EnqueueOutcome::Created(_)) {
+            self.signal_inbox(target);
+        }
+        Ok(outcome)
     }
 
     fn enqueue_worker_peer_with_supervisor_copy(
@@ -7481,6 +7635,64 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn worker_action_burst_keeps_only_the_newest_pending_wake() {
+        let (_temp, store) = create_test_store();
+        let origin = QueueOrigin::RegisteredAgent {
+            agent_id: "worker-agent-id".into(),
+        };
+
+        for sequence in 1..=5 {
+            let prompt = format!(
+                "status {sequence}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
+            );
+            assert!(matches!(
+                store
+                    .enqueue_worker_action_with_outcome(
+                        "swift-fox",
+                        "cosmic-bear-43",
+                        &prompt,
+                        "swift-fox",
+                        "session-1",
+                        Some("status update"),
+                        None,
+                        false,
+                        &origin,
+                    )
+                    .unwrap(),
+                EnqueueOutcome::Created(_)
+            ));
+        }
+
+        let conn = store.conn.lock().unwrap();
+        let pending_wakes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue
+                 WHERE target = 'cosmic-bear-43' AND factory_session = 'session-1'
+                   AND origin_agent_id = 'worker-agent-id'
+                   AND prompt LIKE '%<cas-worker-action kind=\"status\"%'
+                   AND processed_at IS NULL AND transport_delivered_at IS NULL
+                   AND COALESCE(highest_stage, 'enqueued')
+                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let superseded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue
+                 WHERE target = 'cosmic-bear-43' AND factory_session = 'session-1'
+                   AND origin_agent_id = 'worker-agent-id'
+                   AND last_pending_reason = 'superseded_stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(pending_wakes, 1, "five statuses leave one pending wake");
+        assert_eq!(superseded, 4, "each older status records its replacement");
     }
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so

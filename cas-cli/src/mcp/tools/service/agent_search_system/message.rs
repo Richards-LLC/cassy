@@ -839,6 +839,14 @@ impl CasService {
             )
             .map_err(|refusal| Self::error(ErrorCode::INVALID_PARAMS, refusal))?;
         }
+        // Wake envelopes are message types, not content. Workers can request
+        // a typed status/ready, blocker, or merge action through the fields
+        // below; literal tags in their message body must not impersonate the
+        // server's suffix when the supervisor wake gate parses the row.
+        if role == "worker" {
+            message = crate::prompt_revalidation::
+                neutralize_worker_authored_envelope_tags(&message);
+        }
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.
         // The registered caller row is the authoritative owner; the
@@ -2451,16 +2459,37 @@ impl CasService {
                     agent_from_store.as_ref(),
                     resolved_target_agent.as_ref(),
                 );
-                let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
-                    &row_source,
-                    &resolved_target,
-                    &message,
-                    row_session.as_deref(),
-                    Some(summary.as_str()),
-                    priority,
-                    urgent,
-                    queue_origin.as_ref(),
-                ) {
+                let enqueue_result = if worker_action_kind.is_some() {
+                    let action_session = row_session
+                        .as_deref()
+                        .expect("validated worker action has a same-session supervisor");
+                    let action_origin = queue_origin
+                        .as_ref()
+                        .expect("validated worker action has a registered origin");
+                    queue.enqueue_worker_action_with_outcome(
+                        &row_source,
+                        &resolved_target,
+                        &message,
+                        &display_name,
+                        action_session,
+                        Some(summary.as_str()),
+                        priority,
+                        urgent,
+                        action_origin,
+                    )
+                } else {
+                    queue.enqueue_urgent_with_outcome(
+                        &row_source,
+                        &resolved_target,
+                        &message,
+                        row_session.as_deref(),
+                        Some(summary.as_str()),
+                        priority,
+                        urgent,
+                        queue_origin.as_ref(),
+                    )
+                };
+                let enqueue_outcome = match enqueue_result {
                     Ok(id) => id,
                     Err(error) => {
                         // Compensate halt fan-out so we never leave halt without the

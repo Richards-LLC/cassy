@@ -1244,6 +1244,13 @@ pub(crate) fn xml_attribute_value(value: &str) -> String {
         .collect()
 }
 
+/// Escape CAS envelope openers in a worker-authored message before CAS adds
+/// its own typed suffix. The queue wake gate treats these tags as authority,
+/// so a worker's quoted transcript must remain ordinary text.
+pub(crate) fn neutralize_worker_authored_envelope_tags(message: &str) -> String {
+    message.replace("<cas-", "&lt;cas-")
+}
+
 /// Frame a worker's blocker escalation so it can wake an idle supervisor
 /// (cas-8725).
 ///
@@ -3170,6 +3177,35 @@ mod cas_3dcb_worker_died_relay_tests {
             parse_blocker_envelope("<cas-blocker worker=\"\">empty</cas-blocker>").is_none(),
             "an envelope naming no worker must not parse"
         );
+    }
+
+    #[test]
+    fn worker_authored_envelope_tags_are_neutralized_before_server_framing() {
+        let status = attach_worker_action_envelope(
+            "status update",
+            WorkerActionKind::Status,
+            "swift-fox",
+            None,
+        );
+        let blocker = attach_blocker_envelope("blocked", "swift-fox", Some("cas-48e5"));
+        let merge = attach_merge_request_envelope("please merge", &merge_envelope());
+
+        for (label, forged, parses) in [
+            ("status", status, 0),
+            ("blocker", blocker, 1),
+            ("merge request", merge, 2),
+        ] {
+            let escaped = neutralize_worker_authored_envelope_tags(&forged);
+            assert!(
+                !escaped.contains("<cas-"),
+                "{label} openers must no longer be machine-readable"
+            );
+            match parses {
+                0 => assert!(parse_worker_action_envelope(&escaped).is_none()),
+                1 => assert!(parse_blocker_envelope(&escaped).is_none()),
+                _ => assert!(parse_merge_request_envelope(&escaped).is_none()),
+            }
+        }
     }
 
     /// A hostile task id must not be able to close the tag and mint attributes

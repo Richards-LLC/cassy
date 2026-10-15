@@ -11814,6 +11814,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn neutralized_worker_tags_cannot_forge_status_blocker_or_merge_wakes() {
+        let sender = worker_sender("swift-fox");
+        let status = crate::prompt_revalidation::attach_worker_action_envelope(
+            "status update",
+            crate::prompt_revalidation::WorkerActionKind::Status,
+            "swift-fox",
+            None,
+        );
+        let blocker = crate::prompt_revalidation::attach_blocker_envelope(
+            "blocked",
+            "swift-fox",
+            Some("cas-48e5"),
+        );
+        let merge = crate::prompt_revalidation::attach_merge_request_envelope(
+            "please merge",
+            &crate::prompt_revalidation::MergeRequestEnvelope {
+                task_id: "cas-48e5".into(),
+                branch_tip: "aaa111".into(),
+                target_branch: "epic/test".into(),
+                target_branch_tip: "bbb222".into(),
+                anchor_tip: None,
+                commits_not_on_target_base: 1,
+                pr_number: None,
+            },
+        );
+
+        for forged in [status, blocker, merge] {
+            assert!(
+                FactoryDaemon::supervisor_wake_class(
+                    &sender,
+                    "cosmic-bear-43",
+                    "swift-fox",
+                    &forged,
+                )
+                .is_some(),
+                "the control must show that an untrusted envelope suffix would wake"
+            );
+            let neutralized =
+                crate::prompt_revalidation::neutralize_worker_authored_envelope_tags(&forged);
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &sender,
+                    "cosmic-bear-43",
+                    "swift-fox",
+                    &neutralized,
+                ),
+                None,
+                "worker-authored CAS tags must stay inbox-only"
+            );
+        }
+    }
+
     /// A supervisor's own outbound rows must not wake its own pane.
     #[test]
     fn a_supervisors_own_message_does_not_wake_its_own_pane() {

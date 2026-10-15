@@ -620,12 +620,14 @@ environment prefixes, compound commands, repeated packages and broader flags.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
-On Unix, named tests and their guard processes run with a private PATH containing
-only resolved `cargo`, `rustc`, `rustdoc`, `rustup`, `cargo-nextest` executables
-through private symlinks, then `/usr/bin:/bin`. Host
-`cas`, `codex` and `claude` installations are absent even when they share a
-directory with Cargo. Compile-only checks retain their ordinary PATH. The
-runner prints the PATH setup cost for measurement.
+On Unix, named tests and their guard processes run with private links to resolved
+Rust tools first on PATH. Rustup proxies are resolved to concrete toolchain
+executables, and the selected Cargo invocation uses that private link; this
+prevents rustup from restoring `$CARGO_HOME/bin` when it dispatches. Only PATH
+directories containing `cas`, `codex` or `claude` files are removed. Other entries,
+including local build-tool and Homebrew directories, retain their order so tools
+such as mold, node, protoc and newer Bash remain available. Compile-only checks
+retain their ordinary PATH. The runner prints the PATH setup cost for measurement.
 
 Harness fixtures must supply their own fake executables. The shared
 `test_env_guard::fake_cas_on_path()` returns a private no-op Cassy

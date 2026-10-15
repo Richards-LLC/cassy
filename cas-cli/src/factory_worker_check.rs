@@ -286,15 +286,49 @@ fn isolated_test_path(
     };
     let resolved_cargo =
         resolve(cargo).context("cannot resolve Cargo before isolating test PATH")?;
-    std::os::unix::fs::symlink(resolved_cargo, bin.path().join("cargo"))?;
+    let rustup = resolve(Path::new("rustup")).or_else(|| {
+        resolved_cargo.canonicalize().ok().filter(|path| path.file_name().is_some_and(|name| name == "rustup"))
+    });
+    let concrete = |name: &str, tool: PathBuf| -> Result<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let tool = tool.canonicalize()?;
+        let proxy = rustup.as_ref().is_some_and(|rustup| {
+            tool.metadata().ok().zip(rustup.metadata().ok())
+                .is_some_and(|(tool, rustup)| tool.dev() == rustup.dev() && tool.ino() == rustup.ino())
+        });
+        if !proxy || name == "rustup" {
+            return Ok(tool);
+        }
+        // Rustup proxies prepend CARGO_HOME/bin when dispatching. Resolve their
+        // actual toolchain binary before constructing the isolated environment.
+        use crate::bounded_process::{Deadline, run_command};
+        let budget = std::time::Duration::from_secs(2);
+        let mut command = Command::new(rustup.as_ref().unwrap());
+        command.args(["which", name]).current_dir(cwd);
+        let output = run_command(&mut command, Deadline::after(budget), budget)
+            .map_err(|_| anyhow::anyhow!("cannot resolve concrete {name} through rustup"))?;
+        if !output.status.success() {
+            bail!("rustup cannot resolve concrete {name}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        let direct = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+        if !direct.is_absolute() || !executable(&direct) || direct.canonicalize()? == tool {
+            bail!("rustup did not resolve a concrete executable for {name}");
+        }
+        Ok(direct)
+    };
+    std::os::unix::fs::symlink(concrete("cargo", resolved_cargo)?, bin.path().join("cargo"))?;
     for name in ["rustc", "rustdoc", "rustup", "cargo-nextest"] {
         if let Some(tool) = resolve(Path::new(name)) {
-            std::os::unix::fs::symlink(tool, bin.path().join(name))?;
+            std::os::unix::fs::symlink(concrete(name, tool)?, bin.path().join(name))?;
         }
     }
-    let path = std::env::join_paths([bin.path(), Path::new("/usr/bin"), Path::new("/bin")])?;
+    let retained = std::env::split_paths(&search)
+        .map(|dir| if dir.is_absolute() { dir } else { cwd.join(dir) })
+        .filter(|dir| !["cas", "codex", "claude"].iter().any(|name| dir.join(name).is_file()))
+        .collect::<Vec<_>>();
+    let path = std::env::join_paths(std::iter::once(bin.path()).chain(retained.iter().map(PathBuf::as_path)))?;
     println!(
-        "Worker test PATH: isolated toolchain + /usr/bin:/bin; setup={:.3}ms",
+        "Worker test PATH: concrete Rust tools + PATH without host harness directories; setup={:.3}ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
     Ok((bin, path))
@@ -723,6 +757,10 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let test_path = if test.is_some() && host_path_opt_out.is_none() {
         Some(isolated_test_path(cargo, cwd, &slots)?)
     } else { None };
+    #[cfg(unix)]
+    let private_cargo = test_path.as_ref().map(|(bin, _)| bin.path().join("cargo"));
+    #[cfg(unix)]
+    let cargo = private_cargo.as_deref().unwrap_or(cargo);
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
         let verified = include_str!("../../scripts/run-verified-tests.sh");

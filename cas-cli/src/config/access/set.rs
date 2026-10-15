@@ -90,6 +90,12 @@ impl Config {
                     .violet_bot_user_ids = (!ids.is_empty()).then_some(ids);
             }
             // Factory build contention
+            "factory.nice_cargo" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).nice_cargo =
+                    value.parse().map_err(|_| MemError::Parse(format!(
+                        "Invalid boolean value for factory.nice_cargo: {value}"
+                    )))?;
+            }
             "factory.max_concurrent_builders" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.max_concurrent_builders = value.parse().map_err(|_| {

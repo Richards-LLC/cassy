@@ -3,6 +3,19 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     registry.register(ConfigMeta {
+        key: "factory.nice_cargo",
+        section: "factory",
+        name: "Lower Worker Scheduling Priority",
+        description: "Run factory workers with nice -n 10 so Cargo builds leave the supervisor responsive. Disable for single-worker sessions or benchmarking.",
+        value_type: ConfigType::Bool,
+        default: "true",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "worker", "cargo", "nice", "priority"],
+        use_cases: &["Keep the supervisor responsive during worker builds"],
+    });
+    registry.register(ConfigMeta {
         key: "factory.commander_mirror_enabled",
         section: "factory",
         name: "Supervisor Reply Mirroring",

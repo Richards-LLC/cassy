@@ -4,6 +4,124 @@ use crate::mcp::tools::core::imports::*;
 /// supervisor review and therefore needs a supervisor recovery decision.
 pub const VERIFICATION_REJECTED_REOPEN_LABEL: &str = "verification-rejected-reopen";
 
+const MAX_VERIFICATION_ISSUES_BYTES: usize = 512 * 1024;
+const VERIFICATION_ISSUE_FIELDS: &str = "each issue requires string fields `file`, `category`, and `problem` (`description` or `message` may replace `problem`); optional fields are `line`, `severity`, `code`, and `suggestion` (`fix` may replace `suggestion`)";
+
+fn invalid_verification_issues(reason: impl std::fmt::Display) -> String {
+    format!("Invalid verification issues: {reason}; input omitted; {VERIFICATION_ISSUE_FIELDS}.")
+}
+
+fn parse_verification_issues(issues_json: &str) -> Result<Vec<VerificationIssue>, String> {
+    if issues_json.len() > MAX_VERIFICATION_ISSUES_BYTES {
+        return Err(invalid_verification_issues("JSON exceeds 512 KiB"));
+    }
+
+    let mut value: serde_json::Value = serde_json::from_str(issues_json)
+        .map_err(|_| invalid_verification_issues("expected valid JSON array of issue objects"))?;
+    let Some(items) = value.as_array_mut() else {
+        return Err(invalid_verification_issues(
+            "expected a JSON array of issue objects",
+        ));
+    };
+
+    for (index, item) in items.iter_mut().enumerate() {
+        let Some(object) = item.as_object_mut() else {
+            return Err(invalid_verification_issues(format!(
+                "item {index} must be an object"
+            )));
+        };
+
+        if !object.contains_key("problem") {
+            for alias in ["description", "message"] {
+                if let Some(value) = object.get(alias).cloned() {
+                    if !value.is_string() {
+                        return Err(invalid_verification_issues(format!(
+                            "item {index} field `{alias}` must be a string"
+                        )));
+                    }
+                    object.insert("problem".to_string(), value);
+                    break;
+                }
+            }
+        }
+        if !object.contains_key("suggestion") {
+            if let Some(value) = object.get("fix").cloned() {
+                if !value.is_string() && !value.is_null() {
+                    return Err(invalid_verification_issues(format!(
+                        "item {index} field `fix` must be a string or null"
+                    )));
+                }
+                object.insert("suggestion".to_string(), value);
+            }
+        }
+        if object.get("severity").and_then(serde_json::Value::as_str) == Some("high") {
+            object.insert(
+                "severity".to_string(),
+                serde_json::Value::String("blocking".to_string()),
+            );
+        }
+
+        let mut missing = Vec::new();
+        for field in ["file", "category", "problem"] {
+            match object.get(field) {
+                Some(serde_json::Value::String(_)) => {}
+                Some(_) => {
+                    return Err(invalid_verification_issues(format!(
+                        "item {index} field `{field}` must be a string"
+                    )));
+                }
+                None => missing.push(field),
+            }
+        }
+        if !missing.is_empty() {
+            let missing = missing
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(invalid_verification_issues(format!(
+                "item {index} is missing required field(s) {missing}"
+            )));
+        }
+
+        for field in ["code", "suggestion"] {
+            if let Some(value) = object.get(field) {
+                if !value.is_string() && !(field == "suggestion" && value.is_null()) {
+                    return Err(invalid_verification_issues(format!(
+                        "item {index} field `{field}` must be a string{}",
+                        if field == "suggestion" {
+                            " or null"
+                        } else {
+                            ""
+                        }
+                    )));
+                }
+            }
+        }
+        if let Some(value) = object.get("line") {
+            if !value.is_null()
+                && !value
+                    .as_u64()
+                    .is_some_and(|line| line <= u64::from(u32::MAX))
+            {
+                return Err(invalid_verification_issues(format!(
+                    "item {index} field `line` must be a non-negative 32-bit integer or null"
+                )));
+            }
+        }
+        if let Some(value) = object.get("severity") {
+            if !matches!(value.as_str(), Some("blocking" | "warning")) {
+                return Err(invalid_verification_issues(format!(
+                    "item {index} field `severity` must be `blocking`, `warning`, or `high`"
+                )));
+            }
+        }
+    }
+
+    serde_json::from_value(value)
+        .map_err(|_| invalid_verification_issues("could not decode issue objects"))
+}
+
 impl CasCore {
     pub async fn cas_verification_add(
         &self,
@@ -41,20 +159,9 @@ impl CasCore {
         // This makes malformed issues failure-atomic even when the named
         // capability or dispatch is expired.
         let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
-            if issues_json.len() > 512 * 1024 {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
-                        "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted.",
-                    ),
-                    data: None,
-                });
-            }
-            serde_json::from_str(issues_json).map_err(|_| McpError {
+            parse_verification_issues(issues_json).map_err(|message| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted.",
-                ),
+                message: Cow::from(message),
                 data: None,
             })?
         } else {

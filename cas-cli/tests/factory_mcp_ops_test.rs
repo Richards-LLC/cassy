@@ -7841,7 +7841,11 @@ async fn test_worker_duplicate_send_reports_suppression() {
         "a suppressed duplicate must not impersonate a fresh queue insert: {duplicate_text}"
     );
     assert!(duplicate_text.starts_with(&format!("suppressed #{first_id} → ")));
-    assert_eq!(env.prompt_queue().peek_all(10).unwrap().len(), 1);
+    assert!(env.prompt_queue().queued_prompt(first_id).unwrap().is_some());
+    assert!(
+        env.prompt_queue().peek_all(10).unwrap().is_empty(),
+        "the delivered original remains stored; dedup must not queue a new row"
+    );
 }
 
 /// cas-c061: responding to a peer proves consumption only of messages from

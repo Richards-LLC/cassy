@@ -1054,6 +1054,22 @@ pub struct AgentRequest {
     #[serde(default)]
     pub attachment: Option<String>,
 
+    /// cas-6853: a newer `all_workers` broadcast with the same key replaces
+    /// this one for every worker that has not read it yet.
+    #[schemars(
+        description = "message target=all_workers only: supersede key. A later broadcast with the same key replaces this one for every worker that has not read it yet (e.g. 'epic-tip')."
+    )]
+    #[serde(default)]
+    pub supersede_key: Option<String>,
+
+    /// cas-6853: standing policy that also reaches workers registered after
+    /// the broadcast. Other broadcasts reach only workers already registered.
+    #[schemars(
+        description = "message target=all_workers only: standing policy that workers spawned later still receive. Omit for ordinary broadcasts, which reach only workers registered when sent."
+    )]
+    #[serde(default)]
+    pub sticky: Option<bool>,
+
     /// cas-207e: a Commander ask's deadline in seconds (from `remind_delay_secs`).
     #[schemars(description = "message kind=ask: deadline in seconds; needs remind_message")]
     #[serde(default)]

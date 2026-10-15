@@ -56,6 +56,8 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "in_reply_to",
     "kind",
     "attachment",
+    "supersede_key",
+    "sticky",
     "task_id",
     "notification_id",
     "limit",
@@ -90,6 +92,9 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("in_reply_to", "message: notification_id of the direct message this answers."),
     ("kind", "Commander turn kind: answer, status, receipt, ask or blocker."),
     ("attachment", "Published artifact id to attach to a Commander turn."),
+    // cas-6853: kept terse; the coordination schema has a 3,600 B budget.
+    ("supersede_key", "Broadcast: newest same key wins."),
+    ("sticky", "Broadcast: later workers get it."),
     (
         "task_id",
         "message with merge_request=true: the parked task; remind: bind the reminder to this task.",
@@ -124,6 +129,8 @@ pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
     "in_reply_to",
     "kind",
     "attachment",
+    "supersede_key",
+    "sticky",
     "remind_message",
     "remind_delay_secs",
     "remind_event",

@@ -1007,6 +1007,22 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub attachment: Option<String>,
 
+    /// cas-6853: a newer `all_workers` broadcast with the same key replaces
+    /// this one for every worker that has not read it yet.
+    #[schemars(
+        description = "message target=all_workers only: supersede key. A later broadcast with the same key replaces this one for every worker that has not read it yet (e.g. 'epic-tip')."
+    )]
+    #[serde(default)]
+    pub supersede_key: Option<String>,
+
+    /// cas-6853: standing policy that also reaches workers registered after
+    /// the broadcast. Other broadcasts reach only workers already registered.
+    #[schemars(
+        description = "message target=all_workers only: standing policy that workers spawned later still receive. Omit for ordinary broadcasts, which reach only workers registered when sent."
+    )]
+    #[serde(default)]
+    pub sticky: Option<bool>,
+
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
@@ -1443,6 +1459,8 @@ impl CoordinationRequest {
             in_reply_to: self.in_reply_to,
             kind: self.kind.clone(),
             attachment: self.attachment.clone(),
+            supersede_key: self.supersede_key.clone(),
+            sticky: self.sticky,
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,
             completion_promise: self.completion_promise.clone(),

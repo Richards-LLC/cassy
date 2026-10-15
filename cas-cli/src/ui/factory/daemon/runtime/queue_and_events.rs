@@ -7484,7 +7484,7 @@ impl FactoryDaemon {
                             self.app.cas_dir(),
                             queued.id,
                             name,
-                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { token: claim_token },
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token },
                         );
                     }
                     match inject_result {

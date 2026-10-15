@@ -127,7 +127,7 @@ fn claim_source(cas_dir: &Path, row: i64, recipient: &str) -> Option<String> {
     .ok()
 }
 
-fn store_claim(cas_dir: &Path, row: i64, recipient: &str) -> anyhow::Result<Option<String>> {
+fn store_claim(cas_dir: &Path, row: i64, recipient: &str) -> anyhow::Result<Option<cas_store::ClaimToken>> {
     Ok(crate::store::open_prompt_queue_store(cas_dir)?.claim_recipient_transport_token(row, recipient)?)
 }
 
@@ -232,7 +232,7 @@ fn flv2_no_double_inject() {
         match jobs
             .admit(row_id, "worker-a", t0, move || {
                 let token = store_claim(&cas, row_id, "worker-a")?;
-                *seen.lock().unwrap() = token.clone();
+                *seen.lock().unwrap() = token;
                 Ok(token)
             })
             .unwrap()
@@ -261,7 +261,7 @@ fn flv2_no_double_inject() {
         &cas_dir,
         row_id,
         "worker-a",
-        QueueStamp::ReleaseClaim { token: "2000-01-01T00:00:00+00:00".into() },
+        QueueStamp::ReleaseClaim { claim_token: cas_store::ClaimToken::never_issued() },
     );
     writer.open();
     settle(&mut jobs, |jobs| !jobs.in_flight().holds_row(row_id));
@@ -273,7 +273,7 @@ fn flv2_no_double_inject() {
     );
     let stale_release = crate::store::open_prompt_queue_store(&cas_dir)
         .unwrap()
-        .release_recipient_transport_claim(row_id, "worker-a", "2000-01-01T00:00:00+00:00")
+        .release_recipient_transport_claim(row_id, "worker-a", cas_store::ClaimToken::never_issued())
         .unwrap();
     assert!(!stale_release, "a stale token releases nothing");
     assert_eq!(claim_source(&cas_dir, row_id, "worker-a").as_deref(), Some("transport_claimed"));
@@ -663,7 +663,7 @@ fn an_exhausted_stamp_is_deferred_not_dropped() {
         &cas_dir,
         row_id,
         "worker-a",
-        &QueueStamp::ReleaseClaim { token },
+        &QueueStamp::ReleaseClaim { claim_token: token },
         "store busy",
     );
     assert_ne!(persisted, super::super::store_worker::Persisted::Dropped);

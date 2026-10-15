@@ -2314,7 +2314,7 @@ pub trait PromptQueueStore: Send + Sync {
         &self,
         prompt_id: i64,
         recipient: &str,
-    ) -> Result<Option<String>>;
+    ) -> Result<Option<ClaimToken>>;
 
     /// Release exactly the transport claim `token` names, if it is still a
     /// `transport_claimed` receipt. A late release can therefore never drop a
@@ -2324,7 +2324,7 @@ pub trait PromptQueueStore: Send + Sync {
         &self,
         prompt_id: i64,
         recipient: &str,
-        token: &str,
+        token: ClaimToken,
     ) -> Result<bool>;
 
     /// Most recent message timestamp for each target from any of `sources`.
@@ -3741,7 +3741,7 @@ fn require_operator_session(target: &str, factory_session: Option<&str>) -> Resu
 /// RFC 3339 timestamp, so `julianday(seen_at)` comparisons keep working, but
 /// strictly increasing in nanoseconds within the process, so two claims never
 /// share a token even on a coarse clock.
-fn transport_claim_token() -> String {
+fn transport_claim_token() -> ClaimToken {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(0);
     let now = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
@@ -3753,7 +3753,27 @@ fn transport_claim_token() -> String {
             Err(actual) => previous = actual,
         }
     };
-    DateTime::<Utc>::from_timestamp_nanos(nanos).to_rfc3339_opts(chrono::SecondsFormat::Nanos, false)
+    ClaimToken(nanos)
+}
+
+/// A daemon transport claim, for releasing exactly that claim (cas-d2a2).
+/// It is the claim's `seen_at` in nanoseconds since the epoch: strictly
+/// increasing within the process, and stored as an ordinary RFC 3339
+/// timestamp so `julianday(seen_at)` comparisons keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClaimToken(i64);
+
+impl ClaimToken {
+    /// The `seen_at` value this claim was stored with.
+    fn seen_at(self) -> String {
+        DateTime::<Utc>::from_timestamp_nanos(self.0)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, false)
+    }
+
+    /// A token naming no claim (tests: a stale release).
+    pub fn never_issued() -> Self {
+        Self(0)
+    }
 }
 
 impl SqlitePromptQueueStore {
@@ -3931,7 +3951,7 @@ impl SqlitePromptQueueStore {
         conn: &Connection,
         prompt_id: i64,
         recipient: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<ClaimToken>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other("transport claim requires a recipient".into()));
         }
@@ -3947,7 +3967,7 @@ impl SqlitePromptQueueStore {
              ON CONFLICT(prompt_id, recipient) DO UPDATE SET
                 seen_at = excluded.seen_at, source = excluded.source
              WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
-            params![recipient, token, prompt_id, recipient],
+            params![recipient, token.seen_at(), prompt_id, recipient],
         )?;
         Ok((changed == 1).then_some(token))
     }
@@ -5645,7 +5665,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         &self,
         prompt_id: i64,
         recipient: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<ClaimToken>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::claim_recipient_transport_on_conn(&conn, prompt_id, recipient)
@@ -5656,15 +5676,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         &self,
         prompt_id: i64,
         recipient: &str,
-        token: &str,
+        token: ClaimToken,
     ) -> Result<bool> {
+        let seen_at = token.seen_at();
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let changed = conn.execute(
                 "DELETE FROM prompt_queue_recipient_seen
                  WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'
                    AND seen_at = ?",
-                params![prompt_id, recipient, token],
+                params![prompt_id, recipient, seen_at],
             )?;
             Ok(changed == 1)
         })
@@ -11188,15 +11209,15 @@ mod tests {
             .unwrap();
         let first = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
         assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
-        assert!(store.release_recipient_transport_claim(id, "worker", &first).unwrap());
+        assert!(store.release_recipient_transport_claim(id, "worker", first).unwrap());
         let second = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
         assert_ne!(first, second);
         assert!(
-            !store.release_recipient_transport_claim(id, "worker", &first).unwrap(),
+            !store.release_recipient_transport_claim(id, "worker", first).unwrap(),
             "a stale token must not release the newer claim"
         );
         assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
-        assert!(store.release_recipient_transport_claim(id, "worker", &second).unwrap());
+        assert!(store.release_recipient_transport_claim(id, "worker", second).unwrap());
     }
 
     #[test]

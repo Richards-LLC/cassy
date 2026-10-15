@@ -59,7 +59,7 @@ const LANE_CAPACITY: usize = 256;
 pub(crate) enum QueueStamp {
     /// Release the transport claim `token` names, which was not handed off.
     /// A late release never drops a newer claim (review round 1, L10).
-    ReleaseClaim { token: String },
+    ReleaseClaim { claim_token: cas_store::ClaimToken },
     /// The row reached its recipient's transport.
     TransportDelivered,
     /// The recipient's transport receipt (`transport_claimed` surfacing).
@@ -93,8 +93,8 @@ impl QueueStamp {
 
     fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
-            Self::ReleaseClaim { token } => queue
-                .release_recipient_transport_claim(row, recipient, token)
+            Self::ReleaseClaim { claim_token } => queue
+                .release_recipient_transport_claim(row, recipient, *claim_token)
                 .map(drop),
             Self::TransportDelivered => queue.mark_transport_delivered(row),
             Self::TransportReceipt => queue.record_recipient_surfaced(
@@ -275,7 +275,7 @@ struct InFlight {
     since: Instant,
     phase: InjectPhase,
     /// The transport claim the inject holds, released by token.
-    token: Option<String>,
+    claim_token: Option<cas_store::ClaimToken>,
 }
 
 /// An inject whose outcome never arrived: release `token`'s claim.
@@ -284,7 +284,7 @@ pub(crate) struct ExpiredInject {
     pub(crate) row: i64,
     pub(crate) recipient: String,
     pub(crate) generation: u64,
-    pub(crate) token: Option<String>,
+    pub(crate) claim_token: Option<cas_store::ClaimToken>,
 }
 
 /// Rows control has injected whose stamps have not landed (spec §4.5 rule 2).
@@ -302,7 +302,7 @@ impl InFlightSet {
         recipient: &str,
         generation: u64,
         now: Instant,
-        token: Option<String>,
+        claim_token: Option<cas_store::ClaimToken>,
     ) {
         self.entries.insert(
             (row, recipient.to_string()),
@@ -310,16 +310,16 @@ impl InFlightSet {
                 generation,
                 since: now,
                 phase: InjectPhase::AwaitingOutcome,
-                token,
+                claim_token,
             },
         );
     }
 
     /// The transport claim token an in-flight inject holds.
-    pub(crate) fn token_of(&self, row: i64, recipient: &str) -> Option<String> {
+    pub(crate) fn token_of(&self, row: i64, recipient: &str) -> Option<cas_store::ClaimToken> {
         self.entries
             .get(&(row, recipient.to_string()))
-            .and_then(|entry| entry.token.clone())
+            .and_then(|entry| entry.claim_token)
     }
 
     /// Whether any recipient of `row` is in flight.
@@ -397,7 +397,7 @@ impl InFlightSet {
                 row: *row,
                 recipient: recipient.clone(),
                 generation: entry.generation,
-                token: entry.token.clone(),
+                claim_token: entry.claim_token,
             })
             .collect();
         for expired in &expired {
@@ -767,16 +767,16 @@ impl QueueJobs {
         row: i64,
         recipient: &str,
         now: Instant,
-        claim: impl FnOnce() -> anyhow::Result<Option<String>>,
+        claim: impl FnOnce() -> anyhow::Result<Option<cas_store::ClaimToken>>,
     ) -> anyhow::Result<Admission> {
         if self.in_flight.holds_row(row) {
             return Ok(Admission::InFlight);
         }
-        let Some(token) = claim()? else {
+        let Some(claim_token) = claim()? else {
             return Ok(Admission::NotClaimed);
         };
         let generation = self.generation();
-        self.in_flight.begin(row, recipient, generation, now, Some(token));
+        self.in_flight.begin(row, recipient, generation, now, Some(claim_token));
         Ok(Admission::Inject { generation })
     }
 
@@ -789,8 +789,8 @@ impl QueueJobs {
     /// Release the transport claim the in-flight inject of `(row, recipient)`
     /// holds, by its token. No-op when there is none.
     pub(crate) fn release_inject_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
-        if let Some(token) = self.in_flight.token_of(row, recipient) {
-            self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { token });
+        if let Some(claim_token) = self.in_flight.token_of(row, recipient) {
+            self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { claim_token });
         }
     }
 
@@ -827,13 +827,13 @@ impl QueueJobs {
                 generation = inject.generation,
                 "factory loop v2: no inject outcome in time; releasing the transport claim so the row retries"
             );
-            if let Some(token) = inject.token.clone() {
+            if let Some(claim_token) = inject.claim_token {
                 self.submit_stamp(
                     cas_dir,
                     inject.row,
                     &inject.recipient,
                     inject.generation,
-                    QueueStamp::ReleaseClaim { token },
+                    QueueStamp::ReleaseClaim { claim_token },
                 );
             }
         }

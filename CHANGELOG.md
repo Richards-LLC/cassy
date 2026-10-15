@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.54.0] - 2026-10-15
+
 ### Changed — one command releases; landing on main publishes and installs (cas-f95b)
 
 - `scripts/release.sh` is now the whole release. Run on the epic branch, it

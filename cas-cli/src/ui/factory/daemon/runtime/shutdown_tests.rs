@@ -571,10 +571,16 @@ async fn long_transcript_recycle(register_replacement: bool) {
             "{detail:?}"
         );
         let output = daemon.pane_buffers[NAME].as_plain_text();
-        assert_eq!(
-            output.trim(),
-            NEW,
-            "a registered replacement replays only its own output"
+        // A PTY can also echo its startup cursor-position reply. Assert the
+        // session boundary independently of that terminal handshake.
+        assert!(output.contains(NEW), "replacement output is retained");
+        assert!(
+            !output.contains(OLD.trim()),
+            "a registered replacement must not replay the old session"
+        );
+        assert!(
+            output.len() < 2_000,
+            "the short new output is not padded with old history"
         );
         daemon.app.shutdown_worker_for_recycle(NAME).await.unwrap();
     } else {

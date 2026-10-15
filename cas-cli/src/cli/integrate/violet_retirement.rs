@@ -415,6 +415,32 @@ pub fn retire_installed_hub(project_proxy: Option<&Path>) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cas_678d_update_rewrites_account_profile_credential_references() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        let account = home.join(".claude-support@gabber.studio");
+        std::fs::create_dir_all(&account).unwrap();
+        env.set("CLAUDE_CONFIG_DIR", &account);
+        let path = account.join(".claude.json");
+        std::fs::write(&path, serde_json::json!({
+            "mcpServers": {"violet": {"type": "http", "url": violet_hub_url(),
+                "headers": {"Authorization": "Bearer ${MECHA_SLACK_TOKEN_CASSY_PROXY}",
+                    "x-vercel-protection-bypass": "${MECHA_VERCEL_BYPASS}"}}},
+            "unrelated": true
+        }).to_string()).unwrap();
+        // The same entry point used by update, without touching the host HOME.
+        retire_installed_hub(None).unwrap();
+        let document: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_CASSY_PROXY}");
+        assert_eq!(document["mcpServers"]["violet"]["headers"]["x-vercel-protection-bypass"],
+            "${VIOLET_VERCEL_BYPASS}");
+        assert_eq!(document["unrelated"], true);
+    }
+
     fn codex_fixture(path: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, format!(

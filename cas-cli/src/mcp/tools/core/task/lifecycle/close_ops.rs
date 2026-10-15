@@ -13971,7 +13971,23 @@ fn run_factory_branch_merge_gate_for_delivery(
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
     let mut origin_fetch_attempted = false;
-    let mut stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
+    // cas-1cc7: a new target may exist only on origin after a retarget.
+    // Unknown local Git state is not the local-epic KnownZero exception.
+    let mut stranded = match known_unmerged_factory_commits(repo_path, commit_ish, parent_branch) {
+        KnownUnmergedCount::KnownZero => 0,
+        KnownUnmergedCount::KnownPositive(count) => count,
+        KnownUnmergedCount::Unknown => {
+            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            match known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch) {
+                KnownUnmergedCount::KnownZero if !local_merge => 0,
+                KnownUnmergedCount::KnownPositive(count) if !local_merge => count,
+                _ => return MergeStateGateOutcome::Unresolved(format!(
+                    "MERGE STATE UNVERIFIABLE: delivery `{commit_ish}` could not be measured against target `{parent_branch}`{}. No integration evidence was obtained; restore the target ref and retry close.",
+                    if local_merge { String::new() } else { format!(" or `{origin_parent_branch}`") },
+                )),
+            }
+        }
+    };
     let mut local_only_trunk_target = false;
     if stranded == 0 {
         // A local trunk ref is not shared integration evidence. Refresh and
@@ -23922,6 +23938,242 @@ mod merge_state_gate_tests {
     use crate::test_support::TestEnvGuard;
     use std::process::Command;
     use tempfile::TempDir;
+
+    // A newly created epic exists only on origin; the worker's old parent
+    // and its prior review cycle must not supply integration evidence.
+    #[tokio::test]
+    async fn retargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7() {
+        use crate::mcp::CasService;
+        use cas_store::TaskStore;
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let dir = init_factory_repo("retarget-worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "origin", "main:epic/new-target"]);
+        let branch = "factory/retarget-worker-cas-retarget";
+        git(p, &["checkout", "-q", "-b", branch]);
+        std::fs::write(p.join("delivery.rs"), "// cas-retarget delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-retarget): delivery"]);
+        git(p, &["push", "-q", "origin", branch]);
+        let tip = rev_parse_local(p, branch);
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-retarget-fixture\"\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "retarget-supervisor".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("retarget-supervisor".into());
+        let mut task = Task::new("cas-retarget".into(), "Retargeted delivery".into());
+        task.status = TaskStatus::InProgress;
+        task.task_type = TaskType::Bug;
+        task.assignee = Some("retarget-worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-retarget-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        for (id, target) in [
+            ("cas-old-parent", "main"),
+            ("cas-new-parent", "epic/new-target"),
+        ] {
+            let mut epic = Task::new(id.into(), "Parent epic".into());
+            epic.task_type = TaskType::Epic;
+            epic.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "project:cas-retarget-fixture".into(),
+                target_branch: target.into(),
+            });
+            store.add(&epic).unwrap();
+        }
+        let service = CasService::new(core, None);
+        for request in [
+            serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
+            serde_json::json!({"action":"dep_remove", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
+            serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-new-parent", "dep_type":"parent"}),
+            serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/new-target"}),
+        ] {
+            let response = service
+                .task(Parameters(serde_json::from_value(request).unwrap()))
+                .await
+                .unwrap();
+            assert_ne!(response.is_error, Some(true), "{response:?}");
+        }
+        assert!(!git_ref_exists(p, "epic/new-target"));
+        assert!(!git_commit_is_ancestor(p, &tip, "origin/epic/new-target"));
+        agents
+            .register(&Agent::new_with_role(
+                "retarget-worker-id".into(),
+                "retarget-worker".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let worker = CasCore::with_daemon(root, None, None);
+        worker.set_agent_id_for_testing("retarget-worker-id".into());
+        let service = CasService::new(worker, None);
+        let response = service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"close", "id":task.id, "reason":"ready for review"})).unwrap())).await.unwrap();
+        assert_eq!(
+            store.get(&task.id).unwrap().status,
+            TaskStatus::AwaitingMerge,
+            "{response:?}"
+        );
+        assert_eq!(response.is_error, Some(true));
+        assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.contains("MERGE REQUIRED"))));
+    }
+
+    #[tokio::test]
+    async fn ordinary_reopen_keeps_unreviewed_merge_request_actionable_cas_1cc7() {
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestDelivery, MergeRequestEnvelope,
+            merge_request_delivery_decision,
+        };
+        use cas_store::TaskStore;
+        use cas_types::{Agent, AgentRole};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let dir = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "reopen-supervisor".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("reopen-supervisor".into());
+        let mut task = Task::new("cas-unreviewed".into(), "Premature close recovery".into());
+        task.status = TaskStatus::Closed;
+        task.assignee = Some("worker".into());
+        let tip = "4".repeat(40);
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.historical_factory_branch_anchors = vec!["2".repeat(40)];
+        store.add(&task).unwrap();
+        core.cas_task_reopen(Parameters(TaskReopenRequest {
+            id: task.id.clone(),
+            reason: Some("This unmerged tip has never been reviewed".into()),
+        }))
+        .await
+        .unwrap();
+        let reopened = store.get(&task.id).unwrap();
+        let envelope = MergeRequestEnvelope {
+            task_id: task.id,
+            branch_tip: tip,
+            target_branch: "epic/new-target".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 8,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&reopened),
+                &envelope,
+                &MergeRequestDecision::Pending {
+                    target_tip: envelope.target_branch_tip.clone()
+                }
+            ),
+            MergeRequestDelivery::Deliver
+        );
+        // A later actual review rejection of that same recovered tip must
+        // now suppress it, and the disposition must survive the store roundtrip.
+        let mut reviewed = reopened.clone();
+        reviewed.status = TaskStatus::AwaitingMerge;
+        reviewed.deliverables.factory_branch_anchor = Some(envelope.branch_tip.clone());
+        store.update(&reviewed).unwrap();
+        cas_store::request_changes_for_parked_delivery(
+            dir.path(),
+            &reviewed.id,
+            "reopen-supervisor",
+            "Reviewed delivery needs corrective work",
+        )
+        .unwrap();
+        let reviewed = store.get(&reviewed.id).unwrap();
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&reviewed),
+                &envelope,
+                &MergeRequestDecision::Unverifiable
+            ),
+            MergeRequestDelivery::SuppressRequestChanges {
+                status: TaskStatus::Open
+            }
+        );
+        let mut declined = envelope;
+        declined.branch_tip = "2".repeat(40);
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&reopened),
+                &declined,
+                &MergeRequestDecision::Unverifiable
+            ),
+            MergeRequestDelivery::SuppressRequestChanges {
+                status: TaskStatus::Open
+            }
+        );
+    }
+
+    #[test]
+    fn remote_only_target_needs_known_integration_cas_1cc7() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "origin", "main:epic/remote-only"]);
+        std::fs::write(p.join("delivery.rs"), "// cas-test1\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): delivery"]);
+        let task = worker_task("worker");
+        let request = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &request, "epic/remote-only", p),
+            MergeStateGateOutcome::Reject(_)
+        ));
+        git(p, &["push", "-q", "origin", "HEAD:epic/remote-only"]);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &request, "epic/remote-only", p),
+            MergeStateGateOutcome::Proceed
+        ));
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &request, "epic/missing-target", p),
+            MergeStateGateOutcome::Unresolved(_)
+        ));
+    }
 
     fn close_relay_fixture_cas_3a82(
         root: &std::path::Path,

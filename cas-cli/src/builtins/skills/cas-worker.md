@@ -72,6 +72,7 @@ use assigned work; `ready` and `available` are backlog
   remain inbox-only; never set `merge_request=true` to wake the supervisor for a
   status update.
 - Never block the pane: run long commands in the background with a log.
+- Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: commit, push and note, then request a respawn when
   context runs low.
 - When close says verification required, quote its guidance in `need:`.

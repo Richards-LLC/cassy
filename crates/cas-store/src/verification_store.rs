@@ -2040,7 +2040,7 @@ pub fn request_changes_for_parked_delivery(
     // cannot reuse it as merge authority. Preserve it separately as task
     // identity: the declined delivery is still this task's work, and a later
     // lease must not reclassify its unmerged commit as unrelated lane residue.
-    deliverables.retain_factory_branch_anchor_as_history();
+    deliverables.decline_factory_branch_anchor();
     deliverables.parked_branch = None;
     deliverables.merge_conflicted = false;
     deliverables.review_envelope = None;

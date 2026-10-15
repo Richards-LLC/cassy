@@ -593,7 +593,7 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
 
-    /// Commit anchors from declined delivery cycles. `request_changes` clears
+    /// Commit anchors from prior delivery cycles. `request_changes` clears
     /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
     /// merge proof, but the declined commits remain this task's work and must
     /// stay attributable when a later lease starts after their commit time.
@@ -603,6 +603,13 @@ pub struct TaskDeliverables {
     /// the live factory branch and the normal merge-state gate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub historical_factory_branch_anchors: Vec<String>,
+
+    /// Tips explicitly declined by request_changes, separate from ordinary
+    /// reopen/history retention. None preserves legacy rows' conservative
+    /// history-as-declined interpretation; Some (including empty) records
+    /// that subsequent history has an explicit review disposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined_factory_branch_anchors: Option<Vec<String>>,
 
     /// cas-a844: the `factory/<assignee>` branch name recorded alongside
     /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
@@ -673,6 +680,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     historical_factory_branch_anchors: Vec<String>,
     #[serde(default)]
+    declined_factory_branch_anchors: Option<Vec<String>>,
+    #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
     handoff_branches: Vec<String>,
@@ -698,6 +707,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
+            declined_factory_branch_anchors: value.declined_factory_branch_anchors,
             parked_branch: value.parked_branch,
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
@@ -948,6 +958,10 @@ impl TaskDeliverables {
             return;
         };
         let anchor = anchor.trim().to_string();
+        if !anchor.is_empty() {
+            self.declined_factory_branch_anchors
+                .get_or_insert_with(|| self.historical_factory_branch_anchors.clone());
+        }
         if !anchor.is_empty()
             && !self
                 .historical_factory_branch_anchors
@@ -956,6 +970,32 @@ impl TaskDeliverables {
         {
             self.historical_factory_branch_anchors.push(anchor);
         }
+    }
+
+    /// Explicit review rejection, unlike administrative recovery by reopen.
+    pub fn decline_factory_branch_anchor(&mut self) {
+        let anchor = self.factory_branch_anchor.clone();
+        self.retain_factory_branch_anchor_as_history();
+        if let Some(anchor) = anchor
+            .map(|anchor| anchor.trim().to_string())
+            .filter(|anchor| !anchor.is_empty())
+        {
+            let declined = self
+                .declined_factory_branch_anchors
+                .get_or_insert_with(Vec::new);
+            if !declined
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&anchor))
+            {
+                declined.push(anchor);
+            }
+        }
+    }
+
+    pub fn declined_factory_anchors(&self) -> &[String] {
+        self.declined_factory_branch_anchors
+            .as_deref()
+            .unwrap_or(&self.historical_factory_branch_anchors)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -972,6 +1012,7 @@ impl TaskDeliverables {
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
             && self.historical_factory_branch_anchors.is_empty()
+            && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
             && !self.merge_conflicted
     }
@@ -1419,6 +1460,41 @@ mod tests {
 
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.historical_factory_branch_anchors.is_empty());
+    }
+
+    #[test]
+    fn reopen_history_is_distinct_from_declined_delivery_cas_1cc7() {
+        let mut deliverables: TaskDeliverables = serde_json::from_value(serde_json::json!({
+            "historical_factory_branch_anchors": ["old-declined-tip"],
+            "factory_branch_anchor": "unreviewed-tip"
+        }))
+        .unwrap();
+        assert_eq!(
+            deliverables.declined_factory_anchors(),
+            ["old-declined-tip"]
+        );
+        deliverables.retain_factory_branch_anchor_as_history();
+        let mut decoded: TaskDeliverables =
+            serde_json::from_value(serde_json::to_value(&deliverables).unwrap()).unwrap();
+        assert_eq!(
+            decoded.historical_factory_branch_anchors,
+            ["old-declined-tip", "unreviewed-tip"]
+        );
+        assert_eq!(decoded.declined_factory_anchors(), ["old-declined-tip"]);
+        decoded.factory_branch_anchor = Some("unreviewed-tip".into());
+        decoded.decline_factory_branch_anchor();
+        assert_eq!(
+            decoded.declined_factory_anchors(),
+            ["old-declined-tip", "unreviewed-tip"]
+        );
+        let mut first = TaskDeliverables {
+            factory_branch_anchor: Some("first-unreviewed-tip".into()),
+            ..Default::default()
+        };
+        first.retain_factory_branch_anchor_as_history();
+        let first: TaskDeliverables =
+            serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+        assert_eq!(first.declined_factory_branch_anchors, Some(vec![]));
     }
 
     #[test]

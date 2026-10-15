@@ -278,6 +278,7 @@ pub fn mime_for(path: &Path) -> String {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        "webm" => "video/webm",
         "zip" => "application/zip",
         "gz" | "tgz" => "application/gzip",
         "yaml" | "yml" => "application/yaml",

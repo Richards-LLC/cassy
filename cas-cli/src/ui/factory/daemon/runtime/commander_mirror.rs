@@ -834,6 +834,120 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn ct2_p3_operator_mirror_without_prior_send() {
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "unsolicited-status",
+            "[cas #77 agent-authored] worker update",
+            "The release is ready for review.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        assert_eq!(queue.first_operator_activity_at("factory-1").unwrap(), None);
+
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+
+        for device in ["phone", "desktop"] {
+            let rows = queue
+                .conversation_history("factory-1", device, None, 50)
+                .unwrap();
+            assert_eq!(rows.len(), 1, "operator lane must not need a prior send");
+            assert_eq!(rows[0].target, "operator");
+            let reply: crate::ui::factory::OperatorReplyPayload =
+                serde_json::from_str(&rows[0].prompt).unwrap();
+            assert_eq!(reply.message, "The release is ready for review.");
+            assert_eq!(reply.kind, crate::ui::factory::OperatorTurnKind::Status);
+            assert_eq!(reply.reply_to, None);
+            assert_eq!(reply.device_id, "*");
+        }
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_survives_supervisor_state_changes() {
+        for status in [
+            cas_types::AgentStatus::Idle,
+            cas_types::AgentStatus::Stale,
+            cas_types::AgentStatus::Shutdown,
+        ] {
+            let question = "Is the release ready?";
+            let (temp, root, queue) = terminal_session(codex_turn_at(
+                "final-before-idle",
+                question,
+                "Yes, it is ready.",
+                Utc::now(),
+            ));
+            let terminal = queue
+                .record_terminal_operator_turn("factory-1", question)
+                .unwrap();
+            let agents = SqliteAgentStore::open(&root).unwrap();
+            let mut supervisor = agents.get("supervisor-id").unwrap();
+            supervisor.status = status;
+            agents.update(&supervisor).unwrap();
+
+            mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+            mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+
+            let replies = operator_replies(&queue);
+            assert_eq!(replies.len(), 1, "completed answer lost in {status}");
+            assert_eq!(replies[0].message, "Yes, it is ready.");
+            assert_eq!(replies[0].reply_to, Some(terminal));
+        }
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_opt_out_does_not_backfill_disabled_turns() {
+        let question = "Keep this terminal turn private.";
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "private-turn",
+            question,
+            "Private answer.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        queue
+            .record_terminal_operator_turn("factory-1", question)
+            .unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\ncommander_mirror_enabled = false\n",
+        )
+        .unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        assert!(
+            operator_replies(&queue).is_empty(),
+            "explicit opt-out must stop mirroring"
+        );
+
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\ncommander_mirror_enabled = true\n",
+        )
+        .unwrap();
+        // The first enabled poll starts a new window. Even terminal-linked
+        // answers from the disabled interval must not backfill into it.
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        assert!(operator_replies(&queue).is_empty());
+        let mut transcript = std::fs::OpenOptions::new()
+            .append(true)
+            .open(
+                temp.path()
+                    .join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl"),
+            )
+            .unwrap();
+        for value in codex_turn_at(
+            "public-turn",
+            "[cas #78 agent-authored] new update",
+            "Public status.",
+            Utc::now() + chrono::Duration::seconds(1),
+        ) {
+            writeln!(transcript, "{value}").unwrap();
+        }
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].message, "Public status.");
+    }
+
     /// The violet_ps shape: the operator never paired a device and only typed
     /// in the terminal. Their question and the supervisor's answer must both
     /// reach the conversation, the answer threaded under the question, once.

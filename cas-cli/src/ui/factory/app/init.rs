@@ -609,6 +609,13 @@ impl FactoryApp {
 
     /// Track a live worker pane the way a finished spawn does, for tests that
     /// drive shutdown against a real PTY process (cas-00d5).
+    /// Name a roster worker without a pane, for daemon sweeps that read
+    /// only the roster (cas-1f0c).
+    #[cfg(test)]
+    pub(crate) fn add_worker_name_for_test(&mut self, name: &str) {
+        self.worker_names.push(name.to_string());
+    }
+
     #[cfg(test)]
     pub(crate) fn adopt_worker_pane_for_test(&mut self, pane: cas_mux::Pane) {
         self.worker_names.push(pane.id().to_string());

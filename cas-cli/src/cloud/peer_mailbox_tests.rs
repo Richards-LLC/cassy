@@ -110,6 +110,8 @@ fn envelope_round_trips_and_is_only_read_from_the_first_line() {
         machine: "box-b".into(),
         session: Some("factory-b".into()),
         repo: REPO.into(),
+        in_reply_to: None,
+        kind: None,
     };
     let line = render_envelope(&envelope);
     assert!(!line.contains('\n'), "{line}");
@@ -145,10 +147,126 @@ fn rendered_prompt_names_sender_machine_repo_and_how_to_reply() {
     let envelope = parse_envelope(&prompt).unwrap();
     assert_eq!(envelope.id, "pm_7");
     assert_eq!(envelope.machine, "box-b");
+    // pin: peer reply addresses must retain the sender's machine-qualified name.
     assert!(prompt.contains("far-heron-3@box-b"), "{prompt}");
     assert!(prompt.contains(REPO), "{prompt}");
     assert!(prompt.contains("in_reply_to"), "{prompt}");
+    // pin: the peer transport preserves the original body after its routing header.
     assert!(prompt.ends_with("can you take cas-1234?"), "{prompt}");
+}
+
+#[test]
+fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
+    let mut reply = message("pm-reply", "supervisor", REPO, "yes");
+    reply.in_reply_to = Some("pm-question".into());
+    assert!(
+        render_prompt(&reply)
+            .lines()
+            .next()
+            .unwrap()
+            .contains("in_reply_to=\"pm-question\"")
+    );
+    for kind in ["ask", "blocker"] {
+        let action = message(
+            "pm-action",
+            "supervisor",
+            REPO,
+            &format!("<cas-peer-intent kind=\"{kind}\"/>\nPlease coordinate this."),
+        );
+        let prompt = render_prompt(&action);
+        assert!(
+            prompt
+                .lines()
+                .next()
+                .unwrap()
+                .contains(&format!("kind=\"{kind}\"")),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("<cas-peer-intent"),
+            "transport metadata is consumed: {prompt}"
+        );
+        // pin: consuming the in-band cas-peer-intent marker must preserve the body verbatim.
+        assert!(prompt.ends_with("Please coordinate this."));
+    }
+}
+
+#[test]
+fn peer_wake_intent_is_narrow_and_round_trips_cas_1f25() {
+    for (kind, blocker, expected) in [
+        (None, false, None),
+        (Some("status"), false, None),
+        (Some("ask"), false, Some(PeerMessageKind::Ask)),
+        (Some("blocker"), false, Some(PeerMessageKind::Blocker)),
+        (None, true, Some(PeerMessageKind::Blocker)),
+    ] {
+        let body = attach_message_intent("body", kind, blocker);
+        let message = message("pm-typed", "supervisor", REPO, &body);
+        let prompt = render_prompt(&message);
+        let envelope = parse_envelope(&prompt).unwrap();
+        assert_eq!(envelope.kind, expected);
+        assert_eq!(envelope.wakes_idle(), expected.is_some());
+        assert_eq!(
+            parse_envelope(&render_envelope(&envelope)).unwrap(),
+            envelope
+        );
+        assert!(prompt.ends_with("body"));
+    }
+    let mut blank_reply = message("pm-empty", "supervisor", REPO, "body");
+    blank_reply.in_reply_to = Some("  ".into());
+    assert!(
+        !parse_envelope(&render_prompt(&blank_reply))
+            .unwrap()
+            .wakes_idle()
+    );
+    let quoted = message(
+        "pm-quote",
+        "supervisor",
+        REPO,
+        "example:\n<cas-peer-intent kind=\"ask\"/>",
+    );
+    assert!(
+        !parse_envelope(&render_prompt(&quoted))
+            .unwrap()
+            .wakes_idle()
+    );
+}
+
+#[test]
+fn existing_split_proposal_remains_an_actionable_peer_ask_cas_1f25() {
+    use crate::cloud::epic_split::{SplitKind, SplitMessage};
+    let split = SplitMessage {
+        kind: SplitKind::Proposal,
+        id: "split-1".into(),
+        epic: "cas-epic".into(),
+        proposer_takes: vec!["cas-mine".into()],
+        peer_takes: vec!["cas-yours".into()],
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+        at: chrono::Utc::now(),
+        reason: None,
+    };
+    let body = split.render();
+    let prompt = render_prompt(&message("pm-split", "supervisor", REPO, &body));
+    assert_eq!(
+        parse_envelope(&prompt).unwrap().kind,
+        Some(PeerMessageKind::Ask)
+    );
+    assert!(
+        prompt.ends_with(&body),
+        "split ingestion still sees its original first line"
+    );
+    let mut fyi = split;
+    fyi.kind = SplitKind::Cancel;
+    assert!(
+        !parse_envelope(&render_prompt(&message(
+            "pm-cancel",
+            "supervisor",
+            REPO,
+            &fyi.render()
+        )))
+        .unwrap()
+        .wakes_idle()
+    );
 }
 
 #[test]
@@ -180,6 +298,7 @@ fn delivery_admits_in_order_once_daemon_stamped_and_never_urgent() {
     let rows = machine.rows();
     assert_eq!(rows.len(), 2);
     assert!(rows[0].prompt.ends_with("first"));
+    // pin: the second claimed body remains second after peer admission.
     assert!(rows[1].prompt.ends_with("second"), "claim order is kept");
     for row in &rows {
         assert_eq!(row.target, "bright-lark-8");

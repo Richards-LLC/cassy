@@ -71,6 +71,30 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
 
+## Project issue repository reads
+
+`cas config get issues.repo` returns the stored project tracker, or resolves an
+unset value from that checkout's local GitHub `origin`. It parses the local URL
+without contacting GitHub and accepts HTTPS, SCP-style SSH and `ssh://` remotes.
+A missing, invalid or non-GitHub origin leaves the result empty; nested folders
+without their own Git repository do not borrow a parent repository's origin.
+An explicit `issues.repo` always wins, independently of component repositories.
+
+Plain `get` prints only `owner/repo`, so it remains usable in `gh --repo
+"$(cas config get issues.repo)"`. Human `list`, `describe` and `search` label an
+inferred value `(from origin; unset in config)`; their JSON views and JSON `get`
+include `source` (`origin`, `config` or `unset`) and `configured` for this key.
+`cas doctor` warns when the setting is unset and names the resolved origin or
+explains how to set a tracker when none can be resolved.
+
+These reads never save the inferred value. Raw `Config::get`/`list`, editing,
+serialization and `config diff` retain stored values. Legacy `report_cas_bug`,
+automatic issue triage and release-report GitHub intake retain their explicit
+configuration contracts; they do not infer a project target from origin.
+`report_cas_bug` continues using its explicit legacy override or the Cassy
+component repository. Only project initialization may persist a discovered
+origin; routine reads and updates do not backfill it.
+
 ## Canonical install path
 
 Cassy must be installed to **one** location: `~/.local/bin/cas`. Any other
@@ -289,7 +313,17 @@ supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
 ```
 
 Both lists default to empty and appear in `cas config list`. Server names are
-exact. These denials override project proxy credential grants and read-only
+exact.
+
+Operator-authenticated CLIs and connector tools are refused to workers at the
+pre-tool hook (GH #1219). `factory.worker_denied_clis` (default `vercel`) names
+executables a worker's shell may not run, matched on basename through wrappers
+(`env`, `sudo`, `timeout`, `sh -c`, `eval`, `npx`, `pnpm dlx`, paths).
+`factory.worker_denied_mcp_tools` (default `*vercel*`) holds case-insensitive
+tool-name patterns, also applied to each `server.tool` an `mcp_execute`
+dispatches. The refusal sends the worker to the supervisor with
+`blocker=true`; supervisors are unaffected. Both keys are operator-only, and
+an empty list disables its check. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
 

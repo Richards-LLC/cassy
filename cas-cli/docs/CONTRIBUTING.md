@@ -583,6 +583,22 @@ environment prefixes, compound commands, repeated packages and broader flags.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+In the Cassy source repository, every named run first executes the fixed cheap
+guards: `test_support::lib_test_process_env_mutation_is_isolated`,
+`config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9`,
+and `scripts/check-test-shape.py --changed-since <task-target-base>`. Guard tests
+run separately from the requested selection, so their passes cannot hide a
+zero-match requested filter. The runner prints `guards: PASS` with the separate
+guard count and elapsed seconds; the `test: PASS` count remains the requested
+selection's count. Both invocations share the builder slot, private target and
+memory scope. Other repositories retain their existing named-test behavior.
+
+The same preflight compares removed/changed string literals against tracked
+test references and prints `Worker changed-string warning: <file>:<line> test
+<name>` for surviving assertions. Run or update the named assertions before
+push. This is a warning heuristic, not a complete dependency analysis. The diff
+uses the active task's integration target, with configured epic/default-branch
+fallbacks for standalone runs; pushing the worker branch never clears it.
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 

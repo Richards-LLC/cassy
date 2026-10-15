@@ -1588,7 +1588,7 @@ impl DirectorEventDetector {
         // leaves as its only commit evidence. Checkpoints and task notes are
         // already in the activity baseline. A worker with none of these is
         // still a stall.
-        let (executing, commit_age) = if !transcript_confirms || STALL_EVIDENCE_RED_STUB {
+        let (executing, commit_age) = if !transcript_confirms {
             (false, None)
         } else if let Some(overrides) = &self.worker_evidence_override {
             overrides.get(worker_name).copied().unwrap_or((false, None))
@@ -2592,9 +2592,6 @@ impl DirectorEventDetector {
 /// — the SAME function `cas factory is-wedged` uses — so an outstanding
 /// tool call (e.g. a worker sleeping on a backgrounded `cargo test`) never
 /// confirms a stall here while is-wedged would call the worker Alive.
-/// Red-first stub (cas-9bf6): worker_status evidence not consulted yet.
-const STALL_EVIDENCE_RED_STUB: bool = true;
-
 fn transcript_confirms_stall_for_path(
     transcript_path: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,

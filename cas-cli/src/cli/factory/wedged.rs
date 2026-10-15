@@ -750,9 +750,6 @@ fn claude_has_pending_tool_call(lines: &[String]) -> bool {
 /// [`has_in_flight_tool_call`]'s doc for the confidence caveat on this
 /// schema — unrecognized shapes are silently skipped, never treated as
 /// evidence of an in-flight call.
-/// Red-first stub (cas-9bf6): custom tool calls not counted yet.
-const CUSTOM_CALL_RED_STUB: bool = true;
-
 fn codex_has_pending_tool_call(lines: &[String]) -> bool {
     let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in lines {
@@ -773,7 +770,6 @@ fn codex_has_pending_tool_call(lines: &[String]) -> bool {
         // exec_command calls) are `custom_tool_call` records; a long one is
         // as in-flight as a plain function call.
         match payload_type {
-            Some("custom_tool_call") if CUSTOM_CALL_RED_STUB => {}
             Some("function_call" | "local_shell_call" | "custom_tool_call") => {
                 pending.insert(call_id.to_string());
             }

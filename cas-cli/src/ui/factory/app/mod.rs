@@ -2432,6 +2432,13 @@ impl FactoryApp {
         &self.director_data
     }
 
+    pub(crate) fn worker_attention_episode_start(
+        &self,
+        event: &DirectorEvent,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.event_detector.worker_attention_episode_start(event)
+    }
+
     /// Get the Cassy directory path
     pub fn cas_dir(&self) -> &std::path::Path {
         &self.cas_dir

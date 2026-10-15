@@ -9,7 +9,7 @@ pub(crate) mod director_refresh;
 mod delivery_matrix_tests;
 mod gui_client;
 mod injection_events;
-mod lifecycle;
+pub(crate) mod lifecycle;
 #[cfg(test)]
 mod loop_latency_tests;
 #[cfg(test)]

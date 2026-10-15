@@ -184,9 +184,10 @@ pub trait SupervisorQueueStore: Send + Sync {
     ///
     /// Finished means: an outbox row (`transition_key` set) whose prompt was
     /// delivered, or a pull row (no key) that was processed. Pending and
-    /// undelivered rows stay. Keys that can recur for the same subject
-    /// (`worker-attention:`, `integration:`) stay, because deleting them would
-    /// let [`Self::notify_idempotent`] fire the same event again.
+    /// undelivered rows stay. Attention keys stay while their session has a
+    /// registered non-shutdown agent; old delivered keys from ended sessions
+    /// age out. Missing registry/session evidence stays conservative.
+    /// Integration keys stay to prevent replay of an unchanged integration.
     fn prune_finished_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize>;
 
     /// Close the store
@@ -550,12 +551,29 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         let batch = batch.clamp(1, crate::retention::RETENTION_MAX_BATCH);
         let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
         crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            // A queue-only legacy database has no session registry yet. Do
+            // not treat that lack of evidence as proof that a session ended.
+            let has_agents: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+                [],
+                |row| row.get(0),
+            )?;
+            let ended_attention = if has_agents {
+                "NULLIF(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session'), '') IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM agents
+                     WHERE agents.factory_session = json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session')
+                       AND agents.status <> 'shutdown'
+                 )"
+            } else {
+                "0"
+            };
             // Outbox rows are finished once their prompt is delivered (the
             // outbox re-relays only prompt_delivered_at IS NULL); pull rows once
-            // processed. Keys that recur for one subject stay, or
-            // notify_idempotent would insert the same event again.
+            // processed. Preserve same-episode dedupe for any live member of
+            // the session, including a replacement supervisor after resume.
             Ok(tx.execute(
-                "DELETE FROM supervisor_queue
+                &format!("DELETE FROM supervisor_queue
                  WHERE id IN (
                      SELECT id FROM supervisor_queue
                      WHERE created_at < ?1
@@ -563,12 +581,13 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                            (transition_key IS NULL AND processed_at IS NOT NULL)
                            OR (transition_key IS NOT NULL
                                AND prompt_delivered_at IS NOT NULL
-                               AND transition_key NOT LIKE 'worker-attention:%'
+                               AND (transition_key NOT LIKE 'worker-attention:%'
+                                    OR ({ended_attention}))
                                AND transition_key NOT LIKE 'integration:%')
                        )
                      ORDER BY id
                      LIMIT ?2
-                 )",
+                 )"),
                 params![cutoff, batch as i64],
             )?)
         })
@@ -589,6 +608,83 @@ mod tests {
         let store = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn ct2_p2_attention_keys_age_out() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentStatus};
+        let (temp, store) = create_test_store();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        for (id, session, status) in [
+            ("live", "live-session", AgentStatus::Active),
+            ("ended", "ended-session", AgentStatus::Shutdown),
+            ("reused", "new-session", AgentStatus::Active),
+        ] {
+            let mut agent = Agent::new(id.into(), id.into());
+            agent.factory_session = Some(session.into());
+            agent.status = status;
+            agents.register(&agent).unwrap();
+        }
+        let insert = |supervisor: &str, session: &str, suffix: &str, delivered: bool| {
+            let payload = serde_json::json!({"factory_session": session}).to_string();
+            let key = format!("worker-attention:{session}:worker_idle:worker:{suffix}");
+            let NotifyIdempotentResult::Created(id) = store
+                .notify_idempotent(
+                    supervisor,
+                    "worker_idle",
+                    &payload,
+                    NotificationPriority::High,
+                    &key,
+                )
+                .unwrap()
+            else {
+                panic!("new episode")
+            };
+            if delivered {
+                store.mark_prompt_delivered(id).unwrap();
+            }
+            id
+        };
+        let live = insert("live", "live-session", "old", true);
+        let ended = insert("ended", "ended-session", "old", true);
+        let reused = insert("reused", "old-session", "old", true);
+        let missing = insert("removed", "removed-session", "old", true);
+        let pending = insert("ended", "ended-session", "pending", false);
+        let fresh = insert("ended", "ended-session", "fresh", true);
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE supervisor_queue SET created_at = ?1 WHERE id <> ?2",
+                params![
+                    (Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+                    fresh
+                ],
+            )
+            .unwrap();
+        }
+        // Bounded transactions retain active-session dedupe and undelivered
+        // outbox state, while terminal/removed/rebound session keys age out.
+        let removed: usize = (0..4)
+            .map(|_| store.prune_finished_batch(14 * 86400, 1).unwrap())
+            .sum();
+        assert_eq!(removed, 3);
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id FROM supervisor_queue ORDER BY id")
+            .unwrap();
+        let actual: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        let mut expected = vec![live, pending, fresh];
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert!(!actual.contains(&ended));
+        assert!(!actual.contains(&reused));
+        assert!(!actual.contains(&missing));
     }
 
     #[test]

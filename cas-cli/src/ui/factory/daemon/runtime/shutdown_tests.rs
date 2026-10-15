@@ -397,3 +397,52 @@ fn receipts(
         .map(|row| row.prompt)
         .collect()
 }
+
+/// cas-c1a2 (GH #1178): a recycle relaunches the SAME pane name, and the
+/// daemon's pane buffers are keyed by name and only ever appended to
+/// (relay.rs `buffer_pane_output`). The replacement's register-timeout
+/// diagnostic therefore quoted the previous session's transcript ("the pane
+/// still showed the old session's transcript"), so the operator could not see
+/// what the relaunched Codex actually printed. Stopping the old worker must
+/// drop its buffer, so whatever the diagnostic quotes is the new process.
+#[tokio::test(flavor = "current_thread")]
+async fn recycle_drops_the_old_sessions_pane_buffer_cas_c1a2() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    let name = "idle-codex";
+    register_idle_worker(&cas_dir, name);
+    daemon
+        .app
+        .adopt_worker_pane_for_test(idle_worker_pane(name, cas_mux::SupervisorCli::Codex));
+    daemon.buffer_pane_output(name, b"OLD SESSION TRANSCRIPT: every prior delivery\r\n");
+
+    // A recipe routing refuses after the old worker stops, so no real
+    // harness launches; the shutdown half is what this test pins.
+    let refused = cas_mux::WorkerSpec {
+        cli: cas_mux::SupervisorCli::Claude,
+        model: Some("claude-haiku-4-5".to_string()),
+        ..cas_mux::WorkerSpec::builtin_default()
+    };
+    open_spawn_queue_store(&cas_dir)
+        .unwrap()
+        .enqueue_recycle(
+            name,
+            Some(&serde_json::to_string(&refused).unwrap()),
+            Some(SESSION),
+        )
+        .unwrap();
+    daemon.enqueue_spawn_requests().unwrap();
+    daemon.process_pending_spawns().await;
+
+    let tail = daemon
+        .pane_buffers
+        .get(name)
+        .map(|buffer| buffer.as_plain_text())
+        .unwrap_or_default();
+    assert!(
+        !tail.contains("OLD SESSION TRANSCRIPT"),
+        "the stopped session's output must not be quoted for its replacement: {tail}"
+    );
+}

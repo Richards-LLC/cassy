@@ -690,30 +690,42 @@ mod tests {
         .with_variant("xhigh")
     }
 
-    /// Regeneration helper for `opencode_projection.snapshot.json` (cas-1f6e):
-    /// `CAS_OPENCODE_SNAPSHOT_OUT=crates/cas-mux/src/opencode_projection.snapshot.json \
-    ///  cargo nextest run -p cas-mux --run-ignored ignored-only write_projection_snapshot`
-    /// then review the diff and name the changed prompt line in the commit.
-    #[test]
-    #[ignore = "writes the reviewed snapshot; run on purpose after a prompt change"]
-    fn write_projection_snapshot_to_env_path() {
-        let Ok(out) = std::env::var("CAS_OPENCODE_SNAPSHOT_OUT") else {
-            return;
-        };
-        std::fs::write(&out, render_opencode_config(&spec())).expect("write snapshot");
-    }
-
     #[test]
     fn projection_config_is_deterministic_and_contains_both_primary_agents() {
         let first = render_opencode_config(&spec());
         let second = render_opencode_config(&spec());
-        assert_eq!(first, second, "projection is a deterministic snapshot");
-        assert_eq!(first, include_str!("opencode_projection.snapshot.json"));
+        assert_eq!(first, second, "projection is deterministic");
         let json: Value = serde_json::from_str(&first).expect("valid OPENCODE_CONFIG_CONTENT");
-        assert_eq!(json["agent"]["cassy-worker"]["mode"], "primary");
-        assert_eq!(json["agent"]["cassy-supervisor"]["mode"], "primary");
-        assert_eq!(json["agent"]["cassy-worker"]["model"], "local/qwen3.8-max");
-        assert_eq!(json["agent"]["cassy-worker"]["variant"], "xhigh");
+        // cas-2aef: structure, not prompt text. The prompt wording belongs to
+        // the worker and supervisor contracts and is tested there.
+        let permissions = serde_json::json!({
+            "bash": "allow", "edit": "allow", "external_directory": "deny", "glob": "allow",
+            "grep": "allow", "question": "deny", "read": "allow"
+        });
+        for agent in ["cassy-worker", "cassy-supervisor"] {
+            assert_eq!(json["agent"][agent]["mode"], "primary", "{agent} mode");
+            assert_eq!(
+                json["agent"][agent]["model"], "local/qwen3.8-max",
+                "{agent} model"
+            );
+            assert_eq!(json["agent"][agent]["variant"], "xhigh", "{agent} variant");
+            assert_eq!(
+                json["agent"][agent]["permission"], permissions,
+                "{agent} permissions"
+            );
+            assert!(
+                !json["agent"][agent]["prompt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{agent} prompt"
+            );
+        }
+        assert_eq!(
+            json.as_object().map(|object| object.len()),
+            Some(3),
+            "agent, mcp and plugin only"
+        );
         assert_eq!(
             json["mcp"]["cas"]["command"],
             serde_json::json!(["cas", "serve"])

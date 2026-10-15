@@ -405,3 +405,69 @@ fn cas_07ee_never_surfaced_supervisor_message_still_alerts_once() {
     let again = f.scan();
     assert_eq!(again.len(), first.len(), "one durable alarm per unread row");
 }
+
+#[test]
+fn cas_07ee_guard_approval_with_a_new_instruction_still_alerts() {
+    let _env = env();
+    let mut f = Fixture::new();
+    f.aged(
+        "supervisor",
+        "worker",
+        "Approved. I will merge the branch; rebase your worker now.",
+    );
+    assert!(
+        !f.scan().is_empty(),
+        "an approval prefix must not hide a real instruction"
+    );
+}
+
+#[test]
+fn cas_07ee_guard_unrelated_author_activity_does_not_hide_unread() {
+    let _env = env();
+    let mut f = Fixture::new();
+    f.aged("supervisor", "worker", "Please run the targeted checks");
+    let event = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        "cas-07ee",
+        "Another worker acted",
+    )
+    .with_session("other-worker-id");
+    crate::store::open_event_store(&f.cas_dir)
+        .unwrap()
+        .record(&event)
+        .unwrap();
+    f.queue
+        .enqueue_with_session(
+            "other-worker",
+            "supervisor",
+            "I finished my unrelated task",
+            SESSION,
+        )
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "only this recipient's activity can quiet its alarm"
+    );
+}
+
+#[test]
+fn cas_07ee_guard_closed_task_mention_is_not_a_satisfied_instruction() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let mut task = Task::new("cas-07ee".into(), "closed".into());
+    task.status = TaskStatus::Closed;
+    crate::store::open_task_store_local(&f.cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    f.aged(
+        "supervisor",
+        "worker",
+        "Please explain why cas-07ee closed without the required evidence",
+    );
+    assert!(
+        !f.scan().is_empty(),
+        "a closed-task mention can still ask new work"
+    );
+}

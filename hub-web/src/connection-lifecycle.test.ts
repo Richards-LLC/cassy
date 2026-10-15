@@ -1087,6 +1087,36 @@ describe("a session's attach chain always has its next attempt (cas-5dbc)", () =
     expect(HalfOpenSocket.instances.length, "a new attempt after the ready deadline").toBeGreaterThan(1);
   });
 
+  it("finishes replacing the timed-out socket after slow retry signing (cas-ec55)", async () => {
+    transport();
+    HalfOpenSocket.instances = [];
+    vi.stubGlobal("WebSocket", HalfOpenSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const connection = supervisor(await storedMachine("slow-retry-signing"));
+    vi.useFakeTimers(timers);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+
+    // Native WebCrypto can still be working after the fake timers drain.
+    // Hold the retry's credential digest, then perform the real signing.
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let releaseSigning!: () => void;
+    const signing = new Promise<void>(resolve => { releaseSigning = resolve; });
+    vi.spyOn(crypto.subtle, "digest").mockImplementationOnce(async (...args) => {
+      await signing;
+      return digest(...args);
+    });
+    const retired = HalfOpenSocket.instances[0]!;
+    retired.open();
+    await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.attaching + MACHINE_RETRY_CEILING_MS);
+    expect(retired.readyState).toBe(2);
+    expect(connection.attachSnapshot("session-a")?.phase).toBe("auth");
+    expect(HalfOpenSocket.instances).toHaveLength(1);
+    releaseSigning();
+    expect(HalfOpenSocket.instances.length, "a replacement after retry signing completes").toBeGreaterThan(1);
+  });
+
   it("reattaches a session whose attempt was abandoned while its ticket was in flight", async () => {
     transport();
     TransportSocket.instances = [];

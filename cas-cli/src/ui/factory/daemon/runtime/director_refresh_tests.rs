@@ -222,3 +222,115 @@ async fn flv2_retraction_reads_fresh() {
         "decided from the fresh read, not the cached snapshot"
     );
 }
+
+/// Review round 1, M2: a snapshot job that dies without a result frees its
+/// slot, so the next pass starts a new one instead of waiting forever.
+#[tokio::test]
+async fn c2_failed_snapshot_frees_its_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let mut refresh = DirectorRefresh::new().with_panicking_reads();
+    refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
+    assert!(refresh.take_director_read(&mut daemon.queue_jobs).is_none());
+    assert!(
+        !refresh.director.busy(),
+        "a dead snapshot job must not hold the slot"
+    );
+    // The next pass starts a fresh one, which now succeeds.
+    refresh.panic_reads = false;
+    refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
+    assert!(refresh.take_director_read(&mut daemon.queue_jobs).is_some());
+}
+
+/// Review round 1, M2: a delivery read that dies keeps its events: they
+/// wait for the next read instead of being lost.
+#[tokio::test]
+async fn c2_failed_delivery_read_requeues_its_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let mut refresh = DirectorRefresh::new().with_panicking_reads();
+    let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "idle-worker".into(),
+        active_task: None,
+    };
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+    assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
+    assert!(!refresh.delivery.busy());
+    assert_eq!(refresh.delivery_backlog.len(), 1, "the event waits for the next read");
+    refresh.panic_reads = false;
+    refresh
+        .start_delivery_backlog(&daemon.app, &mut daemon.queue_jobs)
+        .unwrap();
+    let (events, _) = refresh
+        .take_delivery_read(&mut daemon.queue_jobs)
+        .expect("the retried read reports");
+    assert_eq!(events.len(), 1);
+}
+
+/// Review round 1, M4: shutdown never drops prompts waiting for their
+/// re-check. A re-check still running past the drain is handed back for the
+/// caller to re-check itself.
+#[tokio::test]
+async fn c2_shutdown_hands_back_pending_rechecks() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let mut refresh = DirectorRefresh::new().with_read_delay(Duration::from_millis(500));
+    let alert = crate::ui::factory::director::Prompt {
+        target: "supervisor".into(),
+        text: "worker-a is idle".into(),
+        stall_nudge_task: None,
+        retract_worker: None,
+        retract_task: None,
+        retract_epic: None,
+        drop_if_worker_assigned: Some("worker-a".into()),
+        durable_retry: false,
+    };
+    refresh
+        .start_deliverability_check(
+            &daemon.app,
+            &mut daemon.queue_jobs,
+            vec![alert.clone()],
+            Vec::new(),
+            Instant::now(),
+        )
+        .unwrap();
+    let (done, pending) = refresh.drain_deliverability(&mut daemon.queue_jobs, Duration::ZERO);
+    assert!(done.is_empty());
+    assert_eq!(pending.len(), 1, "the unfinished re-check is handed back");
+    assert_eq!(pending[0].prompts[0].text, alert.text);
+
+    refresh
+        .start_deliverability_check(
+            &daemon.app,
+            &mut daemon.queue_jobs,
+            vec![alert],
+            Vec::new(),
+            Instant::now(),
+        )
+        .unwrap();
+    let (done, pending) =
+        refresh.drain_deliverability(&mut daemon.queue_jobs, Duration::from_secs(10));
+    assert!(pending.is_empty());
+    assert_eq!(done.len(), 1, "a re-check that finishes during the drain is delivered");
+}
+
+/// Review round 1, M1: the git half of the stall evidence is its own job on
+/// the external lane, never part of a read-lane job.
+#[test]
+fn c2_ci_status_runs_on_the_external_lane() {
+    let spec = super::super::factory_jobs::ci_status_spec(1);
+    assert_eq!(spec.lane, super::super::jobs::Lane::External);
+    assert_eq!(spec.kind, super::super::factory_jobs::CI_STATUS);
+    for read in [
+        super::super::factory_jobs::director_snapshot_spec(1),
+        super::super::factory_jobs::delivery_read_spec(1),
+        super::super::factory_jobs::deliverability_spec(1),
+    ] {
+        assert_eq!(read.lane, super::super::jobs::Lane::Read, "{}", read.key);
+    }
+}

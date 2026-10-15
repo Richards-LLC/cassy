@@ -421,3 +421,87 @@ pub(crate) fn evidence_merged_close_blocked(
         .and_then(|found| found.merged_close_blocked.clone())
         .filter(|merged| merged.target_branch == target_branch)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parked(task_id: &str, worker: &str, store_hold: Option<DeliveryHold>) -> ParkedFacts {
+        ParkedFacts {
+            task: TaskSummary {
+                id: task_id.into(),
+                title: "parked".into(),
+                status: cas_types::TaskStatus::AwaitingMerge,
+                priority: cas_types::Priority::MEDIUM,
+                assignee: Some(worker.into()),
+                task_type: cas_types::TaskType::Task,
+                epic: Some("cas-epic".into()),
+                branch: None,
+                updated_at: None,
+                epic_verification_owner: None,
+            },
+            worker: worker.into(),
+            target: Some("epic/x".into()),
+            store_hold,
+            qa_unreadable: false,
+            parked_branch: Some(format!("factory/{worker}-{task_id}")),
+            anchor: Some("abc123".into()),
+            close_rejection: "MERGE REQUIRED".into(),
+        }
+    }
+
+    /// Review round 1, M1: the stall check joins store facts (read lane) with
+    /// git evidence (external lane) in memory. Missing or mismatched git
+    /// evidence is pending, never "merge now"; a store hold decides alone.
+    #[test]
+    fn c2_evidence_joins_store_facts_with_git_evidence() {
+        let mut facts = ParkedFactsMap::new();
+        facts.insert("cas-a".into(), parked("cas-a", "wa", None));
+        facts.insert("cas-b".into(), parked("cas-b", "wb", None));
+        facts.insert("cas-c".into(), parked("cas-c", "wc", Some(DeliveryHold::BlockerNote)));
+        facts.insert("cas-d".into(), parked("cas-d", "wd", None));
+        let mut git = GitEvidenceMap::new();
+        git.insert(
+            "cas-a".into(),
+            GitEvidence {
+                inputs: facts["cas-a"].inputs(),
+                delivery: ("factory/wa-cas-a".into(), Some("tip-a".into())),
+                ci_pending: false,
+                merged_close_blocked: None,
+            },
+        );
+        git.insert(
+            "cas-b".into(),
+            GitEvidence {
+                inputs: facts["cas-b"].inputs(),
+                delivery: ("factory/wb-cas-b".into(), Some("tip-b".into())),
+                ci_pending: true,
+                merged_close_blocked: None,
+            },
+        );
+        // Computed for another worker: stale.
+        let mut stale = facts["cas-d"].inputs();
+        stale.0 = "someone-else".into();
+        git.insert(
+            "cas-d".into(),
+            GitEvidence {
+                inputs: stale,
+                delivery: ("factory/x".into(), Some("tip-x".into())),
+                ci_pending: false,
+                merged_close_blocked: None,
+            },
+        );
+        let combined = combine(&facts, &git);
+        assert_eq!(combined["cas-a"].hold, None);
+        assert_eq!(combined["cas-a"].delivery.1.as_deref(), Some("tip-a"));
+        assert_eq!(combined["cas-b"].hold, Some(DeliveryHold::LaneCiPending));
+        assert_eq!(combined["cas-c"].hold, Some(DeliveryHold::BlockerNote));
+        assert_eq!(combined["cas-d"].hold, Some(DeliveryHold::EvidencePending));
+
+        // Only deliveries without a store hold need the external job.
+        let request = CiStatusRequest::new(PathBuf::from("/nonexistent"), &facts, LaneCiCache::default())
+            .expect("three deliveries need git evidence");
+        assert_eq!(request.facts.len(), 3);
+        assert!(CiStatusRequest::new(PathBuf::new(), &ParkedFactsMap::new(), LaneCiCache::default()).is_none());
+    }
+}

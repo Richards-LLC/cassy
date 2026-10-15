@@ -151,6 +151,9 @@ pub(crate) struct DirectorRefresh {
     ci_status: Slot<GitEvidenceMap>,
     /// Test hook: sleep this long inside every background read.
     read_delay: Duration,
+    /// Test hook: every background read panics.
+    #[cfg(test)]
+    panic_reads: bool,
 }
 
 impl DirectorRefresh {
@@ -168,7 +171,26 @@ impl DirectorRefresh {
             health_failed: Vec::new(),
             ci_status: Slot::default(),
             read_delay: Duration::ZERO,
+            #[cfg(test)]
+            panic_reads: false,
         }
+    }
+
+    /// Model a read job that dies without a result.
+    #[cfg(test)]
+    pub(crate) fn with_panicking_reads(mut self) -> Self {
+        self.panic_reads = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn panics(&self) -> bool {
+        self.panic_reads
+    }
+
+    #[cfg(not(test))]
+    fn panics(&self) -> bool {
+        false
     }
 
     /// Model a slow store: every read sleeps `delay` first.
@@ -366,6 +388,7 @@ impl DirectorRefresh {
         }
         let request: DirectorRefreshRequest = app.director_refresh_request();
         let delay = self.read_delay;
+        let panics = self.panics();
         let generation = self.next_generation();
         // Marked first: an inline runtime finishes the job inside submit.
         self.director.start(generation);
@@ -375,6 +398,7 @@ impl DirectorRefresh {
                 if !delay.is_zero() {
                     std::thread::sleep(delay);
                 }
+                assert!(!panics, "test: the snapshot read died");
                 Box::new(FactoryJobOutput::DirectorSnapshot(request.read(stores)))
             },
         );
@@ -410,6 +434,7 @@ impl DirectorRefresh {
         }
         let request: DeliveryRequest = app.delivery_request(&events);
         let delay = self.read_delay;
+        let panics = self.panics();
         let generation = self.next_generation();
         self.delivery_events = events.clone();
         let carried = events;
@@ -420,6 +445,7 @@ impl DirectorRefresh {
                 if !delay.is_zero() {
                     std::thread::sleep(delay);
                 }
+                assert!(!panics, "test: the delivery read died");
                 let inputs = request.read(stores);
                 Box::new(FactoryJobOutput::Delivery(carried, inputs))
             },
@@ -633,6 +659,30 @@ impl DirectorRefresh {
             std::mem::take(&mut self.health_ready),
             std::mem::take(&mut self.health_failed),
         )
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    /// Review round 1, M2: a job given up after its timeout frees the slot,
+    /// and its late result is ignored rather than applied over a newer one.
+    #[test]
+    fn c2_timed_out_job_frees_its_slot_and_its_late_result_is_ignored() {
+        let mut slot: Slot<&'static str> = Slot::default();
+        slot.start(1);
+        assert!(slot.busy());
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(slot.expire(Duration::from_millis(1)));
+        assert!(!slot.busy(), "a timed-out job frees its slot");
+        slot.start(2);
+        assert!(!slot.finish(1, "late"), "a late result is ignored");
+        assert!(slot.fail(2));
+        assert!(!slot.busy());
+        slot.start(3);
+        assert!(slot.finish(3, "fresh"));
+        assert_eq!(slot.ready.take(), Some("fresh"));
     }
 }
 

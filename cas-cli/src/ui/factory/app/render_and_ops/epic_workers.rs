@@ -1482,15 +1482,18 @@ fn reset_stale_preassign_holder(
     // that wins between persistence and this cloud call must keep its claim.
     let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
         .filter(|agent| agent.name == holder).map(|agent| agent.id.clone()).collect();
-    if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(cas_dir) {
+    {
+        let cas_dir = cas_dir.to_path_buf();
         let task_id = task.id.clone();
         let holder = holder.to_string();
         let release = move || {
+            let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(&cas_dir) else { return; };
             if let Err(error) = claims.release_reset_holder(&task_id, &holder, &retired_ids) {
                 tracing::debug!(task = %task_id, %error, "stale assignee cloud release failed; start will retry");
             }
         };
-        // Never hold the factory loop on the network. The exact retired owner
+        // Config, Git discovery, registry/event reads and network all stay off
+        // the factory loop. The exact retired owner
         // remains fenced if task start wins before this best-effort release.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn_blocking(release));

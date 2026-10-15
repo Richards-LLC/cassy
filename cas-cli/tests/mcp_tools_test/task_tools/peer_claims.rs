@@ -42,7 +42,7 @@ struct FakeState {
     statuses: HashMap<String, String>,
     replace_on_release: Option<String>,
     revive_on_lock: Option<String>,
-    renew_after_lock_reads: Option<usize>,
+    renew_after_lock_reads: Option<(usize, bool)>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -194,9 +194,11 @@ impl FakeCloud {
                 }
                 let response = serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))});
                 let reads = state.requests.iter().filter(|r| r.ends_with("/lock")).count();
-                if state.renew_after_lock_reads == Some(reads)
-                    && let Some(lock) = state.locks.get_mut(&key)
-                { lock.renewed_at = now; lock.epoch += 1; }
+                if let Some((at, epoch_only)) = state.renew_after_lock_reads
+                    && at == reads && let Some(lock) = state.locks.get_mut(&key)
+                {
+                    if epoch_only { lock.epoch += 1; } else { lock.renewed_at = now; }
+                }
                 (200, response)
             },
             _ => (404, serde_json::json!({"error": "not found"})),
@@ -1083,6 +1085,7 @@ async fn cas_50713_late_presence_with_fresh_renewal_refuses_and_reports_claim_lo
 
 #[tokio::test]
 async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
+    for epoch_only in [true, false] {
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let cloud = FakeCloud::start();
@@ -1094,9 +1097,10 @@ async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
     {
         let mut state = cloud.state.lock().unwrap();
         state.statuses.insert(old.agent_id.clone(), "shutdown".into());
-        state.renew_after_lock_reads = Some(1);
+        state.renew_after_lock_reads = Some((1, epoch_only));
     }
-    let _ = start(&new.core, "cas-race", false).await;
+    assert!(start(&new.core, "cas-race", false).await.is_err());
     assert_eq!(cloud.active_lock("cas-race").unwrap().1.agent_id, old.agent_id);
     assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")));
+    }
 }

@@ -57,7 +57,10 @@ fn cas_559c_details_enforce_repo_machine_session_liveness_and_active_leases() {
             1,
         ),
     ];
+    let mut lapsed = lease("cas-lapsed", "stale", LeaseStatus::Active, 600);
+    lapsed.renewed_at = Utc::now() - chrono::Duration::seconds(301);
     let locks = vec![
+        lapsed,
         lease("cas-running", "worker", LeaseStatus::Active, 600),
         lease("cas-held", "sup", LeaseStatus::Active, 600),
         lease("cas-stale", "stale", LeaseStatus::Active, 600),
@@ -91,7 +94,7 @@ fn cas_559c_details_enforce_repo_machine_session_liveness_and_active_leases() {
             .iter()
             .map(|c| c.task_id.as_str())
             .collect::<Vec<_>>(),
-        ["cas-held", "cas-running"]
+        ["cas-held", "cas-running", "cas-stale"]
     );
     assert_eq!(detail.workers[0].claims[0].task_id, "cas-running");
     assert_eq!(detail.workers[0].branch.as_deref(), Some("factory/worker"));

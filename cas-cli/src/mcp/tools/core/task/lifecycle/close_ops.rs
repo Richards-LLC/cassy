@@ -13644,10 +13644,13 @@ pub(crate) fn task_without_own_commits_judged(
     let Some(assignee) = task.assignee.as_deref() else {
         return true;
     };
-    if worker_task_branch_ref(repo_path, assignee, &task.id).is_some() {
-        return false;
-    }
-    let lanes = std::iter::once(format!("factory/{assignee}"))
+    // GH #1177: allocating a per-task branch does not create a delivery.
+    // It may still contain only inherited foreign work, including the commit
+    // an earlier false park recorded as this no-code task's anchor. Judge its
+    // history by the same ownership rules as the plain and handoff lanes.
+    let lanes = worker_task_branch_ref(repo_path, assignee, &task.id)
+        .into_iter()
+        .chain(std::iter::once(format!("factory/{assignee}")))
         .chain(delivery.parked_branch.clone())
         .chain(delivery.handoff_branches.iter().cloned());
     for lane in lanes {

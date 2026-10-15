@@ -816,3 +816,29 @@ async fn no_code_qa_evidence_on_foreign_task_branch_measures_no_code_paths_gh117
     let evidence = f.task(id).deliverables.evidence_only.expect("evidence recorded");
     assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
 }
+
+#[tokio::test]
+async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
+    for subject in ["fix(cas-f179): own delivery", "unnamed worker change"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let id = "cas-f179";
+        let branch = format!("{LANE}-{id}");
+        git(f.dir.path(), &["checkout", "-q", "-b", &branch, LANE]);
+        std::fs::write(f.dir.path().join("own.rs"), "pub fn own() {}\n").unwrap();
+        git(f.dir.path(), &["add", "own.rs"]);
+        git(f.dir.path(), &["commit", "-q", "-m", subject]);
+        git(f.dir.path(), &["push", "-q", "origin", &branch]);
+        git(f.dir.path(), &["checkout", "-q", "main"]);
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some(PR.into());
+        f.put(&task);
+        claim(&f, id);
+        let response = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Claims read-only verification",
+        })).await;
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}: {response}");
+        assert!(response.contains("MERGE REQUIRED"), "{subject}: {response}");
+    }
+}

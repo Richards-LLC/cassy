@@ -3597,10 +3597,17 @@ mod related_recall_response_tests {
     }
 
     /// The project's `.cas` inside the repo, so an epic created without a
-    /// target finds the repository as its project root.
+    /// target finds the repository as its project root, with a project id.
     fn epic_lane_cas_root(repo: &std::path::Path) -> std::path::PathBuf {
         let cas_root = repo.join(".cas");
         std::fs::create_dir_all(&cas_root).expect("cas root");
+        // The origin is a local bare repo, which has no normalizable URL, so
+        // name the project for the WorkTarget selector.
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"github.com/example/epic-lane\"\n",
+        )
+        .expect("project config");
         cas_root
     }
 

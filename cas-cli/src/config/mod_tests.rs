@@ -954,6 +954,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.supervisor_queue_retention_days", "28", "28"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
+        ("factory.nice_cargo", "false", "false"),
         ("factory.epic_base_branch", "staging", "staging"),
         ("factory.ai_enrichment.enabled", "true", "true"),
         ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
@@ -1030,6 +1031,25 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         Some(FACTORY_ARTIFACTS_ROOT_DEFAULT),
         "an unset artifacts_root reads as its default"
     );
+}
+
+#[test]
+fn factory_nice_cargo_round_trips_cas_f7b9() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let mut config = Config::default();
+    let registry = meta::registry();
+    registry.validate("factory.nice_cargo", "false").unwrap();
+    config.set("factory.nice_cargo", "false").unwrap();
+    assert!(!config.factory().nice_cargo);
+    assert_eq!(config.get("factory.nice_cargo").as_deref(), Some("false"));
+    assert!(config.list().contains(&("factory.nice_cargo".into(), "false".into())));
+    config.save(env.home()).unwrap();
+    let mut loaded = Config::load(env.home()).unwrap();
+    assert!(!loaded.factory().nice_cargo);
+    loaded.set("factory.nice_cargo", "true").unwrap();
+    assert!(loaded.factory().nice_cargo);
+    assert!(loaded.set("factory.nice_cargo", "invalid").is_err());
+    assert!(loaded.factory().nice_cargo, "invalid input must preserve the value");
 }
 
 /// GH #1182: `[factory] write_roots` lives in config.toml, is shown by `get`

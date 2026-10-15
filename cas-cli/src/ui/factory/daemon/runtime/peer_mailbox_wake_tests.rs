@@ -78,7 +78,15 @@ async fn peer_fixture() -> (tempfile::TempDir, FactoryDaemon) {
         )
         .unwrap(),
     );
-    daemon.teams = Some(super::teams::TeamsManager::new(&daemon.session_name));
+    let teams = super::teams::TeamsManager::new(&daemon.session_name);
+    teams
+        .init_team_config(&[], root.path(), &HashMap::new(), "local-sup")
+        .unwrap();
+    assert!(
+        !teams.team_tree_missing(),
+        "exercise Teams delivery, never its missing-tree PTY fallback"
+    );
+    daemon.teams = Some(teams);
     tokio::time::sleep(Duration::from_millis(5100)).await;
     for pane in daemon.app.mux.panes_mut() {
         pane.drain_output();

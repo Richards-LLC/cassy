@@ -163,12 +163,10 @@ pub(crate) fn cleanup_agent_leases(
     // durable row has already been pointed at the new session. Resolve both
     // shapes, but never let the superseded SessionEnd tear down the rebound
     // worker and cascade-delete its task leases.
-    let agent = agent_store.get(session_id).ok().or_else(|| {
-        agent_store
-            .get_by_cc_session_id(session_id)
-            .ok()
-            .flatten()
-    });
+    let agent = agent_store
+        .get(session_id)
+        .ok()
+        .or_else(|| agent_store.get_by_cc_session_id(session_id).ok().flatten());
     let Some(agent) = agent else {
         return Some(Vec::new());
     };
@@ -773,6 +771,100 @@ mod cas_85d9_lease_renewal_tests {
             after.status,
             TaskStatus::Open,
             "an orphaned task with no renewing heartbeat must still be recoverable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod supervisor_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn ct2_p3_session_end_hands_off_epics() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        let mut ending = Agent::new("ending-id".into(), "ending".into());
+        ending.role = AgentRole::Supervisor;
+        ending.factory_session = Some("old-session".into());
+        agents.register(&ending).unwrap();
+        let mut peer = Agent::new("peer-id".into(), "peer".into());
+        peer.role = AgentRole::Supervisor;
+        peer.factory_session = Some("peer-session".into());
+        agents.register(&peer).unwrap();
+        for (id, owner, terminal) in [
+            ("cas-owned-id", "ending-id", false),
+            ("cas-owned-name", "ending", false),
+            ("cas-closed", "ending-id", true),
+            ("cas-other", "peer-id", false),
+        ] {
+            let mut task = Task::new(id.into(), id.into());
+            task.task_type = TaskType::Epic;
+            task.epic_verification_owner = Some(owner.into());
+            if terminal {
+                task.status = TaskStatus::Closed;
+            }
+            tasks.add(&task).unwrap();
+        }
+        // Exercise the real SessionEnd handler, including unconditional cleanup.
+        handle_session_end(
+            &HookInput {
+                session_id: ending.id.clone(),
+                ..Default::default()
+            },
+            Some(&root),
+        )
+        .unwrap();
+        assert!(agents.get(&ending.id).is_err());
+        for id in ["cas-owned-id", "cas-owned-name"] {
+            let task = tasks.get(id).unwrap();
+            assert_eq!(
+                task.epic_verification_owner, None,
+                "ended ownership must be cleared"
+            );
+            assert!(task.notes.contains("ORPHANED"));
+        }
+        assert_eq!(
+            tasks
+                .get("cas-closed")
+                .unwrap()
+                .epic_verification_owner
+                .as_deref(),
+            Some("ending-id")
+        );
+        assert_eq!(
+            tasks
+                .get("cas-other")
+                .unwrap()
+                .epic_verification_owner
+                .as_deref(),
+            Some("peer-id")
+        );
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let rows = queue.peek_all(100).unwrap();
+        assert_eq!(rows.len(), 2, "one grouped notice per peer and operator");
+        assert!(
+            rows.iter()
+                .any(|r| r.target == "operator" && r.factory_session.is_none())
+        );
+        assert!(rows.iter().any(|r| r.target == "peer" && r.factory_session.as_deref() == Some("peer-session")));
+        assert!(
+            rows.iter()
+                .all(|r| r.prompt.contains("cas-owned-id") && r.prompt.contains("cas-owned-name"))
+        );
+        handle_session_end(
+            &HookInput {
+                session_id: ending.id,
+                ..Default::default()
+            },
+            Some(&root),
+        )
+        .unwrap();
+        assert_eq!(
+            queue.peek_all(100).unwrap().len(),
+            2,
+            "repeated SessionEnd does not repeat the event"
         );
     }
 }

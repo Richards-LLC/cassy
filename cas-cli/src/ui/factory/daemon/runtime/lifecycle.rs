@@ -2138,6 +2138,8 @@ impl FactoryDaemon {
         metadata.team_name = teams.as_ref().map(|t| t.team_name().to_string());
         session_manager.save_metadata(&metadata)?;
 
+        // cas-d2a2: the prompt queue's store work runs on its own job lanes.
+        let queue_jobs = crate::ui::factory::daemon::runtime::prompt_queue_jobs::QueueJobs::start(app.cas_dir().to_path_buf(), app.project_scope());
         Ok(Self {
             session_name: config.session_name,
             app,
@@ -2183,7 +2185,7 @@ impl FactoryDaemon {
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
-            commander_mirror_state: Default::default(),
+            queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
@@ -2203,7 +2205,6 @@ impl FactoryDaemon {
             spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
             external_wake: Default::default(),
-            jobs: Default::default(),
             reminder_scan_generation: 0,
             pending_ci_wakes: Vec::new(),
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
@@ -2371,6 +2372,11 @@ impl FactoryDaemon {
         // cas-73b5 (GH #970): the loop records its progress; an OS thread
         // publishes it for `worker_status`, so a blocked pass is still seen.
         let loop_progress = super::loop_watchdog::LoopProgress::new();
+        // cas-d2a2: the prompt queue's job lanes go into `loop.json` and the
+        // wedge check.
+        if let Some(lanes) = self.queue_jobs.job_lanes() {
+            loop_progress.watch_jobs(lanes);
+        }
         let _loop_watchdog = super::loop_watchdog::spawn_watchdog(
             std::sync::Arc::clone(&loop_progress),
             self.app.cas_dir().to_path_buf(),
@@ -2388,12 +2394,10 @@ impl FactoryDaemon {
         // the cached task store skips on open runs on its own schedule.
         let store_worker = super::store_worker::global();
         // cas-ee9ab / cas-223f: the refresh's store reads, health probes and
-        // re-checks run as jobs on the daemon's job runtime, never on this
-        // loop. Stall confirmation asks for probes instead of running them.
-        let mut director_refresh = super::director_refresh::DirectorRefresh::with_jobs(
-            self.jobs
-                .runtime(self.app.cas_dir(), self.app.project_scope()),
-        );
+        // re-checks run as jobs on the daemon's one job runtime (the queue's),
+        // never on this loop. Stall confirmation asks for probes instead of
+        // running them.
+        let mut director_refresh = super::director_refresh::DirectorRefresh::new();
         self.app.set_deferred_worker_health_probes(true);
         let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
             self.app.cas_dir().to_path_buf(),
@@ -2468,7 +2472,13 @@ impl FactoryDaemon {
 
             // Poll prompt queue (on notification or timer)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
-            if prompt_notified || last_prompt_poll.elapsed() >= poll_interval {
+            let prompt_tick = prompt_notified || last_prompt_poll.elapsed() >= poll_interval;
+            if !prompt_tick && self.queue_jobs.has_ready() {
+                // cas-d2a2: a QueueSelect finished between ticks; deliver it
+                // now rather than on the next tick.
+                let _ = self.process_prompt_queue().await;
+            }
+            if prompt_tick {
                 if prompt_notified {
                     if let Some(ref mut notify) = self.notify_rx {
                         notify.drain();
@@ -2518,7 +2528,7 @@ impl FactoryDaemon {
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
             let refresh_due = last_refresh.elapsed() >= refresh_interval;
-            if refresh_due || director_refresh.has_finished() {
+            if refresh_due || director_refresh.has_finished(&mut self.queue_jobs) {
                 // Collect a completed GitHub Actions snapshot in the background.
                 // No supervisor action is required to notice a red run: the
                 // completed result below becomes a lifecycle-wake relay.
@@ -2993,12 +3003,15 @@ impl FactoryDaemon {
             }
         }
 
-        // cas-223f: drain the job lanes first. Write-lane jobs (reminder
-        // scans) run on the StoreWorker, so waiting on it before they are
-        // queued could report it idle too early.
+        // cas-223f: the director refresh's jobs share the queue job
+        // runtime; nothing of theirs outlives the loop.
         drop(director_refresh);
-        if !self.jobs.drain(Duration::from_secs(5)) {
-            tracing::warn!("factory job lanes still busy at shutdown");
+        // cas-d2a2: queue stamps run on the StoreWorker through the queue
+        // job lanes; drain the lanes first so no critical stamp is still
+        // waiting on a lane while the StoreWorker reports idle (jobs.rs).
+        let queue_cas_dir = self.app.cas_dir().to_path_buf();
+        if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, Duration::from_secs(5)) {
+            tracing::warn!("prompt-queue job lanes still busy at shutdown");
         }
         // Let queued store writes land before cleanup tears the session down.
         if !store_worker.wait_idle(Duration::from_secs(5)) {
@@ -3151,7 +3164,7 @@ impl FactoryDaemon {
         let refresh_started = std::time::Instant::now();
         // cas-223f: health probes that finished since the last pass feed this
         // pass's stall confirmation.
-        let (reports, failed) = refresh.take_health_reports();
+        let (reports, failed) = refresh.take_health_reports(&mut self.queue_jobs);
         for report in reports {
             self.app.apply_worker_health_report(report);
         }
@@ -3159,14 +3172,14 @@ impl FactoryDaemon {
             self.app.clear_worker_health_probe(&worker, &task);
         }
         if due {
-            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app));
+            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
         }
         let mut refreshed = false;
-        if let Some(load) = refresh.take_director_read() {
+        if let Some(load) = refresh.take_director_read(&mut self.queue_jobs) {
             refreshed = true;
             let applied = crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load));
             let requests = self.app.take_worker_health_requests();
-            for (worker, task) in refresh.submit_health_probes(&self.app, requests) {
+            for (worker, task) in refresh.submit_health_probes(&self.app, &mut self.queue_jobs, requests) {
                 self.app.clear_worker_health_probe(&worker, &task);
             }
             match applied {
@@ -3185,7 +3198,7 @@ impl FactoryDaemon {
                     .await;
                 }
                 Ok(events) => {
-                    if let Err(events) = refresh.start_delivery_read(&self.app, events) {
+                    if let Err(events) = refresh.start_delivery_read(&self.app, &mut self.queue_jobs, events) {
                         self.deliver_without_jobs(refresh, events, refresh_started, tick_interval_ms, store_worker, loop_progress)
                             .await;
                     }
@@ -3195,7 +3208,7 @@ impl FactoryDaemon {
                 }
             }
         }
-        if let Some((events, inputs)) = refresh.take_delivery_read() {
+        if let Some((events, inputs)) = refresh.take_delivery_read(&mut self.queue_jobs) {
             // cas-627f: one unfiltered read, taken after detection, shared by
             // revalidation and prompt generation. See
             // `revalidate_and_prompt_for_delivery` doc comment.
@@ -3214,13 +3227,13 @@ impl FactoryDaemon {
             )
             .await;
             // Events detected while that read ran are revalidated next.
-            if let Err(events) = refresh.start_delivery_backlog(&self.app) {
+            if let Err(events) = refresh.start_delivery_backlog(&self.app, &mut self.queue_jobs) {
                 self.deliver_without_jobs(refresh, events, refresh_started, tick_interval_ms, store_worker, loop_progress)
                     .await;
             }
         }
         // cas-223f: prompts whose fresh re-check (`RevalidateFresh`) finished.
-        for batch in refresh.take_deliverability() {
+        for batch in refresh.take_deliverability(&mut self.queue_jobs) {
             loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshInject);
             let super::factory_jobs::DeliverabilityBatch {
                 prompts,
@@ -3283,7 +3296,7 @@ impl FactoryDaemon {
         store_worker: &super::store_worker::StoreWorker,
         loop_progress: &super::loop_watchdog::LoopProgress,
     ) {
-        let (delivery_events, prompts, unfiltered_data_for_sweep) = delivery;
+        let (delivery_events, prompts, _unfiltered_data) = delivery;
         tracing::debug!(
             target: "cas::coordination",
             stage = "director_refresh",
@@ -3365,102 +3378,28 @@ impl FactoryDaemon {
         // is the live-evidence-quoted-a-superseded-tip class of
         // bug (three workers announced idle/ready ~7 minutes
         // after each had a genuine InProgress assignment).
-        if let (Some(teams), Some(unfiltered_data)) =
-            (self.teams.as_ref(), unfiltered_data_for_sweep.as_ref())
-        {
-            match teams.prune_stale_idle_alerts("supervisor", |worker| {
-                crate::ui::factory::director::worker_now_has_real_assignment(
-                    unfiltered_data,
-                    worker,
-                )
-            }) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "retract_stale_idle_alert",
-                    channel = "teams_inbox",
-                    retracted = n,
-                    "swept stale WorkerIdle alert(s) from supervisor inbox before delivery"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "cas::coordination",
-                    error = %e,
-                    "prune_stale_idle_alerts failed — non-fatal, stale alerts may still be delivered"
-                ),
-            }
-
-            // cas-e48f: retract stale MERGE REQUIRED alerts the
-            // same way, keyed on task_id rather than worker name
-            // — see `InboxMessage::retract_task` / `Prompt::
-            // retract_task` doc for why `worker_now_has_real_
-            // assignment` above is the WRONG predicate for this
-            // alert class. `check_merge_alert_freshness_for_task`
-            // re-reads the CURRENT epic tip at sweep time (never
-            // the tip captured when the row was written) — the
-            // exact live incident this closes: an alert quoting
-            // "checked against epic tip 811377c" delivered after
-            // the epic had already advanced past that tip.
+        //
+        // cas-d2a2 (factory loop v2 §4.3): the sweep is a job. The decision
+        // comes from a fresh read issued for it (RevalidateFresh, on the
+        // queue jobs' read connection), never the cached director snapshot
+        // (app/mod.rs:1541–1547). The merge-freshness checks (cas-e48f re-reads
+        // the CURRENT epic tip) and the epic-completion check (cas-06ca) then
+        // run on the blocking lane, before the inbox lock is taken; missing
+        // state preserves every row.
+        if let Some(teams) = self.teams.as_ref() {
             let repo_root = self
                 .app
                 .cas_dir()
                 .parent()
                 .unwrap_or(self.app.cas_dir())
                 .to_path_buf();
-            match teams.prune_stale_merge_alerts("supervisor", |task_id| {
-                matches!(
-                    crate::ui::factory::director::check_merge_alert_freshness_for_task(
-                        task_id,
-                        unfiltered_data,
-                        &repo_root,
-                    ),
-                    crate::ui::factory::director::MergeAlertFreshness::Stale
-                )
-            }) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "retract_stale_merge_alert",
-                    channel = "teams_inbox",
-                    retracted = n,
-                    "swept stale MERGE REQUIRED alert(s) from supervisor inbox before delivery"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "cas::coordination",
-                    error = %e,
-                    "prune_stale_merge_alerts failed — non-fatal, stale alerts may still be delivered"
-                ),
-            }
-
-            // cas-06ca: EpicAllSubtasksClosed bypasses the durable
-            // prompt_queue and is written directly to the Teams
-            // inbox. Carrying epic_id on that row lets this existing
-            // generic retraction mechanism re-check the same live
-            // predicate used before transport. This block only runs
-            // with an authoritative store snapshot; missing state is
-            // uncertainty and preserves the row.
-            match teams.prune_stale_epic_completion_alerts("supervisor", |epic_id| {
-                !crate::ui::factory::director::epic_completion_is_current(
-                    unfiltered_data,
-                    epic_id,
-                )
-            }) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "retract_stale_epic_completion",
-                    channel = "teams_inbox",
-                    retracted = n,
-                    "swept stale epic-completion alert(s) before delivery"
-                ),
-                // Retraction is best-effort. A lock/read failure
-                // must never interrupt delivery or surface as a
-                // user-facing error.
-                Err(error) => tracing::debug!(
-                    target: "cas::coordination",
-                    error = %error,
-                    "epic-completion inbox retraction skipped"
-                ),
-            }
+            let request = self.app.delivery_request();
+            self.queue_jobs.submit_inbox_retraction(
+                "supervisor",
+                teams.inbox_pruner(),
+                repo_root,
+                Box::new(move |stores| request.read(stores).into_data()),
+            );
         }
 
         // Inject prompts (config already checked in generate_prompt)
@@ -3476,6 +3415,7 @@ impl FactoryDaemon {
         {
             match refresh.start_deliverability_check(
                 &self.app,
+                &mut self.queue_jobs,
                 prompts,
                 delivery_events.clone(),
                 refresh_started,

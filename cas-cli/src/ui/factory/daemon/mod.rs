@@ -280,7 +280,9 @@ pub struct FactoryDaemon {
     reported_permission_requests: std::collections::HashSet<String>,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
-    commander_mirror_state: runtime::MirrorScanState,
+    /// Factory loop v2 C3 (cas-d2a2): the prompt queue's selection, stamps,
+    /// in-flight rows, inbox retraction and Commander mirror scan as jobs.
+    queue_jobs: runtime::prompt_queue_jobs::QueueJobs,
     /// cas-8a55: workers whose harness refused a turn for an account reason
     /// (revoked Codex token, expired Claude session). Agent id -> evidence
     /// occurrence, so the supervisor is told once per failure rather than once
@@ -376,10 +378,6 @@ pub struct FactoryDaemon {
     /// GH #1208: background scan of durable external reminder conditions;
     /// the loop only collects finished scans.
     external_wake: runtime::external_wake::ExternalWakeScanner,
-    /// Factory loop v2 (cas-223f): the job runtime that runs director
-    /// snapshots, fresh re-checks, worker health probes and reminder scans
-    /// off the loop. Started on first use.
-    jobs: runtime::factory_jobs::FactoryJobs,
     /// Generation of the last `ReminderScan` job.
     reminder_scan_generation: u64,
     /// cas-0f05: satisfied `ci_completed` reminders from the GitHub watcher,

@@ -291,6 +291,19 @@ pub enum PromptRetryDisposition {
     Abandoned { attempts: u32 },
 }
 
+/// A row picked by [`PromptQueueStore::select_and_claim_for_targets`], with the
+/// transport claims that selection took for it (factory loop v2, spec §4.5).
+#[derive(Debug, Clone)]
+pub struct SelectedPrompt {
+    /// The full row, read in the selecting transaction.
+    pub prompt: QueuedPrompt,
+    /// `(recipient, claimed)` per recipient: the addressed target for a direct
+    /// row, each named broadcast recipient for `all_workers`. `claimed` is
+    /// false when another channel or an earlier pass already holds a receipt,
+    /// exactly as [`PromptQueueStore::claim_recipient_transport`] reports.
+    pub claims: Vec<(String, bool)>,
+}
+
 /// A prompt in the queue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedPrompt {
@@ -2295,6 +2308,45 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Factory loop v2 `QueueSelect` (spec §4.5 rule 1): select the delivery
+    /// batch exactly as [`Self::peek_for_targets`] does, stamp each row
+    /// `Selected`, and take its transport claims, all in one transaction. A
+    /// direct row is claimed for its target; an `all_workers` row for each of
+    /// `broadcast_recipients`. A row someone else already claimed is still
+    /// returned (the caller's pending-row logic needs it), with `claimed`
+    /// false. The caller must release, through
+    /// [`Self::release_recipient_transport`], every claim it took and did not
+    /// hand off.
+    fn select_and_claim_for_targets(
+        &self,
+        targets: &[&str],
+        factory_session: Option<&str>,
+        limit: usize,
+        broadcast_recipients: &[&str],
+    ) -> Result<Vec<SelectedPrompt>> {
+        let mut selected = Vec::new();
+        for peeked in self.peek_for_targets(targets, factory_session, limit)? {
+            self.record_selected(peeked.id)?;
+            let Some(prompt) = self.queued_prompt(peeked.id)? else {
+                continue;
+            };
+            let recipients: Vec<&str> = if prompt.target == "all_workers" {
+                broadcast_recipients.to_vec()
+            } else {
+                vec![prompt.target.as_str()]
+            };
+            let mut claims = Vec::with_capacity(recipients.len());
+            for recipient in recipients {
+                claims.push((
+                    recipient.to_string(),
+                    self.claim_recipient_transport(prompt.id, recipient)?,
+                ));
+            }
+            selected.push(SelectedPrompt { prompt, claims });
+        }
+        Ok(selected)
+    }
+
     /// Most recent message timestamp for each target from any of `sources`.
     ///
     /// Unlike the pending-message APIs, this includes processed rows. The
@@ -3704,6 +3756,202 @@ fn require_operator_session(target: &str, factory_session: Option<&str>) -> Resu
     Ok(())
 }
 
+impl SqlitePromptQueueStore {
+    /// [`PromptQueueStore::peek_for_targets`] on a held connection, so
+    /// [`PromptQueueStore::select_and_claim_for_targets`] can select inside
+    /// its own transaction.
+    fn peek_for_targets_on_conn(
+        conn: &Connection,
+        targets: &[&str],
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if targets.is_empty() {
+            return Err(StoreError::Other(
+                "peek_for_targets requires at least one target; session-wide peeks are not supported"
+                    .to_string(),
+            ));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let now = Utc::now().to_rfc3339();
+        // cas-d047 (GH #69): a row this old was never consumed by anyone;
+        // delivering it now would hand a live worker an instruction from a
+        // session that ended long ago. Withheld here even before the sweep
+        // that formally quarantines it has run.
+        let stale_cutoff =
+            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+
+        // Legacy path (no session): single-lane target filter.
+        let Some(session) = factory_session else {
+            let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
+            let sql = format!(
+                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
+                 FROM (
+                     SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY target, priority ORDER BY id ASC
+                     ) AS cas_target_rn
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                       AND created_at >= ?
+                       {NOT_ALREADY_CONSUMED_SQL}
+                       AND target IN ({})
+                 )
+                 ORDER BY priority ASC, cas_target_rn ASC, id ASC
+                 LIMIT ?",
+                placeholders.join(", ")
+            );
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(now.clone()) as Box<dyn rusqlite::ToSql>,
+                Box::new(stale_cutoff.clone()) as Box<dyn rusqlite::ToSql>,
+            ];
+            params.extend(
+                targets
+                    .iter()
+                    .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            params.push(Box::new(limit as i64));
+            return Self::query_lane(&conn, &sql, &params);
+        };
+
+        // Live-session path: two indexable peeks + bounded two-lane merge
+        // (cas-2bcb). Each lane is LIMIT-bounded so neither can permanently
+        // occupy the caller's window.
+        //
+        // cas-7210: within each lane, also round-robin across targets
+        // instead of a flat `ORDER BY priority ASC, id ASC`. The window
+        // function ranks each row by its position within its OWN
+        // `(target, priority)` queue (`cas_target_rn`); ordering the final
+        // result by `(priority, cas_target_rn, id)` means every target's
+        // *oldest* row at a given priority is considered before any
+        // target's *second* row at that same priority — `priority` stays
+        // the dominant sort key, so the existing "never emit priority P+1
+        // while priority ≤P remains" contract is untouched, and for the
+        // common case of a single contending target this reduces to
+        // exactly the original `(priority, id)` FIFO order (rn increases
+        // monotonically with id when there's only one target, so it's a
+        // no-op reordering).
+        //
+        // Without this, a target with a persistent, never-resolving
+        // backlog (rows left `processed_at IS NULL` by
+        // `record_pending_reason` — AdapterRetryable / GatedNotReady /
+        // TargetUnavailable / AwaitingDelivery are all designed to keep
+        // retrying, not to resolve on their own) sorts first by id and can
+        // fill the ENTIRE `limit` window on every tick, forever. A fresh
+        // message to a completely different, actively-working target then
+        // never appears in the peeked batch at all — not retried, not
+        // logged as failing, simply invisible. Reproduced at
+        // `peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog`.
+        let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
+        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
+             FROM (
+                 SELECT *, ROW_NUMBER() OVER (
+                     PARTITION BY target, priority ORDER BY id ASC
+                 ) AS cas_target_rn
+                 FROM prompt_queue
+                 WHERE processed_at IS NULL
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                   AND created_at >= ?
+                   {NOT_ALREADY_CONSUMED_SQL}
+                   AND factory_session = ?
+                   AND target IN ({})
+             )
+             ORDER BY priority ASC, cas_target_rn ASC, id ASC
+             LIMIT ?", placeholders.join(", "));
+        let mut session_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(now.clone()),
+            Box::new(stale_cutoff.clone()),
+            Box::new(session.to_string()),
+        ];
+        session_params.extend(
+            targets
+                .iter()
+                .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        session_params.push(Box::new(limit as i64));
+        let session_lane = Self::query_lane(&conn, &session_sql, &session_params)?;
+
+        let legacy_lane = if targets.is_empty() {
+            Vec::new()
+        } else {
+            let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
+            let legacy_sql = format!(
+                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
+                 FROM (
+                     SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY target, priority ORDER BY id ASC
+                     ) AS cas_target_rn
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                       AND created_at >= ?
+                       {NOT_ALREADY_CONSUMED_SQL}
+                       AND factory_session IS NULL
+                       AND target IN ({})
+                 )
+                 ORDER BY priority ASC, cas_target_rn ASC, id ASC
+                 LIMIT ?",
+                placeholders.join(", ")
+            );
+            let mut legacy_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(now) as Box<dyn rusqlite::ToSql>,
+                Box::new(stale_cutoff) as Box<dyn rusqlite::ToSql>,
+            ];
+            legacy_params.extend(
+                targets
+                    .iter()
+                    .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            legacy_params.push(Box::new(limit as i64));
+            Self::query_lane(&conn, &legacy_sql, &legacy_params)?
+        };
+
+        Ok(Self::merge_two_lane_peeks(session_lane, legacy_lane, limit))
+    }
+
+    fn queued_prompt_on_conn(conn: &Connection, prompt_id: i64) -> Result<Option<QueuedPrompt>> {
+        Ok(conn
+            .query_row(
+                "SELECT id, source, target, prompt, created_at, processed_at,
+                        summary, priority, acked_at, urgent, factory_session,
+                        origin_agent_id, origin_kind, operator_label,
+                        operator_device_id, operator_device_label, operator_scopes,
+                        operator_verified, recipient_device_id, kind, attachments
+                 FROM prompt_queue WHERE id = ?",
+                params![prompt_id],
+                Self::prompt_from_row,
+            )
+            .optional()?)
+    }
+
+    fn claim_recipient_transport_on_conn(
+        conn: &Connection,
+        prompt_id: i64,
+        recipient: &str,
+    ) -> Result<bool> {
+        if recipient.trim().is_empty() {
+            return Err(StoreError::Other("transport claim requires a recipient".into()));
+        }
+        let changed = conn.execute(
+            "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
+             SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
+             WHERE id = ? AND (target = ? OR target = 'all_workers')
+               AND (target = 'all_workers' OR acked_at IS NULL
+                    OR acked_via IS NULL OR acked_via <> 'explicit_ack')
+               AND (highest_stage IS NULL OR highest_stage NOT IN
+                    ('dropped', 'suppressed', 'abandoned'))
+             ON CONFLICT(prompt_id, recipient) DO UPDATE SET
+                seen_at = excluded.seen_at, source = excluded.source
+             WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
+            params![recipient, Utc::now().to_rfc3339(), prompt_id, recipient],
+        )?;
+        Ok(changed == 1)
+    }
+}
+
 impl PromptQueueStore for SqlitePromptQueueStore {
     fn init(&self) -> Result<()> {
         // cas-88d8: concurrent openers race on check-then-ALTER. SQLite
@@ -5109,20 +5357,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let changed = conn.execute(
-                "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
-                 SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
-                 WHERE id = ? AND (target = ? OR target = 'all_workers')
-                   AND (target = 'all_workers' OR acked_at IS NULL
-                        OR acked_via IS NULL OR acked_via <> 'explicit_ack')
-                   AND (highest_stage IS NULL OR highest_stage NOT IN
-                        ('dropped', 'suppressed', 'abandoned'))
-                 ON CONFLICT(prompt_id, recipient) DO UPDATE SET
-                    seen_at = excluded.seen_at, source = excluded.source
-                 WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
-                params![recipient, Utc::now().to_rfc3339(), prompt_id, recipient],
-            )?;
-            Ok(changed == 1)
+            Self::claim_recipient_transport_on_conn(&conn, prompt_id, recipient)
         })
     }
 
@@ -5366,151 +5601,57 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
-        if targets.is_empty() {
-            return Err(StoreError::Other(
-                "peek_for_targets requires at least one target; session-wide peeks are not supported"
-                    .to_string(),
-            ));
+        if targets.is_empty() || limit == 0 {
+            return Self::peek_for_targets_on_conn(
+                &rusqlite::Connection::open_in_memory()?,
+                targets,
+                factory_session,
+                limit,
+            );
         }
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let now = Utc::now().to_rfc3339();
-        // cas-d047 (GH #69): a row this old was never consumed by anyone;
-        // delivering it now would hand a live worker an instruction from a
-        // session that ended long ago. Withheld here even before the sweep
-        // that formally quarantines it has run.
-        let stale_cutoff =
-            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+        Self::peek_for_targets_on_conn(&conn, targets, factory_session, limit)
+    }
 
-        // Legacy path (no session): single-lane target filter.
-        let Some(session) = factory_session else {
-            let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
-            let sql = format!(
-                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
-                 FROM (
-                     SELECT *, ROW_NUMBER() OVER (
-                         PARTITION BY target, priority ORDER BY id ASC
-                     ) AS cas_target_rn
-                     FROM prompt_queue
-                     WHERE processed_at IS NULL
-                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                       AND created_at >= ?
-                       {NOT_ALREADY_CONSUMED_SQL}
-                       AND target IN ({})
-                 )
-                 ORDER BY priority ASC, cas_target_rn ASC, id ASC
-                 LIMIT ?",
-                placeholders.join(", ")
-            );
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                Box::new(now.clone()) as Box<dyn rusqlite::ToSql>,
-                Box::new(stale_cutoff.clone()) as Box<dyn rusqlite::ToSql>,
-            ];
-            params.extend(
-                targets
-                    .iter()
-                    .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
-            );
-            params.push(Box::new(limit as i64));
-            return Self::query_lane(&conn, &sql, &params);
-        };
-
-        // Live-session path: two indexable peeks + bounded two-lane merge
-        // (cas-2bcb). Each lane is LIMIT-bounded so neither can permanently
-        // occupy the caller's window.
-        //
-        // cas-7210: within each lane, also round-robin across targets
-        // instead of a flat `ORDER BY priority ASC, id ASC`. The window
-        // function ranks each row by its position within its OWN
-        // `(target, priority)` queue (`cas_target_rn`); ordering the final
-        // result by `(priority, cas_target_rn, id)` means every target's
-        // *oldest* row at a given priority is considered before any
-        // target's *second* row at that same priority — `priority` stays
-        // the dominant sort key, so the existing "never emit priority P+1
-        // while priority ≤P remains" contract is untouched, and for the
-        // common case of a single contending target this reduces to
-        // exactly the original `(priority, id)` FIFO order (rn increases
-        // monotonically with id when there's only one target, so it's a
-        // no-op reordering).
-        //
-        // Without this, a target with a persistent, never-resolving
-        // backlog (rows left `processed_at IS NULL` by
-        // `record_pending_reason` — AdapterRetryable / GatedNotReady /
-        // TargetUnavailable / AwaitingDelivery are all designed to keep
-        // retrying, not to resolve on their own) sorts first by id and can
-        // fill the ENTIRE `limit` window on every tick, forever. A fresh
-        // message to a completely different, actively-working target then
-        // never appears in the peeked batch at all — not retried, not
-        // logged as failing, simply invisible. Reproduced at
-        // `peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog`.
-        let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
-        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
-             FROM (
-                 SELECT *, ROW_NUMBER() OVER (
-                     PARTITION BY target, priority ORDER BY id ASC
-                 ) AS cas_target_rn
-                 FROM prompt_queue
-                 WHERE processed_at IS NULL
-                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                   AND created_at >= ?
-                   {NOT_ALREADY_CONSUMED_SQL}
-                   AND factory_session = ?
-                   AND target IN ({})
-             )
-             ORDER BY priority ASC, cas_target_rn ASC, id ASC
-             LIMIT ?", placeholders.join(", "));
-        let mut session_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-            Box::new(now.clone()),
-            Box::new(stale_cutoff.clone()),
-            Box::new(session.to_string()),
-        ];
-        session_params.extend(
-            targets
-                .iter()
-                .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
-        );
-        session_params.push(Box::new(limit as i64));
-        let session_lane = Self::query_lane(&conn, &session_sql, &session_params)?;
-
-        let legacy_lane = if targets.is_empty() {
-            Vec::new()
-        } else {
-            let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
-            let legacy_sql = format!(
-                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
-                 FROM (
-                     SELECT *, ROW_NUMBER() OVER (
-                         PARTITION BY target, priority ORDER BY id ASC
-                     ) AS cas_target_rn
-                     FROM prompt_queue
-                     WHERE processed_at IS NULL
-                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                       AND created_at >= ?
-                       {NOT_ALREADY_CONSUMED_SQL}
-                       AND factory_session IS NULL
-                       AND target IN ({})
-                 )
-                 ORDER BY priority ASC, cas_target_rn ASC, id ASC
-                 LIMIT ?",
-                placeholders.join(", ")
-            );
-            let mut legacy_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                Box::new(now) as Box<dyn rusqlite::ToSql>,
-                Box::new(stale_cutoff) as Box<dyn rusqlite::ToSql>,
-            ];
-            legacy_params.extend(
-                targets
-                    .iter()
-                    .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
-            );
-            legacy_params.push(Box::new(limit as i64));
-            Self::query_lane(&conn, &legacy_sql, &legacy_params)?
-        };
-
-        Ok(Self::merge_two_lane_peeks(session_lane, legacy_lane, limit))
+    fn select_and_claim_for_targets(
+        &self,
+        targets: &[&str],
+        factory_session: Option<&str>,
+        limit: usize,
+        broadcast_recipients: &[&str],
+    ) -> Result<Vec<SelectedPrompt>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let peeked = Self::peek_for_targets_on_conn(&tx, targets, factory_session, limit)?;
+            let mut selected = Vec::with_capacity(peeked.len());
+            for row in peeked {
+                Self::atomic_stage_stamp_in_tx(
+                    &tx,
+                    row.id,
+                    DeliveryStage::Selected,
+                    AtomicStampOpts::clear_reason(),
+                )?;
+                let Some(prompt) = Self::queued_prompt_on_conn(&tx, row.id)? else {
+                    continue;
+                };
+                let recipients: Vec<&str> = if prompt.target == "all_workers" {
+                    broadcast_recipients.to_vec()
+                } else {
+                    vec![prompt.target.as_str()]
+                };
+                let mut claims = Vec::with_capacity(recipients.len());
+                for recipient in recipients {
+                    claims.push((
+                        recipient.to_string(),
+                        Self::claim_recipient_transport_on_conn(&tx, prompt.id, recipient)?,
+                    ));
+                }
+                selected.push(SelectedPrompt { prompt, claims });
+            }
+            tx.commit()?;
+            Ok(selected)
+        })
     }
 
     fn latest_created_at_for_targets_from_sources(

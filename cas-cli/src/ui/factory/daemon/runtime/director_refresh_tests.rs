@@ -2,6 +2,17 @@
 use super::super::super::imports::*;
 use super::DirectorRefresh;
 
+/// A test daemon on real job lanes (the provisioning fixture runs queue jobs
+/// inline, which would put every job back on the loop).
+fn daemon_on_lanes(cas_dir: &std::path::Path) -> FactoryDaemon {
+    let mut daemon = super::super::provisioning_tests::daemon(cas_dir);
+    daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(
+        cas_dir.to_path_buf(),
+        daemon.app.project_scope(),
+    );
+    daemon
+}
+
 /// The pass latency #1165 asks for.
 const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 /// The injected store delay.
@@ -11,7 +22,7 @@ const SLOW_READ: Duration = Duration::from_millis(500);
 async fn a_slow_director_read_never_extends_a_loop_pass_cas_ee9ab() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let mut daemon = daemon_on_lanes(&cas_dir);
     let progress = super::super::loop_watchdog::LoopProgress::new();
     let store_worker = super::super::store_worker::global();
     let mut refresh = DirectorRefresh::new().with_read_delay(SLOW_READ);
@@ -69,7 +80,7 @@ async fn flv2_director_snapshot_off_lane() {
     const SNAPSHOT: Duration = Duration::from_secs(2);
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let mut daemon = daemon_on_lanes(&cas_dir);
     let progress = super::super::loop_watchdog::LoopProgress::new();
     let store_worker = super::super::store_worker::global();
     let mut refresh = DirectorRefresh::new().with_read_delay(SNAPSHOT);
@@ -93,10 +104,13 @@ async fn flv2_director_snapshot_off_lane() {
             .await;
         slowest = slowest.max(pass.elapsed());
         due = false;
-        let running = refresh
-            .jobs()
-            .and_then(|jobs| jobs.lane_stats(super::super::jobs::Lane::Read).running);
-        if running.is_some_and(|job| job.kind == super::super::factory_jobs::DIRECTOR_SNAPSHOT) {
+        let lanes = daemon.queue_jobs.job_lanes().expect("real job lanes");
+        if lanes.lane_stats().into_iter().any(|stats| {
+            stats.running.is_some_and(|job| {
+                job.lane == super::super::jobs::Lane::Read
+                    && job.kind == super::super::factory_jobs::DIRECTOR_SNAPSHOT
+            })
+        }) {
             snapshot_seen_running = true;
         }
         if daemon
@@ -145,7 +159,7 @@ async fn flv2_retraction_reads_fresh() {
     let mut task_b = cas_types::Task::new("cas-bbbb".into(), "b's work".into());
     store.add(&task_b).unwrap();
 
-    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let mut daemon = daemon_on_lanes(&cas_dir);
     // The cached snapshot: worker-a assigned, worker-b not.
     daemon.app.refresh_data().unwrap();
     // Then the store moves on: worker-a finished, worker-b was assigned.
@@ -172,6 +186,7 @@ async fn flv2_retraction_reads_fresh() {
         refresh
             .start_deliverability_check(
                 &daemon.app,
+                &mut daemon.queue_jobs,
                 vec![idle_alert("worker-a"), idle_alert("worker-b")],
                 Vec::new(),
                 Instant::now(),
@@ -187,7 +202,7 @@ async fn flv2_retraction_reads_fresh() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let batch = loop {
-        if let Some(batch) = refresh.take_deliverability().pop() {
+        if let Some(batch) = refresh.take_deliverability(&mut daemon.queue_jobs).pop() {
             break batch;
         }
         assert!(Instant::now() < deadline, "the re-check never finished");

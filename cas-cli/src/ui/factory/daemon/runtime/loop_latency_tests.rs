@@ -440,6 +440,9 @@ async fn flv2_external_reminders_never_on_lane() {
         .unwrap();
 
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    // Real job lanes: the fixture runs queue jobs inline, on this thread.
+    daemon.queue_jobs =
+        super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
     assert_eq!(daemon.app.project_path(), project);
     let violations = wait_budget::store_access_violations();
     let started = Instant::now();

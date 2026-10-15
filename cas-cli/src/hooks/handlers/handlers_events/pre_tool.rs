@@ -6712,6 +6712,39 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn sanctioned_static_prefix_allows_dynamic_creation_suffixes_cas_6ada() {
+        let _env = TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let artifacts = root.path().join("artifacts");
+        let scratch = root.path().join("scratch");
+        for path in [&worktree, &artifacts, &scratch] { std::fs::create_dir_all(path).unwrap(); }
+        let artifacts_root = Some(artifacts.display().to_string());
+        let scratch_root = scratch.display().to_string();
+        for base in [&worktree, &artifacts, &scratch] {
+            for command in [
+                format!("mkdir -p {}/run-$$; printf proof > {}/run-$$/all.jsonl", base.display(), base.display()),
+                format!("printf proof > {}/run-${{RUN_ID}}/all.jsonl", base.display()),
+                format!("S={}/violet-logs-$$; mkdir -p \"$S\"; printf proof > \"$S/all.jsonl\"", base.display()),
+                format!("R={}; S=$R/violet-logs-$RUN_ID; mkdir -p $S; printf proof > $S/all.jsonl", base.display()),
+            ] {
+                assert_eq!(factory_write_violation(&bash_input(&command, &worktree), &artifacts_root,
+                    Some(&scratch_root), true, Some(&worktree)), None, "sanctioned static prefix: {command}");
+            }
+        }
+    }
+
+    #[test]
+    fn variable_root_denial_names_the_unexpanded_variable_cas_6ada() {
+        let _env = TestEnvGuard::temp_home();
+        let worktree = tempfile::tempdir().unwrap();
+        let input = bash_input("printf proof > $UNKNOWN_ROOT/all.jsonl", worktree.path());
+        let violation = factory_write_violation(&input, &None, None, false, Some(worktree.path())).unwrap();
+        let reason = factory_workspace_contract_denial(&input, &violation, None, None, Some(worktree.path()));
+        assert!(reason.contains("unexpanded shell variable `$UNKNOWN_ROOT`"), "{reason}");
+    }
+
+    #[test]
     fn relative_worktree_writes_remain_sanctioned_and_bare_tmp_is_denied() {
         let cwd = tempfile::tempdir().expect("worktree");
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);

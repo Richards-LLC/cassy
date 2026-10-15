@@ -1477,16 +1477,33 @@ pub(super) fn lifecycle_redelivery_decision(
 /// there made one message look delivered ~20 times on 2026-10-05. Such a pass
 /// is `reoffered`. `ok` still marks the pass that wrote the copy or typed into
 /// the pane, which is the row ack waiters look for.
+///
+/// cas-f7b0 (communication contract v2, P1.2): a first write whose wake the
+/// gate deferred (`wake_deferred`, the recipient is busy) put the copy in the
+/// inbox but woke nobody. The row stays gated until the recipient's next turn
+/// boundary. Logging that pass `ok` is how 229 gated rows in one session came
+/// to read as injected. It is `deferred`.
 pub(super) fn injection_event_status(
     prior_copy_unread: bool,
     nudge_only: bool,
+    wake_deferred: bool,
     wake: cas_store::WakeAttempt,
 ) -> &'static str {
     if (prior_copy_unread || nudge_only) && wake != cas_store::WakeAttempt::Fired {
         "reoffered"
+    } else if wake_deferred && wake != cas_store::WakeAttempt::Fired {
+        "deferred"
     } else {
         "ok"
     }
+}
+
+/// Whether a `supervisor_injected` status means the body reached the
+/// recipient's transport, the condition `--wait-ack` style waiters poll for.
+/// A gate-deferred first write counts (cas-f7b0): the copy is in the inbox,
+/// which is all `ok` ever meant for those waiters.
+pub(crate) fn injection_status_reached_transport(status: &str) -> bool {
+    matches!(status, "ok" | "deferred")
 }
 
 /// GH #751: Claude's Agent-Teams inbox path must not redeliver a pending row
@@ -7251,7 +7268,12 @@ impl FactoryDaemon {
                                 &queued.source,
                                 &queued.target,
                                 &pane_target,
-                                injection_event_status(prior_copy_unread, nudge_only, pass_wake),
+                                injection_event_status(
+                                    prior_copy_unread,
+                                    nudge_only,
+                                    wake_deferred,
+                                    pass_wake,
+                                ),
                                 None,
                             );
                         }
@@ -16715,7 +16737,7 @@ mod injection_storm_regressions_cas_366b {
                     }
                     replay
                         .statuses
-                        .push(injection_event_status(prior_copy_unread, false, wake));
+                        .push(injection_event_status(prior_copy_unread, false, false, wake));
                     last_attempt = Some(now);
                 }
                 ClaudeRedelivery::Cooldown => {}
@@ -16772,38 +16794,62 @@ mod injection_storm_regressions_cas_366b {
         );
     }
 
+    /// Communication contract v2, P1.2 (cas-f7b0): a first inbox write whose
+    /// wake the gate deferred is logged `deferred`, not `ok`. A pass that fired
+    /// the wake is still `ok`, and ack waiters accept both.
+    #[test]
+    fn ct2_p1_supervisor_injected_logs_deferred() {
+        assert_eq!(
+            injection_event_status(false, false, true, WakeAttempt::NotAttempted),
+            "deferred"
+        );
+        assert_eq!(
+            injection_event_status(false, false, true, WakeAttempt::Fired),
+            "ok"
+        );
+        assert_eq!(
+            injection_event_status(true, false, true, WakeAttempt::NotAttempted),
+            "reoffered",
+            "a dedup no-op re-offer stays reoffered"
+        );
+        assert!(super::injection_status_reached_transport("deferred"));
+        assert!(super::injection_status_reached_transport("ok"));
+        assert!(!super::injection_status_reached_transport("reoffered"));
+        assert!(!super::injection_status_reached_transport("failed"));
+    }
+
     #[test]
     fn injection_event_status_names_what_the_pass_did_cas_366b() {
         // A first write, or a re-append after the harness took the copy.
         assert_eq!(
-            injection_event_status(false, false, WakeAttempt::NotAttempted),
+            injection_event_status(false, false, false, WakeAttempt::NotAttempted),
             "ok"
         );
         // A PTY nudge fired: bytes reached the pane.
         assert_eq!(
-            injection_event_status(true, false, WakeAttempt::Fired),
+            injection_event_status(true, false, false, WakeAttempt::Fired),
             "ok"
         );
         assert_eq!(
-            injection_event_status(false, true, WakeAttempt::Fired),
+            injection_event_status(false, true, false, WakeAttempt::Fired),
             "ok"
         );
         // Dedup no-op write and no wake; or a nudge-only pass whose nudge
         // was vetoed or failed.
         assert_eq!(
-            injection_event_status(true, false, WakeAttempt::NotAttempted),
+            injection_event_status(true, false, false, WakeAttempt::NotAttempted),
             "reoffered"
         );
         assert_eq!(
-            injection_event_status(true, false, WakeAttempt::Failed),
+            injection_event_status(true, false, false, WakeAttempt::Failed),
             "reoffered"
         );
         assert_eq!(
-            injection_event_status(false, true, WakeAttempt::NotAttempted),
+            injection_event_status(false, true, false, WakeAttempt::NotAttempted),
             "reoffered"
         );
         assert_eq!(
-            injection_event_status(false, true, WakeAttempt::Failed),
+            injection_event_status(false, true, false, WakeAttempt::Failed),
             "reoffered"
         );
     }

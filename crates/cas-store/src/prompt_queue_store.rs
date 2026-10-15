@@ -1004,6 +1004,17 @@ pub enum PendingReason {
     ShutdownCancelled,
     /// Terminal non-delivery: unknown/stale target abandoned.
     AbandonedUnknownTarget,
+    /// Terminal non-delivery: the recipient was a real member of the session
+    /// (registered, or a transport had claimed the row for it) and left the
+    /// roster before anything surfaced the row to it (cas-f7b0;
+    /// communication contract v2, P1.3).
+    ///
+    /// Split from [`Self::AbandonedUnknownTarget`] because the two mean
+    /// opposite things. That one says the address never resolved. This one
+    /// says the address was right and the reader went away. Before this split,
+    /// 1,376 of 1,990 rows labelled "unknown target" in one month belonged to
+    /// recipients that had been live, and some had been read.
+    RecipientEndedUnread,
     /// Terminal non-delivery of a supervisor lifecycle WAKE relay that was
     /// never transported (cas-7787, GH #160).
     ///
@@ -1039,6 +1050,7 @@ impl PendingReason {
             Self::SupersededStale => "superseded_stale",
             Self::ShutdownCancelled => "shutdown_cancelled",
             Self::AbandonedUnknownTarget => "abandoned_unknown_target",
+            Self::RecipientEndedUnread => "recipient_ended_unread",
             Self::UndeliveredLifecycleRelay => "undelivered_lifecycle_relay",
             Self::PartialBroadcast => "partial_broadcast",
             Self::NoIntendedRecipients => "no_intended_recipients",
@@ -1060,6 +1072,7 @@ impl PendingReason {
             "superseded_stale" => Some(Self::SupersededStale),
             "shutdown_cancelled" => Some(Self::ShutdownCancelled),
             "abandoned_unknown_target" => Some(Self::AbandonedUnknownTarget),
+            "recipient_ended_unread" => Some(Self::RecipientEndedUnread),
             "undelivered_lifecycle_relay" => Some(Self::UndeliveredLifecycleRelay),
             "partial_broadcast" => Some(Self::PartialBroadcast),
             "no_intended_recipients" => Some(Self::NoIntendedRecipients),
@@ -1078,6 +1091,7 @@ impl PendingReason {
                 DeliveryStage::Suppressed
             }
             Self::AbandonedUnknownTarget
+            | Self::RecipientEndedUnread
             | Self::UndeliveredLifecycleRelay
             | Self::UndeliveredAfterWakeDeclines => {
                 DeliveryStage::Abandoned
@@ -1132,6 +1146,7 @@ impl PendingReason {
             | Self::SupersededStale
             | Self::ShutdownCancelled
             | Self::AbandonedUnknownTarget
+            | Self::RecipientEndedUnread
             | Self::UndeliveredLifecycleRelay
             | Self::UndeliveredAfterWakeDeclines
             | Self::PartialBroadcast => false,
@@ -1204,7 +1219,30 @@ pub enum SurfacingSource {
     ObservedWake,
 }
 
+/// SQL list of the receipt sources that prove a body entered the recipient's
+/// turn: the "surfaced" rung of the receipt ladder (communication contract v2,
+/// P1.2). `transport_claimed` is a reservation and `transport_delivered` a
+/// provisional handoff; neither belongs here.
+pub(crate) const SURFACED_RECEIPT_SOURCES_SQL: &str =
+    "('hook_surfaced', 'inbox_poll', 'observed_wake')";
+
 impl SurfacingSource {
+    /// Whether this receipt proves the body entered the recipient's turn
+    /// (cas-f7b0; communication contract v2, P1.2).
+    ///
+    /// Only `hook_surfaced`, `inbox_poll` and `observed_wake` count as
+    /// "seen". `transport_claimed` is the daemon's delivery reservation,
+    /// written about 0.1 s after enqueue even when the wake gate then defers
+    /// the row. `transport_delivered` is a handoff the harness may still drop.
+    /// A view that counts either one as seen reports a read that never
+    /// happened.
+    pub fn is_surfaced(self) -> bool {
+        match self {
+            Self::InboxPoll | Self::HookSurfaced | Self::ObservedWake => true,
+            Self::TransportDelivered | Self::TransportClaimed => false,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InboxPoll => "inbox_poll",
@@ -4051,7 +4089,35 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // untyped legacy rows and explicit asks/blockers monitored; transport
         // delivery alone is still not a recipient read or acknowledgment.
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let mut stmt = conn.prepare(
+        // cas-f7b0 (communication contract v2, P1.7): an unread notice must
+        // agree with what the recipient has already done. Two signals:
+        //   superseded: the recipient has since surfaced or acked a LATER
+        //     message from the same sender, so it is reading that channel.
+        //   acted: the recipient claimed or released a task lease after this
+        //     message was enqueued, e.g. it started, closed or parked the
+        //     task the message asked about.
+        // In both cases the row is not a candidate. It stays as it is, and no
+        // "unread on idle worker" or "delivery stalled" notice is built from
+        // it. This is the 2026-10-14 case: "Verification approved: retry
+        // close" was reported unread after the worker had already closed both
+        // tasks.
+        let lease_history: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_lease_history')",
+            [],
+            |row| row.get(0),
+        )?;
+        let recipient_acted = if lease_history {
+            "AND NOT EXISTS (
+                   SELECT 1 FROM task_lease_history h
+                     JOIN agents a ON a.id = h.agent_id
+                    WHERE a.name = q.target AND a.factory_session = q.factory_session
+                      AND h.event_type IN ('claimed', 'released')
+                      AND julianday(h.timestamp) > julianday(q.created_at)
+               )"
+        } else {
+            ""
+        };
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
@@ -4084,11 +4150,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
                        AND seen.source <> 'transport_claimed'
                )
+               AND NOT EXISTS (
+                    SELECT 1 FROM prompt_queue later
+                     WHERE later.factory_session = q.factory_session
+                       AND later.target = q.target
+                       AND later.source = q.source
+                       AND later.id > q.id
+                       AND (later.acked_at IS NOT NULL
+                            OR EXISTS (SELECT 1 FROM prompt_queue_recipient_seen later_seen
+                                        WHERE later_seen.prompt_id = later.id
+                                          AND later_seen.recipient = later.target
+                                          AND later_seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}))
+               )
+               {recipient_acted}
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
                     OR (q.urgent = 0 AND q.priority > 1 AND q.created_at <= ?))
              ORDER BY q.priority ASC, q.id ASC
              LIMIT ?",
-        )?;
+        ))?;
         Ok(stmt
             .query_map(
                 params![
@@ -4246,7 +4325,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND (
                     COALESCE(q.highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
                     OR (q.highest_stage = 'abandoned'
-                        AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines', 'abandoned_unknown_target'))
+                        AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines', 'abandoned_unknown_target', 'recipient_ended_unread'))
                )
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = q.id
@@ -6602,21 +6681,46 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let placeholders = std::iter::repeat_n("?", targets.len())
                 .collect::<Vec<_>>()
                 .join(", ");
+            // cas-f7b0 (contract v2, P1.3): classify each aged row before
+            // stamping it, so the terminal reason says what happened.
+            //   surfaced: a hook, poll or observed wake put the body in the
+            //     recipient's turn, or the recipient acked it. It was read,
+            //     so it settles as delivered, never abandoned.
+            //   existed: the recipient was a real member of this session.
+            //     It was registered here, or a transport claimed or handed
+            //     off the row for it. The row ends recipient_ended_unread.
+            //   otherwise the address never resolved: abandoned_unknown_target.
+            let agents_table: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+                [],
+                |row| row.get(0),
+            )?;
+            let registered_here = if agents_table {
+                "OR EXISTS (SELECT 1 FROM agents a
+                            WHERE a.name = q.target AND a.factory_session = q.factory_session)"
+            } else {
+                ""
+            };
             let sql = format!(
-                "UPDATE prompt_queue
-                 SET processed_at = COALESCE(processed_at, ?),
-                     highest_stage = 'abandoned',
-                     last_pending_reason = 'abandoned_unknown_target',
-                     last_pending_detail = 'target no longer belongs to factory session',
-                     next_attempt_at = NULL
-                 WHERE processed_at IS NULL
-                   AND factory_session = ?
-                   AND created_at < ?
+                "SELECT q.id,
+                        (q.acked_at IS NOT NULL
+                         OR EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                                    WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                                      AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL})),
+                        (EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                                 WHERE seen.prompt_id = q.id AND seen.recipient = q.target)
+                         OR EXISTS (SELECT 1 FROM prompt_queue_recipient_transport rt
+                                    WHERE rt.prompt_id = q.id)
+                         {registered_here})
+                 FROM prompt_queue q
+                 WHERE q.processed_at IS NULL
+                   AND q.factory_session = ?
+                   AND q.created_at < ?
                    AND {OPERATOR_LANE_EXCLUSION}
-                   AND target NOT IN ({placeholders}) RETURNING id"
+                   AND q.target NOT IN ({placeholders})
+                 ORDER BY q.id"
             );
             let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                Box::new(now),
                 Box::new(factory_session.to_string()),
                 Box::new(cutoff),
             ];
@@ -6625,16 +6729,53 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     .iter()
                     .map(|target| Box::new((*target).to_string()) as Box<dyn rusqlite::ToSql>),
             );
-            let ids = tx
-                .prepare_cached(&sql)?
+            let rows = tx
+                .prepare(&sql)?
                 .query_map(
                     rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?)),
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            Self::notify_bulk_abandoned_senders_in_tx(&tx, &ids)?;
+
+            let mut abandoned = Vec::new();
+            for (id, surfaced, existed) in rows {
+                if surfaced {
+                    Self::atomic_stage_stamp_in_tx(
+                        &tx,
+                        id,
+                        DeliveryStage::Delivered,
+                        AtomicStampOpts::detail(
+                            "surfaced to the recipient before it left the factory session",
+                        ),
+                    )?;
+                    continue;
+                }
+                let (reason, detail) = if existed {
+                    (
+                        PendingReason::RecipientEndedUnread,
+                        "recipient left the factory session before the message surfaced to it",
+                    )
+                } else {
+                    (
+                        PendingReason::AbandonedUnknownTarget,
+                        "target no longer belongs to factory session",
+                    )
+                };
+                tx.execute(
+                    "UPDATE prompt_queue
+                     SET processed_at = COALESCE(processed_at, ?),
+                         highest_stage = 'abandoned',
+                         last_pending_reason = ?,
+                         last_pending_detail = ?,
+                         next_attempt_at = NULL
+                     WHERE id = ? AND processed_at IS NULL",
+                    params![now, reason.as_str(), detail, id],
+                )?;
+                abandoned.push(id);
+            }
+            Self::notify_bulk_abandoned_senders_in_tx(&tx, &abandoned)?;
             tx.commit()?;
-            Ok(ids.len())
+            Ok(abandoned.len())
         })
     }
     fn prune_terminal_batch(&self, older_than_secs: i64, batch: usize) -> Result<usize> {
@@ -10440,6 +10581,224 @@ mod tests {
         let poison_report = store.message_delivery_report(poison).unwrap().unwrap();
         assert_eq!(poison_report.stage, DeliveryStage::Abandoned);
         assert!(poison_report.delivered_at.is_none());
+    }
+
+    fn age_rows_past_retry_window(store: &SqlitePromptQueueStore, ids: &[i64]) {
+        let conn = store.conn.lock().unwrap();
+        for id in ids {
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
+                        .to_rfc3339(),
+                    id
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    fn notices_to(store: &SqlitePromptQueueStore, sender: &str) -> i64 {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM prompt_queue WHERE target = ?",
+            params![sender],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Communication contract v2, P1.2 (cas-f7b0): the daemon's transport
+    /// claim is a reservation, not a read. A claimed, gated row reports a
+    /// receipt that is not surfaced until the recipient polls it.
+    #[test]
+    fn ct2_p1_gated_row_has_no_seen_receipt() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("lead-sup", "busy-worker", "status check", "factory-a")
+            .unwrap();
+        assert!(store.claim_recipient_transport(id, "busy-worker").unwrap());
+        store
+            .record_pending_reason(id, PendingReason::GatedNotReady, Some("pane busy"))
+            .unwrap();
+
+        let gated = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(gated.stage, DeliveryStage::Gated);
+        assert_eq!(gated.recipient_receipt, Some(SurfacingSource::TransportClaimed));
+        assert!(
+            !gated.recipient_receipt.is_some_and(SurfacingSource::is_surfaced),
+            "a claim is not a read"
+        );
+        assert!(!SurfacingSource::TransportDelivered.is_surfaced());
+
+        let polled = store
+            .poll_named_for_recipient("busy-worker", Some("factory-a"), &[id])
+            .unwrap();
+        assert_eq!(polled.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        let read = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(read.recipient_receipt, Some(SurfacingSource::InboxPoll));
+        assert!(read.recipient_receipt.is_some_and(SurfacingSource::is_surfaced));
+        assert!(SurfacingSource::HookSurfaced.is_surfaced());
+        assert!(SurfacingSource::ObservedWake.is_surfaced());
+    }
+
+    /// Communication contract v2, P1.3 (cas-f7b0): a row that reached the
+    /// surfaced rung is never relabelled abandoned when its recipient leaves.
+    /// It settles as delivered and its sender gets no notice.
+    #[test]
+    fn ct2_p1_surfaced_row_never_abandoned() {
+        let (_temp, store) = create_test_store();
+        let observed = store
+            .enqueue_with_session("lead-sup", "gone-worker", "observed", "factory-a")
+            .unwrap();
+        store
+            .record_recipient_surfaced(observed, "gone-worker", SurfacingSource::ObservedWake)
+            .unwrap();
+        let polled = store
+            .enqueue_with_session("lead-sup", "gone-worker", "polled", "factory-a")
+            .unwrap();
+        store
+            .poll_named_for_recipient("gone-worker", Some("factory-a"), &[polled])
+            .unwrap();
+        age_rows_past_retry_window(&store, &[observed, polled]);
+
+        assert_eq!(
+            store
+                .abandon_ineligible_session_targets(
+                    &["lead-sup", "supervisor", "all_workers"],
+                    "factory-a",
+                    PROMPT_RETRY_MAX_AGE_SECS,
+                )
+                .unwrap(),
+            0
+        );
+        for id in [observed, polled] {
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, DeliveryStage::Delivered, "row {id}");
+            assert_ne!(report.pending_reason, Some(PendingReason::AbandonedUnknownTarget));
+        }
+        assert_eq!(notices_to(&store, "lead-sup"), 0);
+    }
+
+    /// Communication contract v2, P1.3 (cas-f7b0): an unread row whose real
+    /// recipient left ends recipient_ended_unread. A target that never
+    /// resolved keeps abandoned_unknown_target. Both are true non-deliveries,
+    /// so both senders are told.
+    #[test]
+    fn ct2_p1_unread_row_recipient_ended() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "retired-worker", "factory-a");
+        let registered = store
+            .enqueue_with_session("lead-sup", "retired-worker", "never read", "factory-a")
+            .unwrap();
+        let claimed = store
+            .enqueue_with_session("lead-sup", "claimed-worker", "inbox copy only", "factory-a")
+            .unwrap();
+        assert!(store.claim_recipient_transport(claimed, "claimed-worker").unwrap());
+        let unknown = store
+            .enqueue_with_session("other-sender", "typo-worker", "lost", "factory-a")
+            .unwrap();
+        age_rows_past_retry_window(&store, &[registered, claimed, unknown]);
+
+        assert_eq!(
+            store
+                .abandon_ineligible_session_targets(
+                    &["lead-sup", "supervisor", "all_workers"],
+                    "factory-a",
+                    PROMPT_RETRY_MAX_AGE_SECS,
+                )
+                .unwrap(),
+            3
+        );
+        for id in [registered, claimed] {
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, DeliveryStage::Abandoned, "row {id}");
+            assert_eq!(
+                report.pending_reason,
+                Some(PendingReason::RecipientEndedUnread),
+                "row {id}"
+            );
+        }
+        let report = store.message_delivery_report(unknown).unwrap().unwrap();
+        assert_eq!(report.pending_reason, Some(PendingReason::AbandonedUnknownTarget));
+        assert_eq!(
+            PendingReason::parse("recipient_ended_unread"),
+            Some(PendingReason::RecipientEndedUnread)
+        );
+        assert!(notices_to(&store, "lead-sup") >= 1);
+        assert_eq!(notices_to(&store, "other-sender"), 1);
+    }
+
+    fn candidate_ids(store: &SqlitePromptQueueStore) -> Vec<i64> {
+        store
+            .delivery_stalled_candidates("factory-a", 0, 0, 50)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    /// Communication contract v2, P1.7 (cas-f7b0): an unread notice must agree
+    /// with what the recipient already did. A recipient that closed (released)
+    /// a task after the message, or read a later message from the same
+    /// sender, no longer yields "unread"/"delivery stalled" candidates for
+    /// it.
+    #[test]
+    fn ct2_p1_notice_suppressed_after_action() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "lead-sup", "factory-a");
+        register_bounce_sender(&store, "closer-worker", "factory-a");
+        register_bounce_sender(&store, "reader-worker", "factory-a");
+        let retry_close = store
+            .enqueue_with_session(
+                "lead-sup",
+                "closer-worker",
+                "Verification approved: retry close",
+                "factory-a",
+            )
+            .unwrap();
+        let older = store
+            .enqueue_with_session("lead-sup", "reader-worker", "rebase onto the epic", "factory-a")
+            .unwrap();
+        let later = store
+            .enqueue_with_session("lead-sup", "reader-worker", "now start cas-x", "factory-a")
+            .unwrap();
+        age_rows_past_retry_window(&store, &[retry_close, older, later]);
+        let before = candidate_ids(&store);
+        assert!(before.contains(&retry_close) && before.contains(&older), "{before:?}");
+
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_lease_history (task_id, agent_id, event_type, epoch, timestamp)
+                 VALUES ('cas-x', 'bounce-closer-worker-factory-a', 'released', 1, ?)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+        store
+            .poll_named_for_recipient("reader-worker", Some("factory-a"), &[later])
+            .unwrap();
+
+        let after = candidate_ids(&store);
+        assert!(!after.contains(&retry_close), "acted on: {after:?}");
+        assert!(!after.contains(&older), "superseded by a later read: {after:?}");
+    }
+
+    /// Communication contract v2, P2.5 (cas-f7b0): once the original is acked,
+    /// the unread/stalled producers never see it again.
+    #[test]
+    fn ct2_p2_no_refire_after_ack() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "lead-sup", "factory-a");
+        register_bounce_sender(&store, "slow-worker", "factory-a");
+        let id = store
+            .enqueue_with_session("lead-sup", "slow-worker", "status?", "factory-a")
+            .unwrap();
+        age_rows_past_retry_window(&store, &[id]);
+        assert!(candidate_ids(&store).contains(&id));
+        store.ack(id).unwrap();
+        assert!(!candidate_ids(&store).contains(&id));
     }
 
     /// Communication contract v2, P3.1/P3.3 (cas-d88c): the roster sweep owns

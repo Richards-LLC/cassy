@@ -803,7 +803,9 @@ pub(super) fn execute_message(
                         .as_ref()
                         .and_then(|m| m.get("status"))
                         .and_then(|v| v.as_str())
-                        == Some("ok")
+                        .is_some_and(
+                            crate::ui::factory::daemon::runtime::queue_and_events::injection_status_reached_transport,
+                        )
                     && (e.entity_type == EventEntityType::Agent)
             });
             if let Some(ev) = found {

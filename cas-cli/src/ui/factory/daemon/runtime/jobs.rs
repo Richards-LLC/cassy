@@ -240,7 +240,49 @@ impl Backoff {
     }
 }
 
-type Work<T> = Box<dyn FnOnce() -> T + Send + 'static>;
+/// The single writer write-lane jobs run on (review round 1, item 3). In the
+/// daemon this is the existing [`super::store_worker::StoreWorker`], so the
+/// job framework adds no second writer.
+pub(crate) trait WriteExecutor: Send + Sync + 'static {
+    /// Run `job` on the writer thread; false when the writer is gone.
+    fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool;
+}
+
+/// Opens the read lane's dedicated context (in the daemon, the refresh
+/// reader's own SQLite connection) once, on the read thread, on first use.
+pub(crate) type ReadContextFactory =
+    Box<dyn FnOnce() -> Option<Box<dyn std::any::Any + Send>> + Send + 'static>;
+
+/// How the lanes reach the stores.
+pub(crate) struct LaneWiring {
+    pub(crate) reader: Option<ReadContextFactory>,
+    pub(crate) writer: Arc<dyn WriteExecutor>,
+}
+
+impl LaneWiring {
+    /// Writes go through the daemon's StoreWorker; no read context.
+    pub(crate) fn daemon_writer() -> Self {
+        Self {
+            reader: None,
+            writer: Arc::new(GlobalStoreWorker),
+        }
+    }
+}
+
+struct GlobalStoreWorker;
+
+impl WriteExecutor for GlobalStoreWorker {
+    fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        super::store_worker::global().execute(label, job)
+    }
+}
+
+type ReadWork<T> = Box<dyn FnOnce(Option<&dyn std::any::Any>) -> T + Send + 'static>;
+
+enum Work<T> {
+    Plain(Box<dyn FnOnce() -> T + Send + 'static>),
+    Read(ReadWork<T>),
+}
 
 /// Work waiting for a key that is queued or running.
 struct KeyFollowUps<T> {
@@ -322,6 +364,14 @@ impl<T: Send + 'static> JobRuntime<T> {
     /// queue: past it, refresh work replaces older refresh work, and critical
     /// work is still queued.
     pub(crate) fn start(lane_capacity: usize) -> Self {
+        Self::start_with(lane_capacity, LaneWiring::daemon_writer())
+    }
+
+    /// [`JobRuntime::start`] with explicit wiring: the read lane's context
+    /// factory and the single writer that write-lane jobs run on.
+    pub(crate) fn start_with(lane_capacity: usize, wiring: LaneWiring) -> Self {
+        let LaneWiring { reader, writer } = wiring;
+        let mut reader = reader;
         let lanes = Lane::ALL
             .into_iter()
             .map(|lane| {
@@ -350,10 +400,17 @@ impl<T: Send + 'static> JobRuntime<T> {
             .filter_map(|lane| {
                 let thread_shared = Arc::clone(&shared);
                 let sender = sender.clone();
+                let lane_reader = if lane == Lane::Read {
+                    reader.take()
+                } else {
+                    None
+                };
+                let lane_writer = (lane == Lane::Write).then(|| Arc::clone(&writer));
                 match std::thread::Builder::new()
                     .name(lane.thread_name().into())
-                    .spawn(move || run_lane(&thread_shared, lane, &sender))
-                {
+                    .spawn(move || {
+                        run_lane(&thread_shared, lane, &sender, lane_reader, lane_writer)
+                    }) {
                     Ok(handle) => Some(handle),
                     Err(error) => {
                         // A lane with no thread must refuse work, not swallow it
@@ -379,6 +436,26 @@ impl<T: Send + 'static> JobRuntime<T> {
         spec: JobSpec,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Submitted {
+        self.enqueue(spec, Work::Plain(Box::new(work)))
+    }
+
+    /// Queue a read on [`Lane::Read`], which passes it the lane's dedicated
+    /// context (`None` when the factory gave none or it is not a `C`).
+    pub(crate) fn submit_read<C: 'static>(
+        &self,
+        mut spec: JobSpec,
+        work: impl FnOnce(Option<&C>) -> T + Send + 'static,
+    ) -> Submitted {
+        spec.lane = Lane::Read;
+        self.enqueue(
+            spec,
+            Work::Read(Box::new(move |ctx: Option<&dyn std::any::Any>| {
+                work(ctx.and_then(|ctx| ctx.downcast_ref::<C>()))
+            })),
+        )
+    }
+
+    fn enqueue(&self, spec: JobSpec, work: Work<T>) -> Submitted {
         let Some(slot) = self.shared.lanes.get(&spec.lane) else {
             return Submitted::Closed;
         };
@@ -388,7 +465,7 @@ impl<T: Send + 'static> JobRuntime<T> {
         }
         let queued = Queued {
             spec,
-            work: Box::new(work),
+            work,
             enqueued_at: Instant::now(),
         };
         {
@@ -544,11 +621,60 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
+fn run_work<T: Send + 'static>(
+    work: Work<T>,
+    label: &'static str,
+    reader: &mut Option<ReadContextFactory>,
+    context: &mut Option<Box<dyn std::any::Any + Send>>,
+    writer: Option<&Arc<dyn WriteExecutor>>,
+) -> Result<T, JobPanicked> {
+    let caught = |panic: Box<dyn std::any::Any + Send>| JobPanicked {
+        message: panic_message(panic.as_ref()),
+    };
+    match work {
+        Work::Read(work) => {
+            if let Some(open) = reader.take() {
+                *context = open();
+            }
+            let ctx = context.as_deref().map(|ctx| ctx as &dyn std::any::Any);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(ctx))).map_err(caught)
+        }
+        Work::Plain(work) => match writer {
+            // Write-lane jobs run on the single writer, not on this thread.
+            Some(writer) => {
+                let (sender, receiver) = mpsc::channel();
+                let job = Box::new(move || {
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                        .map_err(|panic: Box<dyn std::any::Any + Send>| JobPanicked {
+                            message: panic_message(panic.as_ref()),
+                        });
+                    let _ = sender.send(outcome);
+                });
+                if writer.execute(label, job) {
+                    receiver.recv().unwrap_or_else(|_| {
+                        Err(JobPanicked {
+                            message: "the store writer dropped the job".to_string(),
+                        })
+                    })
+                } else {
+                    Err(JobPanicked {
+                        message: "the store writer is unavailable".to_string(),
+                    })
+                }
+            }
+            None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(caught),
+        },
+    }
+}
+
 fn run_lane<T: Send + 'static>(
     shared: &Shared<T>,
     lane: Lane,
     completions: &mpsc::Sender<JobResult<T>>,
+    mut reader: Option<ReadContextFactory>,
+    writer: Option<Arc<dyn WriteExecutor>>,
 ) {
+    let mut context: Option<Box<dyn std::any::Any + Send>> = None;
     let slot = &shared.lanes[&lane];
     loop {
         let next = {
@@ -584,12 +710,7 @@ fn run_lane<T: Send + 'static>(
             return;
         };
         let started = Instant::now();
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|panic| {
-                JobPanicked {
-                    message: panic_message(panic.as_ref()),
-                }
-            });
+        let outcome = run_work(work, spec.kind, &mut reader, &mut context, writer.as_ref());
         let elapsed = started.elapsed();
         if let Err(panicked) = &outcome {
             tracing::error!(lane = ?lane, kind = spec.kind, key = %spec.key, message = %panicked.message, "factory job panicked");
@@ -919,6 +1040,61 @@ mod tests {
         );
         release.wait();
         assert_eq!(wait_for(&runtime, 1)[0].key, "git-fetch");
+    }
+
+    struct ThreadNameWriter(super::super::store_worker::StoreWorker);
+
+    impl WriteExecutor for ThreadNameWriter {
+        fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+            self.0.execute(label, job)
+        }
+    }
+
+    /// Review round 1, item 3: write-lane jobs run on the single store
+    /// writer's thread, not a second writer; read jobs share one dedicated
+    /// context, opened once on the read thread.
+    #[test]
+    fn flv2_job_writes_on_store_worker_and_reads_share_one_context() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&opens);
+        let reader: ReadContextFactory = Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Some(Box::new(41_u32) as Box<dyn std::any::Any + Send>)
+        });
+        let runtime: JobRuntime<String> = JobRuntime::start_with(
+            4,
+            LaneWiring {
+                reader: Some(reader),
+                writer: Arc::new(ThreadNameWriter(
+                    super::super::store_worker::StoreWorker::start(),
+                )),
+            },
+        );
+        runtime.submit(spec("stamp", Lane::Write, Criticality::Critical, 1), || {
+            std::thread::current().name().unwrap_or("").to_string()
+        });
+        let wrote = wait_for(&runtime, 1).remove(0).outcome.expect("no panic");
+        assert_eq!(
+            wrote, "factory-store-worker",
+            "writes run on the single writer"
+        );
+
+        for key in ["read-a", "read-b"] {
+            runtime.submit_read(
+                spec(key, Lane::Read, Criticality::Refresh, 1),
+                |ctx: Option<&u32>| format!("{:?}", ctx.map(|value| value + 1)),
+            );
+        }
+        let reads: Vec<String> = wait_for(&runtime, 2)
+            .into_iter()
+            .map(|r| r.outcome.expect("no panic"))
+            .collect();
+        assert_eq!(reads, vec!["Some(42)", "Some(42)"]);
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "the read context opens once"
+        );
     }
 
     /// Review round 1, item 4: a panicking job posts a result and frees its key.

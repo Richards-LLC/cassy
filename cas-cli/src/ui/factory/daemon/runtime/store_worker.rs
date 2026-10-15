@@ -175,6 +175,14 @@ impl StoreWorker {
     }
 }
 
+/// Write-lane jobs of the factory loop v2 job framework run here, so the
+/// daemon keeps one writer (cas-1240, review round 1 item 3).
+impl super::jobs::WriteExecutor for StoreWorker {
+    fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        self.submit(label, job)
+    }
+}
+
 /// The daemon's store worker. One per process: the factory daemon runs one
 /// loop per process, and its methods reach the worker without a struct field.
 pub(crate) fn global() -> &'static StoreWorker {

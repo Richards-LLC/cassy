@@ -463,7 +463,7 @@ pub(super) fn scan_supervisor_replies(
 
 #[cfg(test)]
 fn mirror_supervisor_replies(root: &Path, project_path: &Path, session: &str, queue: &dyn PromptQueueStore) {
-    let agents = crate::store::open_agent_store(root).and_then(|store| store.list(None)).unwrap_or_default();
+    let agents = crate::store::open_agent_store(root).ok().and_then(|store| store.list(None).ok()).unwrap_or_default();
     scan_supervisor_replies(root, project_path, session, queue, &agents, &mut MirrorScanState::default());
 }
 

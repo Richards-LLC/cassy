@@ -364,6 +364,29 @@ mod tests {
         assert_eq!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
     }
 
+    #[test]
+    fn ct2_p3_commander_mirror_config_set_is_operator_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut config = Config::default();
+        config.save(root).unwrap();
+        let original = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let error = set_config_value(&mut config, "factory.commander_mirror_enabled", "false", root, agent)
+            .expect_err("agents cannot disable automatic replies").to_string();
+        assert!(error.contains("factory.commander_mirror_enabled") && error.contains("operator"));
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
+        let mut config = Config::load(root).unwrap();
+        set_config_value(&mut config, "factory.commander_mirror_enabled", "false", root, operator).unwrap();
+        let original = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let error = set_config_value(&mut config, "factory.commander_mirror_enabled", "true", root, agent)
+            .expect_err("agents cannot undo the operator opt-out").to_string();
+        assert!(error.contains("operator"));
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
+        let mut config = Config::load(root).unwrap();
+        set_config_value(&mut config, "factory.commander_mirror_enabled", "true", root, operator).unwrap();
+        assert!(Config::load(root).unwrap().factory().commander_mirror_enabled);
+    }
+
     /// cas-0d4f0: reset, import and the line editor save through the same
     /// guard, so a whole-config replacement cannot relax a guard either.
     #[test]

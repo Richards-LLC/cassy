@@ -6350,7 +6350,8 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     assert!(text.contains("processed but unacked"), "{text}");
     assert!(text.contains("legacy message"), "{text}");
     assert!(!text.contains("wrong session"), "{text}");
-    assert!(text.contains("at-most-once inbox claim"), "{text}");
+    // pin: the poll states its claim and the once-more resurfacing of unacked rows (cas-6ccb)
+    assert!(text.contains("shown once more at your next turn"), "{text}");
 
     let second = env
         .service

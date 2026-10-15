@@ -2917,11 +2917,14 @@ impl CasService {
             }
         }
 
-        // This is an at-most-once claim for the polling API: the store records
-        // recipient-seen state in the same transaction that selects the rows,
-        // before this MCP response is handed back. That prevents concurrent
-        // duplicate delivery, but a response lost after this point is not
-        // replayed by a later poll. Daemon transport state remains independent.
+        // The store records recipient-seen state in the same transaction that
+        // selects the rows, before this MCP response is handed back. That
+        // prevents concurrent duplicate delivery; a later poll does not replay
+        // a row. cas-6ccb (GH #1215): a row polled but never acknowledged with
+        // message_ack is shown once more by the next turn's hook (the
+        // `inbox_poll` receipt, older than that turn, with no ack), so a row
+        // polled mid-turn and not acted on is not lost. Daemon transport state
+        // remains independent.
         // cas-3bf1 (GH #176): poll every alias this agent answers to, not just
         // its registered pane name. A supervisor answers to two, and rows
         // addressed to the logical `supervisor` alias were previously
@@ -3266,9 +3269,9 @@ impl CasService {
         }
 
         let mut output = format!(
-            "Pulled {rendered} unread message(s) for {recipient} (at-most-once inbox claim: \
-             marked seen before this response is delivered; daemon transport delivery is \
-             unchanged)"
+            "Pulled {rendered} unread message(s) for {recipient} (inbox claim: marked seen \
+             now; one you do not message_ack is shown once more at your next turn; daemon \
+             transport delivery is unchanged)"
         );
         if redelivered > 0 {
             output.push_str(&format!(

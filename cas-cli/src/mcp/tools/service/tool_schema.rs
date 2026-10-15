@@ -102,8 +102,9 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
         "task_id",
         "message with merge_request=true: the parked task; remind: bind the reminder to this task.",
     ),
-    ("notification_id", "message_ack / message_status: the notification id. inbox_poll: read it even while its transport holds it."),
-    ("limit", "inbox_poll: maximum rows to return."),
+    // cas-6ccb: the resurfacing note fits by trimming limit and cross_session.
+    ("notification_id", "message_ack/message_status: the message id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
+    ("limit", "inbox_poll: max rows."),
     ("name", "register / session_start: agent name."),
     ("agent_type", "register / session_start: primary, sub_agent, worker or ci."),
     ("parent_id", "register / session_start: parent agent id for a sub-agent."),
@@ -121,7 +122,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_filter", "remind: JSON filter for the event; a refusal names missing keys."),
     ("remind_id", "remind_cancel: the reminder id."),
     ("remind_ttl_secs", "remind: TTL seconds (default 3600; external events 7 days; 0 = never)."),
-    ("cross_session", "remind: keep the reminder across session end and task close."),
+    ("cross_session", "remind: survive session end and task close."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not

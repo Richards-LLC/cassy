@@ -1427,3 +1427,77 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
     let fresh = worker.next_teammate_turn().unwrap();
     assert!(!fresh.contains("already shown"), "{fresh}");
 }
+
+/// cas-6ccb (GH #1215 §3.4): `inbox_poll` marks rows seen before its response
+/// is read, so a row polled mid-turn and not acted on was lost. A polled row
+/// the agent never acknowledged is shown once more at its next turn, labelled
+/// as such; a row it acknowledged with message_ack is not, and nothing is
+/// repeated inside the polling turn or after the one repeat.
+#[test]
+fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    let first_turn = worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Rebase onto v43, then re-run the named tests.";
+    let acked = "FYI: lane CI is green.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    let acked_id = store.enqueue_with_session("supervisor", WORKER, acked, SESSION).unwrap();
+    // Mid-turn, the agent polls both (what `inbox_poll` runs) and acks one.
+    let polled = store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap();
+    assert_eq!(polled.len(), 2);
+    store.ack(acked_id).unwrap();
+    let same_turn = worker.tool_call();
+    assert!(!same_turn.contains(kept) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next_turn = worker.take_turn("continuing my work");
+    assert_eq!(next_turn.matches(kept).count(), 1, "{next_turn}");
+    assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
+    assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
+    assert_eq!(
+        store.recipient_receipt(kept_id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+    assert_eq!(
+        store.recipient_receipt(acked_id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::InboxPoll)
+    );
+
+    let after = worker.take_turn("still working");
+    assert!(!after.contains(kept) && !after.contains("[not acknowledged]"), "once: {after}");
+}
+
+/// cas-6ccb: a Claude Teams member's next turn may be a teammate-message
+/// turn, which fires no UserPromptSubmit; its tool boundary shows the
+/// polled-but-unacked row once instead.
+#[test]
+fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Hold the merge until the QA pass lands.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    assert!(!worker.tool_call().contains(kept));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next = "Also: rebase first.";
+    let next_id = store.enqueue_with_session("supervisor", WORKER, next, SESSION).unwrap();
+    deliver_to_claude_worker(&store, &mut worker, next_id, next);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert_eq!(teammate_turn.matches(kept).count(), 1, "{teammate_turn}");
+    assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(next).count(), 1, "{teammate_turn}");
+    assert!(!worker.take_turn("continuing my work").contains(kept));
+}

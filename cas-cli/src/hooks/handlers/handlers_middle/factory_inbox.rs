@@ -360,23 +360,29 @@ fn surface_factory_inbox_with_transport_delivery(
     let mut rows: Vec<QueuedPrompt> = Vec::new();
     let mut over_budget: Vec<(i64, usize)> = Vec::new();
     let mut withheld: Vec<i64> = Vec::new();
+    let mut polled_unacked: Vec<i64> = Vec::new();
+    // cas-6ccb: a turn-start hook runs as its turn begins.
+    let turn_started = chrono::Utc::now();
     let mut drain_failed = false;
     for alias in &aliases {
         let drains = match &surfacing {
             // cas-ad92: a pointer wake names the row whose body the harness
             // holds back until the next turn boundary; surface it into the
             // wake turn first, over the daemon's transport claim.
+            // cas-6ccb (GH #1215): a row read with inbox_poll in an earlier
+            // turn and never acknowledged is shown once more.
             Surfacing::TurnStart => vec![
                 cas_store::HookDrain::WakeNamed(&wake_ids),
                 cas_store::HookDrain::Unseen,
             ],
-            Surfacing::ToolBoundary(Some(turn)) => {
-                vec![cas_store::HookDrain::DeliveredAfter(turn.started_at)]
-            }
+            Surfacing::ToolBoundary(Some(turn)) => vec![
+                cas_store::HookDrain::DeliveredAfter(turn.started_at),
+            ],
             Surfacing::ToolBoundary(None) => vec![cas_store::HookDrain::WithoutTransport],
             Surfacing::TurnPrompt { .. } => vec![cas_store::HookDrain::WakeNamed(&wake_ids)],
         };
         for drain in drains {
+            let repeat_of_poll = matches!(drain, cas_store::HookDrain::PolledBefore(_));
             let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
             if remaining == 0 {
                 break;
@@ -436,6 +442,9 @@ fn surface_factory_inbox_with_transport_delivery(
                     continue;
                 }
                 *budget = budget.saturating_sub(cas_store::hook_surface_cost(&row.prompt));
+                if repeat_of_poll {
+                    polled_unacked.push(row.id);
+                }
                 rows.push(row);
             }
         }
@@ -450,6 +459,7 @@ fn surface_factory_inbox_with_transport_delivery(
             .all(|(_, cost)| *cost > cas_store::HOOK_SURFACE_BUDGET_CHARS);
 
     let mut block_notes: Vec<String> = Vec::new();
+    block_notes.extend(polled_unacked_note(&polled_unacked));
     if notes {
         block_notes.extend(already_shown_note(&already_shown));
         // cas-1f0c: the wake promised this turn the body or a reason.
@@ -522,6 +532,19 @@ fn render_block(notes: &[String], rows: &[QueuedPrompt], header: &str) -> Option
         );
     }
     Some(out)
+}
+
+/// cas-6ccb (GH #1215): rows shown again because they were read with
+/// `inbox_poll` in an earlier turn and never acknowledged.
+fn polled_unacked_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[not acknowledged] Message {} was read with inbox_poll in an earlier turn but not \
+         acknowledged, so CAS shows it once more below. Skip it if you already handled it.",
+        id_list(ids)
+    ))
 }
 
 /// cas-1f0c: a row the wake named whose assignment no longer applies. Its

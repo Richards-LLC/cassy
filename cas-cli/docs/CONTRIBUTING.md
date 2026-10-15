@@ -1364,7 +1364,11 @@ inputs remain hexadecimal commit IDs, including unambiguous abbreviations.
 
 The close gate resolves the recorded factory branch locally or on origin before
 counting commits. An unavailable branch produces a missing-evidence error and
-is not parked for merge. A no-code task whose stale code target and delivery
+is not parked for merge. A valid integrated `commit_receipt` proves delivery
+even after a suffixed promotion branch was deleted and the canonical task
+branch never existed. If that receipt is invalid, close reports its validation
+reason before parking; `merged_into` does not override the declared work target.
+A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 

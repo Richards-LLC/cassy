@@ -1226,6 +1226,10 @@ pub struct DirectorEventDetector {
     /// Workers for whom the stall has already been escalated to the
     /// supervisor in the current streak. Cleared alongside `stall_nudged`.
     stall_escalated: HashSet<String>,
+    /// Alarm cooldown survives streak resets; keyed by kind and worker/task.
+    stall_alarm_at: HashMap<(String, String, bool), DateTime<chrono::Utc>>,
+    /// Transcript/tool evidence remains activity after a call closes.
+    observed_worker_activity: HashMap<String, DateTime<chrono::Utc>>,
     /// Seconds of no observable activity (with a fresh heartbeat and an
     /// in-progress task) before a worker is flagged `WorkerStalled`.
     /// Defaults to `cas_factory::DEFAULT_STALL_THRESHOLD_SECS`; overridden
@@ -1336,6 +1340,8 @@ impl DirectorEventDetector {
             task_assigned_announced: HashSet::new(),
             stall_nudged: HashSet::new(),
             stall_escalated: HashSet::new(),
+            stall_alarm_at: HashMap::new(),
+            observed_worker_activity: HashMap::new(),
             stall_threshold_secs: cas_factory::DEFAULT_STALL_THRESHOLD_SECS,
             task_start_observed: HashMap::new(),
             cas_root: None,
@@ -1462,46 +1468,93 @@ impl DirectorEventDetector {
     /// since here the checkpoint-age signal is already the fallback and we
     /// must not let a *missing* confirmation signal silently suppress every
     /// stall alert.
-    fn transcript_confirms_stall(&self, worker_name: &str) -> bool {
-        if let Some(overrides) = &self.transcript_age_override {
-            let age = overrides.get(worker_name).copied().flatten();
-            let window = self
-                .transcript_window_override
-                .as_ref()
-                .and_then(|m| m.get(worker_name).copied())
-                .unwrap_or(crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW);
-            // cas-7e85: missing from the override map means "no in-flight
-            // call", matching production's fail-safe default.
-            let in_flight = self
-                .transcript_in_flight_override
-                .as_ref()
-                .and_then(|m| m.get(worker_name).copied())
-                .unwrap_or(false);
-            return transcript_confirms_stall_for_age(age, window, in_flight);
-        }
-        let Some(cas_root) = &self.cas_root else {
-            return true;
-        };
-        let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, worker_name)
-        else {
-            return true;
-        };
-        let background_processes = crate::cli::factory::wedged::find_worker_pid(
-            &crate::cli::factory::wedged::RealProcessTable,
-            &resolved.name,
-        )
-        .or(resolved.pid)
-        .map(crate::cli::factory::wedged::background_processes_for)
-        .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
-        if background_processes.is_active() {
-            transcript_confirms_stall_for_path_with_background(
-                resolved.transcript_path.as_deref(),
-                resolved.cli,
-                &background_processes,
+    fn transcript_confirms_stall(
+        &mut self,
+        worker_name: &str,
+        now: DateTime<chrono::Utc>,
+        threshold_secs: u64,
+    ) -> bool {
+        let (age, window, in_flight, background_active) = if let Some(overrides) =
+            &self.transcript_age_override
+        {
+            (
+                overrides.get(worker_name).copied().flatten(),
+                self.transcript_window_override
+                    .as_ref()
+                    .and_then(|m| m.get(worker_name).copied())
+                    .unwrap_or(crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW),
+                self.transcript_in_flight_override
+                    .as_ref()
+                    .and_then(|m| m.get(worker_name).copied())
+                    .unwrap_or(false),
+                false,
             )
         } else {
-            transcript_confirms_stall_for_path(resolved.transcript_path.as_deref(), resolved.cli)
+            let Some(cas_root) = &self.cas_root else {
+                return true;
+            };
+            let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, worker_name)
+            else {
+                return false;
+            };
+            let Some(path) = resolved.transcript_path.as_deref() else {
+                return false;
+            };
+            let background = crate::cli::factory::wedged::find_worker_pid(
+                &crate::cli::factory::wedged::RealProcessTable,
+                &resolved.name,
+            )
+            .or(resolved.pid)
+            .map(crate::cli::factory::wedged::background_processes_for)
+            .is_some_and(|state| state.is_active());
+            (
+                crate::cli::factory::wedged::transcript_mtime_age(path),
+                crate::cli::factory::wedged::activity_fresh_window(resolved.cli),
+                crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli),
+                background,
+            )
+        };
+        let window = window.max(Duration::from_secs(threshold_secs));
+        let confirmed = transcript_confirms_stall_for_age_with_background(
+            age,
+            window,
+            in_flight,
+            background_active,
+        );
+        let activity = if in_flight || background_active {
+            Some(now)
+        } else {
+            age.filter(|age| *age < window)
+                .and_then(|age| chrono::Duration::from_std(age).ok())
+                .map(|age| now - age)
+        };
+        if let Some(activity) = activity {
+            self.observed_worker_activity
+                .entry(worker_name.to_string())
+                .and_modify(|previous| *previous = (*previous).max(activity))
+                .or_insert(activity);
         }
+        confirmed
+    }
+
+    fn admit_stall_alarm(
+        &mut self,
+        worker: &str,
+        task: &str,
+        escalate: bool,
+        now: DateTime<chrono::Utc>,
+        threshold: u64,
+    ) -> bool {
+        let key = (worker.to_string(), task.to_string(), escalate);
+        if self
+            .stall_alarm_at
+            .get(&key)
+            .is_some_and(|last| (now - *last).num_seconds() < threshold as i64)
+        {
+            return false;
+        }
+        self.stall_alarm_at.insert(key, now);
+        true
     }
 
     /// Add a worker to the tracked list (call when spawning workers dynamically)
@@ -1808,26 +1861,41 @@ impl DirectorEventDetector {
                     .unwrap_or(false);
                 let effective_threshold =
                     effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
-                let activity_baseline = task.updated_at.map(|assigned_at| {
-                    agent
-                        .latest_activity
-                        .as_ref()
-                        .map(|(_, activity_at)| assigned_at.max(*activity_at))
-                        .unwrap_or(assigned_at)
-                });
-                let elapsed = task.updated_at.zip(activity_baseline).and_then(|(assigned_at, activity_baseline)| {
-                    let quiet_age_secs = (now_utc - activity_baseline).num_seconds();
-                    let assigned_age_secs = (now_utc - assigned_at).num_seconds();
-                    (quiet_age_secs >= effective_threshold as i64 && assigned_age_secs >= 0)
-                        .then_some(assigned_age_secs as u64)
-                });
+                let transcript_stalled =
+                    self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold);
+                let activity_baseline = task
+                    .updated_at
+                    .map(|assigned_at| {
+                        agent
+                            .latest_activity
+                            .as_ref()
+                            .map(|(_, activity_at)| assigned_at.max(*activity_at))
+                            .unwrap_or(assigned_at)
+                    })
+                    .into_iter()
+                    .chain(self.observed_worker_activity.get(&resolved_name).copied())
+                    .max();
+                let elapsed = task.updated_at.zip(activity_baseline).and_then(
+                    |(assigned_at, activity_baseline)| {
+                        let quiet_age_secs = (now_utc - activity_baseline).num_seconds();
+                        let assigned_age_secs = (now_utc - assigned_at).num_seconds();
+                        (quiet_age_secs >= effective_threshold as i64 && assigned_age_secs >= 0)
+                            .then_some(assigned_age_secs as u64)
+                    },
+                );
 
-                if has_fresh_heartbeat
-                    && elapsed.is_some()
-                    && self.transcript_confirms_stall(&resolved_name)
-                {
-                    if !self.stall_escalated.contains(&agent.id) {
-                        self.stall_episode_start.insert(resolved_name.clone(), activity_baseline.unwrap());
+                if has_fresh_heartbeat && elapsed.is_some() && transcript_stalled {
+                    if !self.stall_escalated.contains(&agent.id)
+                        && self.admit_stall_alarm(
+                            &resolved_name,
+                            &task.id,
+                            true,
+                            now_utc,
+                            effective_threshold,
+                        )
+                    {
+                        self.stall_episode_start
+                            .insert(resolved_name.clone(), activity_baseline.unwrap());
                         events.push(DirectorEvent::WorkerStalled {
                             worker: resolved_name.clone(),
                             task_id: task.id.clone(),
@@ -1907,6 +1975,12 @@ impl DirectorEventDetector {
                     .filter(|(observed_task_id, _)| observed_task_id == task_id)
                     .map(|(_, observed_at)| *observed_at);
 
+                let effective_threshold =
+                    effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
+                // Sample on every working tick, including before the threshold:
+                // otherwise open/closed poll boundaries can hide ongoing work.
+                let transcript_stalled =
+                    self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold);
                 // Baseline = whichever is MORE RECENT — real activity or
                 // task-start. Once a task has genuinely run past the
                 // threshold with zero activity since start, the grace
@@ -1923,12 +1997,10 @@ impl DirectorEventDetector {
                     (Some(activity_ts), None) => Some(activity_ts),
                     (None, Some(start_ts)) => Some(start_ts),
                     (None, None) => None,
-                };
-                // cas-09d0: scale the threshold by this worker's configured
-                // effort before comparing — a high/xhigh worker gets a longer
-                // grace window before the same elapsed time counts as stalled.
-                let effective_threshold =
-                    effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
+                }
+                .into_iter()
+                .chain(self.observed_worker_activity.get(&resolved_name).copied())
+                .max();
                 let stalled_elapsed_secs = effective_activity_ts.and_then(|ts| {
                     let age_secs = (now_utc - ts).num_seconds();
                     (age_secs >= effective_threshold as i64).then_some(age_secs)
@@ -1950,10 +2022,18 @@ impl DirectorEventDetector {
                         // alerts for a worker that's confirmed alive —
                         // it never re-enters the `stalled_elapsed_secs`
                         // branch while its transcript stays fresh.
-                        if !self.transcript_confirms_stall(&resolved_name) {
+                        if !transcript_stalled {
                             self.stall_nudged.remove(&agent.id);
                             self.stall_escalated.remove(&agent.id);
-                        } else if !self.stall_nudged.contains(&agent.id) {
+                        } else if !self.stall_nudged.contains(&agent.id)
+                            && self.admit_stall_alarm(
+                                &resolved_name,
+                                task_id,
+                                false,
+                                now_utc,
+                                effective_threshold,
+                            )
+                        {
                             // First detection in this streak: auto-nudge the
                             // worker (re-inject the task prompt) before
                             // paging the supervisor — a single re-poke often
@@ -1966,7 +2046,16 @@ impl DirectorEventDetector {
                                 escalate: false,
                             });
                             self.stall_nudged.insert(agent.id.clone());
-                        } else if !self.stall_escalated.contains(&agent.id) {
+                        } else if self.stall_nudged.contains(&agent.id)
+                            && !self.stall_escalated.contains(&agent.id)
+                            && self.admit_stall_alarm(
+                                &resolved_name,
+                                task_id,
+                                true,
+                                now_utc,
+                                effective_threshold,
+                            )
+                        {
                             // Still stalled after the nudge — escalate to
                             // the supervisor.
                             self.stall_episode_start.insert(resolved_name.clone(), effective_activity_ts.unwrap());
@@ -2119,6 +2208,10 @@ impl DirectorEventDetector {
             .retain(|name, _| seen_factory_agent_names.contains(name));
         self.idle_handled_by_supervisor
             .retain(|name| seen_factory_agent_names.contains(name));
+        self.stall_alarm_at
+            .retain(|(name, _, _), _| seen_factory_agent_names.contains(name));
+        self.observed_worker_activity
+            .retain(|name, _| seen_factory_agent_names.contains(name));
         self.stall_nudged
             .retain(|id| seen_factory_agents.contains(id));
         self.stall_escalated

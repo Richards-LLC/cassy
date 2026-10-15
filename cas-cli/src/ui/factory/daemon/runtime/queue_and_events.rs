@@ -6285,6 +6285,37 @@ impl FactoryDaemon {
                 continue;
             }
 
+            // Keep routine inactivity alarms on the durable queue while a
+            // reader is busy; a Teams inbox write would already hand off the
+            // body and make coalescing impossible. Recheck the task premise too.
+            if queued.kind.as_deref() == Some("worker_stall_nudge")
+                && queued.origin == Some(cas_store::QueueOrigin::Daemon)
+            {
+                let task_id = queued
+                    .summary
+                    .as_deref()
+                    .and_then(|s| s.strip_prefix("Worker stall nudge: "));
+                if let Some(task_id) = task_id
+                    && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
+                    && let Ok(task) = store.get(task_id)
+                    && (task.status != cas_types::TaskStatus::InProgress
+                        || task.assignee.as_deref() != Some(queued.target.as_str()))
+                {
+                    let _ =
+                        queue.mark_superseded(queued.id, "worker no longer holds the stalled task");
+                    continue;
+                }
+                let pane = self.pane_wake_state(&queued.target);
+                if let Some(reason) = pane.veto_for_active_looking_recipient() {
+                    let _ = queue.record_pending_reason(
+                        queued.id,
+                        cas_store::PendingReason::GatedNotReady,
+                        Some(reason),
+                    );
+                    continue;
+                }
+            }
+
             // Resolve the queue source to a valid team member name for inbox writes.
             // The source must be a registered team member name for Claude Code to
             // accept it. The supervisor's team name is "supervisor" (not the generated

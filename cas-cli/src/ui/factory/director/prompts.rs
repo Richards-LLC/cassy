@@ -1840,7 +1840,7 @@ pub fn generate_prompt_at(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
-                    durable_retry: false,
+                    durable_retry: true,
                 })
             } else {
                 // Still stalled after the nudge — escalate to the supervisor.

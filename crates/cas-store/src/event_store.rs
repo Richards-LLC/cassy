@@ -4,7 +4,7 @@
 //! powering the sidecar activity feed.
 
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_events_session_created ON events(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_worker_push_activity ON events(entity_id, created_at DESC)
+    WHERE event_type = 'worker_push_blocked';
 "#;
 
 /// Upper bound on rows removed by one retention delete transaction (cas-e193).
@@ -44,7 +47,7 @@ pub const EVENT_PRUNE_MAX_BATCH: usize = 1_000;
 ///
 /// Every reader of these types looks at a recent window: injection acks scan
 /// the newest 25 `supervisor_injected` rows, worker status and the activity
-/// feed read minutes to hours, and the director reads the newest 50 rows.
+/// feed read minutes to hours, and the director queries each worker's latest activity.
 /// Every other type is lifecycle history. Commit provenance
 /// (`history_store`, `worker_git_commit`) and task-ownership inference
 /// (`foreign_rows`, `migration`, first task event per task) read those
@@ -56,6 +59,7 @@ pub const TELEMETRY_EVENT_TYPES: &[EventType] = &[
     EventType::WorkerFileEdited,
     EventType::WorkerSubagentSpawned,
     EventType::WorkerSubagentCompleted,
+    EventType::WorkerActivity,
 ];
 
 /// Outcome of one bounded telemetry-retention run.
@@ -141,6 +145,9 @@ pub trait EventStore: Send + Sync {
 
     /// Get events for a specific session
     fn list_by_session(&self, session_id: &str, limit: usize) -> Result<Vec<Event>>;
+
+    /// Latest activity for this worker, independent of fleet traffic or heartbeats.
+    fn latest_worker_activity(&self, agent_id: &str, worker_name: &str) -> Result<Option<Event>>;
 
     /// Whether this author recorded the specified activity strictly after `since`.
     /// Query the author and type directly so fleet traffic cannot evict evidence.
@@ -358,6 +365,28 @@ impl EventStore for SqliteEventStore {
             .collect();
 
         Ok(events)
+    }
+
+    fn latest_worker_activity(&self, agent_id: &str, worker_name: &str) -> Result<Option<Event>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        // Each branch reads the worker's own indexed history. Push blocks name
+        // the subject in entity_id even when a different session recorded them.
+        let sql = "SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
+            FROM (SELECT * FROM (SELECT * FROM events
+              WHERE session_id = ?1 AND event_type IN (
+                'worker_activity', 'worker_subagent_spawned', 'worker_subagent_completed',
+                'worker_file_edited', 'worker_git_commit', 'worker_verification_blocked',
+                'verification_started', 'verification_added', 'task_note_added',
+                'task_started', 'task_completed', 'task_blocked', 'audit_trail_gap')
+              ORDER BY created_at DESC, id DESC LIMIT 1)
+              UNION ALL SELECT * FROM (SELECT * FROM events
+                WHERE event_type = 'worker_push_blocked' AND entity_id = ?2
+                ORDER BY created_at DESC, id DESC LIMIT 1))
+            ORDER BY created_at DESC, id DESC LIMIT 1";
+        Ok(conn
+            .prepare_cached(sql)?
+            .query_row(params![agent_id, worker_name], Self::row_to_event)
+            .optional()?)
     }
 
     fn has_event_since(

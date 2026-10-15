@@ -1921,6 +1921,17 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult>;
 
+    /// Persist a daemon nudge and supersede only older, undelivered nudges
+    /// for the same worker/task. Episode replay never withdraws a newer row.
+    fn enqueue_worker_stall_nudge(
+        &self,
+        target: &str,
+        prompt: &str,
+        factory_session: &str,
+        task_id: &str,
+        dedupe_key: &str,
+    ) -> Result<EnqueueIdempotentResult>;
+
     /// Worker-level activity after a transport delivery, including drained replies.
     /// This is evidence for the watchdog only; it does not acknowledge any message.
     fn has_message_from_since(
@@ -4417,6 +4428,87 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(EnqueueIdempotentResult::AlreadyExists(existing_id))
         })
+    }
+
+    fn enqueue_worker_stall_nudge(
+        &self,
+        target: &str,
+        prompt: &str,
+        factory_session: &str,
+        task_id: &str,
+        dedupe_key: &str,
+    ) -> Result<EnqueueIdempotentResult> {
+        let outcome = crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            if let Some(id) = tx
+                .query_row(
+                    "SELECT id FROM prompt_queue WHERE dedupe_key = ?",
+                    [dedupe_key],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                return Ok(EnqueueIdempotentResult::AlreadyExists(id));
+            }
+            let summary = format!("Worker stall nudge: {task_id}");
+            // A source label alone is forgeable. Only this daemon's stamped,
+            // episode-keyed routine nudges qualify; blockers and surfaced or
+            // transported bodies are never withdrawn by this coalescer.
+            let older = {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT q.id FROM prompt_queue q
+                    WHERE q.source = 'director' AND q.origin_kind = 'daemon'
+                      AND q.target = ?1 AND q.factory_session = ?2 AND q.summary = ?3
+                      AND q.kind = 'worker_stall_nudge' AND q.dedupe_key LIKE 'worker-attention:%'
+                      AND q.priority = ?4 AND q.urgent = 0
+                      AND q.processed_at IS NULL AND q.transport_delivered_at IS NULL
+                      AND q.acked_at IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                          WHERE seen.prompt_id = q.id)",
+                )?;
+                stmt.query_map(
+                    params![
+                        target,
+                        factory_session,
+                        summary,
+                        i32::from(NotificationPriority::Normal)
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for id in older {
+                Self::atomic_stage_stamp_in_tx(
+                    &tx,
+                    id,
+                    DeliveryStage::Suppressed,
+                    AtomicStampOpts {
+                        reason: Some(PendingReason::SupersededStale),
+                        detail: Some(
+                            "newer worker stall nudge superseded this undelivered episode",
+                        ),
+                        set_processed: true,
+                        broadcast_attempted: None,
+                        broadcast_succeeded: None,
+                        broadcast_failed: None,
+                    },
+                )?;
+            }
+            tx.execute("INSERT INTO prompt_queue
+                (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_kind, kind)
+                VALUES ('director', ?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, 'daemon', 'worker_stall_nudge')",
+                params![target, prompt, Utc::now().to_rfc3339(), factory_session,
+                    summary, i32::from(NotificationPriority::Normal), dedupe_key])?;
+            let id = tx.last_insert_rowid();
+            let _ = capture_message_event(&tx, "director", target);
+            tx.commit()?;
+            Ok(EnqueueIdempotentResult::Created(id))
+        })?;
+        if matches!(outcome, EnqueueIdempotentResult::Created(_)) {
+            self.signal_inbox(target);
+        }
+        Ok(outcome)
     }
 
     fn has_message_from_since(
@@ -7698,6 +7790,146 @@ mod tests {
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so
     /// a legacy `datetime('now')` row counts the same as an RFC 3339 one.
+    #[test]
+    fn ct2_p2_queued_nudges_coalesce() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let result = store
+                .enqueue_worker_stall_nudge(
+                    "worker",
+                    &format!("nudge {n}"),
+                    "session",
+                    "cas-poll",
+                    &format!("worker-attention:session:episode-{n}"),
+                )
+                .unwrap();
+            let EnqueueIdempotentResult::Created(id) = result else {
+                panic!("new episode");
+            };
+            ids.push(id);
+        }
+        let pending = store.peek_all(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, ids[2]);
+        assert_eq!(pending[0].prompt, "nudge 2");
+        let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+        for id in &ids[..2] {
+            let (stage, reason): (String, String) = conn
+                .query_row(
+                    "SELECT highest_stage, last_pending_reason FROM prompt_queue WHERE id = ?",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(stage, "suppressed");
+            assert_eq!(reason, "superseded_stale");
+        }
+        drop(conn);
+        assert_eq!(
+            store
+                .enqueue_worker_stall_nudge(
+                    "worker",
+                    "old replay",
+                    "session",
+                    "cas-poll",
+                    "worker-attention:session:episode-0"
+                )
+                .unwrap(),
+            EnqueueIdempotentResult::AlreadyExists(ids[0])
+        );
+        assert_eq!(store.peek_all(10).unwrap()[0].id, ids[2]);
+    }
+
+    #[test]
+    fn ct2_p2_blocker_class_not_coalesced() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let blocker = store
+            .enqueue_urgent_with_outcome(
+                "director",
+                "worker",
+                "real blocker",
+                Some("session"),
+                Some("Worker stall nudge: cas-poll"),
+                Some(NotificationPriority::Critical),
+                false,
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap()
+            .id();
+        for n in 0..3 {
+            store
+                .enqueue_worker_stall_nudge(
+                    "worker",
+                    "routine nudge",
+                    "session",
+                    "cas-poll",
+                    &format!("worker-attention:session:{n}"),
+                )
+                .unwrap();
+        }
+        let rows = store.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].id, blocker,
+            "blocker sorts first and survives coalescing"
+        );
+    }
+
+    #[test]
+    fn stall_nudge_coalescing_preserves_other_subjects_and_delivered_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let insert = |worker, session, task, key| match store
+            .enqueue_worker_stall_nudge(worker, "nudge", session, task, key)
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("new episode"),
+        };
+        let delivered = insert(
+            "worker",
+            "session",
+            "cas-poll",
+            "worker-attention:delivered",
+        );
+        store.mark_transport_delivered(delivered).unwrap();
+        insert(
+            "other",
+            "session",
+            "cas-poll",
+            "worker-attention:other-worker",
+        );
+        insert(
+            "worker",
+            "other-session",
+            "cas-poll",
+            "worker-attention:other-session",
+        );
+        insert(
+            "worker",
+            "session",
+            "cas-other",
+            "worker-attention:other-task",
+        );
+        insert("worker", "session", "cas-poll", "worker-attention:new");
+        assert_eq!(store.peek_all(10).unwrap().len(), 4);
+        let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+        let stage: String = conn
+            .query_row(
+                "SELECT highest_stage FROM prompt_queue WHERE id = ?",
+                [delivered],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stage, "delivered");
+    }
+
     #[test]
     fn has_message_from_since_compares_instants_across_timestamp_formats() {
         let (_temp, store) = create_test_store();

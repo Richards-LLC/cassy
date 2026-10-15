@@ -2491,12 +2491,15 @@ fn test_9829_worker_stalled_streak_resets_when_activity_resumes() {
     );
 
     // Goes stale again — must nudge again (streak was cleared), not jump
-    // straight to escalate. Advance `Instant` past `DEBOUNCE_DURATION` (30s)
+    // straight to escalate. Advance `Instant` past the task threshold (300s)
     // so the generic per-key debounce in `debounce_events` isn't the thing
     // suppressing re-emission — this test is isolating the streak-reset
     // logic specifically, not the debounce window.
-    let t1 = t0 + std::time::Duration::from_secs(31);
-    let ev3 = detector.detect_changes_at(&stalled, None, t1, base_utc);
+    let t1 = t0 + std::time::Duration::from_secs(301);
+    let now = base_utc + chrono::Duration::seconds(301);
+    let mut stalled = stalled;
+    stalled.agents[0].last_heartbeat = Some(now);
+    let ev3 = detector.detect_changes_at(&stalled, None, t1, now);
     assert!(
         ev3.iter().any(|e| matches!(
             e,
@@ -3292,20 +3295,107 @@ fn ct2_p2_sleep_poll_one_nudge_per_window() {
     let tick = std::time::Instant::now();
     let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
     detector.set_stall_threshold_secs(300);
-    let mut data = stalled_data_for(make_agent_working_stalled("a", "poller", "cas-poll", 0, Some(900), base));
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "a",
+        "poller",
+        "cas-poll",
+        0,
+        Some(1800),
+        base,
+    ));
     detector.initialize(&data);
     let mut nudges = 0;
-    for seconds in [0, 31, 62, 93, 124, 155, 186, 217, 248, 279, 310] {
+    for seconds in (0..900).step_by(31) {
         let now = base + chrono::Duration::seconds(seconds);
         data.agents[0].last_heartbeat = Some(now);
-        // Alternating closed/cold and open calls must not restart the cooldown.
-        detector.set_transcript_age_override(HashMap::from([("poller".into(), Some(Duration::from_secs(900)))]));
-        detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), true)]));
-        assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+        detector.set_transcript_age_override(HashMap::from([(
+            "poller".into(),
+            Some(Duration::from_secs(1800)),
+        )]));
         detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), false)]));
-        nudges += detector.detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now).iter().filter(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })).count();
-        assert_eq!(nudges, if seconds < 300 { 1 } else { 2 }, "at {seconds}s");
+        nudges += detector
+            .detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now)
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DirectorEvent::WorkerStalled {
+                        escalate: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            nudges, 1,
+            "closing a poll must retain its activity at {seconds}s"
+        );
+        detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), true)]));
+        assert!(
+            !detector
+                .detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now)
+                .iter()
+                .any(|e| matches!(e, DirectorEvent::WorkerStalled { .. }))
+        );
     }
+    // Once the loop ends, a genuinely silent worker can nudge again.
+    let now = base + chrono::Duration::seconds(1500);
+    data.agents[0].last_heartbeat = Some(now);
+    detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), false)]));
+    assert!(
+        detector
+            .detect_changes_at(&data, None, tick + Duration::from_secs(1500), now)
+            .iter()
+            .any(|e| matches!(
+                e,
+                DirectorEvent::WorkerStalled {
+                    escalate: false,
+                    ..
+                }
+            ))
+    );
+}
+
+#[test]
+fn stall_cooldown_survives_checkpoint_streak_resets() {
+    let base = chrono::Utc::now();
+    let tick = std::time::Instant::now();
+    let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(300);
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "a",
+        "poller",
+        "cas-poll",
+        0,
+        Some(1800),
+        base,
+    ));
+    detector.initialize(&data);
+    assert!(
+        detector
+            .detect_changes_at(&data, None, tick, base)
+            .iter()
+            .any(|e| matches!(
+                e,
+                DirectorEvent::WorkerStalled {
+                    escalate: false,
+                    ..
+                }
+            ))
+    );
+    let stale = data.agents[0].latest_activity.clone();
+    data.agents[0].latest_activity = Some(("progress".into(), base));
+    detector.detect_changes_at(&data, None, tick, base);
+    // Even if a later snapshot loses that evidence, the cooldown survives.
+    data.agents[0].latest_activity = stale;
+    let now = base + chrono::Duration::seconds(31);
+    data.agents[0].last_heartbeat = Some(now);
+    assert!(
+        !detector
+            .detect_changes_at(&data, None, tick + Duration::from_secs(31), now)
+            .iter()
+            .any(|e| matches!(e, DirectorEvent::WorkerStalled { .. }))
+    );
 }
 
 #[test]

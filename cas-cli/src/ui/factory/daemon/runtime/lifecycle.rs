@@ -3368,6 +3368,39 @@ impl FactoryDaemon {
                 );
                 continue;
             }
+            // A routine nudge has one queryable row and uses the queue's
+            // busy-recipient gate. Never write it directly into a Teams inbox.
+            if let Some(
+                event @ crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                    task_id,
+                    escalate: false,
+                    ..
+                },
+            ) = delivery_events.iter().find(|event| {
+                matches!(event,
+                crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                    worker, escalate: false, ..
+                } if worker == &prompt.target)
+            }) {
+                if let Some(start) = self.app.worker_attention_episode_start(event) {
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    let session = self.session_name.clone();
+                    let task_id = task_id.clone();
+                    store_worker.submit("worker stall nudge", move || {
+                        if let Err(error) = super::delivery::enqueue_worker_stall_nudge(
+                            &cas_dir,
+                            &session,
+                            &prompt.target,
+                            &task_id,
+                            &prompt.text,
+                            start,
+                        ) {
+                            tracing::warn!(%error, "worker stall nudge enqueue failed");
+                        }
+                    });
+                }
+                continue;
+            }
             // GH #682: the event snapshot was read before this
             // loop. Re-read assignment state at the final direct
             // transport boundary so a task that moved beyond Open

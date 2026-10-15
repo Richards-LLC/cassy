@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.53.0] - 2026-10-14
+
 ### Changed — the merge queue skips the Commander journeys when only the CI workflow changes (cas-c846)
 
 - `.github/workflows/ci.yml` no longer counts as a Commander web input. A PR

@@ -14785,6 +14785,7 @@ mod tests {
             .find(|pid| !crate::mcp::daemon::pid_alive(*pid))
             .expect("the fixture needs an unavailable MCP child pid");
         agent.pid = Some(unavailable_pid);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, unavailable_pid);
         assert!(
             !crate::mcp::tools::service::factory_ops::agent_process_is_alive(&agent),
             "the fixture must represent an unavailable server child"

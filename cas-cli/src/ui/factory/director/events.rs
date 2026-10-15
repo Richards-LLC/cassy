@@ -1309,6 +1309,12 @@ pub struct DirectorEventDetector {
     /// map) means "no in-flight call" — production resolves this via
     /// `wedged::transcript_has_in_flight_tool_call`.
     transcript_in_flight_override: Option<HashMap<String, bool>>,
+    /// (cas-9bf6) Test-only override for the `worker_status` execution
+    /// evidence the stall probe consults after the transcript: per worker,
+    /// whether worker_status reports `executing` (turn evidence or a
+    /// CPU-busy harness) and the age of the clone's HEAD commit. Missing
+    /// workers read as not executing with no commit.
+    worker_evidence_override: Option<HashMap<String, (bool, Option<Duration>)>>,
     /// (cas-09d0) Workers explicitly put on hold by the supervisor — a
     /// first-class primitive for "deliberately paused, not idle-needing-work"
     /// that doesn't require a task-status transition (unlike `AwaitingMerge`,
@@ -1369,6 +1375,7 @@ impl DirectorEventDetector {
             transcript_age_override: None,
             transcript_window_override: None,
             transcript_in_flight_override: None,
+            worker_evidence_override: None,
             held_workers: HashSet::new(),
             merge_alert_last_evidence: HashMap::new(),
         }
@@ -1443,6 +1450,16 @@ impl DirectorEventDetector {
     #[cfg(test)]
     pub(crate) fn set_transcript_in_flight_override(&mut self, in_flight: HashMap<String, bool>) {
         self.transcript_in_flight_override = Some(in_flight);
+    }
+
+    /// (cas-9bf6) Test-only seam: inject the `worker_status` execution
+    /// evidence (executing, HEAD commit age) the stall probe consults.
+    #[cfg(test)]
+    pub(crate) fn set_worker_evidence_override(
+        &mut self,
+        evidence: HashMap<String, (bool, Option<Duration>)>,
+    ) {
+        self.worker_evidence_override = Some(evidence);
     }
 
     /// Initialize with current state (call after first data load)
@@ -1558,16 +1575,48 @@ impl DirectorEventDetector {
             )
         };
         let window = window.max(Duration::from_secs(threshold_secs));
-        let confirmed = transcript_confirms_stall_for_age_with_background(
+        let transcript_confirms = transcript_confirms_stall_for_age_with_background(
             age,
             window,
             in_flight,
             background_active,
         );
-        let activity = if in_flight || background_active {
+        // cas-9bf6: a cold transcript is not proof of a stall on its own.
+        // Before alarming, consult the execution evidence `worker_status`
+        // reports — harness turn evidence and a CPU-busy harness — and the
+        // worker clone's HEAD commit, which a Codex worker (no commit hooks)
+        // leaves as its only commit evidence. Checkpoints and task notes are
+        // already in the activity baseline. A worker with none of these is
+        // still a stall.
+        let (executing, commit_age) = if !transcript_confirms || STALL_EVIDENCE_RED_STUB {
+            (false, None)
+        } else if let Some(overrides) = &self.worker_evidence_override {
+            overrides.get(worker_name).copied().unwrap_or((false, None))
+        } else if self.transcript_age_override.is_some() {
+            (false, None)
+        } else {
+            self.cas_root
+                .as_deref()
+                .and_then(|root| {
+                    crate::mcp::tools::service::factory_ops::worker_stall_evidence(
+                        root,
+                        worker_name,
+                        now,
+                        threshold_secs as i64,
+                    )
+                })
+                .map(|evidence| (evidence.executing, evidence.head_commit_age))
+                .unwrap_or((false, None))
+        };
+        let commit_fresh = commit_age.filter(|age| *age < window);
+        let confirmed = transcript_confirms && !executing && commit_fresh.is_none();
+        let activity = if in_flight || background_active || executing {
             Some(now)
         } else {
             age.filter(|age| *age < window)
+                .into_iter()
+                .chain(commit_fresh)
+                .min()
                 .and_then(|age| chrono::Duration::from_std(age).ok())
                 .map(|age| now - age)
         };
@@ -2543,6 +2592,9 @@ impl DirectorEventDetector {
 /// — the SAME function `cas factory is-wedged` uses — so an outstanding
 /// tool call (e.g. a worker sleeping on a backgrounded `cargo test`) never
 /// confirms a stall here while is-wedged would call the worker Alive.
+/// Red-first stub (cas-9bf6): worker_status evidence not consulted yet.
+const STALL_EVIDENCE_RED_STUB: bool = true;
+
 fn transcript_confirms_stall_for_path(
     transcript_path: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,

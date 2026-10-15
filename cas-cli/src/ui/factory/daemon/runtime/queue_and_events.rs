@@ -11838,6 +11838,7 @@ mod tests {
                 anchor_tip: None,
                 commits_not_on_target_base: 1,
                 pr_number: None,
+                source_freshness_unavailable: None,
             },
         );
 

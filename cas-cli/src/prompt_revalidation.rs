@@ -3198,6 +3198,7 @@ mod cas_3dcb_worker_died_relay_tests {
                 anchor_tip: None,
                 commits_not_on_target_base: 0,
                 pr_number: None,
+                source_freshness_unavailable: None,
             },
         );
 

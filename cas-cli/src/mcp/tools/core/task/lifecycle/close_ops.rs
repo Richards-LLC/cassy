@@ -39498,6 +39498,3 @@ mod no_code_close_tests;
 #[cfg(test)]
 #[path = "close_ops/blast_radius_park_tests.rs"]
 mod blast_radius_park_tests;
-#[cfg(test)]
-#[path = "close_ops/cas_0a27_measure.rs"]
-mod cas_0a27_measure;

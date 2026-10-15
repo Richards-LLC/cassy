@@ -29,6 +29,38 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The upload itself is a file transfer, not an API round trip.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Content types the Cassy artifact flow currently sends to Cloud's object
+/// store. Keep this client-side preflight aligned with the server policy; the
+/// service currently delegates the final decision to the storage provider
+/// (petra-stella-cloud#156 tracks an authoritative server-side policy).
+const ARTIFACT_UPLOAD_MIME_ALLOWLIST: &[&str] = &[
+    "application/octet-stream",
+    "application/pdf",
+    "application/json",
+    "application/x-ndjson",
+    "application/zip",
+    "application/gzip",
+    "application/yaml",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/csv",
+    "image/svg+xml",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+];
+
+fn validate_upload_mime(mime: &str) -> Result<String, UploadFailure> {
+    let canonical = mime.trim().to_ascii_lowercase();
+    if ARTIFACT_UPLOAD_MIME_ALLOWLIST.contains(&canonical.as_str()) {
+        Ok(canonical)
+    } else {
+        Err(UploadFailure::UnsupportedContentType { mime: canonical })
+    }
+}
+
 /// Which of the three calls a failure came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadStep {
@@ -70,6 +102,9 @@ impl fmt::Display for ArtifactDigest {
 /// Why an upload did not complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadFailure {
+    /// The MIME type is outside the artifact upload allowlist. This local
+    /// refusal happens before begin or the object-store PUT.
+    UnsupportedContentType { mime: String },
     /// `begin` answered 404/501: this deployment has no artifact storage.
     /// A boundary to report, not an error to alarm about.
     NotLive { reason: String },
@@ -108,6 +143,10 @@ impl UploadFailure {
 impl fmt::Display for UploadFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            UploadFailure::UnsupportedContentType { mime } => write!(
+                f,
+                "unsupported_content_type: Cloud artifact uploads do not allow {mime}; to publish a QA screencast, package it as a .zip archive (application/zip) and publish that archive"
+            ),
             UploadFailure::NotLive { reason } => write!(f, "{reason}"),
             UploadFailure::Mismatch {
                 declared,
@@ -307,8 +346,10 @@ impl ArtifactUploadClient {
 
     /// Reserve an artifact id and get a place to put the bytes.
     pub fn begin(&self, request: &BeginRequest) -> Result<BeginResponse, UploadFailure> {
+        let mime = validate_upload_mime(&request.mime)?;
         let url = format!("{}/api/artifacts/begin", self.endpoint);
         let mut body = request.clone();
+        body.mime = mime;
         if body.team_id.is_none() {
             body.team_id = self.team_id.clone();
             body.project_id = body.project_id.or_else(|| self.project_id.clone());
@@ -372,9 +413,10 @@ impl ArtifactUploadClient {
         size_bytes: u64,
         body: impl Read,
     ) -> Result<(), UploadFailure> {
+        let mime = validate_upload_mime(mime)?;
         check_upload_url(&begun.upload_url)?;
         let mut request = ureq::put(&begun.upload_url)
-            .set("Content-Type", mime)
+            .set("Content-Type", &mime)
             // ureq streams chunked unless the length is declared; object
             // stores reject a chunked pre-signed PUT.
             .set("Content-Length", &size_bytes.to_string())

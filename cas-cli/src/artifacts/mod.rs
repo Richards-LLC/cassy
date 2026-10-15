@@ -278,6 +278,7 @@ pub fn mime_for(path: &Path) -> String {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        "webm" => "video/webm",
         "zip" => "application/zip",
         "gz" | "tgz" => "application/gzip",
         "yaml" | "yml" => "application/yaml",
@@ -595,6 +596,47 @@ mod tests {
             "an unknown extension must not be guessed into something renderable"
         );
         assert_eq!(mime_for(Path::new("a/noext")), "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn webm_publish_is_rejected_before_cloud_requests_and_suggests_zip() {
+        let server = wiremock::MockServer::start().await;
+        let endpoint = server.uri();
+        let (outcome, stored_status) = tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            let file = f.task_dir.join("receipt.webm");
+            fs::write(&file, b"webm bytes").unwrap();
+            let context = PublishContext {
+                store: &f.store,
+                roots: f.roots.clone(),
+                task_id: "cas-b72a".to_string(),
+                cloud: Some(ArtifactUploadClient::new(&endpoint, "test-token")),
+            };
+
+            let outcome = publish(&context, &file).unwrap();
+            let stored_status = f
+                .store
+                .get(&outcome.artifact.id)
+                .unwrap()
+                .expect("publish retains the local artifact record")
+                .status;
+            (outcome, stored_status)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.artifact.mime, "video/webm");
+        let reason = match &outcome.disposition {
+            PublishDisposition::UploadFailed { reason } => reason,
+            other => panic!("expected an upload failure, got {other:?}"),
+        };
+        assert!(reason.contains("unsupported_content_type"), "{reason}");
+        assert!(reason.contains("application/zip"), "{reason}");
+        assert_eq!(stored_status, "local");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "an unsupported MIME must be refused before begin, presign, or PUT"
+        );
     }
 
     #[test]

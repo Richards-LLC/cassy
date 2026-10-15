@@ -36,6 +36,17 @@ pub const IN_FLIGHT_SPAWN_SLOW_SECS: i64 = 120;
 pub const WATCHDOG_INTERVAL_SECS: u64 = 5;
 /// A status file not rewritten for this long means the daemon itself is gone.
 pub const STATUS_STALE_SECS: i64 = 30;
+/// How often the watchdog checks each lane's heartbeat (factory loop v2 §6.4).
+pub const LANE_HEARTBEAT_MS: u64 = 250;
+/// A lane that has not finished an iteration for this long is wedged, and a
+/// job pending this long past its budget wedges the jobs lane. This drives
+/// the TUI and `loop.json`; `worker_status` still warns at
+/// [`LOOP_WEDGED_SECS`].
+pub const LANE_WEDGE_MS: u64 = 1_000;
+/// Over-budget step events `loop.json` keeps.
+pub const SLOW_RING_CAP: usize = 32;
+/// How long the TUI shows the newest over-budget step.
+pub const SLOW_STATUS_SECS: u64 = 10;
 
 /// One snapshot of the daemon loop, written by its watchdog thread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +93,44 @@ pub struct DaemonLoopStatus {
     /// the single `phase` field above only says where the loop is now.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub phase_latency: std::collections::BTreeMap<String, PhaseLatency>,
+    /// The last [`SLOW_RING_CAP`] steps that ran over their budget, oldest
+    /// first (cas-6931).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slow_steps: Vec<SlowStepEvent>,
+    /// The lane wedged now, if any (cas-6931).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wedge: Option<LaneWedge>,
+    /// Age of the oldest pending job of each kind, in milliseconds.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub job_oldest_ms: std::collections::BTreeMap<String, u64>,
+    /// Blocking calls made on the io or control lane so far (factory loop v2
+    /// §6.6, report mode), and the call sites that made them.
+    #[serde(default)]
+    pub lane_violations: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lane_violation_sites: Vec<String>,
+}
+
+/// One step that ran over its budget (factory loop v2 §6.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlowStepEvent {
+    pub lane: String,
+    pub step: String,
+    pub elapsed_ms: u64,
+    pub budget_ms: u64,
+    pub at: DateTime<Utc>,
+}
+
+/// A wedged lane (factory loop v2 §6.4): the step it is stuck in, for how
+/// long, and the loop thread's kernel wait channel when the lane is the loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneWedge {
+    pub lane: String,
+    pub step: String,
+    pub duration_ms: u64,
+    pub detected_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wchan: Option<String>,
 }
 
 /// Latency of one loop phase over a status window (cas-ee9ab).
@@ -328,6 +377,11 @@ mod tests {
             window_passes: 0,
             passes_over_100ms: 0,
             phase_latency: Default::default(),
+            slow_steps: Vec::new(),
+            wedge: None,
+            job_oldest_ms: Default::default(),
+            lane_violations: 0,
+            lane_violation_sites: Vec::new(),
         }
     }
 

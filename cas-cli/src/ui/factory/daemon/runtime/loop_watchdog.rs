@@ -11,19 +11,36 @@
 //! restart, the watchdog also kills hung git/gh/ssh helper processes the
 //! daemon started. Those are the blocking calls a pass can sit in. Harness
 //! panes (the supervisor and workers) are never candidates.
+//!
+//! Factory loop v2 §6 (cas-6931) makes the watchdog name the step that is
+//! slow. Each lane marks the [`Step`] it runs, including the prompt queue's
+//! sub-steps ([`mark`]) and the director apply's `timed()` steps
+//! ([`scoped`]). A step over its budget lands in a 32-event ring, a
+//! `cas::loop_watchdog` WARN and the TUI status line
+//! (`slow: <lane>/<step> <n> ms`). The watchdog checks the lanes every
+//! 250 ms; a pass that has not finished in 1 s, or a job pending past its
+//! budget, is `wedged: <lane>/<step> for <n> s`, written to `loop.json` at
+//! once with the thread's wait channel. An attached lane thread also reports
+//! blocking calls through [`cas_store::lane_guard`] (report mode).
 
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
 use crate::factory_daemon_health::{
-    DaemonLoopStatus, LOOP_WEDGED_SECS, WATCHDOG_INTERVAL_SECS, pending_reset, status_path,
+    DaemonLoopStatus, LANE_HEARTBEAT_MS, LANE_WEDGE_MS, LOOP_WEDGED_SECS, LaneWedge, SLOW_RING_CAP,
+    SLOW_STATUS_SECS, SlowStepEvent, WATCHDOG_INTERVAL_SECS, pending_reset, status_path,
     write_status,
 };
+
+/// Red-first stub (cas-6931): the behavior under test is not wired yet.
+const RED_STUB: bool = true;
 
 /// A helper must have run at least this long before a restart may kill it.
 const HELPER_MIN_AGE_SECS: u64 = 30;
@@ -31,6 +48,91 @@ const HELPER_MIN_AGE_SECS: u64 = 30;
 const HELPER_COMMANDS: &[&str] = &["git", "gh", "ssh", "git-remote-https", "git-remote-http"];
 /// How many killed helpers the status file keeps.
 const KILLED_HELPERS_KEPT: usize = 10;
+
+/// Step budgets (factory loop v2 §6.2, cas-6931): an io step, a prompt-queue
+/// decision step and every other control step.
+pub(crate) const IO_STEP_BUDGET_MS: u64 = 5;
+pub(crate) const PROMPT_QUEUE_STEP_BUDGET_MS: u64 = 20;
+pub(crate) const CONTROL_STEP_BUDGET_MS: u64 = 10;
+/// An over-budget step is logged at most this often per step name; the ring
+/// and the status line still record every event.
+const SLOW_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A lane of the daemon (factory loop v2 §3). Today one loop thread runs the
+/// io and control steps in turn; jobs run on the store worker and pools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Lane {
+    Io,
+    Control,
+    Jobs,
+}
+
+impl Lane {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Lane::Io => "io",
+            Lane::Control => "control",
+            Lane::Jobs => "jobs",
+        }
+    }
+
+    /// The blocking-call guard's lane; the jobs lane may block.
+    fn guarded(self) -> Option<cas_store::lane_guard::Lane> {
+        match self {
+            Lane::Io => Some(cas_store::lane_guard::Lane::Io),
+            Lane::Control => Some(cas_store::lane_guard::Lane::Control),
+            Lane::Jobs => None,
+        }
+    }
+}
+
+/// A named step of a lane and its budget. `None` is never timed (the idle
+/// sleep between passes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Step {
+    pub(crate) lane: Lane,
+    pub(crate) name: &'static str,
+    pub(crate) budget_ms: Option<u64>,
+}
+
+impl Step {
+    pub(crate) const fn io(name: &'static str) -> Self {
+        Self {
+            lane: Lane::Io,
+            name,
+            budget_ms: Some(IO_STEP_BUDGET_MS),
+        }
+    }
+
+    pub(crate) const fn control(name: &'static str) -> Self {
+        Self {
+            lane: Lane::Control,
+            name,
+            budget_ms: Some(CONTROL_STEP_BUDGET_MS),
+        }
+    }
+
+    /// A step of the prompt-queue pass.
+    pub(crate) const fn prompt_queue(name: &'static str) -> Self {
+        Self {
+            lane: Lane::Control,
+            name,
+            budget_ms: Some(PROMPT_QUEUE_STEP_BUDGET_MS),
+        }
+    }
+
+    const fn idle() -> Self {
+        Self::untimed("idle")
+    }
+
+    const fn untimed(name: &'static str) -> Self {
+        Self {
+            lane: Lane::Control,
+            name,
+            budget_ms: None,
+        }
+    }
+}
 
 /// The loop step running now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,25 +158,6 @@ pub(crate) enum LoopPhase {
 }
 
 impl LoopPhase {
-    const ALL: [LoopPhase; 16] = [
-        LoopPhase::Start,
-        LoopPhase::ClientInput,
-        LoopPhase::PtyOutput,
-        LoopPhase::Relay,
-        LoopPhase::PromptQueue,
-        LoopPhase::SpawnQueue,
-        LoopPhase::PendingSpawns,
-        LoopPhase::Refresh,
-        LoopPhase::Render,
-        LoopPhase::Idle,
-        LoopPhase::RefreshSpawnVerify,
-        LoopPhase::RefreshDirector,
-        LoopPhase::RefreshDelivery,
-        LoopPhase::RefreshRelays,
-        LoopPhase::RefreshFollowUp,
-        LoopPhase::RefreshInject,
-    ];
-
     pub(crate) fn name(self) -> &'static str {
         match self {
             LoopPhase::Start => "start",
@@ -96,11 +179,162 @@ impl LoopPhase {
         }
     }
 
-    fn from_u8(value: u8) -> LoopPhase {
-        LoopPhase::ALL
-            .get(value as usize)
-            .copied()
-            .unwrap_or(LoopPhase::Start)
+    /// The phase as a watchdog step: input, PTY output and render are io
+    /// steps; the prompt queue has the decision budget (cas-6931).
+    pub(crate) fn step(self) -> Step {
+        match self {
+            LoopPhase::Idle => Step::idle(),
+            LoopPhase::Start => Step::untimed(self.name()),
+            LoopPhase::ClientInput | LoopPhase::PtyOutput | LoopPhase::Render => {
+                Step::io(self.name())
+            }
+            LoopPhase::PromptQueue => Step::prompt_queue(self.name()),
+            _ => Step::control(self.name()),
+        }
+    }
+}
+
+/// The watchdog's time source; tests drive a fake one.
+#[derive(Debug, Clone)]
+pub(crate) enum LoopClock {
+    Real,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fake(Arc<FakeClock>),
+}
+
+impl LoopClock {
+    fn now(&self) -> Instant {
+        match self {
+            LoopClock::Real => Instant::now(),
+            LoopClock::Fake(clock) => clock.now(),
+        }
+    }
+}
+
+/// A clock that moves only when told to.
+#[derive(Debug)]
+pub(crate) struct FakeClock {
+    base: Instant,
+    offset_ms: AtomicU64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl FakeClock {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            base: Instant::now(),
+            offset_ms: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn advance(&self, by: Duration) {
+        self.offset_ms
+            .fetch_add(by.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn now(&self) -> Instant {
+        self.base + Duration::from_millis(self.offset_ms.load(Ordering::Relaxed))
+    }
+}
+
+/// Jobs queued or running off the lanes, by kind, so the watchdog can name
+/// the oldest (factory loop v2 §6.5). A [`JobTicket`] is taken when a job is
+/// submitted and dropped when it finishes.
+#[derive(Debug, Default)]
+pub(crate) struct JobHealth {
+    next_id: AtomicU64,
+    pending: Mutex<HashMap<u64, PendingJob>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingJob {
+    kind: &'static str,
+    budget: Duration,
+    since: Instant,
+}
+
+/// The oldest pending job of one kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OldestJob {
+    pub(crate) age: Duration,
+    pub(crate) budget: Duration,
+}
+
+/// One pending job; dropping it marks the job finished.
+#[derive(Debug)]
+pub(crate) struct JobTicket {
+    health: Arc<JobHealth>,
+    id: u64,
+}
+
+impl Drop for JobTicket {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.health.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
+
+impl JobHealth {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// The process's job registry, which the daemon's watchdog reads.
+    pub(crate) fn global() -> Arc<Self> {
+        static GLOBAL: std::sync::OnceLock<Arc<JobHealth>> = std::sync::OnceLock::new();
+        Arc::clone(GLOBAL.get_or_init(|| Arc::new(JobHealth::default())))
+    }
+
+    /// Record a job of `kind` submitted now with its §4.4 `budget`.
+    pub(crate) fn begin(self: &Arc<Self>, kind: &'static str, budget: Duration) -> JobTicket {
+        self.begin_at(kind, budget, Instant::now())
+    }
+
+    pub(crate) fn begin_at(
+        self: &Arc<Self>,
+        kind: &'static str,
+        budget: Duration,
+        since: Instant,
+    ) -> JobTicket {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(
+                id,
+                PendingJob {
+                    kind,
+                    budget,
+                    since,
+                },
+            );
+        }
+        JobTicket {
+            health: Arc::clone(self),
+            id,
+        }
+    }
+
+    /// The oldest pending job of each kind at `now`.
+    pub(crate) fn oldest(&self, now: Instant) -> BTreeMap<&'static str, OldestJob> {
+        let mut oldest: BTreeMap<&'static str, OldestJob> = BTreeMap::new();
+        let Ok(pending) = self.pending.lock() else {
+            return oldest;
+        };
+        for job in pending.values() {
+            let age = now.saturating_duration_since(job.since);
+            let entry = oldest.entry(job.kind).or_insert(OldestJob {
+                age,
+                budget: job.budget,
+            });
+            if age > entry.age {
+                *entry = OldestJob {
+                    age,
+                    budget: job.budget,
+                };
+            }
+        }
+        oldest
     }
 }
 
@@ -111,23 +345,62 @@ struct SpawnSnapshot {
     last_reset: Option<String>,
 }
 
+/// The step a lane runs now and when its current segment began.
+#[derive(Debug, Clone, Copy)]
+struct CurrentStep {
+    step: Step,
+    started: Instant,
+}
+
+/// Over-budget steps: the last [`SLOW_RING_CAP`] events, the newest one for
+/// the status line, and the per-step log throttle.
+#[derive(Debug, Default)]
+struct SlowSteps {
+    ring: VecDeque<SlowStepEvent>,
+    newest: Option<(SlowStepEvent, Instant)>,
+    logged: HashMap<&'static str, (Instant, u64)>,
+}
+
+/// A wedge the watchdog has detected and not yet seen clear.
+#[derive(Debug, Clone)]
+struct WedgeState {
+    lane: Lane,
+    step: &'static str,
+    since: Instant,
+    detected_at: DateTime<Utc>,
+}
+
+/// A wedge found by [`LoopProgress::check_wedge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WedgeCheck {
+    pub(crate) lane: Lane,
+    pub(crate) step: &'static str,
+    pub(crate) duration: Duration,
+    /// True the first time this lane/step wedge is seen.
+    pub(crate) new: bool,
+}
+
 /// Progress the loop records and the watchdog publishes.
 #[derive(Debug)]
 pub(crate) struct LoopProgress {
+    clock: LoopClock,
+    jobs: Arc<JobHealth>,
     last_pass_ms: AtomicI64,
     passes: AtomicU64,
-    phase: AtomicU8,
     loop_tid: AtomicI64,
     spawn: Mutex<SpawnSnapshot>,
     /// When the running pass began, and the pass durations since the last
     /// status snapshot (GH #1165).
-    pass_started: Mutex<Option<std::time::Instant>>,
+    pass_started: Mutex<Option<Instant>>,
     window: Mutex<Vec<u64>>,
-    /// The phase running now and when it began, and per-phase latency since
-    /// the last status snapshot (cas-ee9ab). Idle time is never timed.
-    phase_clock: Mutex<Option<(LoopPhase, std::time::Instant)>>,
+    /// The step marker (cas-6931): the step running now and when its segment
+    /// began. Per-step latency since the last status snapshot (cas-ee9ab).
+    /// Idle time is never timed.
+    current: Mutex<CurrentStep>,
     phase_window:
         Mutex<std::collections::BTreeMap<&'static str, crate::factory_daemon_health::PhaseLatency>>,
+    slow: Mutex<SlowSteps>,
+    wedge: Mutex<Option<WedgeState>>,
 }
 
 /// Most pass durations one snapshot window keeps; older ones are dropped
@@ -164,26 +437,101 @@ impl PassWindow {
     }
 }
 
+thread_local! {
+    /// The progress a lane thread reports its sub-steps to (cas-6931).
+    static ATTACHED: RefCell<Option<Arc<LoopProgress>>> = const { RefCell::new(None) };
+}
+
+/// A lane thread attached to its progress; dropping it detaches.
+#[must_use = "the lane lasts only while the attachment is alive"]
+pub(crate) struct LaneAttachment {
+    previous: Option<Arc<LoopProgress>>,
+    _lane: Option<cas_store::lane_guard::LaneGuard>,
+}
+
+impl Drop for LaneAttachment {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ATTACHED.with(|attached| *attached.borrow_mut() = previous);
+    }
+}
+
+fn attached() -> Option<Arc<LoopProgress>> {
+    ATTACHED.with(|attached| attached.borrow().clone())
+}
+
+/// Mark the attached lane as entering `step`. A no-op off a lane thread.
+pub(crate) fn mark(step: Step) {
+    if let Some(progress) = attached() {
+        progress.enter_step(step);
+    }
+}
+
+/// Run `step` until the returned scope drops, then return to the step that
+/// was running. A no-op off a lane thread.
+pub(crate) fn scoped(step: Step) -> Option<StepScope> {
+    let progress = attached()?;
+    let previous = progress.current_step();
+    progress.enter_step(step);
+    Some(StepScope { progress, previous })
+}
+
+/// Returns its lane to the enclosing step when dropped.
+pub(crate) struct StepScope {
+    progress: Arc<LoopProgress>,
+    previous: Step,
+}
+
+impl Drop for StepScope {
+    fn drop(&mut self) {
+        self.progress.enter_step(self.previous);
+    }
+}
+
 impl LoopProgress {
     pub(crate) fn new() -> Arc<Self> {
+        Self::with_clock(LoopClock::Real, JobHealth::global())
+    }
+
+    pub(crate) fn with_clock(clock: LoopClock, jobs: Arc<JobHealth>) -> Arc<Self> {
+        let now = clock.now();
         Arc::new(Self {
+            clock,
+            jobs,
             last_pass_ms: AtomicI64::new(Utc::now().timestamp_millis()),
             passes: AtomicU64::new(0),
-            phase: AtomicU8::new(LoopPhase::Start as u8),
             loop_tid: AtomicI64::new(current_tid()),
             spawn: Mutex::new(SpawnSnapshot::default()),
             pass_started: Mutex::new(None),
             window: Mutex::new(Vec::new()),
-            phase_clock: Mutex::new(None),
+            current: Mutex::new(CurrentStep {
+                step: LoopPhase::Start.step(),
+                started: now,
+            }),
             phase_window: Mutex::new(std::collections::BTreeMap::new()),
+            slow: Mutex::new(SlowSteps::default()),
+            wedge: Mutex::new(None),
         })
+    }
+
+    /// Mark this thread as `lane`, so sub-steps marked with [`mark`] and
+    /// [`scoped`] reach this progress and blocking calls are reported
+    /// (factory loop v2 §6.6, report mode).
+    pub(crate) fn attach(self: &Arc<Self>, lane: Lane) -> LaneAttachment {
+        let lane_guard = lane.guarded().map(cas_store::lane_guard::enter_lane);
+        let previous = ATTACHED.with(|attached| attached.replace(Some(Arc::clone(self))));
+        LaneAttachment {
+            previous,
+            _lane: lane_guard,
+        }
     }
 
     /// Mark the top of a pass, so [`Self::complete_pass`] can time it.
     pub(crate) fn begin_pass(&self) {
         if let Ok(mut started) = self.pass_started.lock() {
-            *started = Some(std::time::Instant::now());
+            *started = Some(self.clock.now());
         }
+        self.loop_tid.store(current_tid(), Ordering::Relaxed);
     }
 
     /// Take the pass durations recorded since the last call.
@@ -210,46 +558,221 @@ impl LoopProgress {
             .collect()
     }
 
-    /// Record the loop entering `phase`. The phase it leaves is timed into
-    /// the per-phase window, except the idle sleep between passes.
+    /// Record the loop entering `phase`.
     pub(crate) fn enter(&self, phase: LoopPhase) {
-        self.phase.store(phase as u8, Ordering::Relaxed);
-        let now = std::time::Instant::now();
-        let left = self.phase_clock.lock().ok().and_then(|mut clock| {
-            let left = clock.take();
-            if phase != LoopPhase::Idle {
-                *clock = Some((phase, now));
-            }
-            left
-        });
-        if let Some((left, started)) = left
-            && left != LoopPhase::Idle
-            && let Ok(mut window) = self.phase_window.lock()
-        {
-            let ms = now.duration_since(started).as_millis() as u64;
-            let latency = window.entry(left.name()).or_default();
+        self.enter_step(phase.step());
+    }
+
+    /// The step running now.
+    pub(crate) fn current_step(&self) -> Step {
+        self.current
+            .lock()
+            .map(|current| current.step)
+            .unwrap_or_else(|_| Step::idle())
+    }
+
+    /// Record the lane entering `step`. The step it leaves is timed into the
+    /// per-step window and, when over its budget, into the slow ring, the
+    /// `cas::loop_watchdog` log and the status line. The idle sleep between
+    /// passes is never timed.
+    pub(crate) fn enter_step(&self, step: Step) {
+        if let Some(lane) = step.lane.guarded() {
+            cas_store::lane_guard::switch_lane(lane);
+        }
+        let now = self.clock.now();
+        let left = match self.current.lock() {
+            Ok(mut current) => std::mem::replace(&mut *current, CurrentStep { step, started: now }),
+            Err(_) => return,
+        };
+        let Some(budget_ms) = left.step.budget_ms else {
+            return;
+        };
+        let ms = now.saturating_duration_since(left.started).as_millis() as u64;
+        if let Ok(mut window) = self.phase_window.lock() {
+            let latency = window.entry(left.step.name).or_default();
             latency.entries += 1;
             latency.max_ms = latency.max_ms.max(ms);
             if ms >= SLOW_PASS_MS {
                 latency.over_100ms += 1;
             }
         }
+        if ms > budget_ms {
+            self.record_slow(left.step, ms, budget_ms, now);
+        }
+    }
+
+    fn record_slow(&self, step: Step, elapsed_ms: u64, budget_ms: u64, now: Instant) {
+        if RED_STUB {
+            return;
+        }
+        let event = SlowStepEvent {
+            lane: step.lane.name().to_string(),
+            step: step.name.to_string(),
+            elapsed_ms,
+            budget_ms,
+            at: Utc::now(),
+        };
+        let Ok(mut slow) = self.slow.lock() else {
+            return;
+        };
+        if slow.ring.len() == SLOW_RING_CAP {
+            slow.ring.pop_front();
+        }
+        slow.ring.push_back(event.clone());
+        slow.newest = Some((event, now));
+        let log = match slow.logged.get_mut(step.name) {
+            Some((last, suppressed))
+                if now.saturating_duration_since(*last) < SLOW_LOG_INTERVAL =>
+            {
+                *suppressed += 1;
+                None
+            }
+            Some((last, suppressed)) => {
+                *last = now;
+                Some(std::mem::take(suppressed))
+            }
+            None => {
+                slow.logged.insert(step.name, (now, 0));
+                Some(0)
+            }
+        };
+        drop(slow);
+        if let Some(suppressed) = log {
+            tracing::warn!(
+                target: "cas::loop_watchdog",
+                lane = %step.lane.name(),
+                step = %step.name,
+                elapsed_ms,
+                budget_ms,
+                suppressed,
+                "daemon step over budget"
+            );
+        }
+    }
+
+    /// The last [`SLOW_RING_CAP`] over-budget steps, oldest first.
+    pub(crate) fn slow_events(&self) -> Vec<SlowStepEvent> {
+        self.slow
+            .lock()
+            .map(|slow| slow.ring.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Check the lanes' heartbeats (factory loop v2 §6.4). A pass running
+    /// for [`LANE_WEDGE_MS`] wedges the lane of its current step; a job
+    /// pending past both that and its kind's budget wedges the jobs lane.
+    /// The watchdog calls this every [`LANE_HEARTBEAT_MS`].
+    pub(crate) fn check_wedge(&self) -> Option<WedgeCheck> {
+        if RED_STUB {
+            return None;
+        }
+        let now = self.clock.now();
+        let wedge_after = Duration::from_millis(LANE_WEDGE_MS);
+        let pass = self
+            .pass_started
+            .lock()
+            .ok()
+            .and_then(|started| *started)
+            .map(|started| now.saturating_duration_since(started))
+            .filter(|elapsed| *elapsed >= wedge_after)
+            .map(|elapsed| {
+                let step = self.current_step();
+                (step.lane, step.name, elapsed)
+            });
+        let found = pass.or_else(|| {
+            self.jobs
+                .oldest(now)
+                .into_iter()
+                .filter(|(_, job)| job.age >= wedge_after.max(job.budget))
+                .max_by_key(|(_, job)| job.age)
+                .map(|(kind, job)| (Lane::Jobs, kind, job.age))
+        });
+        let Ok(mut wedge) = self.wedge.lock() else {
+            return None;
+        };
+        let Some((lane, step, duration)) = found else {
+            *wedge = None;
+            return None;
+        };
+        let new = wedge
+            .as_ref()
+            .is_none_or(|known| known.lane != lane || known.step != step);
+        if new {
+            *wedge = Some(WedgeState {
+                lane,
+                step,
+                since: now.checked_sub(duration).unwrap_or(now),
+                detected_at: Utc::now(),
+            });
+            drop(wedge);
+            tracing::warn!(
+                target: "cas::loop_watchdog",
+                lane = %lane.name(),
+                step = %step,
+                elapsed_ms = duration.as_millis() as u64,
+                wedge_ms = LANE_WEDGE_MS,
+                "daemon lane wedged"
+            );
+        }
+        Some(WedgeCheck {
+            lane,
+            step,
+            duration,
+            new,
+        })
+    }
+
+    /// The TUI status-line badge: `wedged: <lane>/<step> for <n> s` while a
+    /// lane is wedged, else `slow: <lane>/<step> <n> ms` for
+    /// [`SLOW_STATUS_SECS`] after a step over budget.
+    pub(crate) fn status_line(&self) -> Option<String> {
+        let now = self.clock.now();
+        if let Some(wedge) = self.wedge.lock().ok().and_then(|wedge| wedge.clone()) {
+            return Some(format!(
+                "wedged: {}/{} for {} s",
+                wedge.lane.name(),
+                wedge.step,
+                now.saturating_duration_since(wedge.since).as_secs()
+            ));
+        }
+        let slow = self.slow.lock().ok()?;
+        let (event, seen) = slow.newest.as_ref()?;
+        (now.saturating_duration_since(*seen) < Duration::from_secs(SLOW_STATUS_SECS)).then(|| {
+            format!(
+                "slow: {}/{} {} ms",
+                event.lane, event.step, event.elapsed_ms
+            )
+        })
     }
 
     /// Mark a pass complete. The loop's future may move between runtime
-    /// threads, so the thread id is refreshed here too.
+    /// threads, so the thread id is refreshed here too. A loop wedge ends
+    /// with the pass.
     pub(crate) fn complete_pass(&self) {
+        let now = self.clock.now();
         let elapsed = self
             .pass_started
             .lock()
             .ok()
             .and_then(|mut started| started.take())
-            .map(|started| started.elapsed().as_millis() as u64);
+            .map(|started| now.saturating_duration_since(started).as_millis() as u64);
         if let Some(ms) = elapsed
             && let Ok(mut window) = self.window.lock()
             && window.len() < PASS_WINDOW_CAP
         {
             window.push(ms);
+        }
+        if let Ok(mut wedge) = self.wedge.lock()
+            && wedge.as_ref().is_some_and(|wedge| wedge.lane != Lane::Jobs)
+            && let Some(cleared) = wedge.take()
+        {
+            tracing::info!(
+                target: "cas::loop_watchdog",
+                lane = %cleared.lane.name(),
+                step = %cleared.step,
+                elapsed_ms = elapsed.unwrap_or_default(),
+                "daemon lane recovered"
+            );
         }
         self.last_pass_ms
             .store(Utc::now().timestamp_millis(), Ordering::Relaxed);
@@ -286,14 +809,31 @@ impl LoopProgress {
             ),
             Err(_) => (0, None, None),
         };
+        let clock_now = self.clock.now();
+        let wedge = self
+            .wedge
+            .lock()
+            .ok()
+            .and_then(|wedge| wedge.clone())
+            .map(|wedge| LaneWedge {
+                lane: wedge.lane.name().to_string(),
+                step: wedge.step.to_string(),
+                duration_ms: clock_now.saturating_duration_since(wedge.since).as_millis() as u64,
+                detected_at: wedge.detected_at,
+                wchan: None,
+            });
+        let job_oldest_ms = self
+            .jobs
+            .oldest(clock_now)
+            .into_iter()
+            .map(|(kind, job)| (kind.to_string(), job.age.as_millis() as u64))
+            .collect();
         DaemonLoopStatus {
             pid,
             session: session.to_string(),
             written_at: now,
             last_pass_at,
-            phase: LoopPhase::from_u8(self.phase.load(Ordering::Relaxed))
-                .name()
-                .to_string(),
+            phase: self.current_step().name.to_string(),
             passes: self.passes.load(Ordering::Relaxed),
             pending_spawns,
             in_flight_spawn: in_flight.as_ref().map(|(name, _)| name.clone()),
@@ -306,6 +846,14 @@ impl LoopProgress {
             window_passes: 0,
             passes_over_100ms: 0,
             phase_latency: Default::default(),
+            slow_steps: self.slow_events(),
+            wedge,
+            job_oldest_ms,
+            lane_violations: cas_store::lane_guard::total_violations(),
+            lane_violation_sites: cas_store::lane_guard::violation_sites()
+                .iter()
+                .map(cas_store::lane_guard::LaneViolation::describe)
+                .collect(),
         }
     }
 }
@@ -403,9 +951,11 @@ fn kill_hung_helpers(_parent: u32, _min_age_secs: u64) -> Vec<String> {
     Vec::new()
 }
 
-/// Start the watchdog thread. It stops when `shutdown` is set, and removes
-/// its status file on the way out so a closed session does not read as a
-/// silent daemon.
+/// Start the watchdog thread. It checks the lanes' heartbeats every
+/// [`LANE_HEARTBEAT_MS`] and writes the status file every
+/// [`WATCHDOG_INTERVAL_SECS`], and at once when a lane wedges (cas-6931). It
+/// stops when `shutdown` is set, and removes its status file on the way out
+/// so a closed session does not read as a silent daemon.
 pub(crate) fn spawn_watchdog(
     progress: Arc<LoopProgress>,
     cas_dir: PathBuf,
@@ -417,36 +967,50 @@ pub(crate) fn spawn_watchdog(
         .spawn(move || {
             let pid = std::process::id();
             let mut helpers_killed: Vec<String> = Vec::new();
+            let ticks_per_write = (WATCHDOG_INTERVAL_SECS * 1000 / LANE_HEARTBEAT_MS).max(1);
+            let mut ticks_since_write = ticks_per_write;
+            let mut window = PassWindow::default();
+            let mut phase_latency = std::collections::BTreeMap::new();
             while !shutdown.load(Ordering::Relaxed) {
-                let now = Utc::now();
-                let mut status = progress.status(pid, &session, now);
-                let wedged =
-                    now.signed_duration_since(status.last_pass_at).num_seconds() > LOOP_WEDGED_SECS;
-                if wedged {
-                    status.loop_thread_wait =
-                        thread_wait_channel(progress.loop_tid.load(Ordering::Relaxed));
-                    if pending_reset(&cas_dir, &session).is_some() {
+                let wedge = progress.check_wedge();
+                let wedged_now = wedge.as_ref().is_some_and(|wedge| wedge.new);
+                if ticks_since_write >= ticks_per_write || wedged_now {
+                    let now = Utc::now();
+                    let mut status = progress.status(pid, &session, now);
+                    let loop_wedged = wedge.as_ref().is_some_and(|wedge| wedge.lane != Lane::Jobs);
+                    if loop_wedged {
+                        let wait = thread_wait_channel(progress.loop_tid.load(Ordering::Relaxed));
+                        if let Some(wedge) = status.wedge.as_mut() {
+                            wedge.wchan = wait.clone();
+                        }
+                        status.loop_thread_wait = wait;
+                    }
+                    let stalled = now.signed_duration_since(status.last_pass_at).num_seconds()
+                        > LOOP_WEDGED_SECS;
+                    if stalled && pending_reset(&cas_dir, &session).is_some() {
                         helpers_killed.extend(kill_hung_helpers(pid, HELPER_MIN_AGE_SECS));
                         let excess = helpers_killed.len().saturating_sub(KILLED_HELPERS_KEPT);
                         helpers_killed.drain(..excess);
                     }
-                }
-                status.helpers_killed = helpers_killed.clone();
-                let window = progress.take_pass_window();
-                status.max_pass_ms = window.max_ms;
-                status.p99_pass_ms = window.p99_ms;
-                status.window_passes = window.passes;
-                status.passes_over_100ms = window.over_100ms;
-                status.phase_latency = progress.take_phase_window();
-                if let Err(error) = write_status(&cas_dir, &status) {
-                    tracing::debug!(%error, "cas-73b5: could not write the daemon loop status");
-                }
-                for _ in 0..(WATCHDOG_INTERVAL_SECS * 4) {
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
+                    status.helpers_killed = helpers_killed.clone();
+                    // The pass windows span the regular interval; a write on a
+                    // new wedge repeats the last one.
+                    if ticks_since_write >= ticks_per_write {
+                        window = progress.take_pass_window();
+                        phase_latency = progress.take_phase_window();
+                        ticks_since_write = 0;
                     }
-                    std::thread::sleep(Duration::from_millis(250));
+                    status.max_pass_ms = window.max_ms;
+                    status.p99_pass_ms = window.p99_ms;
+                    status.window_passes = window.passes;
+                    status.passes_over_100ms = window.over_100ms;
+                    status.phase_latency = phase_latency.clone();
+                    if let Err(error) = write_status(&cas_dir, &status) {
+                        tracing::debug!(%error, "cas-73b5: could not write the daemon loop status");
+                    }
                 }
+                std::thread::sleep(Duration::from_millis(LANE_HEARTBEAT_MS));
+                ticks_since_write += 1;
             }
             let _ = std::fs::remove_file(status_path(&cas_dir, &session));
         })
@@ -459,6 +1023,218 @@ pub(crate) fn spawn_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer_logs = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8(logs.lock().unwrap().clone()).unwrap()
+    }
+
+    /// Factory loop v2 §6.1–6.3 (cas-6931): a step over its budget is named,
+    /// with its lane, in the slow ring, the `cas::loop_watchdog` log and the
+    /// TUI status line, which shows it for 10 s. Fake clock.
+    #[test]
+    fn flv2_watchdog_names_slow_step() {
+        let clock = FakeClock::new();
+        let progress =
+            LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)), JobHealth::new());
+        let log = capture_logs(|| {
+            let _lane = progress.attach(Lane::Control);
+            progress.begin_pass();
+            progress.enter(LoopPhase::ClientInput);
+            clock.advance(Duration::from_millis(3));
+            progress.enter(LoopPhase::PromptQueue);
+            // A prompt-queue sub-step, marked from inside the step the way
+            // `process_prompt_queue` marks its own.
+            mark(Step::prompt_queue("prompt queue: stub step"));
+            clock.advance(Duration::from_millis(45));
+            {
+                // A nested scope (the director apply's `timed()` steps)
+                // returns to the enclosing step when it ends.
+                let _scope = scoped(Step::control("change detection"));
+                clock.advance(Duration::from_millis(4));
+            }
+            assert_eq!(progress.current_step().name, "prompt queue: stub step");
+            progress.enter(LoopPhase::Render);
+            progress.complete_pass();
+            progress.enter(LoopPhase::Idle);
+            // The idle sleep is never a slow step.
+            clock.advance(Duration::from_millis(400));
+            progress.begin_pass();
+        });
+
+        let ring = progress.slow_events();
+        assert_eq!(ring.len(), 1, "only the over-budget step: {ring:?}");
+        assert_eq!(ring[0].lane, "control");
+        assert_eq!(ring[0].step, "prompt queue: stub step");
+        assert_eq!(ring[0].elapsed_ms, 45);
+        assert_eq!(ring[0].budget_ms, PROMPT_QUEUE_STEP_BUDGET_MS);
+
+        let warn = log
+            .lines()
+            .find(|line| line.contains("daemon step over budget"))
+            .unwrap_or_else(|| panic!("no over-budget log line: {log}"));
+        assert!(warn.contains("WARN"), "{warn}");
+        assert!(warn.contains("cas::loop_watchdog"), "{warn}");
+        assert!(warn.contains("lane=control"), "{warn}");
+        assert!(warn.contains("step=prompt queue: stub step"), "{warn}");
+        assert!(warn.contains("elapsed_ms=45"), "{warn}");
+        assert!(warn.contains("budget_ms=20"), "{warn}");
+
+        assert_eq!(
+            progress.status_line().as_deref(),
+            Some("slow: control/prompt queue: stub step 45 ms")
+        );
+        let status = progress.status(1, "s", Utc::now());
+        assert_eq!(status.slow_steps, ring);
+        clock.advance(Duration::from_secs(SLOW_STATUS_SECS));
+        assert_eq!(progress.status_line(), None, "the badge clears after 10 s");
+
+        // An io step has the 5 ms budget, and the ring keeps the last 32.
+        for _ in 0..(SLOW_RING_CAP + 8) {
+            progress.enter(LoopPhase::PtyOutput);
+            clock.advance(Duration::from_millis(IO_STEP_BUDGET_MS + 1));
+            progress.enter(LoopPhase::Idle);
+        }
+        let ring = progress.slow_events();
+        assert_eq!(ring.len(), SLOW_RING_CAP);
+        assert!(
+            ring.iter()
+                .all(|event| event.lane == "io" && event.step == "pty output")
+        );
+        assert_eq!(
+            progress.status_line().as_deref(),
+            Some("slow: io/pty output 6 ms")
+        );
+    }
+
+    /// Factory loop v2 §6.4 (cas-6931): a lane blocked 1.5 s is reported as
+    /// wedged with its step, within the 250 ms heartbeat of the 1 s wedge,
+    /// in `loop.json` and the status line; a job pending past its budget is
+    /// a named jobs-lane wedge.
+    #[test]
+    fn flv2_wedge_reports_step_and_duration() {
+        let temp = tempfile::tempdir().unwrap();
+        let progress = LoopProgress::new();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handle = spawn_watchdog(
+            Arc::clone(&progress),
+            temp.path().to_path_buf(),
+            "flv2-wedge".to_string(),
+            Arc::clone(&shutdown),
+        )
+        .expect("watchdog starts");
+
+        let lane_progress = Arc::clone(&progress);
+        let (blocked_tx, blocked) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let lane = std::thread::spawn(move || {
+            let _lane = lane_progress.attach(Lane::Control);
+            lane_progress.begin_pass();
+            lane_progress.enter(LoopPhase::PromptQueue);
+            mark(Step::prompt_queue("prompt queue: urgent inject"));
+            blocked_tx.send(()).unwrap();
+            // Blocked until the test has seen the wedge and 1.5 s have passed.
+            let _ = released.recv_timeout(Duration::from_secs(20));
+            lane_progress.enter(LoopPhase::Render);
+            lane_progress.complete_pass();
+            lane_progress.enter(LoopPhase::Idle);
+        });
+        blocked.recv().unwrap();
+        let started = Instant::now();
+
+        let mut wedge = None;
+        while wedge.is_none() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+            wedge = crate::factory_daemon_health::read_status(temp.path(), "flv2-wedge")
+                .and_then(|status| status.wedge);
+        }
+        let detected_after = started.elapsed();
+        let wedge = wedge.expect("loop.json records the wedge");
+        assert_eq!(wedge.lane, "control");
+        assert_eq!(wedge.step, "prompt queue: urgent inject");
+        assert!(wedge.duration_ms >= LANE_WEDGE_MS, "{wedge:?}");
+        assert!(
+            detected_after < Duration::from_secs(3),
+            "a 1 s wedge is written on the heartbeat, not at the next 5 s write: \
+             {detected_after:?}"
+        );
+        let line = progress.status_line().expect("the TUI shows the wedge");
+        let secs: u64 = line
+            .strip_prefix("wedged: control/prompt queue: urgent inject for ")
+            .and_then(|rest| rest.strip_suffix(" s"))
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(secs >= 1, "{line}");
+
+        let remaining = Duration::from_millis(1_500).saturating_sub(started.elapsed());
+        std::thread::sleep(remaining);
+        release.send(()).unwrap();
+        lane.join().unwrap();
+        assert_eq!(progress.check_wedge(), None, "the wedge ends with the pass");
+        let blocked_step = progress
+            .slow_events()
+            .into_iter()
+            .find(|event| event.step == "prompt queue: urgent inject")
+            .expect("the blocked step is in the slow ring");
+        assert_eq!(blocked_step.lane, "control");
+        assert!(blocked_step.elapsed_ms >= 1_500, "{blocked_step:?}");
+
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // A job pending past its budget and the 1 s wedge names the jobs lane.
+        let clock = FakeClock::new();
+        let jobs = JobHealth::new();
+        let progress =
+            LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)), Arc::clone(&jobs));
+        let ticket = jobs.begin_at("store write", Duration::from_millis(100), clock.now());
+        clock.advance(Duration::from_millis(900));
+        assert_eq!(progress.check_wedge(), None, "under the 1 s wedge");
+        clock.advance(Duration::from_millis(600));
+        let check = progress.check_wedge().expect("job wedge");
+        assert_eq!(check.lane, Lane::Jobs);
+        assert_eq!(check.step, "store write");
+        assert_eq!(check.duration, Duration::from_millis(1_500));
+        assert!(check.new);
+        assert_eq!(
+            progress.status_line().as_deref(),
+            Some("wedged: jobs/store write for 1 s")
+        );
+        let status = progress.status(1, "s", Utc::now());
+        assert_eq!(status.job_oldest_ms.get("store write"), Some(&1_500));
+        assert_eq!(
+            status.wedge.as_ref().map(|wedge| wedge.lane.as_str()),
+            Some("jobs")
+        );
+        assert!(
+            !progress.check_wedge().unwrap().new,
+            "logged once per wedge"
+        );
+        drop(ticket);
+        assert_eq!(progress.check_wedge(), None);
+        assert!(progress.status(1, "s", Utc::now()).job_oldest_ms.is_empty());
+    }
 
     #[test]
     fn pass_window_reports_max_p99_and_slow_passes_then_resets() {

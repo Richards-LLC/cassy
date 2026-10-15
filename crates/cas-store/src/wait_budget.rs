@@ -184,7 +184,10 @@ pub fn store_access_forbidden() -> bool {
 }
 
 /// Record a store access. Inside a forbidden region it counts as a violation.
+/// On a daemon lane it is also reported to [`crate::lane_guard`].
+#[track_caller]
 pub fn note_store_access(what: &'static str) {
+    crate::lane_guard::note_blocking_call(crate::lane_guard::BlockingKind::Store, what);
     if store_access_forbidden() {
         VIOLATIONS.with(|count| count.set(count.get() + 1));
         LAST_VIOLATION.with(|last| last.set(Some(what)));

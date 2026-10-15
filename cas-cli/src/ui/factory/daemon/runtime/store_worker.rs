@@ -38,6 +38,10 @@ pub(crate) const SHUTDOWN_STORE_WAIT_BUDGET: Duration = Duration::from_secs(2);
 /// How often the background thread runs the pending task-sync repair.
 pub(crate) const TASK_SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Watchdog budget of one store-worker job (factory loop v2 §4.4,
+/// `QueueStamp`); past it and the 1 s wedge the jobs lane reads as wedged.
+const STORE_JOB_BUDGET: Duration = Duration::from_millis(100);
+
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 /// One ordered background thread for daemon store writes.
@@ -124,6 +128,14 @@ impl StoreWorker {
             return false;
         };
         self.pending.fetch_add(1, Ordering::AcqRel);
+        // cas-6931 (factory loop v2 §6.5): the watchdog sees each pending
+        // job's age by kind, so a writer stuck on a flock is a named job
+        // wedge rather than a frozen TUI.
+        let ticket = super::loop_watchdog::JobHealth::global().begin(label, STORE_JOB_BUDGET);
+        let job: Job = Box::new(move || {
+            let _ticket = ticket;
+            job();
+        });
         if sender.send((key, job)).is_err() {
             self.pending.fetch_sub(1, Ordering::AcqRel);
             tracing::warn!(label, "factory store worker stopped; job dropped");

@@ -35,6 +35,7 @@ use std::time::Duration;
 /// backoff (in `shared_db::with_write_retry`) handles longer contention.
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub mod lane_guard;
 pub mod shared_db;
 pub mod wait_budget;
 

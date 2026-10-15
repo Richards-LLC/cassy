@@ -199,6 +199,28 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
   expect(ring, "the focused field shows its whole focus ring").toEqual({ outline: "solid", fits: true });
 }
 
+/**
+ * Hold the page clock a moment ahead of the page's own now (cas-c4b2). Time
+ * then moves only through page.clock.runFor/fastForward, so a step that
+ * stands for a measured delay is counted on the page clock alone, never
+ * stretched by a loaded host. Resume with page.clock.resume().
+ *
+ * The page's now is its installed clock's origin plus the ticks run since
+ * (journeys never set the system time). It is read just before the hold, and
+ * read again if a slow round trip let the clock pass it.
+ */
+export async function holdPageClock(page: Page, ahead = 250): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    const now = await page.evaluate(() => performance.timeOrigin + performance.now());
+    try {
+      await page.clock.pauseAt(now + ahead);
+      return;
+    } catch (error) {
+      if (attempt === 3 || !String(error).includes("Cannot fast-forward to the past")) throw error;
+    }
+  }
+}
+
 /** Two animation frames: let the UI paint before a screenshot. */
 export async function settle(page: Page): Promise<void> {
   // A test that holds the page clock (ProtocolClock) holds animation frames

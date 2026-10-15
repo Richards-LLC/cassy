@@ -56,7 +56,11 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     new MutationObserver((records) => {
       for (const record of records) {
         const speaker = region(record.target);
-        if (!speaker || !speaker.isConnected) continue;
+        // A live region in a hidden subtree (the context rail's stale-status
+        // line while its section is hidden) is not read aloud. Counting it
+        // made the outage look announced twice once the line aged past "just
+        // now", which a slow host reached and a fast one did not (cas-c4b2).
+        if (!speaker || !speaker.isConnected || !speaker.checkVisibility()) continue;
         const words = speaker.innerText.trim();
         if (!words || last.get(speaker) === words) continue;
         last.set(speaker, words);
@@ -91,8 +95,10 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(seen.header).toContain("Reconnecting");
     expect(seen.row).toContain("Reconnecting");
     // Journey F42: the banner announces the outage, once. The header's
-    // "Reconnecting" is on screen but is not a second announcement.
-    await page.waitForTimeout(1_500);
+    // "Reconnecting" is on screen but is not a second announcement. The page
+    // clock runs the app's next second and a half (its retry included) at
+    // once, however loaded the host (cas-c4b2).
+    await page.clock.runFor(1_500);
     expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     await expect(header).toHaveAttribute("aria-live", "off");
     await expect(banner.getByRole("status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
@@ -165,7 +171,11 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // cas-5a8f: once the held send is out on a live machine and delivered,
     // the supervisor has it and the thread says it is working again.
     await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
-    await page.waitForTimeout(1_000);
+    // A second flush would come from a timer: the page clock runs the next
+    // second at once, and a round trip carries anything it sent to the double
+    // (cas-c4b2).
+    await page.clock.runFor(1_000);
+    await page.evaluate(() => 0);
     expect(hub.sends.filter((m) => m.text === "Are you there?"), "sent once, not again").toHaveLength(1);
     // The transport alarm resolved itself with the reconnect.
     await expect(page.locator("#attention-panel")).not.toContainText(/transport/i);
@@ -218,7 +228,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // The banner's own text is what sits on top at its centre, in light and in dark.
     for (const scheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme: scheme });
-      await page.waitForTimeout(1_600);
+      // The failed resize send's toast, if any, and the theme's transitions
+      // run on the page clock now, not over a fixed pause (cas-c4b2).
+      await page.clock.runFor(1_600);
       const onTop = await banner.evaluate((el) => { const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && (hit === el || el.contains(hit)); });
       expect(onTop, `banner unobscured (${scheme})`).toBe(true);
     }
@@ -264,8 +276,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
       }
     }
     // Journey F42: the reasons are descriptions, not live regions: the
-    // outage is still announced once, by the banner.
-    await page.waitForTimeout(1_000);
+    // outage is still announced once, by the banner. The page clock runs the
+    // next second at once, however loaded the host (cas-c4b2).
+    await page.clock.runFor(1_000);
     expect((await heard()).filter((words) => OUTAGE.test(words)), "the outage is announced once").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     // Playwright will not click an aria-disabled control; a person can. A
     // press says why instead of acting: nothing reaches the hub and no drawer

@@ -1,5 +1,4 @@
 import { phoneLayout, phoneSwitch, showConversationList } from "./responsive-goals";
-import type { Page } from "@playwright/test";
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
@@ -13,14 +12,17 @@ import { journeyStamp } from "./clock";
  * page was still on its way; a count of the page's own requests does not.
  * The test timeout remains only as a hang guard.
  */
-async function within(page: Page, what: string, events: () => number, allowance: number, ready: () => Promise<boolean>): Promise<void> {
+async function within(what: string, events: () => number, allowance: number, ready: () => Promise<boolean>): Promise<void> {
   const start = events();
-  for (;;) {
-    if (await ready()) return;
-    const seen = events() - start;
-    if (seen > allowance) throw new Error(`${what}: still not so after ${seen} protocol events (allowance ${allowance})`);
-    await page.waitForTimeout(100);
-  }
+  let seen = 0;
+  let outcome = "waiting";
+  // Poll the whole condition, with no time limit of its own (cas-c4b2).
+  await expect.poll(async () => {
+    if (await ready()) return (outcome = "ready");
+    seen = events() - start;
+    return (outcome = seen > allowance ? "over allowance" : "waiting");
+  }, { message: what, timeout: 0 }).not.toBe("waiting");
+  if (outcome !== "ready") throw new Error(`${what}: still not so after ${seen} protocol events (allowance ${allowance})`);
 }
 
 // A third machine, paired mid-journey. Its id sorts before both others and
@@ -159,7 +161,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(dialog).toBeHidden();
     const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
     if (await back.isVisible().catch(() => false)) await back.click();
-    await within(page, "the paired machine's sessions are listed", () => hub.catalogFetchCount("alpha"), 3, () => list.getByRole("button", { name: /orion/ }).isVisible());
+    await within("the paired machine's sessions are listed", () => hub.catalogFetchCount("alpha"), 3, () => list.getByRole("button", { name: /orion/ }).isVisible());
     expect(await colour(/cas-src/), "Atlas keeps its accent").toBe(atlas);
     expect(await colour(/gabber-studio/), "Studio keeps its accent").toBe(studio);
     expect(await colour(/orion/), "the new machine gets its own accent").not.toBe(atlas);

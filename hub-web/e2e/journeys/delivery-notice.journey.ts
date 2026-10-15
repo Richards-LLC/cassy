@@ -1,4 +1,4 @@
-import { test, expect, expectWholeFocusRing, RECEIPTS } from "./journey";
+import { test, expect, expectWholeFocusRing, RECEIPTS, settle } from "./journey";
 import { join } from "node:path";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
@@ -63,8 +63,11 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
   await journey.stage("The delivery problem is one attention item", async () => {
     await expect(attentionItems).toHaveCount(1);
     // The watchdog raises it again (a repeat and a live replay): still one.
-    hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: false } });
-    await page.waitForTimeout(300);
+    const repeat = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: false } });
+    // The page has handled the repeat before it is counted, rather than after
+    // a fixed pause a loaded host can outrun (cas-c4b2).
+    await hub.received(repeat);
+    await settle(page);
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");
     // cas-5c22: the item carries the notice's own time, not when this page heard of it.

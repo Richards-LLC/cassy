@@ -4701,6 +4701,7 @@ mod cas_89e1_post_merge_message_type_tests {
         task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-unreviewed-message-test".into(), target_branch: "main".into() });
         tasks.add(&task).unwrap();
         core.cas_task_reopen(Parameters(serde_json::from_value(serde_json::json!({"id":task.id,"reason":"Unmerged tip was never reviewed"})).unwrap())).await.unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("worker-id".into());
         env.set("CAS_AGENT_ROLE", "worker");
         #[cfg(feature = "mcp-proxy")]
@@ -4717,8 +4718,13 @@ mod cas_89e1_post_merge_message_type_tests {
         let reopened = tasks.get(&task.id).unwrap();
         let git = crate::prompt_revalidation::queued_merge_request_decision(repo, Some(&reopened), &envelope);
         assert_eq!(crate::prompt_revalidation::merge_request_delivery_decision(Some(&reopened), &envelope, &git), crate::prompt_revalidation::MergeRequestDelivery::Deliver);
-        core.set_agent_id_for_testing("supervisor-id".into());
-        let inbox = response_text(service.inbox_poll(serde_json::from_value(serde_json::json!({"action":"inbox_poll"})).unwrap()).await.unwrap());
+        let inbox_core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        inbox_core.set_agent_id_for_testing("supervisor-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let inbox_service = CasService::new(inbox_core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let inbox_service = CasService::new(inbox_core);
+        let inbox = response_text(inbox_service.inbox_poll(serde_json::from_value(serde_json::json!({"action":"inbox_poll"})).unwrap()).await.unwrap());
         assert!(inbox.contains("Fresh worker delivery"), "{inbox}");
         assert!(inbox.contains(&tip), "{inbox}");
     }

@@ -125,48 +125,81 @@ fn cas_07ee_terminated_recipient_never_raises_unread_or_stalled() {
 }
 
 #[test]
-fn cas_07ee_closed_or_merged_task_no_longer_needs_attention() {
+fn cas_07ee_closed_task_no_longer_needs_attention() {
     let _env = env();
-    for merged in [false, true] {
-        let mut f = Fixture::new();
-        let mut task = Task::new("cas-07ee".into(), "delivery".into());
-        task.assignee = Some("worker".into());
-        task.status = if merged {
-            TaskStatus::AwaitingMerge
-        } else {
-            TaskStatus::Closed
-        };
-        if merged {
-            task.deliverables.merge_commit = Some("merged-tip".into());
-        }
-        crate::store::open_task_store_local(&f.cas_dir)
-            .unwrap()
-            .add(&task)
+    let mut f = Fixture::new();
+    let mut task = Task::new("cas-07ee".into(), "delivery".into());
+    task.assignee = Some("worker".into());
+    task.status = TaskStatus::Closed;
+    crate::store::open_task_store_local(&f.cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    f.aged("supervisor", "worker", "cas-07ee merged; re-close now");
+    assert!(
+        f.scan().is_empty(),
+        "re-close is already satisfied by the closed task"
+    );
+}
+
+#[test]
+fn cas_07ee_merged_delivery_no_longer_needs_attention() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
             .unwrap();
-        if merged {
-            let envelope = crate::prompt_revalidation::MergeRequestEnvelope {
-                task_id: task.id.clone(),
-                branch_tip: "delivery-tip".into(),
-                target_branch: "main".into(),
-                target_branch_tip: "old-target".into(),
-                anchor_tip: None,
-                commits_not_on_target_base: 1,
-                pr_number: None,
-                source_freshness_unavailable: None,
-            };
-            let body = crate::prompt_revalidation::attach_merge_request_envelope(
-                "status: ready",
-                &envelope,
-            );
-            f.aged("worker", "supervisor", &body);
-        } else {
-            f.aged("supervisor", "worker", "cas-07ee merged; re-close now");
-        }
         assert!(
-            f.scan().is_empty(),
-            "the task has already satisfied this message: merged={merged}"
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
-    }
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["config", "user.name", "Cassy Test"]);
+    std::fs::write(f.root.path().join("delivery.txt"), "already merged\n").unwrap();
+    git(&["add", "delivery.txt"]);
+    git(&["commit", "-qm", "delivery"]);
+    let tip = git(&["rev-parse", "HEAD"]);
+    let mut task = Task::new("cas-07ee".into(), "delivery".into());
+    task.assignee = Some("worker".into());
+    task.status = TaskStatus::AwaitingMerge;
+    crate::store::open_task_store_local(&f.cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    let envelope = crate::prompt_revalidation::MergeRequestEnvelope {
+        task_id: task.id.clone(),
+        branch_tip: tip,
+        target_branch: "main".into(),
+        target_branch_tip: "old-target".into(),
+        anchor_tip: None,
+        commits_not_on_target_base: 1,
+        pr_number: None,
+        source_freshness_unavailable: None,
+    };
+    assert!(matches!(
+        crate::prompt_revalidation::queued_merge_request_decision(
+            f.root.path(),
+            Some(&task),
+            &envelope
+        ),
+        crate::prompt_revalidation::MergeRequestDecision::AlreadyIntegrated { .. }
+    ));
+    let body =
+        crate::prompt_revalidation::attach_merge_request_envelope("status: ready", &envelope);
+    f.aged("worker", "supervisor", &body);
+    assert!(
+        f.scan().is_empty(),
+        "the requested commit is already on the real Git target"
+    );
 }
 
 #[test]

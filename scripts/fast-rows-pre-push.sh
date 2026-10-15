@@ -16,6 +16,12 @@ set -uo pipefail
 
 zero='0000000000000000000000000000000000000000'
 common="$(git rev-parse --path-format=absolute --git-common-dir)" || exit 1
+# Git exports GIT_DIR, GIT_INDEX_FILE and friends to hooks. The gate runs
+# script tests that create fixture repositories; with those variables set, a
+# fixture `git init` reinitialised the shared repository as bare (cas-f95b).
+# The hook runs at the worktree root, so discovery finds the same repository.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
 receipts="$common/cas/fast-rows"
 status=0
 

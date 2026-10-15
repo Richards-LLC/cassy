@@ -1568,6 +1568,7 @@ pub trait PromptQueueStore: Send + Sync {
     ) -> Result<i64>;
 
     /// Record a supervisor's terminal input as already processed history.
+    /// Record its immutable event and, when enrolled, cloud outbox atomically.
     /// It must never enter the pending notification queue.
     fn record_terminal_operator_turn(&self, factory_session: &str, prompt: &str) -> Result<i64>;
 
@@ -3670,16 +3671,31 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn record_terminal_operator_turn(&self, factory_session: &str, prompt: &str) -> Result<i64> {
+        require_operator_session("operator", Some(factory_session))?;
+        let event_id = operator_delivery::new_event_identity();
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO prompt_queue
-                   (source, target, prompt, created_at, processed_at, factory_session)
-                 VALUES ('terminal', 'terminal-history', ?1, ?2, ?2, ?3)",
-                params![prompt, now, factory_session],
+            let tx = ImmediateTx::new(&conn)?;
+            let id = Self::insert_complete_operator_turn(
+                &tx,
+                &OperatorTurn {
+                    source: "terminal",
+                    target: "terminal-history",
+                    prompt,
+                    factory_session: Some(factory_session),
+                    metadata: OperatorTurnMetadata::default(),
+                },
+                &event_id,
+            )?
+            .id();
+            // The terminal already delivered this input. Commit history and
+            // both outboxes together without ever notifying an agent again.
+            tx.execute(
+                "UPDATE prompt_queue SET processed_at = created_at WHERE id = ?1",
+                [id],
             )?;
-            Ok(conn.last_insert_rowid())
+            tx.commit()?;
+            Ok(id)
         })
     }
 

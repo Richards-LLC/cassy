@@ -243,6 +243,7 @@ impl SqlitePromptQueueStore {
         let id = conn.last_insert_rowid();
         if metadata.cloud_history_event_id.is_none()
             && (turn.target.trim().eq_ignore_ascii_case("operator")
+                || (turn.source == "terminal" && turn.target == "terminal-history")
                 || operator.is_some_and(|stamp| stamp.verified))
         {
             let snapshot = serde_json::to_string(&serde_json::json!({

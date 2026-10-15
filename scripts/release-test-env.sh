@@ -5,6 +5,12 @@
 # it prevents nested admitted suites from waiting on their owning proof.
 release_test_env_scrub() {
     local release_env_key
+    # Git exports GIT_DIR, GIT_INDEX_FILE and friends to hooks. A suite child
+    # that inherits them points every fixture `git init`/`git commit` at the
+    # real repository: the pre-push fast rows set core.bare=true in the shared
+    # .git/config twice on 2026-10-14 (cas-ea62).
+    # shellcheck disable=SC2046
+    unset $(git rev-parse --local-env-vars 2>/dev/null)
     if [[ -n "${release_test_home:-}" ]]; then
         # Preserve toolchain locations while tests see a clean CI-like HOME.
         export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"

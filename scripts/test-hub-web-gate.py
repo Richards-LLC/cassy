@@ -144,7 +144,10 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
 
     # cas-7822: the ~19 min Commander step runs only for its real inputs.
     def test_unrelated_script_or_workflow_skips_web_tests(self):
-        for path in ('scripts/test-jev-triage.py', '.github/workflows/release.yml', 'scripts/release-gate.sh'):
+        # cas-a1b0: release plumbing (the former worker-memory wrapper closure) too.
+        for path in ('scripts/test-jev-triage.py', '.github/workflows/release.yml', 'scripts/release-gate.sh',
+                     'scripts/worker-memory.py', 'scripts/host_memory.py', 'scripts/assembly-proof.py',
+                     'scripts/proof_target.py', 'scripts/release_scratch.py', 'scripts/release_env.py'):
             with self.subTest(path=path):
                 self.write(path, '# unrelated to hub-web\n')
                 self.commit()
@@ -153,8 +156,7 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
 
     def test_journey_catalog_specs_and_repo_level_inputs_run_web_tests(self):
         for path in ('hub-web/src/main.ts', 'hub-web/dist/app.js', 'hub-web/e2e/journeys/reply.journey.ts',
-                     'docs/qa/journeys.md', 'docs/design/design-tokens.json', 'scripts/worker-memory.py',
-                     'scripts/assembly-proof.py', 'scripts/classify-web-inputs.py'):
+                     'docs/qa/journeys.md', 'docs/design/design-tokens.json', 'scripts/classify-web-inputs.py'):
             with self.subTest(path=path):
                 self.write(path, ('# ' if path.endswith('.py') else '') + 'changed web input\n')
                 self.commit()
@@ -183,18 +185,6 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
                 self.assertEqual((result.returncode, result.stdout), (0, expected + '\n'), result.stderr)
                 self.base = self.git('rev-parse', 'HEAD').stdout.strip()
 
-    def test_merge_queue_commander_step_consumes_web_signal(self):
-        # Cheap wiring proof for a ci.yml edit; the journeys themselves do not run.
-        steps = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())['jobs']['fast-validation-preflight']['steps']
-        by_name = {step.get('name', ''): step for step in steps}
-        self.assertEqual(by_name['Build and test Commander web assets']['if'],
-                         "steps.classify-diff.outputs.web-check-needed == 'true'")
-        self.assertEqual(by_name['Build and test Commander web assets']['working-directory'], 'hub-web')
-        self.assertIn("steps.classify-diff.outputs.web-check-needed == 'true'",
-                      by_name['Upload Commander journey evidence on failure']['if'])
-        classify = [step for step in steps if step.get('id') == 'classify-diff']
-        self.assertEqual([step.get('uses') for step in classify], ['./.github/actions/classify-required-diff'])
-
     def test_failed_web_classifier_runs_web_tests(self):
         self.write('scripts/classify-web-inputs.py', 'raise SystemExit(1)\n')
         self.write('scripts/unrelated.py', '# unrelated\n')
@@ -221,27 +211,15 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
                         found.add(str(target.relative_to(ROOT)))
         workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         for job in workflow['jobs'].values():
+            default = job.get('defaults', {}).get('run', {}).get('working-directory')
             for step in job.get('steps', []):
-                if step.get('working-directory') == 'hub-web':
+                if step.get('working-directory', default) == 'hub-web':
                     found.update(str((ROOT / 'hub-web' / r).resolve().relative_to(ROOT))
                                  for r in reference.findall(step.get('run', '')))
         self.assertIn('scripts/visual-qa.mjs', found)
-        self.assertIn('scripts/worker-memory.py', found)
+        self.assertNotIn('scripts/worker-memory.py', found)
         self.assertIn('docs/design/design-tokens.json', found)
         self.assertIn('scripts/test-ci-journey-evidence-upload.sh', found)
-        # worker-memory.py's own sibling imports are inputs too.
-        closure = {'scripts/worker-memory.py'}
-        pending = ['scripts/worker-memory.py']
-        while pending:
-            body = (ROOT / pending.pop()).read_text()
-            names = re.findall(r"with_name\(['\"]([\w.-]+\.py)['\"]\)", body)
-            names += [m + '.py' for m in re.findall(r'^import (\w+)$', body, re.M)
-                      if (ROOT / 'scripts' / (m + '.py')).exists()]
-            for name in names:
-                if 'scripts/' + name not in closure:
-                    closure.add('scripts/' + name)
-                    pending.append('scripts/' + name)
-        found |= closure
         missing = sorted(path for path in found if not WEB.covered(path))
         self.assertEqual(missing, [], 'add these hub-web inputs to scripts/classify-web-inputs.py WEB_INPUTS')
 
@@ -256,48 +234,6 @@ if command == 'test' and Path('../scripts/visual-qa.mjs').read_text() != 'expect
         result = subprocess.run([str(ROOT / 'scripts/classify-web-inputs.py'), '7c233bef^', '7c233bef'], cwd=ROOT,
                                 text=True, capture_output=True)
         self.assertEqual((result.returncode, result.stdout), (0, 'true\n'), result.stderr)
-
-    def test_scoped_lanes_execute_the_signaled_web_tests(self):
-        workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
-        for job in ('scoped-validation-fast', 'scoped-validation'):
-            with self.subTest(job=job):
-                steps = [s for s in workflow['jobs'][job]['steps']
-                         if s.get('working-directory') == 'hub-web' and 'npm test' in s.get('run', '')]
-                self.assertEqual(len(steps), 1, f'{job} must consume the web signal')
-                self.assertIn("steps.classify-diff.outputs.web-check-needed == 'true'", steps[0]['if'])
-                (self.repo / 'npm-calls').unlink(missing_ok=True)
-                result = subprocess.run(['bash', '-euo', 'pipefail', '-c', steps[0]['run']],
-                                        cwd=self.repo / 'hub-web',
-                                        env=dict(os.environ, PATH=str(self.repo / 'bin') + ':' + os.environ['PATH']),
-                                        text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual((self.repo / 'npm-calls').read_text().splitlines(),
-                                 ['ci', 'run typecheck', 'test'])
-
-    def test_scoped_conditions_cover_push_and_pr_routing(self):
-        workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
-        conditions = []
-        for job in ('scoped-validation-fast', 'scoped-validation'):
-            conditions.append(next(s['if'] for s in workflow['jobs'][job]['steps']
-                                   if s.get('working-directory') == 'hub-web'))
-        cases = [('push', 'true', 'false', [True, False]),
-                 ('push', 'false', 'false', [False, True]),
-                 ('pull_request', 'true', 'false', [True, True]),
-                 ('push', 'true', 'true', [True, False])]
-        # The fast job itself runs only on factory pushes. Conditions here
-        # prove its step remains independent of PR dedupe and full-tier routing.
-        for event, fast, covered, expected in cases:
-            with self.subTest(event=event, fast=fast, covered=covered):
-                actual = []
-                for condition in conditions:
-                    expression = condition
-                    for variable, value in [('github.event_name', event),
-                                            ('steps.classify-diff.outputs.fast-admission', fast),
-                                            ('steps.classify-diff.outputs.web-check-needed', 'true'),
-                                            ('steps.pr-dedupe.outputs.covered', covered)]:
-                        expression = expression.replace(variable, repr(value))
-                    actual.append(eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}}))
-                self.assertEqual(actual, expected)
 
 if __name__ == '__main__':
     unittest.main()

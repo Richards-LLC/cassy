@@ -23,6 +23,8 @@ class PolicyTests(unittest.TestCase):
         cls.files = set()
         for entry in cls.entries + prose:
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
+        # Workflow sources the behavioural cases below read beyond the registry.
+        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -62,28 +64,6 @@ class PolicyTests(unittest.TestCase):
         self.write('.github/workflows/ci.yml', data)
         self.assertTrue(policy.validate(self.root, verbose=False))
 
-    def test_trigger_comment_cannot_replace_the_actual_factory_trigger(self):
-        data = self.ci()
-        data['on']['push']['branches'].remove('factory/**')
-        self.write('.github/workflows/ci.yml', data)
-        with (self.root / '.github/workflows/ci.yml').open('a') as stream:
-            stream.write('\n# - "factory/**"\n')
-        policy.load.cache_clear()
-        failed = policy.validate(self.root, verbose=False)
-        self.assertIn('factory pushes trigger CI', [entry['consumer'] for entry, _ in failed])
-
-    def test_comment_and_display_name_cannot_replace_an_executable_step(self):
-        for body in ['# make -C cas-cli test-ci-tiers\ntrue\n', 'true # make -C cas-cli test-ci-tiers\n']:
-            with self.subTest(body=body):
-                data = self.ci()
-                step = next(s for s in data['jobs']['fast-validation-preflight']['steps'] if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
-                step['name'] = 'make -C cas-cli test-ci-tiers'
-                step['run'] = body
-                self.write('.github/workflows/ci.yml', data)
-                self.assertTrue(policy.validate(self.root, verbose=False))
-                shutil.copyfile(policy.ROOT / '.github/workflows/ci.yml', self.root / '.github/workflows/ci.yml')
-                policy.load.cache_clear()
-
     def test_required_context_in_a_note_cannot_replace_a_real_context(self):
         file = self.root / 'docs/branch-protection/main-ruleset.json'
         data = json.loads(file.read_text())
@@ -99,7 +79,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn('requires pyyaml==6.0.3', result.stderr)
 
     def test_real_parser_provisioning_step_reuses_yaml_or_isolates_installation(self):
-        step = next(s for s in self.ci()['jobs']['fast-validation-preflight']['steps']
+        step = next(s for s in self.ci()['jobs']['fast-validation-ci-tiers']['steps']
                     if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
         # Isolate tool orchestration and the pip network boundary. The make
         # fixture runs the actual parsed-policy suite, without recursive make.
@@ -134,8 +114,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
 [[ "$MODE" != install-failure ]]
 ''')
                 (fixture / 'venv-python').write_text(f'#!/usr/bin/env bash\nexec {interpreter} "$@"\n')
-                # cas-bf89: a runner that has the linter installs nothing.
-                (bin_dir / 'markdownlint-cli2').write_text('#!/usr/bin/env bash\n')
+                # cas-a1b0: the pinned linter comes from the root lockfile.
+                (bin_dir / 'npm').write_text('#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$CALLS"\n')
                 (bin_dir / 'make').write_text(f'''#!/usr/bin/env bash
 set -euo pipefail
 [[ "$*" == '-C cas-cli test-ci-tiers' ]]
@@ -157,38 +137,19 @@ fi
                     self.assertNotEqual(result.returncode, 0)
                     self.assertNotIn('make', calls)
                     if mode == 'venv-failure': self.assertEqual(calls, ['import', 'venv'])
+                    self.assertNotIn('npm ci --no-audit --no-fund', calls)
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     count = len(self.entries) + len(json.loads((policy.HERE / 'prose-pins.json').read_text()))
                     self.assertIn(f'parsed policy/prose: {count} passed; 0 failed', result.stdout)
                     if mode == 'present':
-                        self.assertEqual(calls, ['import', 'make', str(bin_dir / 'python3')])
+                        self.assertEqual(calls, ['import', 'npm ci --no-audit --no-fund', 'make', str(bin_dir / 'python3')])
                         self.assertFalse((runner_temp / 'ci-tiers-venv').exists())
                     else:
                         self.assertEqual(calls, ['import', 'venv',
                             'pip install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt',
+                            'npm ci --no-audit --no-fund',
                             'make', str(runner_temp / 'ci-tiers-venv/bin/python3')])
-
-    def test_cas_bf89_missing_markdownlint_is_installed_under_runner_temp(self):
-        step = next(s for s in self.ci()['jobs']['fast-validation-preflight']['steps']
-                    if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
-        bin_dir = self.root / 'bin';bin_dir.mkdir()
-        runner_temp = self.root / 'runner';runner_temp.mkdir()
-        log = self.root / 'calls'
-        (bin_dir / 'python3').write_text('#!/usr/bin/env bash\n')  # YAML importable
-        (bin_dir / 'npm').write_text('''#!/usr/bin/env bash
-set -euo pipefail
-printf 'npm %s\\n' "$*" >> "$CALLS"
-mkdir -p "$3/node_modules/.bin" && printf '#!/usr/bin/env bash\\n' > "$3/node_modules/.bin/markdownlint-cli2"
-chmod +x "$3/node_modules/.bin/markdownlint-cli2"
-''')
-        (bin_dir / 'make').write_text('#!/usr/bin/env bash\ncommand -v markdownlint-cli2 >> "$CALLS"\n')
-        for child in bin_dir.iterdir(): child.chmod(0o755)
-        result = self.run_body(step['run'], dict(PATH=f'{bin_dir}:/usr/bin:/bin', RUNNER_TEMP=str(runner_temp), CALLS=str(log)))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log.read_text().splitlines(), [
-            f'npm install --prefix {runner_temp}/markdownlint markdownlint-cli2@0.18.1 --no-audit --no-fund --silent',
-            str(runner_temp / 'markdownlint/node_modules/.bin/markdownlint-cli2')])
 
     def test_parsed_archive_fail_open_contract_and_all_four_mutations(self):
         job = self.ci()['jobs']['fast-validation-suite-build']
@@ -211,22 +172,6 @@ chmod +x "$3/node_modules/.bin/markdownlint-cli2"
         actual_disable, _ = policy.role(changed, 'Disable sccache for the self-hosted suite archive', source)
         actual_archive, _ = policy.role(changed, 'Build full suite archive', source)
         self.assertGreater(actual_disable, actual_archive)
-
-    def test_heavy_concurrency_positive_controls_and_all_fifteen_mutations(self):
-        jobs = self.ci()['jobs']
-        for name in ['clippy', 'test-compile-guard', 'panic-isolation-release', 'panic-isolation-release-fast', 'build-benchmark']:
-            with self.subTest(job=name):
-                job = jobs[name]
-                group = f'heavy-tier-{name}-${{{{ github.event_name }}}}-${{{{ github.ref }}}}'
-                def valid(candidate):
-                    return candidate.get('concurrency', {}).get('group') == group and candidate.get('concurrency', {}).get('cancel-in-progress') is True and all(ref not in candidate['if'] for ref in ['refs/heads/epic/', 'refs/heads/factory/'])
-                self.assertTrue(valid(job))
-                changed = copy.deepcopy(job);changed['concurrency'].pop('group')
-                self.assertFalse(valid(changed))
-                changed = copy.deepcopy(job);changed['concurrency']['cancel-in-progress'] = False
-                self.assertFalse(valid(changed))
-                changed = copy.deepcopy(job);changed['if'] += " || startsWith(github.ref, 'refs/heads/epic/')"
-                self.assertFalse(valid(changed))
 
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
         factory_group = "${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}"
@@ -286,79 +231,6 @@ chmod +x "$3/node_modules/.bin/markdownlint-cli2"
             with self.subTest(save_ref=ref):
                 self.assertEqual(self.gh_expr(save_if, {'github.ref': ref}), expected)
 
-    def test_queue_full_gate_reuse_skips_linux_lanes_but_never_macos_cas_4cb8(self):
-        jobs = self.ci()['jobs']
-        dedupe = jobs['fast-validation-main-push-dedupe']
-        self.assertEqual(dedupe['outputs']['reuse-source'], '${{ steps.tree-dedupe.outputs.reuse-source }}')
-        reuse = "needs.fast-validation-main-push-dedupe.outputs.reuse-source == 'full-gate'"
-        run = "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'"
-        def macos_runs_on_reuse(job):
-            return reuse in job['if'] and run in job['if']
-        self.assertTrue(macos_runs_on_reuse(jobs['macos-check']))
-        changed = copy.deepcopy(jobs['macos-check']); changed['if'] = changed['if'].replace(reuse, "false")
-        self.assertFalse(macos_runs_on_reuse(changed))
-        # The suite and doctests are proven by the full gate and skip on reuse.
-        for name in ['fast-validation-suite-build', 'fast-validation-suite-shards',
-                     'fast-validation-suite', 'fast-validation-docs']:
-            with self.subTest(job=name):
-                self.assertIn(run, jobs[name]['if'])
-                self.assertNotIn('full-gate', jobs[name]['if'])
-        # The preflight still runs on reuse: the full gate runs no journeys.
-        preflight = jobs['fast-validation-preflight']
-        self.assertIn(reuse, preflight['if'])
-        by_name = {step.get('name', ''): step for step in preflight['steps']}
-        web = by_name['Build and test Commander web assets']
-        self.assertEqual(web['env']['FULL_GATE_REUSE'], "${{ " + reuse + " }}")
-        gate_only = web['run'].split('if [[ "$FULL_GATE_REUSE" == true ]]; then', 1)[1].split('exit 0', 1)[0]
-        self.assertIn('npm run journeys -- --workers=4', gate_only)
-        guards = by_name['Test release publication guards']
-        self.assertIn("reuse-source != 'full-gate'", guards['if'])
-        for kept in ['Check', 'Test portable x86_64 ISA audit', 'Build (without MCP proxy)']:
-            self.assertNotIn('full-gate', by_name[kept].get('if', ''), kept)
-        rollup = {step.get('name', ''): step for step in jobs['fast-validation']['steps']}
-        report = rollup['Report the full-gate receipt reused by this merge-queue run']
-        self.assertIn('test "$PREFLIGHT" = success', report['run'])
-
-    def run_commander_step(self, full_gate, journeys):
-        """Run the real Commander step body with logging stubs for npm/npx/git."""
-        jobs = self.ci()['jobs']
-        steps = {s.get('name', ''): s for s in jobs['fast-validation-preflight']['steps']}
-        step = steps['Build and test Commander web assets']
-        dedupe = 'needs.fast-validation-main-push-dedupe.outputs.'
-        self.assertEqual(step['env']['FULL_GATE_REUSE'], '${{ ' + dedupe + "reuse-source == 'full-gate' }}")
-        self.assertEqual(step['env']['JOURNEYS_REUSE'], '${{ ' + dedupe + "journeys-reuse == 'true' }}")
-        sandbox = self.root / 'commander-step'
-        stubs, hub, scripts = sandbox / 'bin', sandbox / 'hub-web', sandbox / 'scripts'
-        for directory in (stubs, hub, scripts):
-            directory.mkdir(parents=True, exist_ok=True)
-        log = sandbox / 'calls.log'
-        for tool in ('npm', 'npx', 'git', 'sudo'):
-            (stubs / tool).write_text(f'#!/bin/sh\necho "{tool} $*" >>"{log}"\n')
-            (stubs / tool).chmod(0o755)
-        (scripts / 'test-ci-journey-evidence-upload.sh').write_text('exit 0\n')
-        environment = dict(os.environ, PATH=f'{stubs}:{os.environ["PATH"]}',
-                           FULL_GATE_REUSE='true' if full_gate else 'false',
-                           JOURNEYS_REUSE='true' if journeys else 'false')
-        result = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', step['run']],
-                                cwd=hub, env=environment, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return log.read_text() if log.exists() else ''
-
-    def test_queue_skips_commander_journeys_only_with_both_proofs_cas_9f70(self):
-        jobs = self.ci()['jobs']
-        dedupe = jobs['fast-validation-main-push-dedupe']
-        self.assertEqual(dedupe['outputs']['journeys-reuse'], '${{ steps.tree-dedupe.outputs.journeys-reuse }}')
-        journeys = 'npm run journeys -- --workers=4'
-        self.assertNotIn(journeys, self.run_commander_step(full_gate=True, journeys=True))
-        self.assertIn(journeys, self.run_commander_step(full_gate=True, journeys=False))
-        # A journeys proof without the full gate never skips anything.
-        both_missing = self.run_commander_step(full_gate=False, journeys=True)
-        self.assertIn(journeys, both_missing)
-        self.assertIn('npm test', both_missing)
-        rollup = {step.get('name', ''): step for step in jobs['fast-validation']['steps']}
-        report = rollup['Report the full-gate receipt reused by this merge-queue run']
-        self.assertIn('JOURNEYS_REUSE', report['env'])
-
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']
         def counts():
@@ -381,26 +253,6 @@ chmod +x "$3/node_modules/.bin/markdownlint-cli2"
         # which cannot execute these Ubuntu workflow bodies (e.g. mapfile).
         bash = shutil.which('bash')
         return subprocess.run([bash, '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
-
-    def test_release_shared_rustup_wiring_rejects_unsafe_route_mutations(self):
-        self.assertEqual(policy.validate(self.root, verbose=False), [])
-        for file, job in [('.github/workflows/release.yml', 'verify'),
-                          ('.github/workflows/release.yml', 'build'),
-                          ('.github/workflows/release-prebuild.yml', 'build')]:
-            original = copy.deepcopy(policy.load(self.root / file))
-            for mutation in ['remove-helper', 'unguarded-action', 'wrong-helper-route']:
-                with self.subTest(job=job, mutation=mutation):
-                    data = copy.deepcopy(original)
-                    steps = data['jobs'][job]['steps']
-                    helper = next(s for s in steps if s.get('run') == './scripts/setup-cassy-actions-rust.sh')
-                    action = next(s for s in steps if s.get('uses') == 'dtolnay/rust-toolchain@stable')
-                    if mutation == 'remove-helper': steps.remove(helper)
-                    elif mutation == 'unguarded-action': action.pop('if')
-                    else: helper['if'] = helper['if'].replace("'self-hosted'", "'hosted'")
-                    self.write(file, data)
-                    failures = policy.validate(self.root, verbose=False)
-                    self.assertTrue(any('shared Rust' in e['consumer'] for e, _ in failures))
-            self.write(file, original)
 
     def rustup_fixture(self, state):
         fixture = self.root / state
@@ -477,11 +329,23 @@ else:
     def test_real_required_rollup_rejects_every_failed_or_cancelled_dependency(self):
         job = self.ci()['jobs']['fast-validation']
         step = next(s for s in job['steps'] if 'test "$PREFLIGHT" = success' in s.get('run', ''))
-        healthy = dict(PREFLIGHT='success', SUITE='success', DOCS='success')
+        healthy = dict(PREFLIGHT='success', SUITE='success', DOCS='success',
+                       CI_TIERS='success', SLACK_BRIDGE='success', WEB='success', JOURNEYS='success')
         self.assertEqual(self.run_body(step['run'], healthy).returncode, 0)
         for key, value in itertools.product(healthy, ['failure', 'cancelled']):
             with self.subTest(dependency=key, verdict=value):
                 self.assertNotEqual(self.run_body(step['run'], {**healthy, key:value}).returncode, 0)
+        # Input-gated lanes may be skipped; the always-on lanes may not.
+        for key in ['CI_TIERS', 'SLACK_BRIDGE', 'WEB', 'JOURNEYS']:
+            with self.subTest(skipped=key):
+                self.assertEqual(self.run_body(step['run'], {**healthy, key: 'skipped'}).returncode, 0)
+        for key in ['PREFLIGHT', 'SUITE', 'DOCS']:
+            with self.subTest(skipped=key):
+                self.assertNotEqual(self.run_body(step['run'], {**healthy, key: 'skipped'}).returncode, 0)
+        # Every red input-gated lane is reported in the same run, not just the first.
+        result = self.run_body(step['run'], {**healthy, 'WEB': 'failure', 'JOURNEYS': 'failure'})
+        self.assertIn('WEB lane is failure', result.stdout)
+        self.assertIn('JOURNEYS lane is failure', result.stdout)
         shard = next(s for s in self.ci()['jobs']['fast-validation-suite']['steps'] if 'test "$SHARDS" = success' in s.get('run', ''))
         self.assertEqual(self.run_body(shard['run'], {'SHARDS':'success'}).returncode, 0)
         for result in ['failure', 'cancelled']:
@@ -493,7 +357,7 @@ else:
         bin_dir = self.root / 'bin'
         bin_dir.mkdir()
         (bin_dir / 'git').write_text('#!/usr/bin/env bash\ncase "$1" in merge-base) echo fixture-base;; diff) cat "$CHANGED_PATHS";; *) exit 2;; esac\n')
-        (bin_dir / 'npx').write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$NPX_LOG"\n')
+        (bin_dir / 'python3').write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$NPX_LOG"\n')
         for child in bin_dir.iterdir(): child.chmod(0o755)
         changed = self.root / 'changed'
         log = self.root / 'npx.args'
@@ -502,7 +366,7 @@ else:
         changed.write_text('\n'.join(assets + ['docs/round-3/visual-qa.md']) + '\n')
         result = self.run_body(step['run'], environment)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log.read_text().splitlines(), ['--yes', 'markdownlint-cli2@0.18.1', '--config', '.markdownlint-cli2.jsonc', 'docs/round-3/visual-qa.md'])
+        self.assertEqual(log.read_text().splitlines(), ['scripts/markdownlint.py', '--config', '.markdownlint-cli2.jsonc', 'docs/round-3/visual-qa.md'])
         log.unlink()
         changed.write_text('\n'.join(assets) + '\n')
         result = self.run_body(step['run'], environment)

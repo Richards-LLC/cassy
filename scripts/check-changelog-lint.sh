@@ -9,12 +9,10 @@
 # Usage: scripts/check-changelog-lint.sh [repo-root]
 #   CAS_CHANGELOG_LINT_CMD  override the linter command (tests); it receives
 #                           `--config <root>/.markdownlint-cli2.jsonc <root>/CHANGELOG.md`
+# The linter is the pinned root devDependency, resolved by scripts/markdownlint.py,
+# the same one Docs Lint runs.
 # Exit: 0 clean, 1 findings, 2 linter unavailable or inputs missing.
 set -euo pipefail
-
-# Keep in lockstep with the Docs Lint job in .github/workflows/ci.yml;
-# scripts/test-check-changelog-lint.sh fails if the two drift.
-MARKDOWNLINT_CLI2_VERSION="0.18.1"
 
 root="${1:-$(git rev-parse --show-toplevel)}"
 changelog="$root/CHANGELOG.md"
@@ -28,14 +26,17 @@ done
 
 if [[ -n "${CAS_CHANGELOG_LINT_CMD:-}" ]]; then
     read -r -a linter <<<"$CAS_CHANGELOG_LINT_CMD"
-elif command -v npx >/dev/null 2>&1; then
-    linter=(npx --yes "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}")
 else
-    echo "error: npx is not on PATH; install Node to run markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}" >&2
-    exit 2
+    linter=(python3 "$(dirname "${BASH_SOURCE[0]}")/markdownlint.py")
 fi
 
-if "${linter[@]}" --config "$config" "$changelog"; then
+status=0
+"${linter[@]}" --config "$config" "$changelog" || status=$?
+if [[ "$status" == 3 ]]; then
+    echo "error: the pinned markdownlint-cli2 is unavailable (see above)" >&2
+    exit 2
+fi
+if [[ "$status" == 0 ]]; then
     echo "ok: CHANGELOG.md passes the Docs Lint markdownlint policy"
     exit 0
 fi

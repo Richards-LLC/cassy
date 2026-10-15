@@ -262,6 +262,8 @@ export class HubConnectionSupervisor {
   private readonly legacySends = new WeakMap<WebSocket, Array<{ clientRef: string; target: string }>>();
   private readonly retiredLegacySockets = new Map<WebSocket, number>();
   private readonly attachRetryTimers = new Map<string, number>();
+  /** Sessions with an attach() between its start and its socket (cas-5dbc). */
+  private readonly attachesInFlight = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
   private readonly readySockets = new WeakSet<WebSocket>();
@@ -909,6 +911,7 @@ export class HubConnectionSupervisor {
     // "live" again on its next beat, which erased "Needs pairing" from the
     // controls and the rail while the header still said it.
     if (!this.desired || this.lifecycle.phase !== "live") return;
+    this.ensureAttachesPending();
     const started = performance.now();
     try {
       await this.refreshSessions(AbortSignal.timeout(3_000));
@@ -1154,10 +1157,34 @@ export class HubConnectionSupervisor {
   }
 
   async attach(session: string): Promise<void> {
+    this.attachesInFlight.set(session, (this.attachesInFlight.get(session) ?? 0) + 1);
     try {
       await this.openAttach(session);
     } catch (error) {
       await this.handleAttachFailure(session, error);
+    } finally {
+      const left = (this.attachesInFlight.get(session) ?? 1) - 1;
+      if (left > 0) this.attachesInFlight.set(session, left);
+      else this.attachesInFlight.delete(session);
+    }
+  }
+
+  /**
+   * cas-5dbc: on a live machine, every desired session either is served or
+   * has its next attempt coming: a socket opening or open, an attach in
+   * flight, or a retry timer. One left with none (an attempt that ended
+   * without a socket or a retry, such as an abandon while its ticket was in
+   * flight) is scheduled again rather than left "Reconnecting" for good.
+   */
+  private ensureAttachesPending(): void {
+    if (!this.desired || this.lifecycle.phase !== "live" || this.machineSocketOpening) return;
+    for (const session of this.desiredSessions) {
+      if (this.servedByMachineSocket(session) || this.attachRetryTimers.has(session) || this.attachesInFlight.has(session)) continue;
+      // An unsupported browser needs an upgrade, not another attempt.
+      if (this.attachLifecycles.get(session)?.fatal) continue;
+      const socket = this.sockets.get(session);
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) continue;
+      this.scheduleAttach(session);
     }
   }
 
@@ -1511,7 +1538,7 @@ export class HubConnectionSupervisor {
       this.timedOutSockets.add(socket);
       this.transitionAttach(session, "failed", "dialing", { reason: "Stuck dialing terminal — node may be offline (5s)" });
       this.callbacks.onSocketError(session, "Stuck dialing terminal — node may be offline (5s). Retrying…");
-      socket.close();
+      this.replaceTimedOutSocket(session, socket);
     }, STAGE_TIMEOUT_MS.dialing);
     this.attachTimeouts.set(session, timeouts);
   }
@@ -1523,9 +1550,22 @@ export class HubConnectionSupervisor {
       this.timedOutSockets.add(socket);
       this.transitionAttach(session, "failed", "attaching", { reason: "Terminal opened but sent no session state within 3s" });
       this.callbacks.onSocketError(session, "Terminal attach opened but sent no session state within 3s. Retrying…");
-      socket.close();
+      this.replaceTimedOutSocket(session, socket);
     }, STAGE_TIMEOUT_MS.attaching);
     this.attachTimeouts.set(session, timeouts);
+  }
+
+  /**
+   * cas-5dbc: a timed-out socket is retired and the next attempt scheduled
+   * now. Its close() may never finish (a half-open socket), and the attach
+   * chain used to wait for that onclose before retrying: the session then
+   * stayed "Reconnecting" with no further attempt.
+   */
+  private replaceTimedOutSocket(session: string, socket: WebSocket): void {
+    this.clearAttachTimeouts(session);
+    if (this.sockets.get(session) === socket) this.sockets.delete(session);
+    this.retireLegacySocket(socket);
+    if (this.desired) this.scheduleAttach(session);
   }
 
   private clearAttachTimeout(session: string, kind: "open" | "ready"): void {

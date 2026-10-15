@@ -1,5 +1,5 @@
 import { phoneLayout, phoneReply } from "./responsive-goals";
-import { test, expect, journeyPart } from "./journey";
+import { test, expect, journeyPart, holdPageClock } from "./journey";
 import type { Machine } from "./hub-double";
 import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -322,10 +322,15 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await send.click();
     expect((await crossing).text).toBe("Run the gate once more.");
     // The supervisor's turn crosses the send, and the receipt comes 3.4 s
-    // later: the slowest late receipt measured in the cas-1622 QA.
-    hub.supervisorSays(PELICAN, "Gate run 2 of 3 is going.");
-    await page.waitForTimeout(3_400);
-    hub.deliverLatest(PELICAN);
+    // later: the slowest late receipt measured in the cas-1622 QA. Those
+    // 3.4 s, and the 5 s give-up they must stay inside (cas-1185), are counted
+    // on the held page clock: a loaded host's wall clock cannot stretch the
+    // gap past the give-up and flash "Not confirmed" (cas-c4b2).
+    await holdPageClock(page);
+    await hub.received(hub.supervisorSays(PELICAN, "Gate run 2 of 3 is going."));
+    await page.clock.runFor(3_400);
+    await hub.received(hub.deliverLatest(PELICAN));
+    await page.clock.resume();
     const crossed = page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Run the gate once more." });
     await expect(crossed).toHaveCount(1);
     const flashed = await page.evaluate(() => {
@@ -528,7 +533,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(search).toBeFocused();
     releasePelican();
     await expect(page.locator(".conversation-pane-slot :is(.terminal-connecting, .conversation-opening)")).toHaveCount(0, { timeout: 10_000 });
-    await page.waitForTimeout(500);
+    // Any focus move the replacement queued on a timer runs now, on the page
+    // clock, rather than racing a fixed pause (cas-c4b2).
+    await page.clock.runFor(500);
     await expect(search).toBeFocused();
   });
 

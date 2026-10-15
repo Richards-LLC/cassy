@@ -209,8 +209,10 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await expect(log.locator('a[data-artifact-id="art-offline"]')).toHaveAccessibleName(/Lost connection to Atlas · Linux\. Reconnecting…/);
     await expect(log).not.toContainText("is connected");
     // The banner says the drop once; the card's rewrite is not a second
-    // announcement, through its own role or the thread's log around it.
-    await page.waitForTimeout(1_500);
+    // announcement, through its own role or the thread's log around it. The
+    // page clock runs the app's next second and a half of timers at once, so
+    // a late repeat is heard however loaded the host (cas-c4b2).
+    await page.clock.runFor(1_500);
     const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
     expect(heard.filter((words) => /lost connection|reconnecting/i.test(words)), "the outage is spoken once, by the banner").toEqual(["Lost connection to Atlas · Linux. Reconnecting…"]);
     await expect(note("art-offline")).toHaveAttribute("aria-live", "off");
@@ -283,8 +285,9 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
     await expect(header).toContainText("Reconnecting");
     await hub.up("atlas");
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
-    // Past the rebuild: focus is still where the reader put it.
-    await page.waitForTimeout(500);
+    // Past the rebuild: focus is still where the reader put it. The rebuild's
+    // timers run on the page clock, not over a fixed pause (cas-c4b2).
+    await page.clock.runFor(500);
     await expect(loadEarlier).toBeFocused();
   });
 
@@ -362,8 +365,9 @@ for (const [name, viewport, rest] of [
       await expect(header).toContainText("Reconnecting");
       await hub.up("atlas");
       await expect(header).toHaveText(" · Live", { timeout: 30_000 });
-      // Past the rebuild and the put-back of the reading position.
-      await page.waitForTimeout(650);
+      // Past the rebuild and the put-back of the reading position, both run
+      // on the page clock rather than over a fixed pause (cas-c4b2).
+      await page.clock.runFor(650);
       await expect(loadEarlier).toBeFocused();
       const shown = await shownInThread();
       expect(shown.top, "the focused Load earlier is not above the thread").toBeGreaterThanOrEqual(0);

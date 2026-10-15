@@ -121,7 +121,9 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
     // Focus came back to End session, which reads the failure as its
     // description, so the failure is not also an alert: said once (cas-9ae6).
-    await page.waitForTimeout(500);
+    // The page clock runs half a second of the app's own timers at once, so a
+    // late second announcement is caught however loaded the host (cas-c4b2).
+    await page.clock.runFor(500);
     const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
     expect(heard.filter((words) => words.includes("Could not end")), "the failure is said once").toEqual([failure]);
     await expect(row("amber-fox-29")).toHaveCount(1);

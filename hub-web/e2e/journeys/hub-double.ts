@@ -5,7 +5,7 @@
 // to the pairing relay is answered here, at the network boundary. Payload
 // shapes follow the hub wire types in src/types.ts and the relay contract in
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
-import type { Page, Route, WebSocketRoute } from "@playwright/test";
+import { expect, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 import { createHash, webcrypto } from "node:crypto";
 import { journeyNow } from "./clock";
 
@@ -297,6 +297,19 @@ export class HubDouble {
     return found;
   }
 
+  /**
+   * Resolves once the page has received the hub frame that carries
+   * `notificationId` (a turn, receipt or notice), with every listener the app
+   * attached to that socket already run (cas-c4b2). A step that must prove
+   * nothing more happened after a frame waits on its arrival, not on a fixed
+   * pause a loaded host can outrun.
+   */
+  async received(notificationId: number, page = this.page): Promise<void> {
+    await expect.poll(() => page.evaluate((id) => (window as unknown as { __hubNotifications?: Set<number> }).__hubNotifications?.has(id) ?? false, notificationId), {
+      message: `the page received hub frame ${notificationId}`,
+    }).toBe(true);
+  }
+
   /** Install routes; call before the first navigation. */
   async install(page = this.page): Promise<void> {
     // /v1/events is a long-lived event stream the bundle reads with fetch.
@@ -368,6 +381,25 @@ export class HubDouble {
     await page.route("https://*.test/**", (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
     await page.routeWebSocket(/\.test\/v1\//, (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
+    // Every notification id the page's hub sockets deliver (received()). The
+    // listener is attached in the constructor, so it runs before the app's
+    // own: by the time a later evaluation sees an id, the app has handled it.
+    // Registered after routeWebSocket, whose init script replaces
+    // window.WebSocket with Playwright's mock: this extends the mock.
+    await page.addInitScript(() => {
+      const seen = new Set<number>();
+      (window as unknown as { __hubNotifications: Set<number> }).__hubNotifications = seen;
+      const Socket = window.WebSocket;
+      window.WebSocket = class extends Socket {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols);
+          this.addEventListener("message", (event: MessageEvent) => {
+            if (typeof event.data !== "string") return;
+            for (const match of event.data.matchAll(/"notification_id":(\d+)/g)) seen.add(Number(match[1]));
+          });
+        }
+      };
+    });
   }
 
   private fleetStatus(fleet: FleetWorld): Record<string, unknown> {

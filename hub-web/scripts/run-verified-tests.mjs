@@ -39,7 +39,9 @@ export function runVerified(runner, args, { spawn = spawnSync, cwd = process.cwd
     const nativeArgs = runner === 'vitest'
       ? ['run', ...args, '--reporter=default', '--reporter=json', `--outputFile=${report}`]
       : ['test', ...args, '--reporter=list,json'];
-    const result = spawn('python3', [fileURLToPath(new URL('../../scripts/worker-memory.py', import.meta.url)), '--', process.execPath, resolve(cwd, `node_modules/${runner === 'vitest' ? 'vitest/vitest.mjs' : '@playwright/test/cli.js'}`), ...nativeArgs], {
+    // cas-a1b0: no host-memory wrapper. It stopped CI journeys on the shared
+    // runner (cas-f632) and made release scripts Commander inputs (cas-a677).
+    const result = spawn(process.execPath, [resolve(cwd, `node_modules/${runner === 'vitest' ? 'vitest/vitest.mjs' : '@playwright/test/cli.js'}`), ...nativeArgs], {
       cwd, stdio: 'inherit', env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: report },
     });
     if (result.error) throw result.error;

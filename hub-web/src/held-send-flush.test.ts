@@ -118,4 +118,28 @@ describe("held-send recovery flush", () => {
     expect(writes).toBe(0);
     expect((await journal.read(scope)).sends).toEqual([]);
   });
+
+  // cas-5dbc (HUB-J12 queue run 38685284564): the header said Live, the
+  // session's socket could not take the write yet (a definite no-write, so the
+  // journal answers "waiting"), and no later live callback came. The held
+  // message sat "Waiting for the connection" for good.
+  it("re-attempts a batch whose write the socket could not take, with no later live callback (cas-5dbc)", async () => {
+    const journal = new CommanderJournal(new IDBFactory(), async () => fence, () => 1_000, false);
+    await journal.reconcile(scope, [], [item], fence);
+    const flushes = new HeldSendFlushes(5);
+    let writable = false, writes = 0;
+    await flushes.run(scope.session, async () => {
+      const result = await journal.dispatch(scope, item.id, fence, () => {
+        if (!writable) return false;
+        writes++;
+        return true;
+      });
+      return result === "waiting" ? "waiting" : undefined;
+    });
+    expect(writes).toBe(0);
+    expect((await journal.read(scope)).sends[0].state).toBe("held");
+    writable = true;
+    await vi.waitFor(() => expect(writes).toBe(1));
+    await vi.waitFor(async () => expect((await journal.read(scope)).sends[0].state).toBe("sending"));
+  });
 });

@@ -1,6 +1,10 @@
 use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
 
+#[cfg(test)]
+#[path = "message_attention_tests.rs"]
+mod message_attention_tests;
+
 /// What a delivery probe learned about recipient-authored activity (GH #1163).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecipientActivity {

@@ -647,7 +647,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
         let verified = include_str!("../../scripts/run-verified-tests.sh");
-        let mut command = if repo.join("scripts/worker-proof-guards.py").is_file() {
+        let mut command = if repo.join("cas-cli/Cargo.toml").is_file()
+            && repo.join("scripts/check-test-shape.py").is_file()
+        {
             let mut guarded = Command::new("python3");
             guarded.env("PYTHONDONTWRITEBYTECODE", "1");
             guarded.arg("-c").arg(include_str!("../../scripts/worker-proof-guards.py"))
@@ -778,8 +780,9 @@ mod tests {
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         std::fs::create_dir(repo.join("scripts")).unwrap();
+        std::fs::create_dir(repo.join("cas-cli")).unwrap();
+        std::fs::write(repo.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
         for (name, source) in [
-            ("worker-proof-guards.py", include_str!("../../scripts/worker-proof-guards.py")),
             ("check-test-shape.py", include_str!("../../scripts/check-test-shape.py")),
             ("rust_test_source.py", include_str!("../../scripts/rust_test_source.py")),
         ] {
@@ -788,7 +791,10 @@ mod tests {
         git(&repo, &["add", "."]).unwrap();
         git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "guard fixture"]).unwrap();
         let fake = dir.path().join("cargo");
-        fake_cargo(&fake, r#"printf '%s\n' "$*" >> target/invocations
+        fake_cargo(&fake, r#"if [ -d /proc/self/fd ]; then
+    [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 11
+fi
+printf '%s\n' "$*" >> target/invocations
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(unrelated)"].map(str::to_string);
         execute_at(&root, &args, &repo, &fake).unwrap();

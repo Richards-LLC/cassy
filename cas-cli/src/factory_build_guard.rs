@@ -18,6 +18,8 @@ pub(crate) struct BuildGuardSnapshot {
     pub load_1m: Option<f64>,
     pub live_cargo_workers: usize,
     pub requested_workers: usize,
+    pub requested_builders: usize,
+    pub expected_build: &'static str,
     pub max_concurrent_builders: usize,
     pub disabled: bool,
 }
@@ -47,28 +49,41 @@ impl BuildGuardSnapshot {
                 load, self.cpu_count
             ));
         }
-        let projected = self
-            .live_cargo_workers
-            .saturating_add(self.requested_workers);
-        if projected > self.max_concurrent_builders {
-            violations.push(format!(
-                "{} live/requested Cargo workers would exceed max_concurrent_builders={}",
-                projected, self.max_concurrent_builders
-            ));
+        if self.requested_builders > 0 {
+            let projected = self
+                .live_cargo_workers
+                .saturating_add(self.requested_builders);
+            if projected > self.max_concurrent_builders {
+                violations.push(format!(
+                    "{} live/requested Cargo builders would exceed max_concurrent_builders={}",
+                    projected, self.max_concurrent_builders
+                ));
+            }
         }
         violations
     }
 
     pub(crate) fn refusal_message(&self) -> String {
         let violations = self.violations();
+        let retry = if violations
+            .iter()
+            .any(|violation| violation.contains("max_concurrent_builders="))
+        {
+            " Retry the same spawn_workers request after a Cargo worker releases a builder slot; pass force=true only for an intentional override."
+        } else {
+            " Pass force=true to override this soft guard."
+        };
         format!(
-            "Build concurrency guard: refusing spawn of {} worker(s): {}. Current state: load_1m={}, cpu_count={}, live_cargo_workers={}, max_concurrent_builders={}. Pass force=true to override this soft guard.",
+            "Build concurrency guard: refusing spawn of {} worker(s): {}. Current state: load_1m={}, cpu_count={}, live_cargo_workers={}, requested_builders={}, expected_build={}, max_concurrent_builders={}.{}",
             self.requested_workers,
             violations.join("; "),
             format_load(self.load_1m),
             self.cpu_count,
             self.live_cargo_workers,
+            self.requested_builders,
+            self.expected_build,
             self.max_concurrent_builders,
+            retry,
         )
     }
 
@@ -84,11 +99,13 @@ impl BuildGuardSnapshot {
             violations.join("; ")
         };
         format!(
-            "\nBuild guard: {state}; load_1m={} / cpu_count={}; live_cargo_workers={}; requested_workers={}; max_concurrent_builders={}",
+            "\nBuild guard: {state}; load_1m={} / cpu_count={}; live_cargo_workers={}; requested_workers={}; requested_builders={}; expected_build={}; max_concurrent_builders={}",
             format_load(self.load_1m),
             self.cpu_count,
             self.live_cargo_workers,
             self.requested_workers,
+            self.requested_builders,
+            self.expected_build,
             self.max_concurrent_builders,
         )
     }
@@ -103,14 +120,82 @@ pub(crate) fn evaluate(
     requested_workers: usize,
     max_concurrent_builders: usize,
 ) -> BuildGuardSnapshot {
+    evaluate_with_builders(
+        cpu_count,
+        load_1m,
+        live_cargo_workers,
+        requested_workers,
+        requested_workers,
+        "unknown (counted conservatively)",
+        max_concurrent_builders,
+    )
+}
+
+/// Evaluate a spawn with its pre-assigned task's build expectation. Tasks
+/// explicitly marked no-code or docs-only do not consume Cargo builder slots;
+/// all other and unassigned work is counted conservatively.
+pub(crate) fn evaluate_for_task(
+    cpu_count: usize,
+    load_1m: Option<f64>,
+    live_cargo_workers: usize,
+    requested_workers: usize,
+    max_concurrent_builders: usize,
+    task: Option<&cas_types::Task>,
+) -> BuildGuardSnapshot {
+    let expected_build = task_build_expectation(task);
+    let requested_builders = if matches!(expected_build, "no-code" | "docs-only") {
+        0
+    } else {
+        requested_workers
+    };
+    evaluate_with_builders(
+        cpu_count,
+        load_1m,
+        live_cargo_workers,
+        requested_workers,
+        requested_builders,
+        expected_build,
+        max_concurrent_builders,
+    )
+}
+
+fn evaluate_with_builders(
+    cpu_count: usize,
+    load_1m: Option<f64>,
+    live_cargo_workers: usize,
+    requested_workers: usize,
+    requested_builders: usize,
+    expected_build: &'static str,
+    max_concurrent_builders: usize,
+) -> BuildGuardSnapshot {
     BuildGuardSnapshot {
         cpu_count: cpu_count.max(1),
         load_1m,
         live_cargo_workers,
         requested_workers,
+        requested_builders,
+        expected_build,
         max_concurrent_builders,
         disabled: false,
     }
+}
+
+fn task_build_expectation(task: Option<&cas_types::Task>) -> &'static str {
+    let Some(task) = task else {
+        return "unknown (counted conservatively)";
+    };
+    if task.execution_note.as_deref() == Some("no-code") {
+        return "no-code";
+    }
+    if task.labels.iter().any(|label| {
+        matches!(
+            label.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+            "docs-only" | "documentation-only"
+        )
+    }) {
+        return "docs-only";
+    }
+    "yes"
 }
 
 /// Inspect the host and evaluate the requested spawn against the factory cap.
@@ -119,25 +204,39 @@ pub(crate) fn inspect(
     config: &FactoryConfig,
     requested_workers: usize,
 ) -> BuildGuardSnapshot {
+    inspect_for_task(cas_root, config, requested_workers, None)
+}
+
+/// Inspect host pressure while accounting for the pre-assigned task's build
+/// expectation, when one is available.
+pub(crate) fn inspect_for_task(
+    cas_root: &Path,
+    config: &FactoryConfig,
+    requested_workers: usize,
+    task: Option<&cas_types::Task>,
+) -> BuildGuardSnapshot {
     let cpu_count = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(1);
     if build_guard_disabled_override() {
-        return BuildGuardSnapshot {
+        let mut snapshot = evaluate_for_task(
             cpu_count,
-            load_1m: None,
-            live_cargo_workers: 0,
+            None,
+            0,
             requested_workers,
-            max_concurrent_builders: config.max_concurrent_builders,
-            disabled: true,
-        };
+            config.max_concurrent_builders,
+            task,
+        );
+        snapshot.disabled = true;
+        return snapshot;
     }
-    evaluate(
+    evaluate_for_task(
         cpu_count,
         one_minute_load(),
         live_cargo_worker_count(cas_root),
         requested_workers,
         config.max_concurrent_builders,
+        task,
     )
 }
 
@@ -262,6 +361,62 @@ mod tests {
                 .any(|violation| violation.contains("max_concurrent_builders=4"))
         );
         assert!(snapshot.receipt_notice(true).contains("forced override"));
+    }
+
+    #[test]
+    fn no_code_preassigned_spawn_at_builder_cap_needs_no_force() {
+        let mut task = cas_types::Task::new("cas-no-code".into(), "Triage an issue".into());
+        task.execution_note = Some("no-code".into());
+        let snapshot = evaluate_for_task(32, Some(2.0), 3, 1, 3, Some(&task));
+
+        assert!(
+            snapshot.violations().is_empty(),
+            "{:?}",
+            snapshot.violations()
+        );
+        assert_eq!(snapshot.requested_builders, 0);
+        assert!(
+            snapshot
+                .receipt_notice(false)
+                .contains("expected_build=no-code")
+        );
+    }
+
+    #[test]
+    fn docs_only_preassigned_spawn_at_builder_cap_needs_no_force() {
+        let mut task = cas_types::Task::new("cas-docs-only".into(), "Document a workflow".into());
+        task.labels = vec!["docs-only".into()];
+        let snapshot = evaluate_for_task(32, Some(2.0), 3, 1, 3, Some(&task));
+
+        assert!(
+            snapshot.violations().is_empty(),
+            "{:?}",
+            snapshot.violations()
+        );
+        assert_eq!(snapshot.requested_builders, 0);
+        assert!(
+            snapshot
+                .receipt_notice(false)
+                .contains("expected_build=docs-only")
+        );
+    }
+
+    #[test]
+    fn rust_preassigned_spawn_at_builder_cap_is_refused_with_named_retry() {
+        let mut task = cas_types::Task::new("cas-rust".into(), "Fix a Rust bug".into());
+        task.execution_note = Some("test-first".into());
+        let snapshot = evaluate_for_task(32, Some(2.0), 3, 1, 3, Some(&task));
+
+        assert_eq!(snapshot.requested_builders, 1);
+        assert!(!snapshot.violations().is_empty());
+        let refusal = snapshot.refusal_message();
+        assert!(refusal.contains("expected_build=yes"), "{refusal}");
+        assert!(
+            refusal.contains(
+                "Retry the same spawn_workers request after a Cargo worker releases a builder slot"
+            ),
+            "{refusal}"
+        );
     }
 
     #[test]

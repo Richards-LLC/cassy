@@ -13,6 +13,14 @@
 //!   past it and are retried on a later pass; panels show the last snapshot.
 //! - [`spawn_task_sync_reconcile`]: the pending task-sync repair that every
 //!   uncached `open_task_store` used to run, on a background schedule.
+//!
+//! Factory loop v2 (spec-4c5b §4) generalises this into the job framework in
+//! [`super::jobs`]: lanes for reads (own connection), writes, local blocking
+//! work and external calls, a completion queue, single-flight keys,
+//! generations and bounded queues that never drop critical writes. Its write
+//! lane runs on this [`StoreWorker`], so the daemon keeps one writer. New
+//! off-loop work should use that API; children C2 and C3 move callers onto it
+//! (cas-1240 adds the API only).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -165,6 +173,14 @@ impl StoreWorker {
                 "factory store worker still busy at shutdown; leaving it to finish"
             );
         }
+    }
+}
+
+/// Write-lane jobs of the factory loop v2 job framework run here, so the
+/// daemon keeps one writer (cas-1240, review round 1 item 3).
+impl super::jobs::WriteExecutor for StoreWorker {
+    fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
+        self.submit(label, job)
     }
 }
 

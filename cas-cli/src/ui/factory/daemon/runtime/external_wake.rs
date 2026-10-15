@@ -506,8 +506,8 @@ mod tests {
             branch(3, "epic/v41"),
             branch(4, "main"),
             branch(5, "epic/v41"),
-            tag(6, "v3.56.0"),
-            tag(7, "v3.56.0"),
+            tag(6, "v9.99.0"),
+            tag(7, "v9.99.0"),
         ];
         let mut backoff = ExternalWakeBackoff::default();
         let ready = probe_external_wakes(&mut probe, candidates, &mut backoff, Instant::now());

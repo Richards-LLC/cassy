@@ -5940,7 +5940,8 @@ impl CasCore {
             // the stamp the store persisted, not from the pre-write value.
             Ok(persisted_at) => {
                 self.retire_delivered_worker_cache(&parked);
-                // cas-062d / cas-17e4: durable outbox for AwaitingMerge + close-rejected.
+                // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
+                // relay. A refused close stays a tool error for the worker.
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
                 let actor_name = self
                     .open_agent_store()
@@ -5964,23 +5965,6 @@ impl CasCore {
                         task_id = %task.id,
                         error = %e,
                         "supervisor lifecycle push failed after AwaitingMerge park (task remains AwaitingMerge; replay outbox)"
-                    );
-                }
-                if let Err(e) = self.push_task_lifecycle_with_branch_tip(
-                    &task.id,
-                    &task.title,
-                    task.status,
-                    TaskStatus::AwaitingMerge,
-                    &actor_name,
-                    Some(reason),
-                    super::supervisor_push::LifecycleTransition::CloseRejected,
-                    &occurrence,
-                    parked.deliverables.factory_branch_anchor.as_deref(),
-                ) {
-                    tracing::error!(
-                        task_id = %task.id,
-                        error = %e,
-                        "supervisor lifecycle push failed after close rejection (task remains AwaitingMerge; replay outbox)"
                     );
                 }
             }

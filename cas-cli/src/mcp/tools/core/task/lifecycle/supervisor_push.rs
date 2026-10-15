@@ -29,6 +29,8 @@ pub enum LifecycleTransition {
     Started,
     Blocked,
     ReadyReopened,
+    // Legacy outbox/envelope readers still accept this transition. New close
+    // refusals return a tool error without a supervisor relay (cas-3a82).
     CloseRejected,
     AwaitingMerge,
     Closed,

@@ -3474,3 +3474,21 @@ fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_reco
     data.agents[0].last_heartbeat = Some(later);
     assert!(detector.detect_changes_at(&data, None, tick + Duration::from_secs(301), later).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })));
 }
+
+#[test]
+fn cold_stall_confirmation_backs_off_real_probes_between_ticks() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let mut data = stalled_data_for(make_agent_working_stalled("a", "cold-worker", "cas-cold", 0, Some(900), now));
+    let mut detector = DirectorEventDetector::new(vec!["cold-worker".into()], "supervisor".into());
+    detector.set_cas_root(root.path().into());
+    detector.set_stall_threshold_secs(300);
+    detector.initialize(&data);
+    let tick = std::time::Instant::now();
+    for seconds in 0..5 {
+        let at = now + chrono::Duration::seconds(seconds);
+        data.agents[0].last_heartbeat = Some(at);
+        detector.detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), at);
+    }
+    assert_eq!(detector.stall_probe_count, 1, "cold workers must not scan /proc and reopen stores on every pass");
+}

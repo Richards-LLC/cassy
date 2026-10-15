@@ -1228,6 +1228,8 @@ pub struct DirectorEventDetector {
     stall_escalated: HashSet<String>,
     /// Alarm cooldown survives streak resets; keyed by kind and worker/task.
     stall_alarm_at: HashMap<(String, String, bool), DateTime<chrono::Utc>>,
+    #[cfg(test)]
+    pub(super) stall_probe_count: usize,
     /// Transcript/tool evidence remains activity after a call closes.
     observed_worker_activity: HashMap<String, DateTime<chrono::Utc>>,
     /// Seconds of no observable activity (with a fresh heartbeat and an
@@ -1341,6 +1343,8 @@ impl DirectorEventDetector {
             stall_nudged: HashSet::new(),
             stall_escalated: HashSet::new(),
             stall_alarm_at: HashMap::new(),
+            #[cfg(test)]
+            stall_probe_count: 0,
             observed_worker_activity: HashMap::new(),
             stall_threshold_secs: cas_factory::DEFAULT_STALL_THRESHOLD_SECS,
             task_start_observed: HashMap::new(),
@@ -1468,6 +1472,8 @@ impl DirectorEventDetector {
         now: DateTime<chrono::Utc>,
         threshold_secs: u64,
     ) -> bool {
+        #[cfg(test)]
+        { self.stall_probe_count += 1; }
         let (age, window, in_flight, background_active) = if let Some(overrides) =
             &self.transcript_age_override
         {

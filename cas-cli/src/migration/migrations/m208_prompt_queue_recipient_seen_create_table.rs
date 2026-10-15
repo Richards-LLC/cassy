@@ -112,6 +112,11 @@ mod tests {
             .up
             .iter()
             .chain(super::super::m220_prompt_queue_wake_observability::MIGRATION.up.iter())
+            .chain(
+                super::super::m272_prompt_queue_recipient_seen_teams_body_fallback::MIGRATION
+                    .up
+                    .iter(),
+            )
         {
             migrated.execute(sql, []).unwrap();
         }

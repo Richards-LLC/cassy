@@ -346,6 +346,14 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle user-level builtin distribution (~/.claude, ~/.codex)
     if args.user {
+        if args.dry_run {
+            if cli.json {
+                println!("{}", serde_json::json!({"user_level": "planned"}));
+            } else {
+                println!("User-level builtin sync planned (dry run)");
+            }
+            return Ok(());
+        }
         let mut steps = UpdateStepTracker::new(1, !cli.json);
         return steps.run("Distributing built-ins to user-level", || {
             sync_user_builtins(cli)
@@ -1255,6 +1263,10 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
     let Some(cas_root) = user_level_store_root() else {
         return ProjectPhase::Skipped("no home directory".to_string());
     };
+    if args.dry_run {
+        return ProjectPhase::Planned(format!("migrate {} and sync builtins", cas_root.display()));
+    }
+
     if !cas_root.join("cas.db").is_file() {
         return match sync_user_builtins(cli) {
             Ok(()) => ProjectPhase::Ok(format!(
@@ -1264,11 +1276,6 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
             Err(error) => ProjectPhase::Failed(error.to_string()),
         };
     }
-
-    if args.dry_run {
-        return ProjectPhase::Planned(format!("migrate {} and sync builtins", cas_root.display()));
-    }
-
     let migration = run_project_phase("user-level migration", false, || {
         run_schema_migrations(args, cli, Some(&cas_root))
     });
@@ -2488,8 +2495,20 @@ fn sync_claude_files_into(
 /// existing Codex install, its global MCP configuration and trusted hook state.
 /// It never writes project-scoped settings, CLAUDE.md, or db-backed rules/skills.
 fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
-    #[cfg(feature = "mcp-proxy")]
-    crate::cli::integrate::violet_retirement::retire_installed_hub(None)?;
+    sync_user_builtins_with_violet(cli, || {
+        #[cfg(feature = "mcp-proxy")]
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update()?;
+        Ok(())
+    })
+}
+
+fn sync_user_builtins_with_violet(
+    cli: &Cli,
+    violet: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if let Err(error) = violet() {
+        eprintln!("warning: Violet update advisory: {error}; continuing builtin sync");
+    }
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")
     })?;

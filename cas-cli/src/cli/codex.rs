@@ -225,6 +225,7 @@ pub(crate) fn configure_profile_command(command: &mut Command, profile: &str, pr
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY")
         .env_remove("CODEX_ACCESS_TOKEN");
+    cas_pty::violet_env::configure_command(command, "codex");
 }
 
 /// Resolve the picker to a profile name, running a new login when asked.
@@ -660,6 +661,7 @@ mod tests {
 
     #[test]
     fn named_profile_scopes_codex_home_and_scrubs_inherited_keys() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let args = vec![OsString::from("--search")];
         let command = build_codex_command("alt", Path::new("/tmp/.codex-alt"), &args);
 
@@ -677,6 +679,7 @@ mod tests {
 
     #[test]
     fn main_profile_clears_the_selector_so_codex_uses_its_own_default_home() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let command = build_codex_command("main", Path::new("/tmp/.codex"), &[]);
         let envs = command.get_envs().collect::<Vec<_>>();
 

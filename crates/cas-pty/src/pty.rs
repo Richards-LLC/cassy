@@ -1037,7 +1037,7 @@ impl PtyConfig {
     /// a project/task proxy definition. A value placed directly in `env` is not
     /// a grant and is removed from a worker unless this marker is present.
     pub fn grant_worker_credential(&mut self, key: &str) {
-        if !PROTECTED_OPERATOR_ENV.contains(&key) {
+        if !PROTECTED_OPERATOR_ENV.contains(&key) && !crate::violet_env::canonical_credential(key) {
             return;
         }
         let marker = format!("{key}:{}", worker_credential_grant_nonce());
@@ -1049,6 +1049,63 @@ impl PtyConfig {
             self.env
                 .push((WORKER_CREDENTIAL_GRANT_ENV.to_string(), marker));
         }
+    }
+
+    /// Resolve only the selected harness's credential references. Worker grants
+    /// come from the policy-filtered factory builder and cannot be inherited.
+    pub fn hydrate_violet_environment(&mut self) {
+        let harness = self.effective_command().to_owned();
+        if harness != "claude" && harness != "codex" {
+            return;
+        }
+        let role = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|(k, v)| (k == "CAS_AGENT_ROLE").then_some(v.as_str()));
+        let factory = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|(k, v)| (k == "CAS_FACTORY_MODE").then_some(v.as_str()))
+            == Some("1");
+        let mut allowed = std::collections::BTreeSet::new();
+        if role == Some("worker") || (factory && role != Some("supervisor")) {
+            let grants: std::collections::BTreeSet<String> = self
+                .env
+                .iter()
+                .filter_map(|(k, v)| {
+                    let (name, nonce) = v.split_once(':')?;
+                    (k == WORKER_CREDENTIAL_GRANT_ENV
+                        && nonce == worker_credential_grant_nonce()
+                        && crate::violet_env::canonical_credential(name))
+                    .then(|| name.to_owned())
+                })
+                .collect();
+            let mut names: std::collections::BTreeSet<String> = std::env::vars_os()
+                .filter_map(|(k, _)| k.into_string().ok())
+                .filter(|k| crate::violet_env::canonical_credential(k))
+                .collect();
+            names.extend(
+                self.env
+                    .iter()
+                    .map(|(k, _)| k.clone())
+                    .filter(|k| crate::violet_env::canonical_credential(k)),
+            );
+            let resolved = crate::violet_env::resolved_environment(&self.env, &self.env_remove);
+            let registered = crate::violet_env::registration_references(&harness, &resolved).1;
+            allowed = grants;
+            names.extend(registered);
+            for name in names {
+                if crate::violet_env::canonical_credential(&name) && !allowed.contains(&name) {
+                    self.env.retain(|(k, _)| k != &name);
+                    if !self.env_remove.contains(&name) {
+                        self.env_remove.push(name);
+                    }
+                }
+            }
+        }
+        crate::violet_env::hydrate_with_grants(&harness, &mut self.env, &self.env_remove, &allowed);
     }
 
     /// Remove protected operator credentials from a worker's inherited
@@ -2072,20 +2129,32 @@ pub fn claude_supports_chrome_flag() -> bool {
     })
 }
 
-/// Returns `true` when an executable named `cas` is resolvable on `PATH`.
-///
-/// Used by the Codex spawn preflight (cas-bbc2). The CAS MCP server is now
-/// spawn-injected as `mcp_servers.cs.command=cas`, but Codex still needs the
-/// `cas` binary on `PATH` to actually launch it. If `PATH` is unset we return
-/// `true` (skip the check) rather than risk a false refusal — the spawn will
-/// surface its own error in that pathological case.
-fn cas_binary_on_path() -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
+/// Resolve `cas` using the child's PATH, with the same last-override and
+/// removal ordering as CommandBuilder. An unset PATH retains the existing
+/// skip policy; the eventual spawn surfaces lookup failure in that case.
+fn cas_binary_on_path(config: &PtyConfig) -> bool {
+    let path = if config.env_remove.iter().any(|key| key == "PATH") {
+        None
+    } else {
+        config
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| std::ffi::OsString::from(value))
+            .or_else(|| std::env::var_os("PATH"))
+    };
+    let Some(path) = path else {
         return true;
     };
+    let cwd = config.cwd.clone().or_else(|| std::env::current_dir().ok());
     std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join("cas");
-        candidate.is_file()
+        let dir = if dir.is_relative() {
+            cwd.as_ref().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
+        } else {
+            dir
+        };
+        dir.join("cas").is_file()
     })
 }
 
@@ -2402,6 +2471,7 @@ impl Pty {
             return Err(Error::pty(reason.clone()));
         }
         config.apply_worker_credential_policy();
+        config.hydrate_violet_environment();
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
 
@@ -2412,7 +2482,7 @@ impl Pty {
         // with remediation rather than spawning a worker that comes up with zero
         // CAS tools and flails.
         let codex_spawn = is_codex;
-        if codex_spawn && !cas_binary_on_path() {
+        if codex_spawn && !cas_binary_on_path(&config) {
             return Err(Error::pty(
                 "Codex agent cannot start: the `cas` MCP server binary is not on PATH. \
                  CAS is spawn-injected as mcp_servers.cs (command=cas), but Codex needs \
@@ -4474,6 +4544,55 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn child_path_preflight_fixture(daemon_has_cas: bool, child_has_cas: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut guard = TestEnvGuard::temp_home();
+        let home = guard.home().to_path_buf();
+        let daemon = home.join("daemon-bin");
+        let child = home.join("child-bin");
+        for dir in [&daemon, &child] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for (dir, name) in [
+            (&child, "codex"),
+            (if daemon_has_cas { &daemon } else { &child }, "cas"),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if !child_has_cas {
+            let _ = std::fs::remove_file(child.join("cas"));
+        }
+        guard.set("PATH", &daemon);
+        let result = Pty::spawn(
+            "child-path-fixture",
+            PtyConfig {
+                command: "codex".into(),
+                cwd: Some(home),
+                env: vec![("PATH".into(), child.to_string_lossy().into_owned())],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.is_ok(),
+            child_has_cas,
+            "daemon_has_cas={daemon_has_cas}; child_has_cas={child_has_cas}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cas_678d_round5_child_path_accepts_private_cas_without_daemon_cas() {
+        child_path_preflight_fixture(false, true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cas_678d_round5_child_path_refuses_missing_cas_despite_daemon_cas() {
+        child_path_preflight_fixture(true, false);
+    }
     /// cas-bbc2: `cas_binary_on_path()` returns true when an executable named
     /// `cas` lives in a PATH entry. Builds a temp dir with a fake `cas` file and
     /// points PATH at it, under TestEnvGuard to avoid racing other env-mutating tests.
@@ -4484,7 +4603,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cas"), b"#!/bin/sh\n").unwrap();
         env.set("PATH", &dir);
-        let found = cas_binary_on_path();
+        let found = cas_binary_on_path(&PtyConfig::default());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(found, "cas_binary_on_path must find a `cas` file on PATH");
     }
@@ -4497,7 +4616,7 @@ mod tests {
         let dir = std::env::temp_dir().join("cas-bbc2-preflight-absent");
         std::fs::create_dir_all(&dir).unwrap();
         env.set("PATH", &dir);
-        let found = cas_binary_on_path();
+        let found = cas_binary_on_path(&PtyConfig::default());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
             !found,

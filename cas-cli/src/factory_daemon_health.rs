@@ -49,7 +49,7 @@ pub const SLOW_RING_CAP: usize = 32;
 pub const SLOW_STATUS_SECS: u64 = 10;
 
 /// One snapshot of the daemon loop, written by its watchdog thread.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonLoopStatus {
     pub pid: u32,
     pub session: String,
@@ -124,6 +124,9 @@ pub struct DaemonLoopStatus {
     /// Length of the frame window, in milliseconds.
     #[serde(default)]
     pub frame_window_ms: u64,
+    /// TUI frames per second over the window, to one decimal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_per_s: Option<f64>,
 }
 
 /// One job lane's occupancy (factory loop v2 §4.2, §6.5).
@@ -429,6 +432,7 @@ mod tests {
             frames_coalesced: 0,
             frame_bytes_p50: None,
             frame_window_ms: 0,
+            frames_per_s: None,
         }
     }
 

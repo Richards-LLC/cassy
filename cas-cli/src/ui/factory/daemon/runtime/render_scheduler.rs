@@ -13,7 +13,8 @@
 //! | Cause | Rule |
 //! |---|---|
 //! | Input, and echo (output from the pane that took input in the last 250 ms) | drawn now, uncapped |
-//! | Layout, focus, notices, refreshes | drawn at most every 16 ms (coalesced) |
+//! | Layout, focus, notices, refreshes, pane-set and error changes | drawn at most every 16 ms (coalesced) |
+//! | Animation (the spawn spinner, a loading dialog) | at most 10 frames/s |
 //! | Output from the focused pane | at most `render_max_fps` frames/s |
 //! | Output from other visible panes | at most `render_unfocused_fps` frames/s |
 //! | Output from panes not on screen | never; the pane's terminal state still updates |
@@ -23,6 +24,13 @@
 //! restarts that output's cap. No damage tracking is added: ratatui already
 //! sends only changed cells, and an empty diff sends nothing.
 //!
+//! The caps are per cause, not a total: with the focused pane and other
+//! panes streaming, output frames reach about `render_max_fps` (the focused
+//! frames carry the others' output), and at most `render_max_fps +
+//! render_unfocused_fps` (20 by default) when their slots never line up.
+//! Animation frames, which also carry pending output, add at most 10 more
+//! while a worker spawns. Input and layout frames are uncapped by design.
+//!
 //! Time is passed in, so tests drive it with synthetic instants.
 
 use std::time::{Duration, Instant};
@@ -31,6 +39,8 @@ use std::time::{Duration, Instant};
 pub(crate) const ECHO_WINDOW: Duration = Duration::from_millis(250);
 /// Layout frames are coalesced to at most one per this interval.
 pub(crate) const LAYOUT_COALESCE: Duration = Duration::from_millis(16);
+/// Animation frames (a spinner) are drawn at most this often (10 frames/s).
+pub(crate) const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
 /// `[factory] render_max_fps` default.
 pub(crate) const DEFAULT_RENDER_MAX_FPS: u32 = 15;
 /// `[factory] render_unfocused_fps` default.
@@ -49,6 +59,7 @@ pub(crate) enum PaneView {
 pub(crate) enum FrameCause {
     Input,
     Layout,
+    Animation,
     OutputFocused,
     OutputUnfocused,
 }
@@ -59,6 +70,7 @@ impl FrameCause {
         match self {
             FrameCause::Input => "input",
             FrameCause::Layout => "layout",
+            FrameCause::Animation => "animation",
             FrameCause::OutputFocused => "output_focused",
             FrameCause::OutputUnfocused => "output_unfocused",
         }
@@ -91,11 +103,19 @@ impl Default for RenderCaps {
 }
 
 impl RenderCaps {
+    /// `cas config set` refuses values outside 1..=120; a hand-edited 0 is
+    /// read as 1 frame/s, with a warning.
     pub(crate) fn from_config(config: &crate::config::Config) -> Self {
         let factory = config.factory();
+        let clamp = |key: &str, fps: u32| {
+            if fps == 0 {
+                tracing::warn!(key, "a 0 fps frame cap is read as 1 frame/s");
+            }
+            fps.max(1)
+        };
         Self {
-            max_fps: factory.render_max_fps,
-            unfocused_fps: factory.render_unfocused_fps,
+            max_fps: clamp("factory.render_max_fps", factory.render_max_fps),
+            unfocused_fps: clamp("factory.render_unfocused_fps", factory.render_unfocused_fps),
         }
     }
 
@@ -111,6 +131,7 @@ pub(crate) struct RenderScheduler {
     unfocused_interval: Duration,
     input: bool,
     layout: bool,
+    animation: bool,
     focused: bool,
     unfocused: bool,
     last_input: Option<(String, Instant)>,
@@ -126,6 +147,7 @@ impl RenderScheduler {
             unfocused_interval: RenderCaps::interval(caps.unfocused_fps),
             input: false,
             layout: false,
+            animation: false,
             focused: false,
             unfocused: false,
             last_input: None,
@@ -146,6 +168,12 @@ impl RenderScheduler {
     /// Something other than pane output changed what the TUI shows.
     pub(crate) fn note_layout(&mut self) {
         self.layout = true;
+    }
+
+    /// Something on screen animates (the spawn spinner, a loading dialog):
+    /// drawn at most every [`ANIMATION_INTERVAL`].
+    pub(crate) fn note_animation(&mut self) {
+        self.animation = true;
     }
 
     /// `pane` produced output this pass.
@@ -170,7 +198,7 @@ impl RenderScheduler {
     /// Whether any cause is waiting for a frame.
     #[cfg(test)]
     fn pending(&self) -> bool {
-        self.input || self.layout || self.focused || self.unfocused
+        self.input || self.layout || self.animation || self.focused || self.unfocused
     }
 
     /// The frame to draw now, if one is due. Taking it clears every pending
@@ -183,6 +211,8 @@ impl RenderScheduler {
             FrameCause::Input
         } else if self.layout && due(self.last_frame, LAYOUT_COALESCE) {
             FrameCause::Layout
+        } else if self.animation && due(self.last_frame, ANIMATION_INTERVAL) {
+            FrameCause::Animation
         } else if self.focused && due(self.last_focused_frame, self.focused_interval) {
             FrameCause::OutputFocused
         } else if self.unfocused && due(self.last_unfocused_frame, self.unfocused_interval) {
@@ -190,10 +220,16 @@ impl RenderScheduler {
         } else {
             return None;
         };
-        let pending = [self.input, self.layout, self.focused, self.unfocused]
-            .into_iter()
-            .filter(|pending| *pending)
-            .count() as u32;
+        let pending = [
+            self.input,
+            self.layout,
+            self.animation,
+            self.focused,
+            self.unfocused,
+        ]
+        .into_iter()
+        .filter(|pending| *pending)
+        .count() as u32;
         if self.focused {
             self.last_focused_frame = Some(now);
         }
@@ -203,6 +239,7 @@ impl RenderScheduler {
         self.last_frame = Some(now);
         self.input = false;
         self.layout = false;
+        self.animation = false;
         self.focused = false;
         self.unfocused = false;
         Some(Frame {
@@ -441,6 +478,115 @@ mod tests {
         assert_eq!(replay_codex_trace(&workers), (1384, 226));
         let one_focused = [(Focused, 0), (Unfocused, 333), (Unfocused, 777)];
         assert_eq!(replay_codex_trace(&one_focused), (1384, 428));
+    }
+
+    /// cas-77f39 review: output that stops still gets its frame once the
+    /// cap window passes, with no new output to prompt it.
+    #[test]
+    fn flv2_trailing_output_frame_is_drawn_without_new_output() {
+        let mut scheduler = RenderScheduler::new(RenderCaps::default());
+        let start = Instant::now();
+        scheduler.note_output("worker", PaneView::Focused, start);
+        assert!(scheduler.take_frame(start).is_some());
+        // The last write lands just after that frame, then the pane goes quiet.
+        let last_write = start + Duration::from_millis(5);
+        scheduler.note_output("worker", PaneView::Focused, last_write);
+        let mut t = last_write;
+        let mut trailing = None;
+        while t < start + Duration::from_millis(200) {
+            if let Some(frame) = scheduler.take_frame(t) {
+                trailing = Some((t, frame));
+                break;
+            }
+            t += Duration::from_millis(4);
+        }
+        let (at, frame) = trailing.expect("the last write is drawn");
+        assert_eq!(frame.cause, FrameCause::OutputFocused);
+        assert!(
+            at.duration_since(start) <= Duration::from_millis(70),
+            "drawn {:?} after the previous frame",
+            at.duration_since(start)
+        );
+        assert_eq!(scheduler.take_frame(at + Duration::from_secs(1)), None);
+
+        // The same for an unfocused pane, within its 200 ms slot.
+        let mut scheduler = RenderScheduler::new(RenderCaps::default());
+        scheduler.note_output("w2", PaneView::Unfocused, start);
+        assert!(scheduler.take_frame(start).is_some());
+        scheduler.note_output("w2", PaneView::Unfocused, last_write);
+        assert_eq!(
+            scheduler.take_frame(start + Duration::from_millis(199)),
+            None
+        );
+        assert!(
+            scheduler
+                .take_frame(start + Duration::from_millis(200))
+                .is_some()
+        );
+    }
+
+    /// cas-77f39 review: switching focus to a pane that was off screen is
+    /// input, so its frame is drawn in the same pass, and its output is then
+    /// its echo.
+    #[test]
+    fn flv2_focus_switch_to_off_screen_pane_draws_at_once() {
+        let mut scheduler = RenderScheduler::new(RenderCaps::default());
+        let start = Instant::now();
+        for i in 0..10 {
+            let now = start + Duration::from_millis(4 * i);
+            scheduler.note_output("hidden-worker", PaneView::Hidden, now);
+            assert_eq!(scheduler.take_frame(now), None);
+        }
+        let now = start + Duration::from_millis(40);
+        scheduler.note_input(Some("hidden-worker"), now);
+        assert_eq!(
+            scheduler.take_frame(now).map(|frame| frame.cause),
+            Some(FrameCause::Input)
+        );
+        let next = now + Duration::from_millis(4);
+        scheduler.note_output("hidden-worker", PaneView::Focused, next);
+        assert_eq!(
+            scheduler.take_frame(next).map(|frame| frame.cause),
+            Some(FrameCause::Input),
+            "the newly focused pane's output is its echo"
+        );
+    }
+
+    /// cas-77f39 review: the spawn spinner animates at most 10 frames/s, not
+    /// on every pass.
+    #[test]
+    fn flv2_spawning_animation_stays_under_10_fps() {
+        let mut scheduler = RenderScheduler::new(RenderCaps::default());
+        let start = Instant::now();
+        let frames = run_second(&mut scheduler, start, Duration::from_millis(4), |s, now| {
+            s.note_animation();
+            s.note_output("w1", PaneView::Unfocused, now);
+        });
+        assert!(
+            frames.len() <= 11,
+            "{} frames/s while spawning",
+            frames.len()
+        );
+        assert!(
+            frames.len() >= 9,
+            "{} frames/s while spawning",
+            frames.len()
+        );
+        assert!(
+            frames.iter().all(|frame| matches!(
+                frame.cause,
+                FrameCause::Animation | FrameCause::OutputUnfocused
+            )),
+            "{frames:?}"
+        );
+
+        // A layout change during a spawn still draws within 16 ms.
+        scheduler.note_layout();
+        let now = start + Duration::from_millis(1_020);
+        assert_eq!(
+            scheduler.take_frame(now).map(|frame| frame.cause),
+            Some(FrameCause::Layout)
+        );
     }
 
     #[test]

@@ -618,7 +618,9 @@ pub struct FactoryConfig {
 
     /// Most frames per second the factory TUI draws for output from visible
     /// panes other than the focused one. Panes not on screen never draw.
-    /// Read when the daemon starts.
+    /// The caps add up: at most `render_max_fps + render_unfocused_fps`
+    /// output frames/s. Read when the daemon starts; a hand-edited 0 reads
+    /// as 1.
     #[serde(default = "default_render_unfocused_fps")]
     pub render_unfocused_fps: u32,
 

@@ -223,7 +223,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.render_unfocused_fps",
         section: "factory",
         name: "Factory TUI Output Frame Cap (other panes)",
-        description: "Most frames per second the factory TUI draws for output from visible panes other than the focused one. Panes not on screen never draw; read when the factory daemon starts.",
+        description: "Most frames per second the factory TUI draws for output from visible panes other than the focused one. Panes not on screen never draw. The two caps add up, so output frames reach at most render_max_fps + render_unfocused_fps per second (20 by default); read when the factory daemon starts.",
         value_type: ConfigType::Int,
         default: "5",
         constraint: Constraint::Range(1, 120),

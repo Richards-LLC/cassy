@@ -409,6 +409,16 @@ pub(crate) struct FrameStats {
     pub(crate) window_ms: u64,
 }
 
+impl FrameStats {
+    /// Frames per second over the window, to one decimal.
+    pub(crate) fn per_second(&self) -> Option<f64> {
+        (self.window_ms > 0).then(|| {
+            let frames: u64 = self.frames.values().sum();
+            (frames as f64 * 10_000.0 / self.window_ms as f64).round() / 10.0
+        })
+    }
+}
+
 /// A wedge the watchdog has detected and not yet seen clear.
 #[derive(Debug, Clone)]
 struct WedgeState {
@@ -1018,6 +1028,7 @@ impl LoopProgress {
             frames_coalesced: 0,
             frame_bytes_p50: None,
             frame_window_ms: 0,
+            frames_per_s: None,
         }
     }
 }
@@ -1176,6 +1187,7 @@ pub(crate) fn spawn_watchdog(
                     status.frames_coalesced = frame_stats.coalesced;
                     status.frame_bytes_p50 = frame_stats.bytes_p50;
                     status.frame_window_ms = frame_stats.window_ms;
+                    status.frames_per_s = frame_stats.per_second();
                     if let Err(error) = write_status(&cas_dir, &status) {
                         tracing::debug!(%error, "cas-73b5: could not write the daemon loop status");
                     }
@@ -1562,6 +1574,7 @@ mod tests {
         assert_eq!(window.coalesced, 3);
         assert_eq!(window.bytes_p50, Some(60));
         assert_eq!(window.window_ms, 5_000);
+        assert_eq!(window.per_second(), Some(0.8), "4 frames in 5 s");
         let next = progress.take_frame_window();
         assert!(next.frames.is_empty() && next.bytes_p50.is_none());
 

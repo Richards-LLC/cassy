@@ -874,6 +874,7 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
             frames_coalesced: 0,
             frame_bytes_p50: None,
             frame_window_ms: 0,
+            frames_per_s: None,
         },
     )
     .unwrap();

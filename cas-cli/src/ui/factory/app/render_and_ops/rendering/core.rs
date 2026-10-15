@@ -122,12 +122,51 @@ impl FactoryApp {
     /// refreshes this.
     pub(crate) fn pane_on_screen(&self, pane: &str) -> bool {
         use crate::ui::factory::renderer::FactoryViewMode;
+        if !self.drawn_pane_ids.contains(pane) {
+            // New since the last frame: its slot is not laid out yet.
+            return true;
+        }
         if self.show_terminal_dialog && self.terminal_pane_name.as_deref() == Some(pane) {
             return true;
         }
         let in_panes_view = self.factory_view_mode == FactoryViewMode::Panes
             && self.full_pty_content_areas.contains_key(pane);
         in_panes_view || self.compact_pty_content_areas.contains_key(pane)
+    }
+
+    fn record_drawn_panes(&mut self) {
+        self.drawn_pane_ids.clear();
+        let panes = self.mux.pane_ids().into_iter().map(str::to_string);
+        let named = std::iter::once(self.supervisor_name.clone()).chain(self.worker_names.clone());
+        self.drawn_pane_ids.extend(panes.chain(named));
+    }
+
+    /// A cheap digest of the state the TUI draws besides pane contents, so
+    /// the render scheduler draws a frame when it changes (cas-77f39): the
+    /// pane set and which panes exited, focus, the error banner, spawns in
+    /// progress, the worker list and the view and dialog switches. Pane
+    /// output, input and director refreshes are noted separately.
+    pub(crate) fn render_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for pane in self.mux.panes() {
+            pane.id().hash(&mut hasher);
+            pane.has_exited().hash(&mut hasher);
+        }
+        self.mux.focused_id().hash(&mut hasher);
+        self.error_message.hash(&mut hasher);
+        self.spawning_count.hash(&mut hasher);
+        for pending in &self.pending_workers {
+            pending.name.hash(&mut hasher);
+        }
+        self.worker_names.hash(&mut hasher);
+        self.show_terminal_dialog.hash(&mut hasher);
+        self.show_task_dialog.hash(&mut hasher);
+        self.selected_worker_tab.hash(&mut hasher);
+        self.sidecar_collapsed.hash(&mut hasher);
+        (self.factory_view_mode == crate::ui::factory::renderer::FactoryViewMode::Panes)
+            .hash(&mut hasher);
+        hasher.finish()
     }
 
     pub(crate) fn full_pane_hyperlink_map(&self) -> HyperlinkMap {
@@ -201,6 +240,7 @@ impl FactoryApp {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
+        self.record_drawn_panes();
         Self::clear_pane_hyperlinks(&self.full_pane_hyperlinks);
         use crate::ui::factory::renderer::FactoryViewMode;
         match self.factory_view_mode {
@@ -488,6 +528,7 @@ impl FactoryApp {
     /// The supervisor pane is rendered without borders to maximize content area,
     /// since Claude Code has its own input UI.
     pub fn render_compact(&mut self, frame: &mut Frame) {
+        self.record_drawn_panes();
         use ratatui::layout::{Constraint, Layout};
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
@@ -1221,12 +1262,18 @@ mod hyperlink_tests {
         use crate::ui::factory::renderer::FactoryViewMode;
         let mut app = FactoryApp::for_test();
         let supervisor = app.supervisor_name.clone();
-        assert!(!app.pane_on_screen(&supervisor), "nothing drawn yet");
+        assert!(
+            app.pane_on_screen(&supervisor),
+            "a pane not drawn yet counts as on screen until it is"
+        );
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 48)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(app.pane_on_screen(&supervisor));
-        assert!(!app.pane_on_screen("not-a-pane"));
+        assert!(
+            app.pane_on_screen("spawned-since"),
+            "a pane new since the last frame is drawn, not dropped"
+        );
 
         app.factory_view_mode = FactoryViewMode::MissionControl;
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -1235,13 +1282,39 @@ mod hyperlink_tests {
             "Mission Control draws no PTY panes"
         );
 
+        app.drawn_pane_ids.insert("shell".to_string());
         app.terminal_pane_name = Some("shell".to_string());
         assert!(
             !app.pane_on_screen("shell"),
-            "a background shell is off screen"
+            "a drawn background shell is off screen"
         );
         app.show_terminal_dialog = true;
         assert!(app.pane_on_screen("shell"), "the terminal dialog shows it");
+    }
+
+    /// cas-77f39 review: spawn completion, error banners and other state
+    /// the TUI draws used to ride on pane output; they now change the
+    /// render fingerprint, which the loop turns into a layout frame.
+    #[test]
+    fn flv2_render_fingerprint_tracks_state_drawn_besides_pane_output() {
+        let mut app = FactoryApp::for_test();
+        let mut last = app.render_fingerprint();
+        assert_eq!(app.render_fingerprint(), last, "stable without changes");
+        let mut changed = |app: &FactoryApp, what: &str| {
+            let now = app.render_fingerprint();
+            assert_ne!(now, last, "{what} must change the fingerprint");
+            last = now;
+        };
+        app.spawning_count = 1;
+        changed(&app, "a spawn starting");
+        app.spawning_count = 0;
+        changed(&app, "a spawn completing");
+        app.set_error("Worker 'w1' exited".to_string());
+        changed(&app, "an error banner");
+        app.worker_names.push("w1".to_string());
+        changed(&app, "the worker list");
+        app.show_terminal_dialog = true;
+        changed(&app, "a dialog");
     }
 
     #[test]

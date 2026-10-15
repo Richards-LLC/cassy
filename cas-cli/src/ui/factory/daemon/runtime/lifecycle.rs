@@ -2378,6 +2378,8 @@ impl FactoryDaemon {
         // cas-77f39 (GH #1210, factory loop v2 §5): output frames are capped
         // and coalesced; input echo is drawn at once. The caps are read once,
         // before this thread becomes a lane.
+        // What the TUI draws besides pane contents, as of the last pass.
+        let mut last_render_fingerprint = self.app.render_fingerprint();
         let mut render_scheduler = super::render_scheduler::RenderScheduler::new(
             super::render_scheduler::RenderCaps::from_config(
                 &crate::config::Config::load(self.app.cas_dir()).unwrap_or_default(),
@@ -2902,11 +2904,18 @@ impl FactoryDaemon {
                 || needs_full_redraw
                 || needs_compact_redraw
                 || resize_applied
-                || spawning
-                || error_cleared_by_timeout
-                || self.app.task_dialog_load.is_loading();
-            if layout_changed {
+                || error_cleared_by_timeout;
+            // Spawn completion, crash banners and pane-set changes used to
+            // ride on pane output (cas-77f39 review).
+            let render_fingerprint = self.app.render_fingerprint();
+            let state_changed = render_fingerprint != last_render_fingerprint;
+            last_render_fingerprint = render_fingerprint;
+            if layout_changed || state_changed {
                 render_scheduler.note_layout();
+            }
+            // The spawn spinner and a loading dialog animate at <= 10 fps.
+            if spawning || self.app.task_dialog_load.is_loading() {
+                render_scheduler.note_animation();
             }
             // A pending resize keeps its causes for the frame after it.
             let frame = if resize_pending {

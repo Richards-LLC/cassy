@@ -199,6 +199,10 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
     if let Some((key, prompt, _)) = &turn
         && !receipt.state.delivered.contains(key)
     {
+        // cas-7bfa: a teammate-message turn is a delivery; record it once.
+        super::handlers::handlers_middle::factory_inbox::record_turn_prompt_envelopes(
+            root, input, prompt,
+        );
         receipt.remember(key);
         receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
         changed = true;
@@ -276,6 +280,240 @@ mod tests {
             "concurrent readers must not duplicate a turn"
         );
     }
+    fn teams_env() -> crate::test_support::TestEnvGuard {
+        crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-7bfa")),
+            ("CAS_FACTORY_SESSION", Some("sess-7bfa")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ])
+    }
+
+    fn teams_input(transcript: &Path, agent_id: &str) -> HookInput {
+        HookInput {
+            session_id: "s-7bfa".into(),
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            hook_event_name: "PostToolUse".into(),
+            tool_name: Some("Bash".into()),
+            agent_id: Some(agent_id.into()),
+            agent_type: Some("general-purpose".into()),
+            ..Default::default()
+        }
+    }
+
+    fn turn_line(uuid: &str, at: chrono::DateTime<chrono::Utc>, prompt: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "user",
+                "uuid": uuid,
+                "sessionId": "s-7bfa",
+                "timestamp": at.to_rfc3339(),
+                "message": {"content": prompt},
+            })
+        )
+    }
+
+    /// Communication contract v2, P1.2/P2.3 (cas-7bfa, GH #1209): a Claude
+    /// Agent Teams member's hooks carry its own `agent_id` (`<name>@<team>`).
+    /// A row the daemon claimed mid-turn, while the wake gate deferred it,
+    /// surfaces at the member's next tool boundary. A real subagent (hex
+    /// agent_id) still does not drain the parent's inbox.
+    #[test]
+    fn ct2_p1_teams_member_gated_row_surfaces_at_tool_boundary() {
+        let _env = teams_env();
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        fs::write(
+            &transcript,
+            turn_line("t1", chrono::Utc::now() - chrono::Duration::seconds(60), "work on cas-x"),
+        )
+        .unwrap();
+        let queue = crate::store::open_prompt_queue_store(dir.path()).unwrap();
+        let id = queue
+            .enqueue_with_session("supervisor", "worker-7bfa", "P0: rebase now", "sess-7bfa")
+            .unwrap();
+        assert!(queue.claim_recipient_transport(id, "worker-7bfa").unwrap());
+        queue
+            .record_pending_reason(
+                id,
+                cas_store::PendingReason::GatedNotReady,
+                Some("pane has not been silent long enough"),
+            )
+            .unwrap();
+
+        assert!(
+            fallback_context(dir.path(), &teams_input(&transcript, "a24c4ba99866d62e3")).is_none(),
+            "a subagent never drains its parent's inbox"
+        );
+        assert!(
+            fallback_context(dir.path(), &teams_input(&transcript, "worker-7bfa@other-team"))
+                .is_none(),
+            "a same-named member of another team is not this session"
+        );
+        assert_eq!(
+            queue.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+            Some(cas_store::SurfacingSource::TransportClaimed),
+            "neither foreign identity touched the pending row"
+        );
+        let mail = fallback_context(dir.path(), &teams_input(&transcript, "worker-7bfa@sess-7bfa"))
+            .expect("the Teams member's own tool boundary surfaces its mail");
+        assert!(mail.contains("P0: rebase now"), "{mail}");
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
+        assert_eq!(report.stage, cas_store::DeliveryStage::Confirmed, "hook surfacing acks the row");
+
+        // The main thread may also arrive with only its --agent-type.
+        let second = queue
+            .enqueue_with_session("supervisor", "worker-7bfa", "P1: and re-run", "sess-7bfa")
+            .unwrap();
+        assert!(queue.claim_recipient_transport(second, "worker-7bfa").unwrap());
+        let mut type_only = teams_input(&transcript, "unused");
+        type_only.agent_id = None;
+        let mail = fallback_context(dir.path(), &type_only)
+            .expect("agent_type alone is the main thread, not a child");
+        assert!(mail.contains("P1: and re-run"), "{mail}");
+    }
+
+    /// Communication contract v2, P1.2/P1.7 (cas-7bfa, GH #1209): Claude Code
+    /// delivers a held Teams copy as a teammate-message turn, and that turn
+    /// fires no UserPromptSubmit. The turn's first tool boundary records each
+    /// `[cas #N]` row in its prompt as surfaced, so the row leaves `gated` and
+    /// can no longer raise a false "delivery stalled" notice.
+    #[test]
+    fn ct2_p1_teammate_turn_prompt_records_its_envelopes() {
+        let _env = teams_env();
+        let dir = tempfile::tempdir().unwrap();
+        let queue = crate::store::open_prompt_queue_store(dir.path()).unwrap();
+        let id = queue
+            .enqueue_with_session("supervisor", "worker-7bfa", "next: cas-y", "sess-7bfa")
+            .unwrap();
+        assert!(queue.claim_recipient_transport(id, "worker-7bfa").unwrap());
+        let other = queue
+            .enqueue_with_session("supervisor", "worker-other", "not yours", "sess-7bfa")
+            .unwrap();
+        // Quoted but not carried: the envelope is in the prompt, the body is not.
+        let quoted = queue
+            .enqueue_with_session("supervisor", "worker-7bfa", "body never shown", "sess-7bfa")
+            .unwrap();
+        assert!(queue.claim_recipient_transport(quoted, "worker-7bfa").unwrap());
+        // Never handed to a transport: envelope and body present, no receipt.
+        let undelivered = queue
+            .enqueue_with_session("worker-peer", "worker-7bfa", "still queued", "sess-7bfa")
+            .unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        fs::write(
+            &transcript,
+            turn_line(
+                "t2",
+                chrono::Utc::now() + chrono::Duration::seconds(1),
+                &format!(
+                    "<teammate-message teammate_id=\"supervisor\">\n[cas #{id} supervisor-authored 0s first]\n\nnext: cas-y\n[cas #{other} supervisor-authored 0s first]\nquoting [cas #{quoted} supervisor-authored 0s first] and [cas #{undelivered} worker-authored 0s first] still queued\n</teammate-message>"
+                ),
+            ),
+        )
+        .unwrap();
+        // Isolate the turn-prompt path: the mail drain has already run for
+        // every signal, so only the once-per-turn envelope record can act.
+        {
+            let mut receipt = Receipt::open(dir.path(), "s-7bfa").unwrap();
+            receipt.state.mail_checked_at = i64::MAX / 2;
+            receipt.save().unwrap();
+        }
+
+        let _ = fallback_context(dir.path(), &teams_input(&transcript, "worker-7bfa@sess-7bfa"));
+
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
+        assert_eq!(report.stage, cas_store::DeliveryStage::Confirmed, "hook surfacing acks the row");
+        assert!(report.confirmed_at.is_some(), "a body that entered a turn is confirmed");
+        let foreign = queue.message_delivery_report(other).unwrap().unwrap();
+        assert_eq!(foreign.recipient_receipt, None, "only rows addressed to this agent");
+        let quoted = queue.message_delivery_report(quoted).unwrap().unwrap();
+        assert_eq!(
+            quoted.recipient_receipt,
+            Some(cas_store::SurfacingSource::TransportClaimed),
+            "an envelope without its body confirms nothing"
+        );
+        assert!(quoted.confirmed_at.is_none());
+        let undelivered = queue.message_delivery_report(undelivered).unwrap().unwrap();
+        assert_eq!(
+            undelivered.recipient_receipt, None,
+            "a never-transported row is not confirmed by a quoted envelope"
+        );
+        assert!(undelivered.confirmed_at.is_none());
+    }
+
+    /// cas-7bfa review: the supervisor's own Teams identity is
+    /// `supervisor@<session>`. It owns its inbox under both aliases, while a
+    /// hex subagent of the supervisor stays a child.
+    #[test]
+    fn ct2_p1_teams_supervisor_owns_inbox_but_its_subagent_does_not() {
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_AGENT_NAME", Some("lead-sup")),
+            ("CAS_FACTORY_SESSION", Some("sess-7bfa")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        fs::write(
+            &transcript,
+            turn_line("t3", chrono::Utc::now() - chrono::Duration::seconds(60), "review cas-x"),
+        )
+        .unwrap();
+        let queue = crate::store::open_prompt_queue_store(dir.path()).unwrap();
+        let id = queue
+            .enqueue_with_session("worker-7bfa", "supervisor", "ready: cas-x", "sess-7bfa")
+            .unwrap();
+        assert!(queue.claim_recipient_transport(id, "supervisor").unwrap());
+
+        assert!(
+            fallback_context(dir.path(), &teams_input(&transcript, "b81f0c2e9d4a7735e")).is_none(),
+            "the supervisor's subagent never drains the supervisor's inbox"
+        );
+        assert_eq!(
+            queue.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+            Some(cas_store::SurfacingSource::TransportClaimed)
+        );
+        let mail = fallback_context(dir.path(), &teams_input(&transcript, "supervisor@sess-7bfa"))
+            .expect("supervisor@<session> is the supervisor itself");
+        assert!(mail.contains("ready: cas-x"), "{mail}");
+    }
+
+    /// cas-7bfa review: a Teams member now reaches the inbox-signal check, so
+    /// its served-turn no-op must stay cheap with a large transcript.
+    #[test]
+    fn teams_served_turn_noop_with_large_transcript_is_under_50ms() {
+        let _env = teams_env();
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        let filler = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "user",
+                "uuid": "tool",
+                "message": {"content": [{"type": "tool_result", "content": "x".repeat(4096)}]},
+            })
+        );
+        let mut body = turn_line("t-big", chrono::Utc::now(), "continue")
+            .replace("\"uuid\":\"t-big\"", "\"uuid\":\"t-big\",\"promptId\":\"p-big\"");
+        for _ in 0..512 {
+            body.push_str(&filler);
+        }
+        fs::write(&transcript, body).unwrap();
+        let mut input = teams_input(&transcript, "worker-7bfa@sess-7bfa");
+        input.prompt_id = Some("p-big".into());
+        record_prompt_hook(dir.path(), &input);
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(fallback_context(dir.path(), &input).is_none());
+        }
+        let average = started.elapsed() / 100;
+        eprintln!("teams served-turn average with a 2 MiB transcript: {average:?}");
+        assert!(average < std::time::Duration::from_millis(50));
+    }
+
     #[test]
     fn served_turn_noop_is_under_50ms_and_does_not_open_stores() {
         let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[

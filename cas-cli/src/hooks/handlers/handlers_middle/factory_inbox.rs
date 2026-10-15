@@ -90,14 +90,51 @@ fn recipient_aliases(input: &HookInput) -> Vec<String> {
 
 /// Factory environment is inherited by children. Only the parent owns its
 /// inbox and turn-context receipt; child hook payloads identify themselves.
+///
+/// cas-7bfa (GH #1209): a Claude Agent Teams member is launched with
+/// `--agent-id <name>@<team>` (`supervisor@<team>` for the supervisor; see
+/// `teams.rs`), and Claude Code puts that `agent_id`, plus its `agent_type`,
+/// in EVERY hook payload. Treating any `agent_id` as a child made every Teams
+/// worker and supervisor a "subagent" to its own hooks (Claude Code 2.1.300's
+/// hook-input builder sets `agent_id: ctx?.agentId, agent_type: ctx?.agentType
+/// ?? mainThreadAgentType`). Tool-boundary and
+/// turn-start mail surfacing then never ran: 373 of 373 PostToolUse hooks
+/// were empty in one worker session, and a message stayed gated for the whole
+/// turn. A subagent's id is a bare hex string with no `@`; only the
+/// session's own teammate id counts as the parent.
 pub(crate) fn owns_factory_inbox(input: &HookInput) -> bool {
+    // A child always arrives with its own `agent_id` (a hex id, alongside its
+    // `agent_type`). An `agent_type` on its own is the main thread's type:
+    // Claude Code fills it from `--agent-type` (`general-purpose`,
+    // `team-lead`, `director`) for every hook of a Teams member.
+    let is_child = input
+        .agent_id
+        .as_deref()
+        .is_some_and(|agent_id| !is_own_teammate_id(input, agent_id));
     crate::harness_policy::is_factory_agent(input)
-        && input.agent_id.is_none()
-        && input.agent_type.is_none()
+        && !is_child
         && input.subagent_type.is_none()
         && !input.transcript_path.as_deref().is_some_and(|path| {
             Path::new(path).components().any(|part| part.as_os_str() == "subagents")
         })
+}
+
+/// Whether `agent_id` is this session's own Agent Teams identity:
+/// `<CAS_AGENT_NAME>@<team>`, or `supervisor@<team>` for a supervisor, where
+/// the team is the factory session when one is set.
+fn is_own_teammate_id(input: &HookInput, agent_id: &str) -> bool {
+    let Some((local, team)) = agent_id.split_once('@') else {
+        return false;
+    };
+    if let Some(session) = factory_session()
+        && !team.eq_ignore_ascii_case(&session)
+    {
+        return false;
+    }
+    let name = std::env::var("CAS_AGENT_NAME").unwrap_or_default();
+    (!name.is_empty() && local.eq_ignore_ascii_case(name.trim()))
+        || (crate::harness_policy::is_supervisor(input)
+            && local.eq_ignore_ascii_case(crate::harness_policy::SUPERVISOR_ALIAS))
 }
 
 /// cas-b5e4 (GH #989): the newest inbox stamp (epoch milliseconds) across
@@ -302,6 +339,92 @@ fn surface_factory_inbox_with_transport_delivery(
         Some(note) => format!("{note}\n\n{rendered}"),
         None => rendered,
     })
+}
+
+/// cas-7bfa (GH #1209): record that this turn's own prompt carried queued
+/// rows. Claude Code renders a held Agent Teams copy as a teammate-message
+/// turn, and that turn fires no UserPromptSubmit hook, so nothing ever
+/// stamped those rows. They stayed `gated` behind later delivered rows and
+/// raised false "delivery stalled — recipient unread" notices. At the turn's
+/// first tool boundary, each row this turn's prompt really carries takes over
+/// the transport claim and is stamped `hook_surfaced`, which marks it
+/// delivered. Nothing is rendered: the body is already the turn's prompt.
+///
+/// "Really carries" means all three hold: the prompt names the row's
+/// `[cas #N …]` envelope, the row's own body text appears in the prompt, and
+/// the row is addressed to this agent and already holds a transport receipt
+/// (`transport_claimed` or `transport_delivered`). An envelope quoted inside
+/// another message, or one naming a row no transport ever handed over,
+/// therefore never confirms an undelivered row (cas-7bfa review).
+///
+/// Returns the rows recorded, in id order, so a caller can build on them
+/// (cas-1f0c renders pointer-only copies).
+pub(crate) fn record_turn_prompt_envelopes(
+    cas_root: &Path,
+    input: &HookInput,
+    prompt: &str,
+) -> Vec<QueuedPrompt> {
+    let ids = envelope_ids(prompt);
+    if ids.is_empty() || !owns_factory_inbox(input) {
+        return Vec::new();
+    }
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_root) else {
+        return Vec::new();
+    };
+    let aliases = recipient_aliases(input);
+    let carried: Vec<i64> = ids
+        .into_iter()
+        .filter(|id| turn_prompt_carries_row(&*queue, prompt, &aliases, *id))
+        .collect();
+    if carried.is_empty() {
+        return Vec::new();
+    }
+    let session = factory_session();
+    let mut recorded: Vec<QueuedPrompt> = Vec::new();
+    for alias in &aliases {
+        if let Ok(rows) =
+            queue.surface_wake_named_for_recipient(alias, session.as_deref(), &carried)
+        {
+            recorded.extend(rows);
+        }
+    }
+    recorded.sort_by_key(|row| row.id);
+    recorded.dedup_by_key(|row| row.id);
+    recorded
+}
+
+/// Whether the turn `prompt` delivered queue row `id` to one of `aliases`:
+/// a direct row addressed to them, with a transport receipt, whose body text
+/// is in the prompt (cas-7bfa).
+fn turn_prompt_carries_row(
+    queue: &dyn cas_store::PromptQueueStore,
+    prompt: &str,
+    aliases: &[String],
+    id: i64,
+) -> bool {
+    let Ok(Some(row)) = queue.queued_prompt(id) else {
+        return false;
+    };
+    let body = row.prompt.trim();
+    if body.is_empty()
+        || !prompt.contains(body)
+        || !aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&row.target))
+    {
+        return false;
+    }
+    queue
+        .message_delivery_report(id)
+        .ok()
+        .flatten()
+        .is_some_and(|report| {
+            matches!(
+                report.recipient_receipt,
+                Some(
+                    cas_store::SurfacingSource::TransportClaimed
+                        | cas_store::SurfacingSource::TransportDelivered
+                )
+            )
+        })
 }
 
 /// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon

@@ -3012,7 +3012,36 @@ Dev reply
 
     #[test]
     fn reply_was_now_headings_do_not_become_release_groups_or_themes() {
-        let draft = include_str!("../../../docs/release-notes/2026-10-15-v3.55.0-slack.md");
+        let draft = r#"## User thread
+
+**Top-level:**
+
+```text
+*Live on production — User — Cassy v9.99.1*
+Was: release notes had structural headings. Now: report headings describe changes.
+```
+
+**Reply (Was → Now):**
+
+```text
+• *Wait for results* — Was: checks could finish later. Now: the change waits for checks.
+```
+
+## Dev thread
+
+**Top-level:**
+
+```text
+*Live on production — Dev — Cassy v9.99.1*
+Was: reports lacked evidence. Now: reports include verification evidence.
+```
+
+**Reply (Was → Now):**
+
+```text
+• *Merge admission* — Was: pending checks were advisory. Now: merges wait for them.
+```
+"#;
         let parsed = parse_release_note_draft(draft);
         let themes = draft_theme_order(&parsed.articles);
         assert!(
@@ -3026,10 +3055,7 @@ Dev reply
             project: "fixture".to_string(),
             changelog: None,
             changelog_path: None,
-            release_notes: Some((
-                PathBuf::from("docs/release-notes/2026-10-15-v3.55.0-slack.md"),
-                draft.to_string(),
-            )),
+            release_notes: Some((PathBuf::from("release-notes.md"), draft.to_string())),
             release_note_articles: parsed.articles,
             release_note_user_punch: parsed.user_punch,
             release: None,

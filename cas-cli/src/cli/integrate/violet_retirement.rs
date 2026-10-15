@@ -1049,6 +1049,25 @@ mod tests {
     }
 
     #[test]
+    fn cas_678d_update_rejects_empty_header_even_with_a_usable_bearer_variable() {
+        let (env, probe) = update_fixture();
+        let path = env.home().join(".codex/config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!(
+            "[mcp_servers.violet]\nurl = {:?}\nbearer_token_env_var = 'VIOLET_SLACK_TOKEN_SOUNDWAVE'\nhttp_headers = {{ Authorization = 'Bearer ' }}\n",
+            violet_hub_url())).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(probe.calls.borrow().is_empty());
+        assert_eq!(report.warnings.len(), 1);
+        assert!(
+            report.warnings[0]
+                .1
+                .contains("Authorization header has an empty bearer")
+        );
+        assert!(report.warnings[0].1.contains("no request sent"));
+    }
+
+    #[test]
     fn cas_678d_update_preserves_working_account_credentials_and_custom_endpoints() {
         let (mut env, probe) = update_fixture();
         env.set("VIOLET_SLACK_TOKEN_ACCOUNT", "fixture-account");

@@ -1071,7 +1071,6 @@ impl QueueJobs {
     /// Close the lanes and wait up to `timeout` for queued critical work
     /// (stamps) to finish. Call before the StoreWorker drains (jobs.rs).
     pub(crate) fn drain_for_shutdown(&mut self, cas_dir: &Path, timeout: Duration) -> bool {
-        self.close_pass_claims(cas_dir);
         self.settle_injects(cas_dir);
         match std::mem::replace(&mut self.exec, Exec::Inline(VecDeque::new())) {
             Exec::Lanes(runtime) => match Arc::try_unwrap(runtime) {

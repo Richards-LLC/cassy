@@ -2223,8 +2223,10 @@ mod tests {
                 "blocker=true",
                 "merge_request=true",
             ] {
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 assert!(prompt.text.contains(required), "{cli:?} missing {required}");
             }
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             assert!(
                 prompt
                     .text
@@ -2315,11 +2317,13 @@ mod tests {
         .expect("idle prompt is generated");
 
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("No dispatchable tasks"),
             "expected the no-work wording: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("snapshot 2026-08-05 22:41:07Z"),
             "the absence claim must be attributable to a known read: {}",
             prompt.text
@@ -2354,6 +2358,7 @@ mod tests {
         .expect("registration prompt is generated");
 
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("snapshot 2026-08-05 22:41:07Z"),
             "{}",
             prompt.text
@@ -2391,6 +2396,7 @@ mod tests {
         .expect("idle prompt is generated");
 
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("No dispatchable tasks"),
             "out-of-scope backlog must not be advertised as this worker's work: {}",
             prompt.text
@@ -2813,7 +2819,9 @@ mod tests {
                 let envelope =
                     crate::prompt_revalidation::parse_lifecycle_envelope(&notices[0].prompt).unwrap();
                 assert_eq!(envelope.task_id, task.id);
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 assert!(notices[0].prompt.contains(&format!("actor=\"{actor}\"")));
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 assert!(!notices[0].prompt.contains("Assign another task"));
             } else {
                 assert!(
@@ -2870,10 +2878,14 @@ mod tests {
 
         assert_eq!(prompt.target, "swift-fox");
         assert!(prompt.text.contains("task-123"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("Implement feature X"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("mcp__cs__task action=start"));
         // Response instructions should be appended
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("To respond to this message, use:"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("target=supervisor"));
     }
 
@@ -2981,7 +2993,9 @@ mod tests {
                 )
                 .expect("worker lifecycle template");
                 assert!(
+                    // pin: rendered supervisor/worker prompt text is the contract under test.
                     prompt.text.contains(&format!("{prefix}task"))
+                        // pin: rendered supervisor/worker prompt text is the contract under test.
                         || prompt.text.contains(&format!("{prefix}coordination")),
                     "{cli:?}: {}",
                     prompt.text
@@ -2990,6 +3004,7 @@ mod tests {
                     if stale != prefix {
                         assert!(
                             !prompt.text.contains(&format!(" {stale}task"))
+                                // pin: rendered supervisor/worker prompt text is the contract under test.
                                 && !prompt.text.contains(&format!(" {stale}coordination")),
                             "{cli:?} template leaked stale prefix {stale}: {}",
                             prompt.text
@@ -3085,6 +3100,7 @@ mod tests {
 
         // When lease expired and task regressed to Open, supervisor should ask worker to close.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.to_lowercase().contains("task action=close"),
             "cas-6aaf: TaskCompleted for lease-expired Open task must include close instruction: {}",
             prompt.text
@@ -3181,11 +3197,13 @@ mod tests {
         // because the director filters tasks to the current epic scope. We verify
         // that the prompt directs the supervisor to the live command instead.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("3 ready tasks"),
             "Prompt must not embed stale snapshot count (D-3): {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("task action=ready"),
             "Prompt must direct supervisor to live task action=ready (D-3): {}",
             prompt.text
@@ -3254,6 +3272,7 @@ mod tests {
             None,
         )
         .expect("newly registered taskless worker should enqueue a ready prompt");
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("awaiting its first task"));
         assert_eq!(prompt.retract_worker.as_deref(), Some("swift-fox"));
         assert_eq!(prompt.drop_if_worker_assigned.as_deref(), Some("swift-fox"));
@@ -3394,7 +3413,9 @@ mod tests {
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("cas-1234"));
         assert!(prompt.text.contains("in_progress"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("MERGE REQUIRED"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("not a task completion"));
         assert!(
             !lower.contains("done") && !lower.contains("finished"),
@@ -3407,6 +3428,7 @@ mod tests {
         // bug this task fixes) — it stays on the generic informational
         // wording, which doesn't name a factory source branch.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("factory/swift-fox"),
             "InProgress + stale MERGE REQUIRED echo must NOT get the actionable \
              merge-queue framing (cas-6883): {}",
@@ -3684,6 +3706,7 @@ mod tests {
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("cas-8eff"), "{}", prompt.text);
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("factory/recipe-be"),
             "must name source factory branch: {}",
             prompt.text
@@ -3721,11 +3744,13 @@ mod tests {
             prompt
                 .text
                 .contains("cas__task action=list status=awaiting_merge")
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 || prompt.text.contains("status=awaiting_merge"),
             "must surface awaiting_merge list: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("git merge --no-ff factory/recipe-be")
                 || prompt
                     .text
@@ -3735,11 +3760,13 @@ mod tests {
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("cas__task action=close id=cas-8eff"),
             "homogeneous Grok: worker re-close must use cas__ prefix: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("cas__task action=show id=cas-8eff"),
             "homogeneous Grok: supervisor show must use cas__ prefix: {}",
             prompt.text
@@ -3756,6 +3783,7 @@ mod tests {
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("resolve the rejection before acting"),
             "must not keep the pre-cas-c145 vague wording: {}",
             prompt.text
@@ -3982,13 +4010,16 @@ mod tests {
         )
         .unwrap();
 
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("CODE REVIEW REQUIRED"));
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("resolve the rejection before acting"),
             "non-merge rejections keep informational wording: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("factory/swift-fox"),
             "non-merge rejection must not use the merge-queue template: {}",
             prompt.text
@@ -4066,6 +4097,7 @@ mod tests {
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("MERGE REQUIRED"),
             "notification must carry the close-rejected reason: {}",
             prompt.text
@@ -4122,7 +4154,9 @@ mod tests {
         // Must never suggest closing the epic — the snapshot may be stale and
         // the epic might have live open children not visible in this refresh.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.to_lowercase().contains("closing the epic")
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 && !prompt.text.to_lowercase().contains("close the epic"),
             "WorkerIdle nudge must not advise closing the epic (stale-snapshot risk): {:?}",
             prompt.text
@@ -4211,6 +4245,7 @@ mod tests {
             "Epic completion prompt must not prescribe branch/merge/main instructions: {}",
             prompt.text
         );
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("task action=close id=epic-456"));
     }
 
@@ -4239,8 +4274,11 @@ mod tests {
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("calm-owl"));
         assert!(prompt.text.contains("ready"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(!prompt.text.contains("3 ready tasks"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("task action=ready"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("assignee=calm-owl"));
     }
 
@@ -4269,7 +4307,9 @@ mod tests {
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("calm-owl"));
         assert!(prompt.text.contains("ready"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("No dispatchable tasks"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("task action=ready"));
     }
 
@@ -4441,6 +4481,7 @@ mod tests {
                 ("mcp__cs__", "mcp__cas__")
             };
             assert!(
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 prompt.text.contains(&format!("{own}task action=")),
                 "{worker} must see its own prefix {own}: {}",
                 prompt.text
@@ -4504,6 +4545,7 @@ mod tests {
             None,
         )
         .unwrap();
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("mcp__cas__task action=start"));
         assert!(
             prompt
@@ -4575,11 +4617,13 @@ mod tests {
         .unwrap();
 
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("assignee=swift-fox"),
             "WorkerIdle must use the display name in assignee field, got: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("assignee=sess-id-abc123"),
             "WorkerIdle must not use the session ID in assignee field, got: {}",
             prompt.text
@@ -4771,11 +4815,13 @@ mod tests {
         .unwrap();
 
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("assignee=calm-owl"),
             "AgentRegistered must use display name in assignee field, got: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("assignee=sess-id-abc123"),
             "AgentRegistered must not use the session ID in assignee field, got: {}",
             prompt.text
@@ -5195,11 +5241,13 @@ mod tests {
             "cas-efc4 AC3: prompt must target the Codex worker"
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cs__task action=show"),
             "cas-efc4 AC3: show command must use Codex prefix mcp__cs__: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cs__task action=start"),
             "cas-efc4 AC3: start command must use Codex prefix mcp__cs__: {}",
             prompt.text
@@ -5207,11 +5255,13 @@ mod tests {
         // Response instruction: Codex worker replies to Claude supervisor using
         // its own coordination tool.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cs__coordination action=message"),
             "cas-efc4 AC3: response instruction must use Codex coordination tool: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("mcp__cas__task action=start"),
             "cas-efc4 AC3: must NOT leak Claude prefix into Codex worker prompt: {}",
             prompt.text
@@ -5249,11 +5299,13 @@ mod tests {
             "cas-efc4 AC3: prompt must target the Claude worker"
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cas__task action=start"),
             "cas-efc4 AC3: start command must use Claude prefix mcp__cas__: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("mcp__cs__task action=start"),
             "cas-efc4 AC3: must NOT use Codex prefix for Claude worker: {}",
             prompt.text
@@ -5360,11 +5412,13 @@ mod tests {
         );
         // Close instruction uses the worker's prefix (Codex → mcp__cs__)
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cs__task action=close"),
             "cas-efc4 AC5: close instruction must use Codex worker prefix mcp__cs__: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("mcp__cas__task action=close"),
             "cas-efc4 AC5: close instruction must NOT use Claude prefix for Codex worker: {}",
             prompt.text
@@ -5439,22 +5493,26 @@ mod tests {
         );
         // Assign command uses supervisor's prefix (Claude supervisor acts)
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cas__task action=update"),
             "cas-efc4 AC5: assign command must use Claude supervisor prefix: {}",
             prompt.text
         );
         // Ready-check uses supervisor's prefix
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("mcp__cas__task action=ready"),
             "cas-efc4 AC5: ready-check must use Claude supervisor prefix: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("assignee=codex-worker"),
             "cas-efc4: assignee must use worker display name: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("assignee=sess-id-codex-worker"),
             "cas-efc4: assignee must not use the worker session ID: {}",
             prompt.text
@@ -5468,11 +5526,13 @@ mod tests {
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !prompt.text.contains("mcp__cs__task action=update"),
             "cas-efc4 AC5: body assign command must NOT use Codex prefix (supervisor acts): {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("target=codex-worker"),
             "cas-efc4 AC5: response instruction must address the Codex worker: {}",
             prompt.text
@@ -5575,7 +5635,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(prompt.target, "supervisor");
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("assigned-but-unstarted and inactive"));
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("task action=start id=cas-unstarted"));
         assert!(
             revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_some(),
@@ -5620,16 +5682,19 @@ mod tests {
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("is-wedged swift-fox"),
             "must point at `cas factory is-wedged <worker>` for triage: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("debug swift-fox"),
             "must point at `cas factory debug <worker>` for transcript triage: {}",
             prompt.text
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             prompt.text.contains("kill swift-fox"),
             "must name the actual kill command, gated on is-wedged's verdict: {}",
             prompt.text
@@ -5858,6 +5923,7 @@ mod tests {
              assignable/idle-needing-work: {}",
             prompt.text
         );
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("not a task completion"));
     }
 
@@ -6090,6 +6156,7 @@ mod tests {
             "must stamp ownership even when unresolved: {}",
             prompt.text
         );
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         assert!(prompt.text.contains("task action=close id=epic-456"));
     }
 
@@ -6452,6 +6519,7 @@ mod tests {
             )
             .expect("AwaitingMerge task must render a relay");
             assert!(
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 prompt.text.contains("Merge target: main"),
                 "relay must name the WorkTarget branch: {}",
                 prompt.text
@@ -6474,6 +6542,7 @@ mod tests {
                 prompt.text
             );
             assert!(
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 !prompt.text.contains("git merge --no-ff"),
                 "a protected main target must not be merged locally: {}",
                 prompt.text
@@ -6484,6 +6553,7 @@ mod tests {
                 prompt.text
             );
             assert!(
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 !prompt.text.contains("epic/pinned-focus"),
                 "an unrelated focused epic must never appear as the merge destination: {}",
                 prompt.text
@@ -6730,6 +6800,7 @@ mod tests {
             )
             .expect("AwaitingMerge idle with fresh evidence must produce a prompt");
             assert!(
+                // pin: rendered supervisor/worker prompt text is the contract under test.
                 prompt.text.contains("2 unmerged commit"),
                 "alert text must include the unmerged commit count: {}",
                 prompt.text
@@ -6778,7 +6849,9 @@ mod tests {
                 Some(&evidence),
             )
             .unwrap();
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             assert!(prompt.text.contains("Git ref disagreement detected"));
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             assert!(prompt.text.contains("origin/epic/test-epic"));
         }
 
@@ -6836,7 +6909,9 @@ mod tests {
                 Some(&evidence),
             )
             .unwrap();
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             assert!(prompt.text.contains("Push required"));
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             assert!(prompt.text.contains("do not repeat the local merge"));
         }
 

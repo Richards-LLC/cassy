@@ -622,3 +622,7 @@ pub(crate) async fn run_worker_operation(
         Err(error) => Err(OperationError::Failed(error.message.to_string())),
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_supervisor_notices_tests.rs"]
+mod supervisor_notice_tests;

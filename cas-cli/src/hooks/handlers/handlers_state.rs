@@ -851,7 +851,8 @@ mod supervisor_handoff_tests {
         assert_eq!(rows.len(), 2, "one grouped notice per peer and operator");
         assert!(
             rows.iter()
-                .any(|r| r.target == "operator" && r.factory_session.is_none())
+                .any(|r| r.target == "operator"
+                    && r.factory_session.as_deref() == Some("old-session"))
         );
         assert!(rows.iter().any(|r| r.target == "peer" && r.factory_session.as_deref() == Some("peer-session")));
         assert!(

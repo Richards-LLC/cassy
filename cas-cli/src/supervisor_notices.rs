@@ -25,11 +25,11 @@ pub(crate) struct Recipient {
 }
 
 impl Recipient {
-    pub(crate) fn operator() -> Self {
+    pub(crate) fn operator(session: &str) -> Self {
         Self {
             id: "operator".into(),
             name: "operator".into(),
-            session: None,
+            session: Some(session.to_string()),
         }
     }
     pub(crate) fn agent(agent: &Agent) -> Self {
@@ -73,7 +73,7 @@ pub(crate) fn resolve(agents: &[Agent], owner: Option<&str>, session: Option<&st
     });
     live.first()
         .map(|a| Recipient::agent(a))
-        .unwrap_or_else(Recipient::operator)
+        .unwrap_or_else(|| Recipient::operator(session.or(owner).unwrap_or("supervisor-recovery")))
 }
 
 /// Durably enqueue one CAS-authored action. A retry reuses both queue rows.
@@ -159,7 +159,7 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
     }
     enqueue(
         root,
-        &Recipient::operator(),
+        &Recipient::operator(ending.factory_session.as_deref().unwrap_or(&ending.id)),
         "epic_orphaned",
         &detail,
         &ending.id,

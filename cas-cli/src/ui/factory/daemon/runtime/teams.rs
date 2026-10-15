@@ -3960,6 +3960,8 @@ mod tests {
     // ── Worker pre-commit hook tests (cas-bea2, LAYER 2) ─────────────────
 
     fn make_git_repo_for_hook_test() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path();
         for args in [
@@ -3973,6 +3975,10 @@ mod tests {
                 .output()
                 .unwrap();
         }
+        let fast_rows = p.join("scripts/fast-rows-pre-push.sh");
+        std::fs::create_dir_all(fast_rows.parent().unwrap()).unwrap();
+        std::fs::write(&fast_rows, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fast_rows, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(p.join("f.txt"), "x").unwrap();
         for args in [vec!["add", "."], vec!["commit", "-m", "init"]] {
             std::process::Command::new("git")
@@ -4366,12 +4372,30 @@ mod tests {
         let git = |dir: &std::path::Path, args: &[&str]| {
             std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
         };
-        let gate = repo.join("scripts/fast-rows-pre-push.sh");
-        std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
-        std::fs::write(&gate, "#!/bin/sh\ntouch \"$(git rev-parse --git-common-dir)/gate-ran\"\n\
-            echo 'FIX version-literals: fixture refusal' >&2\nexit 1\n").unwrap();
+        let scripts = repo.join("scripts");
+        let gate = scripts.join("fast-rows-pre-push.sh");
+        let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        std::fs::copy(project_root.join("scripts/fast-rows-pre-push.sh"), &gate).unwrap();
+        let release_gate = scripts.join("release-gate.sh");
+        std::fs::write(
+            &release_gate,
+            "#!/bin/bash\n\
+             common=\"$(git rev-parse --path-format=absolute --git-common-dir)\"\n\
+             touch \"$common/gate-ran\"\n\
+             if grep -Fq '9.99.8' version.txt; then\n\
+               echo 'FIX version-literals: fixture next-version literal' >&2\n\
+               exit 1\n\
+             fi\n\
+             sha=\"$(git rev-parse HEAD)\"\n\
+             mkdir -p \"$common/cas/fast-rows\"\n\
+             printf 'fast-rows: PASS %s fixture\\n' \"$sha\" >\"$common/cas/fast-rows/$sha.pass\"\n\",
+        )
+        .unwrap();
         std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&release_gate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join("version.txt"), "fixture next version: 9.99.8\n").unwrap();
         assert!(git(repo, &["add", "scripts"]).status.success());
+        assert!(git(repo, &["add", "version.txt"]).status.success());
         assert!(git(repo, &["commit", "-qm", "ship the retired push gate"]).status.success());
         let remote = repo.join("remote.git");
         assert!(git(repo, &["init", "-q", "--bare", &remote.to_string_lossy()]).status.success());
@@ -4413,6 +4437,25 @@ mod tests {
         let tip = String::from_utf8_lossy(&git(&wt, &["rev-parse", "HEAD"]).stdout).trim().to_string();
         let pushed = git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]);
         assert!(!pushed.status.success(), "a refused tip must not reach the remote: {tip}");
+
+        std::fs::write(wt.join("version.txt"), "fixture value: 9.99.7\n").unwrap();
+        assert!(git(&wt, &["add", "version.txt"]).status.success());
+        assert!(git(&wt, &["commit", "-qm", "remove fixture next-version literal"]).status.success());
+        let allowed = std::process::Command::new("git")
+            .args(["push", "origin", "factory/w"])
+            .env("CAS_AGENT_NAME", "w")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(allowed.status.success(), "{}", String::from_utf8_lossy(&allowed.stderr));
+        let tip = String::from_utf8_lossy(&git(&wt, &["rev-parse", "HEAD"]).stdout).trim().to_string();
+        let receipt = repo.join(format!(".git/cas/fast-rows/{tip}.pass"));
+        assert!(receipt.exists(), "successful gate must write its pushed-tip receipt");
+        let pushed = git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]);
+        assert_eq!(String::from_utf8_lossy(&pushed.stdout).trim(), tip);
         let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }
 

@@ -207,5 +207,20 @@ status=$?
 set -e
 check '[[ $status -eq 0 && "$out" == *"merged as abc123"* ]]' 'a queued then merged PR ends the watch with exit 0'
 
+# 8. cas-ea62: git exports GIT_DIR to hooks. A fixture
+# test that creates bare repositories must leave the repository those name
+# untouched (it once set core.bare=true on the shared checkout).
+parent="$tmp/parent"
+git init --quiet "$parent"
+git -C "$parent" commit --quiet --allow-empty -m parent
+cp "$parent/.git/config" "$tmp/parent-config.before"
+(
+    # The pre-push hook exports GIT_DIR alone, as git does for hooks.
+    export GIT_DIR="$parent/.git"
+    "$script_dir/test-release-publish.sh" >/dev/null 2>&1
+) || bad 'the bare-fixture test passes under exported hook variables'
+check 'cmp -s "$tmp/parent-config.before" "$parent/.git/config"' 'a bare fixture under an exported GIT_DIR leaves the parent config untouched'
+check '[[ "$(git -C "$parent" rev-list --count HEAD)" -eq 1 && -z "$(git -C "$parent" tag)" ]]' 'a bare fixture under an exported GIT_DIR adds no commit or tag to the parent'
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

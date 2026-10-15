@@ -282,9 +282,9 @@ impl Config {
                 } else if key == "factory.supervisor_only_env" {
                     factory.worker_policy.supervisor_only_env = names;
                 } else if key == "factory.worker_denied_clis" {
-                    factory.worker_policy.worker_denied_clis = names;
+                    factory.worker_denied_clis = names;
                 } else if key == "factory.worker_denied_mcp_tools" {
-                    factory.worker_policy.worker_denied_mcp_tools = names;
+                    factory.worker_denied_mcp_tools = names;
                 } else {
                     factory.worker_policy.worker_credential_env = names;
                 }

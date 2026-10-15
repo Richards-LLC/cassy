@@ -13,10 +13,60 @@
 use std::path::Path;
 
 use cas_core::hooks::types::HookInput;
-use cas_types::factory_worker_policy::FactoryWorkerPolicy;
 use serde_json::Value;
 
 use crate::config::{Config, load_global_config};
+
+/// The two worker-denial lists of a factory configuration.
+#[derive(Debug, Clone)]
+struct WorkerDenials {
+    clis: Vec<String>,
+    mcp_tools: Vec<String>,
+}
+
+impl Default for WorkerDenials {
+    fn default() -> Self {
+        let factory = crate::config::FactoryConfig::default();
+        Self { clis: factory.worker_denied_clis, mcp_tools: factory.worker_denied_mcp_tools }
+    }
+}
+
+impl WorkerDenials {
+    /// Whether `cli` (an executable's basename) is denied to workers.
+    fn denies_cli(&self, cli: &str) -> bool {
+        self.clis.iter().any(|denied| denied.trim().eq_ignore_ascii_case(cli))
+    }
+
+    /// The first denied pattern `tool` matches, if any.
+    fn denied_mcp_tool_pattern(&self, tool: &str) -> Option<&str> {
+        self.mcp_tools
+            .iter()
+            .map(|pattern| pattern.trim())
+            .find(|pattern| !pattern.is_empty() && glob_matches(pattern, tool))
+    }
+}
+
+/// Case-insensitive glob with `*` as the only wildcard.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let text = text.to_ascii_lowercase();
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if text.len() < first.len() + last.len() || !text.starts_with(first) || !text.ends_with(last) {
+        return false;
+    }
+    let mut rest = &text[first.len()..text.len() - last.len()];
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    true
+}
 
 /// The refusal for a factory worker's tool call, or `None` when it may run.
 pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> Option<String> {
@@ -32,19 +82,22 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
     denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| tool_refusal(&name, &pattern))
 }
 
-/// The project's factory worker policy, else the global one, else defaults.
-fn worker_policy(cas_root: Option<&Path>) -> FactoryWorkerPolicy {
+/// The project's factory denials, else the global ones, else the defaults.
+fn worker_policy(cas_root: Option<&Path>) -> WorkerDenials {
     cas_root
         .and_then(|root| Config::load(root).ok())
         .and_then(|config| config.factory)
         .or_else(|| load_global_config().factory)
-        .map(|factory| factory.worker_policy)
+        .map(|factory| WorkerDenials {
+            clis: factory.worker_denied_clis,
+            mcp_tools: factory.worker_denied_mcp_tools,
+        })
         .unwrap_or_default()
 }
 
 /// The first denied CLI a shell command runs. Package runners count:
 /// `npx vercel`, `bunx vercel`, `pnpm dlx vercel`, `yarn exec vercel` run it.
-fn denied_cli(policy: &FactoryWorkerPolicy, command: &str) -> Option<String> {
+fn denied_cli(policy: &WorkerDenials, command: &str) -> Option<String> {
     super::pre_tool::shell_invocations(command)
         .into_iter()
         .find_map(|(name, args)| {
@@ -76,7 +129,7 @@ fn package_runner_target<'a>(name: &str, args: &'a [String]) -> Option<&'a str> 
 /// The first denied tool a call names, with the pattern it matched. An
 /// `mcp_execute` dispatch is judged by each `server.tool` it calls.
 fn denied_mcp_tool(
-    policy: &FactoryWorkerPolicy,
+    policy: &WorkerDenials,
     tool: &str,
     input: Option<&Value>,
 ) -> Option<(String, String)> {
@@ -148,8 +201,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn worker_denials_match_clis_and_tool_patterns() {
+        let policy = WorkerDenials::default();
+        assert!(policy.denies_cli("vercel") && policy.denies_cli("Vercel"));
+        assert!(!policy.denies_cli("vercel-helper") && !policy.denies_cli("git"));
+        for tool in ["mcp__claude_ai_Vercel__list_projects", "mcp__vercel__deploy", "vercel"] {
+            assert_eq!(policy.denied_mcp_tool_pattern(tool), Some("*vercel*"), "{tool}");
+        }
+        assert_eq!(policy.denied_mcp_tool_pattern("mcp__github__create_issue"), None);
+
+        let custom = WorkerDenials {
+            clis: Vec::new(),
+            mcp_tools: vec!["mcp__neon__*".into(), "*__deploy_*".into(), "exact".into()],
+        };
+        assert!(!custom.denies_cli("vercel"), "an empty list disables the CLI check");
+        assert!(custom.denied_mcp_tool_pattern("mcp__Neon__run_sql").is_some());
+        assert!(custom.denied_mcp_tool_pattern("mcp__x__deploy_now").is_some());
+        assert!(custom.denied_mcp_tool_pattern("EXACT").is_some());
+        assert!(custom.denied_mcp_tool_pattern("exactly").is_none());
+        assert!(custom.denied_mcp_tool_pattern("mcp__x__deploy").is_none());
+    }
+
+    #[test]
     fn denied_cli_sees_through_wrappers_and_package_runners() {
-        let policy = FactoryWorkerPolicy::default();
+        let policy = WorkerDenials::default();
         for command in [
             "vercel env ls production",
             "/usr/local/bin/vercel whoami",
@@ -183,7 +258,7 @@ mod tests {
 
     #[test]
     fn denied_tools_cover_connectors_and_proxy_dispatches() {
-        let policy = FactoryWorkerPolicy::default();
+        let policy = WorkerDenials::default();
         assert!(denied_mcp_tool(&policy, "mcp__claude_ai_Vercel__list_deployments", None).is_some());
         assert!(denied_mcp_tool(&policy, "mcp__vercel__get_project", None).is_some());
         assert!(denied_mcp_tool(&policy, "mcp__github__create_issue", None).is_none());

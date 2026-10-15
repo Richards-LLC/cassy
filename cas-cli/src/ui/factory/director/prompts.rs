@@ -1183,9 +1183,9 @@ fn pending_qa_idle_prompt_text(
 /// signals (cas-c145). Carries task, source factory branch, merge target,
 /// and next action. Explicitly push-based (no polling loop).
 ///
-/// `supervisor_prefix` is used for every MCP command in this
-/// supervisor-directed relay, including the re-close command. Mixed factories
-/// must render tool names in the receiving supervisor's harness.
+/// `supervisor_prefix` is used for MCP commands the supervisor must run. The
+/// re-close instruction is explicitly handed to the worker, so it uses
+/// `worker_prefix`; the supervisor's escape hatch uses `supervisor_prefix`.
 ///
 /// Wording constraint: must not contain "assign" — the AwaitingMerge idle
 /// path is not "idle needing work" (cas-09d0 / cas-728b).
@@ -1201,6 +1201,7 @@ fn merge_required_idle_prompt_text(
     task: &ActiveLeaseSummary,
     data: &DirectorData,
     supervisor_prefix: &str,
+    worker_prefix: &str,
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = format!("factory/{worker}");
@@ -1234,9 +1235,16 @@ fn merge_required_idle_prompt_text(
     };
     let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
     let show = format!("`{supervisor_prefix}task action=show id={}`", task.task_id);
-    // This command appears in a supervisor-directed relay, so use the
-    // recipient's prefix even when the worker is from another harness.
-    let reclose = format!("`{supervisor_prefix}task action=close id={}`", task.task_id);
+    // This exact command is handed to the worker to execute in its own session.
+    let reclose = format!(
+        "`{worker_prefix}task action=close id={} commit_receipt=<merged sha> reason=\"merged task\"`",
+        task.task_id
+    );
+    // Keep the supervisor's emergency path separate and in their harness.
+    let supervisor_close = format!(
+        "`{supervisor_prefix}task action=close id={} supervisor_override=true commit_receipt=<merged sha> reason=\"worker unavailable\"`",
+        task.task_id
+    );
     let rejection = task
         .close_rejected_reason
         .as_deref()
@@ -1281,8 +1289,8 @@ fn merge_required_idle_prompt_text(
              2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
              Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
              then queue it with `gh pr merge <number> --auto`. Do not merge into or push {target} locally.\n\
-             3. When the merge queue lands it, tell {worker} to re-close with {reclose} (or use the \
-             supervisor escape-hatch close with commit_receipt=<merged sha> if the worker is unresponsive)\n\
+             3. When the merge queue lands it, tell {worker} to run this in its own session: {reclose}\n\
+             Supervisor escape hatch if {worker} is unresponsive: {supervisor_close}\n\
              4. Then clear context / hand the worker their next task if more work is ready\n\
              Live task state: {show}\n\
              This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
@@ -1311,7 +1319,8 @@ fn merge_required_idle_prompt_text(
          1. Confirm: {epic_status} and/or {list_awaiting}\n\
          {merge_step}\n\
          3. Push {target} if remote tracking applies\n\
-         4. Tell {worker} to re-close with {reclose} (or use the supervisor escape-hatch close after merge if the worker is unresponsive)\n\
+         4. Tell {worker} to run this in its own session: {reclose}\n\
+         Supervisor escape hatch if {worker} is unresponsive: {supervisor_close}\n\
          5. Then clear context / hand the worker their next task if more work is ready\n\
          Live task state: {show}\n\
          This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
@@ -1654,6 +1663,7 @@ pub fn generate_prompt_at(
                         task,
                         data,
                         supervisor_prefix,
+                        worker_prefix,
                         merge_alert_evidence,
                     )
                 } else {
@@ -3888,11 +3898,13 @@ mod tests {
         // The re-close command is relayed to the Codex worker and must be
         // explicit that it runs in the worker's own session.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             body.contains("Tell codex-worker to run this in its own session: `mcp__cs__task action=close id=cas-mix1"),
             "worker re-close command must use the worker's Codex prefix: {}",
             body
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             body.lines().any(|line| {
                 line.contains("Supervisor escape hatch")
                     && line.contains("`mcp__cas__task action=close id=cas-mix1")
@@ -3902,6 +3914,7 @@ mod tests {
             body
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !body.contains("Tell codex-worker to run this in its own session: `mcp__cas__task"),
             "worker instruction must not use the supervisor's Claude prefix: {}",
             body
@@ -3978,11 +3991,13 @@ mod tests {
         // The worker instruction targets Grok, while the escape hatch stays
         // with the Claude supervisor.
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             grok_body.contains("Tell grok-worker to run this in its own session: `cas__task action=close id=cas-mix2"),
             "Grok worker re-close command must use its own prefix: {}",
             grok_body
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             grok_body.lines().any(|line| {
                 line.contains("Supervisor escape hatch")
                     && line.contains("`mcp__cas__task action=close id=cas-mix2")
@@ -3992,6 +4007,7 @@ mod tests {
             grok_body
         );
         assert!(
+            // pin: rendered supervisor/worker prompt text is the contract under test.
             !grok_body.contains("Tell grok-worker to run this in its own session: `mcp__cas__task"),
             "Grok worker instruction must not use the supervisor's Claude prefix: {}",
             grok_body
@@ -4057,6 +4073,7 @@ mod tests {
         let body = prompt.text.split("\n---\n").next().unwrap_or(&prompt.text);
         let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
         let supervisor_prefix = supervisor_cli.backend().capabilities().tool_prefix;
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         let expected_worker = format!(
             "Tell {worker} to run this in its own session: `{worker_prefix}task action=close id={task_id}"
         );
@@ -4064,11 +4081,13 @@ mod tests {
             body.contains(&expected_worker),
             "merge relay worker command must use {worker_prefix} and name its own session: {body}"
         );
+        // pin: rendered supervisor/worker prompt text is the contract under test.
         let expected_supervisor_line = format!(
             "Supervisor escape hatch if {worker} is unresponsive: `{supervisor_prefix}task action=close id={task_id}"
         );
         assert!(
-            body.contains(&expected_supervisor_line),
+            body.lines()
+                .any(|line| line.contains(&expected_supervisor_line)),
             "supervisor escape hatch must be on its own line with {supervisor_prefix}: {body}"
         );
         let worker_on_escape = format!(

@@ -70,7 +70,7 @@ pub struct SearchContextRequest {
 
     /// Include related memories
     #[schemars(description = "Include related memories")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_memories: Option<bool>,
 
     /// Observation content (for observe)
@@ -142,7 +142,7 @@ pub struct SearchContextRequest {
 
     /// Include source code in results (for code_search/code_show)
     #[schemars(description = "Include source code in results")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_source: Option<bool>,
 
     /// Regex pattern for grep search
@@ -167,7 +167,7 @@ pub struct SearchContextRequest {
 
     /// Case insensitive search (for grep)
     #[schemars(description = "Case insensitive search")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub case_insensitive: Option<bool>,
 
     // ========== Blame Fields ==========
@@ -188,12 +188,12 @@ pub struct SearchContextRequest {
 
     /// Filter to only AI-generated lines (for blame)
     #[schemars(description = "Show only AI-generated lines")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub ai_only: Option<bool>,
 
     /// Include full prompts in blame output
     #[schemars(description = "Include full prompts in blame output")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_prompts: Option<bool>,
 
     /// Canonical agent session ID filter for retrieval_metrics; hashed before comparison.
@@ -234,14 +234,14 @@ pub struct SearchContextRequest {
     #[schemars(
         description = "Include merge commits in history results (excluded by default: their message is 'Merge branch x')"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_merges: Option<bool>,
 
     /// Request provenance on history results
     #[schemars(
         description = "Resolve which task/session produced each commit, with each edge's link method and confidence. Coverage is partial and measured (see index_status); a commit with no edge comes back with a stated reason, not dropped."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub include_provenance: Option<bool>,
 }
 
@@ -257,26 +257,26 @@ pub struct SystemRequest {
 
     /// Rebuild BM25 index (for reindex)
     #[schemars(description = "Rebuild BM25 full-text search index")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub bm25: Option<bool>,
 
     /// Regenerate embeddings (deprecated - semantic search via cloud only)
     #[schemars(
         description = "Deprecated: embeddings are now cloud-only. This parameter is ignored."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub embeddings: Option<bool>,
 
     /// Only generate for entries missing embeddings (deprecated)
     #[schemars(
         description = "Deprecated: embeddings are now cloud-only. This parameter is ignored."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub missing_only: Option<bool>,
 
     /// Force maintenance run even if not idle
     #[schemars(description = "Force maintenance run even if not idle")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,
 
     /// Search query for config_search action
@@ -662,7 +662,7 @@ pub struct FactoryRequest {
     #[schemars(
         description = "worker_status: one liveness line per worker without Git/history reads; epic_status: fast summary omitting expensive delivery-content proofs"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub summary: Option<bool>,
 
     /// Specific worker names (comma-separated). `target` is accepted as an
@@ -721,19 +721,19 @@ pub struct FactoryRequest {
     #[schemars(
         description = "sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task; a worktree already mid-rebase is refused regardless. shutdown_workers: required when any selected worker is mid-task or has dirty/unpushed work. Default false."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,
 
     /// Preview target-cache reclamation without deleting artifacts.
     #[schemars(
         description = "gc_cleanup: preview exact target-cache candidates and bytes without deleting them (target-cache cleanup defaults to dry-run unless explicitly false)"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub clear: Option<bool>,
 
     /// Branch/ref target for sync operations
@@ -750,7 +750,7 @@ pub struct FactoryRequest {
     #[schemars(
         description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker's branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change mid-session. Such spawn receipts warn."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub isolate: Option<bool>,
 
     /// cas-ee68 (communication contract v2, P3.7): a supervisor brief for
@@ -809,7 +809,7 @@ pub struct FactoryRequest {
     #[schemars(
         description = "Opt in to a reminder surviving its creator session (default false). Cross-session deliveries include origin-session and created-at context."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub cross_session: Option<bool>,
 
     // ========== Spawn-time worker spec overrides (cas-2992) ==========
@@ -889,7 +889,7 @@ pub struct FactoryRequest {
     #[schemars(
         description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
 
     // ========== Epic split between peer supervisors (cas-4736) ==========
@@ -947,7 +947,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "peers only: include task claims, live workers and branches (read-only)"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub detail: Option<bool>,
 
     /// Select one peer supervisor; implies detail.
@@ -957,7 +957,7 @@ pub struct CoordinationRequest {
 
     /// Machine-readable peer report with untruncated values.
     #[schemars(description = "peers only: return one JSON document with untruncated values")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
     // ========== Shared Fields ==========
@@ -989,7 +989,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "message action only: mark this worker-to-supervisor message as a merge request. CAS attaches the cas-merge-request envelope and suppresses it only if its branch tip is already integrated. Omit or false for blockers, questions, close failures, and all other free-form messages."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub merge_request: Option<bool>,
 
     /// Explicit blocker escalation (cas-8725). Only this type receives CAS's
@@ -997,7 +997,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "message action only: mark this message as a blocker escalation. CAS attaches the cas-blocker envelope so an idle supervisor is woken now instead of reading the row at its next turn. Omit or false for status updates, questions and ordinary traffic."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub blocker: Option<bool>,
 
     /// Explicit notification this message acknowledges or answers.
@@ -1033,7 +1033,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "message target=all_workers only: standing policy that workers spawned later still receive. Omit for ordinary broadcasts, which reach only workers registered when sent."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub sticky: Option<bool>,
 
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
@@ -1062,14 +1062,14 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "When true (or with action=interrupt), deliver the message URGENTLY: break the target worker's in-flight turn (Esc) and inject the correction as its next prompt, bypassing the Claude Code inbox even in agent-teams mode. This DISCARDS the worker's in-flight reasoning/partial work — use only when the worker is demonstrably off the rails. Default false = normal, non-disruptive inbox/queue delivery."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub urgent: Option<bool>,
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
         description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed and restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,
 
     /// Explicit intent to use the configured trunk fallback when no epic or
@@ -1078,7 +1078,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "worktree_merge only: allow the fallback to the configured trunk when no epic or task WorkTarget is declared (a declared WorkTarget never needs it). Refusals name the trunk destination first; trunk pushes warn loudly. Separate from force= (dirty worktree)."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub allow_trunk: Option<bool>,
 
     /// worktree_merge only: remove the worktree directory and delete the
@@ -1089,7 +1089,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "worktree_merge only: remove worktree + delete branch after merge (end-of-lane). Separate from force= (dirty only). System-B default is preserve so mid-epic merges do not destroy a live worker cwd."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub cleanup: Option<bool>,
 
     /// worktree_merge only: allow an already failed lane CI result to merge.
@@ -1098,12 +1098,12 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "worktree_merge only: allow a red lane CI result to merge. Requires a live registered supervisor, an explicit task_id, and a non-empty reason; records a decision note on that task. Independent of force= (dirty worktree only)."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,
 
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub clear: Option<bool>,
 
     /// Maximum items to return
@@ -1124,7 +1124,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "worker_status: one liveness line per worker without Git/history reads; epic_status: fast summary omitting expensive delivery-content proofs"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub summary_mode: Option<bool>,
 
     // ========== Agent Fields ==========
@@ -1243,7 +1243,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker's branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change mid-session. Such spawn receipts warn."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub isolate: Option<bool>,
 
     /// Registry lane to resolve for spawn_workers. Mutually exclusive with
@@ -1350,13 +1350,13 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "Explicitly keep a reminder across creator session end and linked task close (default false). Deliveries include origin-session, created-at, and linked-task status context."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub cross_session: Option<bool>,
 
     // ========== Worktree Fields ==========
     /// Show all worktrees including removed/merged (for worktree_list)
     #[schemars(description = "Show all worktrees including removed/merged")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub all: Option<bool>,
 
     /// Worktree or server lifecycle status filter.
@@ -1373,14 +1373,14 @@ pub struct CoordinationRequest {
 
     /// Show only orphaned worktrees (for worktree_list)
     #[schemars(description = "Show only orphaned worktrees")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub orphans: Option<bool>,
 
     /// Preview cleanup without making changes.
     #[schemars(
         description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
     // ========== Server registry (cas-7c93, GH #87) ==========
@@ -1409,7 +1409,7 @@ pub struct CoordinationRequest {
     #[schemars(
         description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
 
     // ========== Epic split between peer supervisors (cas-4736) ==========

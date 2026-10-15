@@ -1039,6 +1039,9 @@ pub struct FactoryApp {
     /// SELECT mode: client has disabled mouse capture so native terminal
     /// text selection works. Set via F10 toggle on the client.
     pub select_mode: bool,
+    /// The daemon watchdog's status-line badge, `slow: <lane>/<step> <n> ms`
+    /// or `wedged: <lane>/<step> for <n> s` (cas-6931).
+    pub loop_health: Option<String>,
     /// Workers currently in the spawning pipeline (after prepare, before finish).
     /// These appear as booting panes in the layout.
     pub pending_workers: Vec<PendingWorkerState>,
@@ -1253,6 +1256,17 @@ pub(crate) fn task_belongs_to_current_session(
                 .assignee
                 .as_ref()
                 .is_some_and(|a| allowed_names.contains(a) || allowed_session_ids.contains(a)))
+}
+
+impl FactoryApp {
+    /// Set the watchdog badge; true when it changed and the frame is dirty.
+    pub(crate) fn set_loop_health(&mut self, badge: Option<String>) -> bool {
+        if self.loop_health == badge {
+            return false;
+        }
+        self.loop_health = badge;
+        true
+    }
 }
 
 impl FactoryApp {

@@ -494,3 +494,84 @@ async fn flv2_external_reminders_never_on_lane() {
     assert_eq!(wait_budget::store_access_violations(), violations);
     assert!(daemon.external_wake.wait_for_scan(Duration::ZERO).is_none());
 }
+
+/// Factory loop v2 §6.6 (cas-6931), report mode: a store open, a `git`
+/// command, a `/proc` scan and a transcript read on the io or control lane
+/// are each reported against their call site, and run as before. Off a lane
+/// they are not reported. C6 flips the guard to enforce.
+#[test]
+fn flv2_no_blocking_call_on_lanes() {
+    use crate::cli::factory::wedged::{self, ProcessTable as _};
+    use cas_store::lane_guard::{self, BlockingKind, Lane};
+
+    let (dir, cas_dir) = logged_in_project();
+    let transcript = dir.path().join("transcript.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+    let blocking_calls = || {
+        let mut kinds = Vec::new();
+        let mut note = |kind: BlockingKind, before: u64| {
+            if lane_guard::thread_violations() > before {
+                kinds.push(kind);
+            }
+        };
+        let before = lane_guard::thread_violations();
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .list(None)
+            .unwrap();
+        note(BlockingKind::Store, before);
+        let before = lane_guard::thread_violations();
+        let _ = crate::git_evidence::git_text(dir.path(), &["rev-parse", "--git-dir"]);
+        note(BlockingKind::Command, before);
+        let before = lane_guard::thread_violations();
+        let _ = wedged::RealProcessTable.pids();
+        note(BlockingKind::Proc, before);
+        let before = lane_guard::thread_violations();
+        let _ = wedged::transcript_has_in_flight_tool_call(
+            &transcript,
+            cas_mux::SupervisorCli::Claude,
+        );
+        note(BlockingKind::Transcript, before);
+        kinds
+    };
+
+    assert!(blocking_calls().is_empty(), "off a lane nothing is reported");
+    let every_kind = vec![
+        BlockingKind::Store,
+        BlockingKind::Command,
+        BlockingKind::Proc,
+        BlockingKind::Transcript,
+    ];
+    for lane in [Lane::Io, Lane::Control] {
+        let _lane = lane_guard::enter_lane(lane);
+        assert_eq!(blocking_calls(), every_kind, "on the {lane:?} lane");
+        assert_eq!(
+            lane_guard::last_thread_violation().map(|last| last.0),
+            Some(lane)
+        );
+    }
+
+    // The daemon loop attaches its thread as the control lane; io steps
+    // switch it to io and back.
+    let progress = super::loop_watchdog::LoopProgress::new();
+    {
+        let _lane = progress.attach(super::loop_watchdog::Lane::Control);
+        assert_eq!(lane_guard::current_lane(), Some(Lane::Control));
+        progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
+        assert_eq!(lane_guard::current_lane(), Some(Lane::Io));
+        progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
+        assert_eq!(lane_guard::current_lane(), Some(Lane::Control));
+    }
+    assert_eq!(lane_guard::current_lane(), None);
+
+    // `loop.json` carries the report.
+    let status = progress.status(1, "flv2", chrono::Utc::now());
+    assert!(status.lane_violations >= 8, "{}", status.lane_violations);
+    for kind in ["io/store", "control/command", "io/proc", "control/transcript"] {
+        assert!(
+            status.lane_violation_sites.iter().any(|site| site.starts_with(kind)),
+            "{kind} missing from {:?}",
+            status.lane_violation_sites
+        );
+    }
+}

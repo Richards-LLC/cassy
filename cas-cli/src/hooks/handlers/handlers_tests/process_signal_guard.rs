@@ -38,6 +38,7 @@ fn cas_51c7_worker_pattern_kill_utilities_are_refused() {
         "bash -lc 'pkill -f cargo'",
         "sh -c 'killall cargo'",
         "nice -n 10 pkill -f cargo",
+        "env -S 'pkill -f cargo'",
     ] {
         assert_refused(command);
     }

@@ -59,7 +59,8 @@ async fn busy_claude_worker_pane(daemon: &mut FactoryDaemon) {
 async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_tool_boundary() {
     let root = tempfile::tempdir().unwrap();
     let claude_config = root.path().join("claude-config");
-    std::fs::create_dir_all(&claude_config).unwrap();
+    // The live team tree a running factory has (a missing one falls back to PTY).
+    std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
     let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
         "CLAUDE_CONFIG_DIR",
         claude_config.to_str(),

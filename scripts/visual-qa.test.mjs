@@ -163,6 +163,63 @@ test('parses computed OKLCH colors without false invisible-text findings', async
   assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast'), []);
 });
 
+for (const [name, inspect] of [['repository', runVisualQa], ['builtin', runBuiltinVisualQa]]) {
+  test(`${name} exempts inactive contrast and keeps enabled text findings (GH #1176)`, async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), `visual-qa-inactive-controls-${name}-`));
+    const page = join(artifactDir, 'inactive-controls.html');
+    await writeFile(page, `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin: 24px; color: #172033; background: #fff; font: 16px/1.5 Arial, sans-serif; }
+    main > * { display: block; margin: 8px 0; }
+    .low { color: #fff !important; background: #fff !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Inactive contrast cases</h1>
+    <button id="native-disabled" class="low" disabled>Native disabled button</button>
+    <div id="aria-disabled" aria-disabled="true"><span id="aria-disabled-text" class="low">ARIA disabled descendant text</span></div>
+    <fieldset disabled>
+      <legend id="first-legend" class="low">First legend remains enabled</legend>
+      <p id="fieldset-descendant" class="low">Disabled fieldset descendant text</p>
+    </fieldset>
+    <label id="disabled-input-label" class="low" for="disabled-input">Label for external disabled input</label>
+    <input id="disabled-input" disabled aria-label="Inactive input">
+    <button id="enabled-control" class="low">Enabled muted button</button>
+    <p>These cases distinguish inactive components from enabled text with the same contrast.</p>
+  </main>
+</body>
+</html>
+`);
+
+    const result = await inspect({
+      urls: [page],
+      artifactDir: join(artifactDir, 'artifacts'),
+      strict: true,
+      schemes: ['light'],
+      viewports: [{ name: 'desktop', width: 1280, height: 800 }],
+    });
+
+    const exemptions = result.infoFindings.filter(({ type }) => type === 'exempt-inactive');
+    assert.deepEqual(exemptions.map(({ selector, reason }) => [selector, reason]).sort(), [
+      ['#aria-disabled-text', 'wcag-1.4.3-inactive-aria-disabled'],
+      ['#disabled-input-label', 'wcag-1.4.3-inactive-native-disabled'],
+      ['#fieldset-descendant', 'wcag-1.4.3-inactive-disabled-fieldset'],
+      ['#native-disabled', 'wcag-1.4.3-inactive-native-disabled'],
+    ].sort());
+    assert.equal(result.infoCounts['exempt-inactive'], 4);
+    assert.match(result.markdown, /4 inactive contrast exemption\(s\)/);
+    assert.deepEqual(result.findings.filter(({ type }) => type === 'contrast').map(({ selector }) => selector).sort(), [
+      '#enabled-control',
+      '#first-legend',
+    ]);
+  });
+}
+
 test('allowlist requires a reason and suppresses intentional findings', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-allowlist-'));
   const allowlistPath = join(artifactDir, 'allowlist.json');

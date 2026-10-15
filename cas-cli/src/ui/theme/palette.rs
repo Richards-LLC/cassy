@@ -492,6 +492,46 @@ mod contrast_guard {
         }
     }
 
+    #[test]
+    fn config_list_foreground_colors_pass_four_terminal_palettes() {
+        for (mode, colors, is_dark, backgrounds) in [
+            (
+                "dark",
+                ColorPalette::dark(),
+                true,
+                [
+                    ("dark", Color::Rgb(30, 30, 30)),
+                    ("solarized-dark", Color::Rgb(0, 43, 54)),
+                ],
+            ),
+            (
+                "light",
+                ColorPalette::light(),
+                false,
+                [
+                    ("light", Color::Rgb(255, 255, 255)),
+                    ("solarized-light", Color::Rgb(253, 246, 227)),
+                ],
+            ),
+        ] {
+            let p = Palette::from_colors(colors, is_dark);
+            for (role, fg) in [
+                ("section heading", p.accent),
+                ("modified key", p.status_warning),
+                ("modified value", p.status_success),
+            ] {
+                for (terminal_palette, bg) in backgrounds {
+                    assert_pair(
+                        &format!("{mode} {role} on {terminal_palette}"),
+                        fg,
+                        bg,
+                        AA_NORMAL_TEXT,
+                    );
+                }
+            }
+        }
+    }
+
     /// text_muted is rendered directly on bg_elevated (status bar hint
     /// suffixes, the [SUP]/branch segment). Before cas-7bf4: dark 3.36:1,
     /// light 2.52:1 — both below AA.

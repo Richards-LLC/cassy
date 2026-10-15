@@ -2,9 +2,9 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | Plain get immediately supplies the usable tracker; grouped views expose whether origin supplied an unset setting. |
-| Scannable | The existing config key/value rows add an adjacent origin note; doctor promotes the unset setting to a warning. |
-| Readable | The origin note explains why the repository is usable while config remains unset; doctor names the effective tracker or the explicit-setting remedy. |
+| First two lines | Plain get immediately supplies the usable tracker; a filtered config list identifies its section before the selected key/value row. |
+| Scannable | Section headings group config keys, `*` marks modified values, and the origin note stays adjacent to the issue repository value. |
+| Readable | Modified keys and values keep their status meaning while using foreground-safe colors; the origin note explains an inferred tracker. |
 | Machine output | Plain get remains owner/repo; JSON get/list/describe/search add source and configured for issues.repo while retaining existing value fields. |
 | Omitted | No network lookup, persistence action, new command or unrelated config detail is added. |
 

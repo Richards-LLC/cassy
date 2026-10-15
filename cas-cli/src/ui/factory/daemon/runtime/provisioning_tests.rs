@@ -58,6 +58,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         last_auth_failure_scan: None,
         cancelled_spawns: std::collections::HashSet::new(),
         last_idle_message_times: HashMap::new(),
+        stall_nudge_gate_checks: HashMap::new(),
         lifecycle_redelivery_attempts: HashMap::new(),
         lifecycle_redelivery_counts: HashMap::new(),
         inbox_deferred_writes: std::collections::HashMap::new(),

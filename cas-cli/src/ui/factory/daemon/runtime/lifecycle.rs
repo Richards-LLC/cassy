@@ -17,6 +17,8 @@ pub(crate) fn attention_episode_key(
 
 /// Route only typed routine nudges through the durable lane. The fallback
 /// baseline is durable task state (or a fixed unknown baseline), never retry time.
+/// With no baseline, UNIX_EPOCH coalesces unknown episodes for this worker/task/session
+/// until a durable baseline becomes available.
 fn enqueue_stall_nudge_prompt(
     cas_dir: &std::path::Path,
     session: &str,
@@ -2186,6 +2188,7 @@ impl FactoryDaemon {
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
+            stall_nudge_gate_checks: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),

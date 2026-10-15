@@ -1877,18 +1877,15 @@ pub(super) fn claude_turn_aware_retry_with_evidence(
     }
 }
 
-/// Persist a declined worker wake only when the recipient is not inside an
-/// observed tool call. Pausing leaves both the count and cadence clock intact.
-/// Apply the same busy hold and premise recheck at the final nudge boundary.
-/// Returns true when this row was held or withdrawn, false when transport may proceed.
+/// Recheck the premise once a held nudge becomes eligible for transport.
+/// Returns true when withdrawn, false when transport may proceed.
 fn process_worker_stall_nudge(
-    cas_dir: &std::path::Path,
+    tasks: &dyn cas_store::TaskStore,
+    events: &dyn cas_store::EventStore,
     queue: &dyn cas_store::PromptQueueStore,
     row: &cas_store::QueuedPrompt,
     agents: &[cas_types::Agent],
-    busy_reason: Option<&str>,
 ) -> anyhow::Result<bool> {
-    use cas_store::EventStore;
     if row.kind.as_deref() != Some("worker_stall_nudge")
         || row.origin != Some(cas_store::QueueOrigin::Daemon) {
         return Ok(false);
@@ -1898,7 +1895,7 @@ fn process_worker_stall_nudge(
     };
     let worker = agents.iter().filter(|agent| agent.name == row.target)
         .max_by_key(|agent| (agent.status == cas_types::AgentStatus::Active, agent.registered_at));
-    let task = crate::store::open_task_store_local(cas_dir)?.get(task_id);
+    let task = tasks.get(task_id);
     let stale_task = match task {
         Ok(task) => task.status != cas_types::TaskStatus::InProgress
             || !(task.assignee.as_deref() == Some(row.target.as_str())
@@ -1910,19 +1907,19 @@ fn process_worker_stall_nudge(
         queue.mark_superseded(row.id, "worker no longer holds the stalled task")?;
         return Ok(true);
     }
-    if let Some(reason) = busy_reason {
-        queue.record_pending_reason(row.id, cas_store::PendingReason::GatedNotReady, Some(reason))?;
-        return Ok(true);
-    }
     // A held alarm's premise may have resolved while the pane was busy.
     // Read the subject's own history; fleet traffic cannot hide its progress.
     let event_activity = if let Some(worker) = worker {
-        cas_store::SqliteEventStore::open(cas_dir)?.latest_worker_activity(&worker.id, &worker.name)?
+        events.latest_worker_activity(&worker.id, &worker.name)?
             .is_some_and(|event| event.created_at > row.created_at)
     } else { false };
-    let transcript_activity = crate::cli::factory::wedged::resolve_worker(cas_dir, &row.target).ok()
-        .and_then(|worker| worker.transcript_path)
-        .and_then(|path| std::fs::metadata(path).ok())
+    let transcript_activity = worker.and_then(|agent| {
+        crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
+            agent.metadata.get("clone_path").map(String::as_str),
+            agent.cc_session_id.as_deref().unwrap_or(&agent.id),
+            crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent),
+            agent.metadata.get("worker_account_dir").map(String::as_str))
+    }).and_then(|path| std::fs::metadata(path).ok())
         .and_then(|metadata| metadata.modified().ok())
         .is_some_and(|modified| chrono::DateTime::<chrono::Utc>::from(modified) > row.created_at);
     if event_activity || transcript_activity {
@@ -1932,6 +1929,7 @@ fn process_worker_stall_nudge(
     Ok(false)
 }
 
+/// Persist a declined worker wake unless an observed open call pauses its budget.
 fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
     id: i64,
@@ -3221,6 +3219,7 @@ impl FactoryDaemon {
     /// longer pending. Both maps are keyed by `prompt_queue.id`, so leaving an
     /// entry behind leaks one record per terminalized row.
     fn forget_row_delivery_state(&mut self, row_id: i64) {
+        self.stall_nudge_gate_checks.remove(&row_id);
         self.lifecycle_redelivery_attempts.remove(&row_id);
         self.lifecycle_redelivery_counts.remove(&row_id);
         self.inbox_deferred_writes.remove(&row_id);
@@ -5955,6 +5954,9 @@ impl FactoryDaemon {
         // wake-slot comment at the decision site.
         let mut supervisor_wake_sent = false;
 
+        // Open the task handle lazily once per pass, only for an eligible nudge.
+        let mut nudge_tasks: Option<crate::Result<Arc<dyn cas_store::TaskStore>>> = None;
+        self.stall_nudge_gate_checks.retain(|_, (next, _)| next.elapsed().as_secs() < 300);
         for selected in prompts {
             // The assignee may have changed while earlier rows were delivered.
             for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
@@ -5962,7 +5964,13 @@ impl FactoryDaemon {
             }
             let Some(queued) = queue.queued_prompt(selected.id)? else { continue };
             if queued.processed_at.is_some() { continue; }
-            let current_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
+            let refreshed_agents;
+            let current_agents = if queued.kind.as_deref() == Some("worker_stall_nudge") {
+                &registered_agents
+            } else {
+                refreshed_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
+                &refreshed_agents
+            };
             if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), &current_agents) {
                 queue.cancel_unread_for_shutdown(&queued.target, Some(&self.session_name),
                     "wake withdrawn: recipient has shut down")?;
@@ -6344,10 +6352,51 @@ impl FactoryDaemon {
             if queued.kind.as_deref() == Some("worker_stall_nudge")
                 && queued.origin == Some(cas_store::QueueOrigin::Daemon)
             {
-                let reason = self.pane_wake_state(&queued.target).veto_for_active_looking_recipient();
-                if process_worker_stall_nudge(self.app.cas_dir(), queue.as_ref(), &queued,
-                    &current_agents, reason)? {
+                let now = Instant::now();
+                let signature = (
+                    self.app.mux.pane_composer_dirty(&queued.target),
+                    self.app.mux.pane_ready_for_injection(&queued.target),
+                    self.pane_silent_since.get(&queued.target)
+                        .is_some_and(|at| at.elapsed() >= SILENCE_FOR_ACTIVE_RECIPIENT_WAKE),
+                );
+                if self.stall_nudge_gate_checks.get(&queued.id)
+                    .is_some_and(|(next, prior)| now < *next && signature == *prior) {
                     continue;
+                }
+                let pane = self.pane_wake_state(&queued.target);
+                if let Some(reason) = pane.veto_for_active_looking_recipient() {
+                    match record_worker_wake_decline(queue.as_ref(), queued.id, WakeDecision::deny(reason), pane.tool_call) {
+                        Ok(declines) => {
+                            let delay = declines.map(|n| 5u64.saturating_mul(1u64 << n.min(3))).unwrap_or(15);
+                            self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(delay), signature));
+                            if let Some(n) = declines.filter(|n| *n >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES) {
+                                let teams = super::delivery::choose_channel(self.app.harness_for(&queued.target), self.teams.is_some())
+                                    == super::delivery::DeliveryChannel::TeamsInbox;
+                                self.park_wake_starved_row(queue.as_ref(), &queued, &queued.target, n, teams);
+                            }
+                        }
+                        Err(error) => {
+                            self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(5), signature));
+                            tracing::warn!(message_id = queued.id, %error, "stall nudge gate persistence failed; skipping row");
+                        }
+                    }
+                    continue;
+                }
+                let tasks = nudge_tasks.get_or_insert_with(|| crate::store::open_task_store_local(self.app.cas_dir()));
+                let result = match (tasks.as_ref(), event_store.as_ref()) {
+                    (Ok(tasks), Some(events)) => process_worker_stall_nudge(tasks.as_ref(), events,
+                        queue.as_ref(), &queued, current_agents),
+                    (Err(error), _) => Err(anyhow::anyhow!("nudge task store unavailable: {error}")),
+                    (_, None) => Err(anyhow::anyhow!("nudge event store unavailable")),
+                };
+                match result {
+                    Ok(true) => { self.forget_row_delivery_state(queued.id); continue; }
+                    Ok(false) => { self.stall_nudge_gate_checks.remove(&queued.id); }
+                    Err(error) => {
+                        self.stall_nudge_gate_checks.insert(queued.id, (now + Duration::from_secs(5), signature));
+                        tracing::warn!(message_id = queued.id, %error, "stall nudge revalidation failed; skipping row");
+                        continue;
+                    }
                 }
             }
 
@@ -17458,6 +17507,57 @@ mod stall_nudge_rework_tests {
         assert_eq!(reason.as_deref(), Some("gated_not_ready"), "exercise the real process_queue busy path");
     }
 
+    async fn make_worker_ready(daemon: &mut FactoryDaemon) {
+        let pty = cas_mux::Pty::spawn("worker-a", cas_mux::PtyConfig {
+            command: "sh".into(), args: vec!["-c".into(), "printf ready; sleep 30".into()],
+            cwd: Some(std::env::temp_dir()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let pane = cas_mux::Pane::with_pty("worker-a", cas_mux::PaneKind::Worker,
+            pty, 24, 80, cas_mux::SupervisorCli::Codex).unwrap();
+        daemon.app.adopt_worker_pane_for_test(pane);
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        for pane in daemon.app.mux.panes_mut() { pane.drain_output(); }
+        let bytes = daemon.app.mux.pane_bytes_received("worker-a").unwrap();
+        assert!(bytes > 0);
+        daemon.last_pane_output_bytes.insert("worker-a".into(), bytes);
+        daemon.pane_silent_since.insert("worker-a".into(), Instant::now() - Duration::from_secs(46));
+        assert!(daemon.app.mux.pane_ready_for_injection("worker-a"));
+    }
+
+    #[tokio::test]
+    async fn stalled_nudge_holds_back_off_and_spend_existing_decline_budget() {
+        let (_root, cas_dir, _worker, id) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        assert_eq!(queue.wake_gate_state(id).unwrap().0, 1);
+        for _ in 0..8 { daemon.process_prompt_queue().await.unwrap(); }
+        assert_eq!(queue.wake_gate_state(id).unwrap().0, 1, "unchanged held rows must not probe each pass");
+        for expected in 2..=MAX_CONSECUTIVE_WAKE_GATE_DECLINES {
+            daemon.stall_nudge_gate_checks.get_mut(&id).unwrap().0 = Instant::now() - Duration::from_secs(1);
+            daemon.process_prompt_queue().await.unwrap();
+            assert_eq!(queue.wake_gate_state(id).unwrap().0, expected);
+        }
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let next: Option<String> = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id = ?", [id], |r| r.get(0)).unwrap();
+        assert!(next.is_some(), "exhausted hold budget must park the row");
+    }
+
+    #[tokio::test]
+    async fn stalled_nudge_store_error_skips_row_and_continues_prompt_queue() {
+        let (_root, cas_dir, _worker, id) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        make_worker_ready(&mut daemon).await;
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute("UPDATE tasks SET title=x'00' WHERE id='cas-stall'", []).unwrap();
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let ordinary = queue.enqueue("supervisor", "worker-a", "ordinary next").unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+        let row = queue.queued_prompt(ordinary).unwrap().unwrap();
+        assert!(row.processed_at.is_some(), "one unreadable nudge task must not abandon later rows");
+    }
+
     #[tokio::test]
     async fn stalled_nudge_busy_hold_rechecks_real_worker_activity_before_release() {
         let (_root, cas_dir, worker, id) = fixture(false);
@@ -17471,7 +17571,10 @@ mod stall_nudge_rework_tests {
         event.created_at = row.created_at + chrono::Duration::milliseconds(1);
         use cas_store::EventStore;
         cas_store::SqliteEventStore::open(&cas_dir).unwrap().record(&event).unwrap();
-        assert!(process_worker_stall_nudge(&cas_dir, queue.as_ref(), &row, &[worker], None).unwrap(), "the release boundary must withdraw resumed work");
-        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some());
+        make_worker_ready(&mut daemon).await;
+        daemon.process_prompt_queue().await.unwrap();
+        let row = queue.queued_prompt(id).unwrap().unwrap();
+        assert!(row.processed_at.is_some(), "the actual busy→free queue transition must withdraw resumed work");
+        assert!(row.transport_delivered_at.is_none(), "resumed work must never receive the stale nudge");
     }
 }

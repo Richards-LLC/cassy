@@ -3305,6 +3305,7 @@ fn ct2_p2_sleep_poll_one_nudge_per_window() {
     ));
     detector.initialize(&data);
     let mut nudges = 0;
+    let mut last_nudge = None;
     for seconds in (0..900).step_by(31) {
         let now = base + chrono::Duration::seconds(seconds);
         data.agents[0].last_heartbeat = Some(now);
@@ -3313,7 +3314,7 @@ fn ct2_p2_sleep_poll_one_nudge_per_window() {
             Some(Duration::from_secs(1800)),
         )]));
         detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), false)]));
-        nudges += detector
+        let count = detector
             .detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now)
             .iter()
             .filter(|e| {
@@ -3326,6 +3327,12 @@ fn ct2_p2_sleep_poll_one_nudge_per_window() {
                 )
             })
             .count();
+        if count > 0 {
+            assert_eq!(count, 1);
+            assert!(last_nudge.is_none_or(|last| seconds - last >= 300), "rolling threshold windows must never overlap");
+            last_nudge = Some(seconds);
+        }
+        nudges += count;
         assert!(nudges <= 1 + seconds as usize / 300,
             "at most one nudge per threshold window at {seconds}s");
         detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), true)]));
@@ -3473,6 +3480,13 @@ fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_reco
     let later = now + chrono::Duration::seconds(301);
     data.agents[0].last_heartbeat = Some(later);
     assert!(detector.detect_changes_at(&data, None, tick + Duration::from_secs(301), later).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })));
+    let reopened = serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"reopened","name":"shell","arguments":"{}"}});
+    std::fs::write(&rollout, format!("{meta}\n{call}\n{result}\n{reopened}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
+    let at = later + chrono::Duration::seconds(1);
+    data.agents[0].last_heartbeat = Some(at);
+    assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(302), at).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+    assert_eq!(detector.stall_probe_count, 3, "a transcript write invalidates the cached cold verdict immediately");
 }
 
 #[test]

@@ -1166,6 +1166,21 @@ impl DirectorState {
     }
 }
 
+/// Bounded health confirmation for unchanged worker/task candidates.
+#[derive(Debug)]
+struct StallProbeCache {
+    confirmed: bool,
+    next_probe_at: DateTime<chrono::Utc>,
+    delay_secs: i64,
+    path: Option<std::path::PathBuf>,
+    fingerprint: Option<(std::time::SystemTime, u64)>,
+}
+
+fn stall_transcript_fingerprint(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 /// Detects events by comparing Cassy state snapshots
 pub struct DirectorEventDetector {
     /// Previous state snapshot
@@ -1228,6 +1243,7 @@ pub struct DirectorEventDetector {
     stall_escalated: HashSet<String>,
     /// Alarm cooldown survives streak resets; keyed by kind and worker/task.
     stall_alarm_at: HashMap<(String, String, bool), DateTime<chrono::Utc>>,
+    stall_probe_cache: HashMap<(String, String), StallProbeCache>,
     #[cfg(test)]
     pub(super) stall_probe_count: usize,
     /// Transcript/tool evidence remains activity after a call closes.
@@ -1343,6 +1359,7 @@ impl DirectorEventDetector {
             stall_nudged: HashSet::new(),
             stall_escalated: HashSet::new(),
             stall_alarm_at: HashMap::new(),
+            stall_probe_cache: HashMap::new(),
             #[cfg(test)]
             stall_probe_count: 0,
             observed_worker_activity: HashMap::new(),
@@ -1467,13 +1484,38 @@ impl DirectorEventDetector {
     /// or failed worker resolution retains the checkpoint fallback; a resolved
     /// worker without transcript telemetry does not confirm a stall.
     fn transcript_confirms_stall(
+        &mut self, worker: &str, task: &str, now: DateTime<chrono::Utc>, threshold: u64,
+    ) -> bool {
+        // Overrides are deterministic test signals. Production invalidates a
+        // cached verdict on transcript writes, so a new open call cannot inherit
+        // the previous cold verdict. Unchanged cold workers back off to 60s.
+        if self.transcript_age_override.is_some() {
+            return self.probe_worker_stall(worker, now, threshold).0;
+        }
+        let key = (worker.to_string(), task.to_string());
+        let mut delay = 5;
+        if let Some(cached) = self.stall_probe_cache.get(&key) {
+            let unchanged = cached.path.as_deref().map(stall_transcript_fingerprint)
+                .unwrap_or(None) == cached.fingerprint;
+            if now < cached.next_probe_at && unchanged { return cached.confirmed; }
+            if unchanged { delay = (cached.delay_secs * 2).min(60); }
+        }
+        let (confirmed, path) = self.probe_worker_stall(worker, now, threshold);
+        let fingerprint = path.as_deref().and_then(stall_transcript_fingerprint);
+        self.stall_probe_cache.insert(key, StallProbeCache { confirmed,
+            next_probe_at: now + chrono::Duration::seconds(delay), delay_secs: delay, path, fingerprint });
+        confirmed
+    }
+
+    fn probe_worker_stall(
         &mut self,
         worker_name: &str,
         now: DateTime<chrono::Utc>,
         threshold_secs: u64,
-    ) -> bool {
+    ) -> (bool, Option<std::path::PathBuf>) {
         #[cfg(test)]
         { self.stall_probe_count += 1; }
+        let mut transcript_path = None;
         let (age, window, in_flight, background_active) = if let Some(overrides) =
             &self.transcript_age_override
         {
@@ -1491,15 +1533,16 @@ impl DirectorEventDetector {
             )
         } else {
             let Some(cas_root) = &self.cas_root else {
-                return true;
+                return (true, None);
             };
             let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, worker_name)
             else {
-                return true;
+                return (true, None);
             };
             let Some(path) = resolved.transcript_path.as_deref() else {
-                return false;
+                return (false, None);
             };
+            transcript_path = Some(path.to_path_buf());
             let background = crate::cli::factory::wedged::find_worker_pid(
                 &crate::cli::factory::wedged::RealProcessTable,
                 &resolved.name,
@@ -1534,7 +1577,7 @@ impl DirectorEventDetector {
                 .and_modify(|previous| *previous = (*previous).max(activity))
                 .or_insert(activity);
         }
-        confirmed
+        (confirmed, transcript_path)
     }
 
     fn admit_stall_alarm(
@@ -1883,7 +1926,7 @@ impl DirectorEventDetector {
                 );
 
                 if has_fresh_heartbeat && elapsed.is_some()
-                    && self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold) {
+                    && self.transcript_confirms_stall(&resolved_name, &task.id, now_utc, effective_threshold) {
                     if !self.stall_escalated.contains(&agent.id)
                         && self.admit_stall_alarm(
                             &resolved_name,
@@ -2017,7 +2060,7 @@ impl DirectorEventDetector {
                         // alerts for a worker that's confirmed alive —
                         // it never re-enters the `stalled_elapsed_secs`
                         // branch while its transcript stays fresh.
-                        if !self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold) {
+                        if !self.transcript_confirms_stall(&resolved_name, task_id, now_utc, effective_threshold) {
                             self.stall_nudged.remove(&agent.id);
                             self.stall_escalated.remove(&agent.id);
                         } else if !self.stall_nudged.contains(&agent.id)
@@ -2203,6 +2246,8 @@ impl DirectorEventDetector {
             .retain(|name, _| seen_factory_agent_names.contains(name));
         self.idle_handled_by_supervisor
             .retain(|name| seen_factory_agent_names.contains(name));
+        self.stall_probe_cache
+            .retain(|(name, _), _| seen_factory_agent_names.contains(name));
         self.stall_alarm_at
             .retain(|(name, _, _), _| seen_factory_agent_names.contains(name));
         self.observed_worker_activity

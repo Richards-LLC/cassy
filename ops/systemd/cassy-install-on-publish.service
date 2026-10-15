@@ -1,0 +1,13 @@
+[Unit]
+Description=Install a newly published CAS release on this host
+Documentation=file://%h/.local/libexec/cassy/install-on-publish.sh
+After=network-online.target
+
+[Service]
+Type=oneshot
+# gh may read its token from the keyring; GH_TOKEN in this optional file
+# overrides it for hosts whose user session has no keyring.
+EnvironmentFile=-%h/.config/cassy/install-on-publish.env
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/libexec/cassy/install-on-publish.sh --once
+TimeoutStartSec=20min

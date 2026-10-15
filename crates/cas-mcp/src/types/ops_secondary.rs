@@ -621,7 +621,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'sweep_tasks' (preview or accept one fix task per integration failure class), 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=, answer or cancel with id=<split> decision=, list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=, answer or cancel with id=<split> decision=, list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
     )]
     pub action: String,
 
@@ -645,13 +645,6 @@ pub struct FactoryRequest {
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub count: Option<i32>,
-
-    /// Accept all currently proposed integration-sweep fix tasks.
-    #[schemars(
-        description = "sweep_tasks only: true creates one local task and queues one isolated worker per failure class; false or omitted previews the durable report"
-    )]
-    #[serde(default)]
-    pub accept: Option<bool>,
 
     /// Maximum rows to inspect/render for epic_status or server_list.
     #[schemars(
@@ -925,7 +918,7 @@ pub struct FactoryRequest {
 ///   session_start, session_end, loop_start, loop_cancel, loop_status, lease_history,
 ///   queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message,
 ///   message_ack, message_status.
-/// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks,
+/// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
 ///   remind, remind_list, remind_cancel, restart_spawn_queue.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
@@ -1196,13 +1189,6 @@ pub struct CoordinationRequest {
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub count: Option<i32>,
-
-    /// Accept all currently proposed integration-sweep fix tasks.
-    #[schemars(
-        description = "sweep_tasks only: true creates one local task and queues one isolated worker per failure class; false or omitted previews the durable report"
-    )]
-    #[serde(default)]
-    pub accept: Option<bool>,
 
     /// Comma-separated worker names. `target` is accepted as an alias for
     /// shutdown_workers.
@@ -1480,7 +1466,6 @@ impl CoordinationRequest {
             id: self.id.clone(),
             name: self.name.clone(),
             count: self.count,
-            accept: self.accept,
             limit: self.limit,
             offset: self.offset,
             summary: self.summary_mode,

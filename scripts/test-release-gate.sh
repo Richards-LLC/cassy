@@ -250,22 +250,18 @@ EOF
         printf '%s\n' '- 2026-09-02 — **version-literals** — Symptom: fixture source literal. Root cause: fixture. Release: fixture.' >"$mirror"
     done
     cat >"$repo/cas-cli/src/builtins/skills/cas-cut-release/SKILL.md" <<'EOF'
-Use when cutting a release.
-Run the full suite on the assembled tree. Use nohup, kill -0, stranded_branch_override,
-release-published-receipt.sh --write-draft, and cas --version.
-Require Scoped Validation; the ledger is the last prep step; record a cause class.
-Use 9.99.x fixtures; workers never poll CI; commit a reviewed snapshot update.
-Check for a competing release with the merge-queue GraphQL query. Read CAS_RELEASE_ENV_FILE.
-Require the annotated tag peels, four Slack POSTED receipts, and refresh_binary_version.
-Keep release.tag-complete.epoch separate from the verified release-published.receipt.
+Use when cutting a release. Run scripts/release.sh --next-version, then
+scripts/release.sh (scripts/release.sh --hotfix for a patch). macOS:
+compile-checked and launch-tested; suite runs on Linux. Set up the host once
+with scripts/install-on-publish.sh --install and confirm with cas --version.
+Fill checksums with release-published-receipt.sh --write-draft. Use 9.99.x
+fixtures; workers never poll CI; stranded_branch_override needs proof.
 EOF
     cat >"$repo/scripts/release.sh" <<'EOF'
 #!/usr/bin/env bash
-./scripts/release.sh                 # local audit only
-# Pre-warming rule: in a tag worktree, use only the bare ./scripts/release.sh;
-# it is audit-only and remote-safe.
-target/$target/release/build"/blake3-*
-target/$target/release/.fingerprint"/blake3-*
+# fixture one-command release
+case "${1:-}" in -h|--help) echo usage; exit 0 ;; esac
+exit 1
 EOF
     cat >"$repo/cas-cli/src/version.rs" <<'EOF'
 // fixture source

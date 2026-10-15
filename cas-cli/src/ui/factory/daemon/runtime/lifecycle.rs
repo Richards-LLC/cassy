@@ -281,8 +281,8 @@ pub(super) fn enqueue_worker_approval_pending_relay(
 /// new episode while repeated polls/restarts stay idempotent.
 ///
 /// cas-e369: an empty `worker` is a supervisor-owned epic PR, which has no
-/// worker inbox row. `recovery` adds the failing job, error line, failure
-/// scope and the automatic re-enqueue decision to the wake.
+/// worker inbox row. cas-fd0a: `failing_job` names the failed job and step;
+/// nothing is re-enqueued automatically.
 pub(super) fn enqueue_merge_queue_ejection_relay(
     cas_dir: &std::path::Path,
     task_id: &str,
@@ -290,7 +290,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     pr_number: u64,
     failed_run_id: Option<u64>,
     occurrence: &str,
-    recovery: Option<&super::merge_queue_recovery::EjectionReport>,
+    failing_job: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
@@ -315,9 +315,8 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
             "{kind} #{pr_number} for {task_id} left the merge queue without merging (dequeued or auto-merge disarmed)."
         ),
     };
-    if let Some(recovery) = recovery {
-        detail.push('\n');
-        detail.push_str(&recovery.detail());
+    if let Some(job) = failing_job {
+        detail.push_str(&format!("\nFailing job: {job}."));
     }
     let key = format!(
         "merge-queue-ejection:{}:{task_id}:{pr_number}:{occurrence}",
@@ -335,7 +334,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         "detail": detail,
         "occurrence": occurrence,
         "supervisor_owned": worker.is_empty(),
-        "recovery": recovery.map(super::merge_queue_recovery::EjectionReport::payload),
+        "failing_job": failing_job,
     })
     .to_string();
     let notification_id = match supervisor_queue.notify_idempotent(
@@ -366,11 +365,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let next_step = if recovery.is_some() {
-        ""
-    } else {
-        "\nInspect the failed run and requeue or request changes."
-    };
+    let next_step = "\nInspect the failed run and requeue or request changes.";
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
     );
@@ -380,13 +375,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         "supervisor",
         &supervisor_body,
         factory_session.as_deref(),
-        Some(&match recovery {
-            Some(recovery) => format!(
-                "merge queue ejected: {task_id} PR #{pr_number} ({})",
-                recovery.decision.token()
-            ),
-            None => format!("merge queue ejected: {task_id}"),
-        }),
+        Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-outbox:{notification_id}"),
         Some(&cas_store::QueueOrigin::Daemon),
@@ -576,7 +565,7 @@ fn persist_ci_watch_results(
     delivery_pr_observations: Vec<super::ci_watch::DeliveryPrObservation>,
     ejections: Vec<(
         super::ci_watch::MergeQueueEjection,
-        Option<super::merge_queue_recovery::EjectionReport>,
+        Option<String>,
     )>,
     pr_lane_failures: Vec<super::ci_watch::PrLaneFailure>,
     failures: Vec<super::ci_watch::CiFailure>,
@@ -598,7 +587,7 @@ fn persist_ci_watch_results(
         }
     }
     relay_delivery_pr_merge_timeouts(cas_dir);
-    for (ejection, recovery) in ejections {
+    for (ejection, failing_job) in ejections {
         match enqueue_merge_queue_ejection_relay(
             cas_dir,
             &ejection.task_id,
@@ -606,7 +595,7 @@ fn persist_ci_watch_results(
             ejection.pr_number,
             ejection.failed_run_id,
             &ejection.occurrence,
-            recovery.as_ref(),
+            failing_job.as_deref(),
         ) {
             WorkerAttentionRelayOutcome::Persisted { notification_id } => {
                 tracing::warn!(
@@ -983,31 +972,6 @@ fn enqueue_worker_attention_relay_detail_with_key(
         return WorkerAttentionRelayOutcome::Pending;
     }
     WorkerAttentionRelayOutcome::Persisted { notification_id }
-}
-
-/// Relay a failed post-merge workspace sweep through the durable supervisor
-/// attention lane. The sweep coordinator records the task note separately;
-/// this wake is deliberately idempotent on epic, merged tip, and failure
-/// occurrence so a daemon restart cannot spam the supervisor.
-pub(super) fn enqueue_merge_sweep_failure_relay(
-    cas_dir: &std::path::Path,
-    epic_id: &str,
-    commit: &str,
-    detail: &str,
-    occurrence: &str,
-) -> WorkerAttentionRelayOutcome {
-    let detail =
-        format!("Merged epic {epic_id} at {commit} failed its bounded workspace sweep. {detail}");
-    enqueue_worker_attention_relay_detail_with_key(
-        cas_dir,
-        "sweep_failed",
-        "supervisor",
-        Some(epic_id),
-        None,
-        |_| detail.clone(),
-        occurrence,
-        Some(&format!("{epic_id}:{commit}")),
-    )
 }
 
 #[cfg(test)]
@@ -1666,7 +1630,7 @@ mod worker_attention_tests {
             556,
             Some(32386300052),
             "merge-group-run:32386300052",
-            None,
+            Some("Fast Validation — CI tiers › Test release publication guards"),
         );
         let replay = enqueue_merge_queue_ejection_relay(
             &cas_dir,
@@ -1675,7 +1639,7 @@ mod worker_attention_tests {
             556,
             Some(32386300052),
             "merge-group-run:32386300052",
-            None,
+            Some("Fast Validation — CI tiers › Test release publication guards"),
         );
         assert!(matches!(
             first,
@@ -1692,8 +1656,13 @@ mod worker_attention_tests {
             2,
             "one supervisor relay plus one worker inbox row"
         );
+        // cas-fd0a: one typed wake naming the PR and the failing job.
         assert!(rows.iter().any(|row| row.target == "supervisor"
-            && row.prompt.contains("failed merge_group run 32386300052")));
+            && row.prompt.contains("failed merge_group run 32386300052")
+            && row.prompt.contains("PR #556")
+            && row.prompt.contains(
+                "Failing job: Fast Validation — CI tiers › Test release publication guards."
+            )));
         assert!(
             rows.iter()
                 .any(|row| row.target == "fast-jaguar-59" && row.prompt.contains("PR #556"))
@@ -1824,10 +1793,6 @@ impl FactoryDaemon {
         // Create the factory app (this spawns Claude instances)
         let mut app = FactoryApp::new(config.factory_config)?;
         app.set_factory_session(config.session_name.clone());
-        let merge_sweep = super::merge_sweep::MergeSweepCoordinator::new(
-            app.cas_dir(),
-            &config.session_name,
-        );
 
         // Track factory session start
         crate::telemetry::track_factory_started("supervisor", app.worker_names().len());
@@ -2000,7 +1965,6 @@ impl FactoryDaemon {
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
-            merge_sweep,
             last_idle_message_times: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
             lifecycle_redelivery_counts: HashMap::new(),
@@ -2125,7 +2089,7 @@ impl FactoryDaemon {
                         super::ci_watch::MergeQueuePoll,
                         Vec<(
                             super::ci_watch::MergeQueueEjection,
-                            Option<super::merge_queue_recovery::EjectionReport>,
+                            Option<String>,
                         )>,
                         Vec<super::ci_watch::DeliveryPrObservation>,
                         (Vec<super::ci_watch::CiWake>, bool),
@@ -2311,13 +2275,6 @@ impl FactoryDaemon {
                 self.process_pending_spawns().await;
             }
 
-            // A successful merge only appends a durable event. The bounded
-            // workspace sweep is owned by this daemon so merge MCP latency is
-            // independent of nextest and failures are reported before the
-            // next merge is allowed to go unnoticed.
-            loop_progress.enter(super::loop_watchdog::LoopPhase::MergeSweep);
-            self.poll_merge_sweep().await;
-
             // Periodic Cassy data refresh
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
@@ -2363,7 +2320,7 @@ impl FactoryDaemon {
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
                         let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
                         let supervisor_prs =
-                            super::merge_queue_recovery::supervisor_prs(&watch_cas_dir);
+                            super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);
                         let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
                         let candidates = super::queue_and_events::ci_completed_candidates(
                             &watch_cas_dir,
@@ -2382,26 +2339,17 @@ impl FactoryDaemon {
                             &previously_queued,
                             &previously_armed,
                         )?;
-                        // cas-e369: diagnose each ejection and re-enqueue once
-                        // when its failure is outside the PR's diff. GitHub
-                        // calls stay on this blocking task (GH #1165).
+                        // cas-fd0a: name each ejection's failing job for the
+                        // wake. GitHub calls stay on this blocking task
+                        // (GH #1165).
                         let ejections = std::mem::take(&mut queue_poll.ejections)
                             .into_iter()
-                            .map(|mut ejection| {
-                                let report = super::merge_queue_recovery::recover(
-                                    &watch_cas_dir,
+                            .map(|ejection| {
+                                let job = super::merge_queue_ejection::failing_job(
                                     &transport,
-                                    &mut ejection,
-                                    chrono::Utc::now(),
+                                    ejection.failed_run_id,
                                 );
-                                if report.decision
-                                    == super::merge_queue_recovery::RecoveryDecision::AutoRequeued
-                                {
-                                    // The next poll sees it as queued, so a
-                                    // later exit is a fresh episode.
-                                    queue_poll.queued_prs.insert(ejection.pr_number);
-                                }
-                                (ejection, Some(report))
+                                (ejection, job)
                             })
                             .collect::<Vec<_>>();
                         let delivery_pr_observations =
@@ -2849,7 +2797,6 @@ impl FactoryDaemon {
         // Stop the isolated provisioner before any asynchronous shutdown waits.
         // This group never contains the supervisor or live worker harnesses.
         self.cancel_provisioning();
-        self.merge_sweep.shutdown().await;
 
         // cas-ca22: retire this run's Commander relay token.
         if self.relay_token.take().is_some()

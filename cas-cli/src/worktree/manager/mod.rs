@@ -522,11 +522,6 @@ impl WorktreeManager {
                 return Err(WorktreeError::Git(GitError::MergeConflictPaths(conflicts)));
             }
 
-            // Projects with a release gate validate the combined tree in a
-            // disposable preview, before the target can move. This is shared
-            // by CLI and MCP merge paths; force only concerns source dirt.
-            self.check_lane_fast_rows(worktree)?;
-
             // cas-4702 / GH #68: never move the main checkout's HEAD. When
             // the checkout already happens to be on the target branch the
             // merge runs in place (no checkout needed, working tree stays in
@@ -577,114 +572,6 @@ impl WorktreeManager {
         };
 
         Ok(merge_commit)
-    }
-
-    fn check_lane_fast_rows(&self, worktree: &Worktree) -> WorktreeResult<()> {
-        let relative = "scripts/check-lane-fast-rows.py";
-        let target_sha = self
-            .git
-            .resolve_commit(&worktree.parent_branch)
-            .ok_or_else(|| WorktreeError::Git(GitError::BranchNotFound(worktree.parent_branch.clone())))?;
-        let source_sha = self
-            .git
-            .resolve_commit(&worktree.branch)
-            .ok_or_else(|| WorktreeError::Git(GitError::BranchNotFound(worktree.branch.clone())))?;
-        // The shared checkout can be on an older, unrelated branch with
-        // operator WIP. Its scripts are never merge-admission authority.
-        let target_script = self.committed_lane_script(&target_sha, relative)?;
-        let (policy_sha, policy_origin, script) = if let Some(script) = target_script {
-            (&target_sha, "target", script)
-        } else if let Some(script) = self.committed_lane_script(&source_sha, relative)? {
-            // A project adding lane admission in this delivery still gets its
-            // existing source-runner policy when the target has none.
-            (&source_sha, "source", script)
-        } else {
-            // Other projects retain their existing merge policy.
-            return Ok(());
-        };
-        let scope = tempfile::Builder::new()
-            .prefix("cas-lane-runner-")
-            .tempdir()?;
-        let runner = scope.path().join("check-lane-fast-rows.py");
-        std::fs::write(&runner, script)?;
-        // check-lane-fast-rows.py loads the compile verifier beside __file__.
-        // Give it the helper from the SAME approved commit, never a mixture
-        // of old-root and target/source policy.
-        if let Some(compiler) =
-            self.committed_lane_script(policy_sha, "scripts/check-lane-compile.py")?
-        {
-            std::fs::write(scope.path().join("check-lane-compile.py"), compiler)?;
-        }
-        // The compile verifier loads its Zig resolver beside __file__ too
-        // (cas-9f61), from the same approved commit.
-        if let Some(resolver) = self.committed_lane_script(policy_sha, "scripts/release_env.py")? {
-            std::fs::write(scope.path().join("release_env.py"), resolver)?;
-        }
-        self.require_lane_refs(worktree, &target_sha, &source_sha)?;
-        let output = std::process::Command::new("python3")
-            .arg(&runner)
-            .arg(&self.repo_root)
-            .arg(&worktree.parent_branch)
-            .arg(&worktree.branch)
-            .output()?;
-        self.require_lane_refs(worktree, &target_sha, &source_sha)?;
-        if !output.status.success() {
-            return Err(WorktreeError::Git(GitError::CommandFailed(format!(
-                "LANE FAST ROWS FAILED (merge refused; {policy_origin} policy {policy_sha}):\n{}{}\n\
-                 The runner copy is temporary. Correct the named row, then retry the authenticated \
-                 worktree_merge action; a manual preflight does not merge or waive admission.",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            ))));
-        }
-        tracing::info!(policy_origin, policy_sha, receipt = %String::from_utf8_lossy(&output.stdout), "lane fast rows passed");
-        Ok(())
-    }
-
-    fn require_lane_refs(
-        &self,
-        worktree: &Worktree,
-        target_sha: &str,
-        source_sha: &str,
-    ) -> WorktreeResult<()> {
-        if self.git.resolve_commit(&worktree.parent_branch).as_deref() != Some(target_sha)
-            || self.git.resolve_commit(&worktree.branch).as_deref() != Some(source_sha)
-        {
-            return Err(WorktreeError::Git(GitError::CommandFailed(
-                "source or target moved during lane fast rows; merge refused".to_string(),
-            )));
-        }
-        Ok(())
-    }
-
-    fn committed_lane_script(&self, sha: &str, relative: &str) -> WorktreeResult<Option<Vec<u8>>> {
-        let listing = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.repo_root)
-            .args(["ls-tree", "-z", sha, "--", relative])
-            .output()?;
-        if !listing.status.success() {
-            return Err(WorktreeError::Git(GitError::CommandFailed(format!(
-                "cannot inspect committed lane policy {sha}:{relative}: {}",
-                String::from_utf8_lossy(&listing.stderr)
-            ))));
-        }
-        if listing.stdout.is_empty() {
-            return Ok(None);
-        }
-        let object = format!("{sha}:{relative}");
-        let blob = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.repo_root)
-            .args(["show", &object])
-            .output()?;
-        if !blob.status.success() {
-            return Err(WorktreeError::Git(GitError::CommandFailed(format!(
-                "cannot load committed lane policy {object}: {}",
-                String::from_utf8_lossy(&blob.stderr)
-            ))));
-        }
-        Ok(Some(blob.stdout))
     }
 
     /// Remove a successfully merged worktree after any caller-owned durable

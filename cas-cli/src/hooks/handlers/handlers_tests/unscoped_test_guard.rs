@@ -315,8 +315,12 @@ fn worker_read_only_and_non_build_commands_are_not_denied() {
     }
 }
 
+/// cas-38e7: the shared-host memory admission is retired. A worker's browser
+/// or JS suite is never rewritten through scripts/worker-memory.py, even when
+/// the checkout still ships it, and no "admission unavailable" warning is
+/// added; the original command's own denials still apply.
 #[test]
-fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc() {
+fn worker_suites_run_unwrapped_without_memory_admission_cas_38e7() {
     use crate::test_support::TestEnvGuard;
     for harness in ["claude", "codex"] {
         let dir = tempfile::tempdir().unwrap();
@@ -329,80 +333,26 @@ fn worker_suite_admission_warns_without_helper_and_rewrites_with_helper_cas_61dc
                 std::fs::create_dir(dir.path().join("scripts")).unwrap();
                 std::fs::write(dir.path().join("scripts/worker-memory.py"), "# fixture, never executed\n").unwrap();
             }
-            // cas-3ae7: an unfiltered Playwright suite is denied to workers by the
-            // browser tier guard first, so admission is exercised on a named spec.
-            for command in ["npm test", "npm run test", "npx playwright test e2e/journeys/answer-ask.journey.ts", "vitest run", "bash scripts/journey-eval.sh", "npm run typecheck", "npm run build", "tsc --noEmit", "vite build", "vitest run --maxWorkers=2"] {
+            // An unfiltered Playwright suite is denied to workers by the
+            // browser tier guard, so a named spec stands in for it.
+            for command in ["npm test", "npx playwright test e2e/journeys/answer-ask.journey.ts", "vitest run", "npm run build", "tsc --noEmit"] {
                 let mut request = input(command, "worker");
                 request.cwd = cwd.into();
                 let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
                 assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
                 let value = serde_json::to_value(&out).unwrap();
-                let rewritten = value.pointer("/hookSpecificOutput/updatedInput/command").and_then(|value| value.as_str());
-                if has_helper {
-                    let rewritten = rewritten.expect("suite routed through host admission");
-                    assert!(rewritten.contains("worker-memory.py") && rewritten.contains(command), "{rewritten}");
-                    // cas-4cb9: pass the actual payload for weighted admission;
-                    // a caller-supplied light hint must never hide a heavy suite.
-                    assert!(rewritten.contains(" --shell-command "), "{rewritten}");
-                    if harness == "codex" {
-                        assert_eq!(value.pointer("/hookSpecificOutput/permissionDecision").and_then(|value| value.as_str()), Some("allow"));
-                    }
-                    assert!(out.system_message.is_none(), "helper present: {out:?}");
-                } else {
-                    assert!(rewritten.is_none(), "no unavailable helper rewrite: {out:?}");
-                    assert!(out.system_message.as_deref().is_some_and(|message| message.contains("shared host memory admission is unavailable")), "{out:?}");
-                }
-            }
-            for command in ["npm config get registry", "npm view vitest version", "node -e 'require(\"fs\").readFileSync(\"secrets.json\")'", "node scripts/generate-tokens.mjs"] {
-                let mut request = input(command, "worker");
-                request.cwd = cwd.into();
-                let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
-                assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
-                let value = serde_json::to_value(&out).unwrap();
-                assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "plain read/script: {out:?}");
-                assert!(out.system_message.is_none(), "plain read/script: {out:?}");
+                assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "{harness}: {command}: {out:?}");
+                assert!(
+                    !out.system_message.as_deref().is_some_and(|message| message.contains("memory admission")),
+                    "{out:?}"
+                );
             }
         }
-        // Admission preserves the unwrapped command's credential decision.
         let mut request = input("npm test; node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'", "worker");
         request.cwd = cwd.into();
         let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
         let reason = deny_reason(&out).expect("credential write remains denied");
-        assert!(reason.contains("credentials"), "the credential guard's own reason survives admission: {reason}");
-        let value = serde_json::to_value(&out).unwrap();
-        assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "deny cannot be rewritten into allow: {out:?}");
-    }
-}
-
-#[test]
-fn worker_suite_rewrite_preserves_original_denials_cas_61dc() {
-    use crate::test_support::TestEnvGuard;
-    for harness in ["claude", "codex"] {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().to_str().unwrap();
-        let _env = TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", cwd)]);
-        let root = dir.path().join(".cas");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(dir.path().join("scripts")).unwrap();
-        std::fs::write(dir.path().join("scripts/worker-memory.py"), "# never executed\n").unwrap();
-        for forbidden in [
-            "node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'",
-            "printf x > .env",
-            "cargo test",
-        ] {
-            let mut direct = input(forbidden, "worker");
-            direct.cwd = cwd.into();
-            let expected = deny_reason(&handle_pre_tool_use(&direct, Some(&root)).unwrap())
-                .expect("original command must be refused");
-            for command in [format!("npm test; {forbidden}"), format!("{forbidden}; npx vitest run")] {
-                let mut request = input(&command, "worker");
-                request.cwd = cwd.into();
-                let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
-                assert_eq!(deny_reason(&out).as_deref(), Some(expected.as_str()), "{harness}: {command}: {out:?}");
-                let value = serde_json::to_value(&out).unwrap();
-                assert!(value.pointer("/hookSpecificOutput/updatedInput").is_none(), "refused command cannot acquire a rewrite: {out:?}");
-            }
-        }
+        assert!(reason.contains("credentials"), "{reason}");
     }
 }
 

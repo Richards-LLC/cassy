@@ -25,7 +25,7 @@ Projects that keep a catalog describe the contract in
 - Put each journey in the matrix as a row that starts at its **Entry** and
   ends at its **Goal**. Use the ledger labels and verdicts unchanged.
 
-## Run them and keep the receipts
+## Run them and keep the evidence
 
 Run the project's journey suite, for example
 `scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id>`. It resolves
@@ -56,13 +56,11 @@ The files are:
 | `result.json` | The stage titles and timings |
 
 `<task-id>/journeys/JOURNEYS.md` summarises the run. Cite these paths in the
-ledger. `journey-receipt.json` records full base/head SHAs, the canonical
-selection IDs, native per-ID pass/fail/skip counts, tool version and suite exit.
-Include its path as `journey_receipt` in the implementer/QA bundle. Repeat runs
-archive prior receipts under `journey-runs/`; retain the original failed run
-when checking a single failing spec at one worker. Reviewers may reuse the
-implementer's receipt for the exact same tip. Document-only rebinds follow
-[the receipt contract](evidence-bundle.md#affected-journey-receipt).
+ledger. The run also writes `journey-receipt.json` (base/head SHAs, selection
+IDs, per-ID counts); close and QA no longer require it, because the merge queue
+runs the full journey suite. Keep the original failed run when
+checking a single failing spec at one worker. Document-only rebinds follow
+[the affected-journeys rules](evidence-bundle.md#affected-journeys).
 
 ## Score the experience
 

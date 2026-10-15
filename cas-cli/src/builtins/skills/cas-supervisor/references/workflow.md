@@ -190,108 +190,37 @@ Run the canonical merge-time diff review ([Required merge-review discipline](#re
 factory action=worktree_merge id=<worker> task_id=<task-id>
 ```
 
-Projects shipping `scripts/check-lane-fast-rows.py` run the deterministic
-`release-gate.sh --fast-rows` checks on a detached preview of the combined tree
-before either merge path moves the target. A failed receipt names the row and
-refuses the merge, including with `force=true`. Install
-`markdownlint-cli2@0.18.1` on the supervisor host before merging changed docs;
-the fast gate downloads no tools and invokes no Cargo commands.
-
-Rust-touching lanes additionally require a capped compile PASS for the combined
-merge tree. A lane-tip check or green CI run cannot supply that receipt. Before
-merging, run the proof as a supervisor, in the background with a retained log:
-
-```bash
-python3 scripts/check-lane-compile.py . <target-branch> factory/<worker> --prove
-```
-
-The prover invokes the existing capped runner once with `--lib` and once with
-`--tests`, both scoped to the affected Cargo packages, in an isolated preview.
-It publishes a tree-keyed receipt only after both checks pass and the preview
-and input refs remain unchanged. A failed retry removes an earlier PASS. The
-normal preflight verifies this receipt without compiling. Missing proof prints
-the exact command to produce it; docs/scripts-only lanes need no compile proof.
-The Git merge helper also verifies the actual detached merge commit before its
-compare-and-swap advances the epic, covering merge drivers and concurrent lanes.
-Rust merges use the detached venue's clean-target-checkout rule; commit or stash
-target-checkout dirt first. Other projects retain their existing merge policy.
+`worktree_merge` admits a lane on its CI state and the merge preflight's
+conflict and dirt checks. It runs no local release rows and needs no compile
+receipt: lane CI runs the fast checks once, and the merge queue is the Rust
+compile and suite proof. Rust merges still use the detached venue's
+clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource
 
 A reviewed delivery or an idle worker that waits costs the epic time. Apply
 these rules every turn:
 
-- **Merge non-Rust deliveries at once.** A docs, scripts or web lane needs no
-  compile proof. Merge it as soon as review passes; never queue it behind a
-  Rust proof.
+- **Merge reviewed deliveries at once.** A lane whose CI is green and whose
+  review passed merges now; never queue it behind another lane's proof.
 - **Cap Rust lanes, not the fleet.** Keep Rust-compiling lanes at or below
   `[factory] max_concurrent_builders`. Give every extra worker non-Rust work.
 - **Leave nothing waiting.** In the turn you review or merge a delivery,
-  assign its idle worker the next task. A reviewed delivery is either merging,
-  under a running proof, or blocked on a named cause.
-- **Prefer parallel proofs to serial waits.** Start every independent proof
-  before you wait on any of them. With two or more reviewed Rust lanes parked,
-  prove them together against their predicted merged trees, then merge them in
-  the predicted order.
+  assign its idle worker the next task. A reviewed delivery is either merging
+  or blocked on a named cause.
 
-A predicted-tree proof for Rust lanes A then B on epic tip E chains each
-predicted merge onto the previous one:
-
-```bash
-E=$(git rev-parse epic/<slug>)
-T1=$(git merge-tree --write-tree "$E" factory/<worker-a>)
-C1=$(git commit-tree "$T1" -p "$E" -p factory/<worker-a> -m "predicted merge: worker-a")
-python3 scripts/check-lane-compile.py . "$E" factory/<worker-a> --prove > <artifacts>/lane-a.log 2>&1 &
-python3 scripts/check-lane-compile.py . "$C1" factory/<worker-b> --prove > <artifacts>/lane-b.log 2>&1 &
-```
-
-For a third lane, predict `T2` and `C2` from `C1` and lane B the same way and
-prove lane C against `C2`. `git merge-tree` must exit zero; a conflict means
-that lane needs a rebase, so end the chain before it. Each proof is one capped
-builder, so run no more at once than the cap leaves free.
-
-Each receipt is keyed to its merged tree. Merge A, then B, with
-`worktree_merge`. Merging A produces `T1`, so B's merge produces the tree
-already proved and its preflight finds the receipt without compiling. If
-another lane lands first, the order changes, or the actual merge tree differs,
-the preflight names the missing proof; rerun that one.
-
-A documented manual Git merge in a project that permits it uses the same
-preflight, from the target checkout immediately before the merge:
-
-```bash
-python3 scripts/check-lane-fast-rows.py . <target-branch> factory/<worker> &&
-  git merge --no-ff factory/<worker>
-```
-
-Run the second command only after the first exits zero. When tracked delivery
-requires `worktree_merge`, use that path so receipts and leases stay consistent.
+When tracked delivery requires `worktree_merge`, use that path so leases stay
+consistent.
 
 The default merge preserves the worker checkout for continued work. A later
 `shutdown_workers` may remove that checkout once it is clean and the worker
 has no nonterminal tasks. Keep the worker running while another process
 depends on its checkout path.
 
-After a successful merge into an `epic/` branch, the factory daemon launches a
-bounded sweep of the project's detected test runner (`cargo nextest run --workspace
---no-fail-fast` for a Cargo project, the `test` script for a Node project) in a reusable
-detached merged-tip worktree. The sweep is asynchronous and capped by
-`[factory].merge_sweep_timeout_secs`; inspect the epic note and the durable
-`<cas-root>/merge-sweeps/` log before accepting another merge when it reports
-`FAILED`, `TIMED OUT`, or `SETUP FAILED`. Set `[factory].merge_sweep = false`
-only when the host cannot absorb this additional validation load.
-The sweep starts `[factory].merge_sweep_quiet_secs` (default 300 s) after the
-last epic merge. A burst of merges runs one sweep of the newest tip, and each
-merge cancels a stale running sweep at once. Set it to 0 to start immediately.
-A project whose suites need their own script or environment sets
-`[factory].merge_sweep_command` (run via `sh -c` instead of the detected
-runner) and a `[factory.merge_sweep_env]` table in `config.toml`. Set
-`[factory].merge_sweep_cwd = "web"` to run the command or detected runner in
-that subdirectory; without it, detection searches the checkout and nested
-directories for a test manifest. The sweep
-log shows only the variable names. A sweep the build guard defers is noted on
-the epic without a relay; the run that finally goes ahead sends one relay
-naming its result and integration tip.
+A merge into an `epic/` branch runs no local suite (3.54.0). The epic's one
+integration proof is the merge queue run for its PR. When that PR leaves the
+queue without merging, the daemon sends one `merge_queue_ejected` wake naming
+the PR and the failing job; nothing is re-enqueued automatically.
 
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
@@ -412,8 +341,8 @@ After the rebase, run the same command against the new base.
   `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
 
 A matching patch-id proves the diff is the same. It does not prove the diff
-still integrates with the new base: the merge sweep and the Phase 4 final
-gate still run. A green CI run is not a review verdict.
+still integrates with the new base: the merge queue run on the epic PR
+still proves that. A green CI run is not a review verdict.
 
 ## Phase 3: Review (Shared Mode)
 
@@ -451,7 +380,7 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
    on the epic tip proves every child and checks cross-task integration.
    **When the base branch lands through a merge queue that runs the full suite
    on the merged tree, that queue run is this gate.** Do not run a local full
-   suite before the PR: lane CI and the lane compile admit lanes, the epic PR
+   suite before the PR: lane CI admits lanes, the epic PR
    enters the queue, and the queue proves the exact tree that becomes base. The
    epic closes once its tip is contained in base.
    Without such a queue, run the project's assembly gate locally. In a project

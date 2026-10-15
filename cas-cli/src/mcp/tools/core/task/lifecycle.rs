@@ -814,6 +814,9 @@ impl CasCore {
             .await
     }
 
+    /// cas-fd0a: only tests create with an explicit target since the
+    /// integration-sweep task fan-out (`factory sweep_tasks`) was retired.
+    #[cfg(test)]
     pub(crate) async fn cas_task_create_with_target(
         &self,
         req: TaskCreateRequest,

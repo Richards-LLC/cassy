@@ -7,6 +7,61 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.54.0] - 2026-10-15
+
+### Changed — one command releases; landing on main publishes and installs (cas-f95b)
+
+- `scripts/release.sh` is now the whole release. Run on the epic branch, it
+  bumps the release crates and `Cargo.lock`, promotes CHANGELOG
+  `[Unreleased]`, names the release-notes draft, commits, opens the PR to
+  `main` and enables auto-merge. If another release lands first, it merges it
+  and takes the next version by itself. `--hotfix` takes the next patch
+  version through the same path. The release PR, its second merge-queue cycle,
+  the local tag push and the local publisher are gone.
+- The merge queue builds the Linux and macOS release archives at enqueue for a
+  PR that changes the version (`release-prebuild.yml`, not required). When the
+  version lands on `main`, `release.yml` adopts them by tree id, runs the ISA
+  audit and the operator launch smoke on both packaged assets, then creates
+  the tag and the GitHub release. It builds only when nothing can be adopted.
+- `scripts/install-on-publish.sh --install` sets up a per-host timer that
+  installs each published release within a minute. The release notes end with
+  one timer, PR opened to installed.
+- Removed: the `release/**` and main-push prebuild triggers,
+  `self-hosted-fast-validation.yml` and the self-hosted release routing. macOS
+  is compile-checked and launch-tested; the suite runs on Linux.
+
+### Removed — the factory daemon no longer re-tests after merges (cas-fd0a)
+
+- A merge into an epic branch no longer starts a workspace sweep, a rolling
+  integration of main and every open epic, a background full gate or a
+  background journey evaluation. The merge queue run on the epic PR is the one
+  integration proof. `worktree_merge` admits on CI state alone; a red-epic
+  integration gate no longer refuses it.
+- A merge-queue ejection still wakes the supervisor once, naming the PR and
+  the failing job. It is no longer diagnosed or re-enqueued automatically.
+- `cas factory integration-recover` and the `factory sweep_tasks` action are
+  removed.
+- The `[factory]` keys `merge_sweep`, `merge_sweep_timeout_secs`,
+  `merge_sweep_quiet_secs`, `merge_sweep_command`, `merge_sweep_cwd`,
+  `merge_sweep_env` and `release_gate_home_dir` are retired. A config file that
+  still sets them loads with a one-line note; the keys are dropped on the next
+  save.
+
+### Removed — release checks no longer re-run at close, merge and push (cas-38e7)
+
+- A worker parks and closes a task without a fast-rows receipt, a journey
+  receipt or a lane-compile receipt. Lane CI runs the fast checks once, and the
+  merge queue runs the Rust suite and the Commander journeys once. Verification
+  verdicts, merge evidence and QA for user-facing work still gate the close.
+- `worktree_merge` no longer runs the lane fast rows, and the Git merge helper
+  no longer requires a lane-compile receipt before it moves an epic branch.
+- Worker browser and JS suites are no longer rewritten through
+  `scripts/worker-memory.py`.
+- The worker pre-push guard still refuses pushes to another worker's branch,
+  but it no longer runs `scripts/fast-rows-pre-push.sh`. Guards installed by
+  earlier builds are refreshed in place.
+- Sixteen unused close-gate functions are gone from the binary.
+
 ## [3.53.0] - 2026-10-14
 
 ### Changed — the merge queue skips the Commander journeys when only the CI workflow changes (cas-c846)

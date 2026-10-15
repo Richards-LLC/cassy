@@ -12,6 +12,7 @@ checksum placeholders below.
 Live on production — **User** — {{USER_IMPACT_PUNCH}}
 
 **Reply (Was → Now):**
+
 - Was: {{USER_WAS}} Now: {{USER_NOW}}
 - Install: use `cas update` for an existing installation, or download the
   vX.Y.Z archive for Linux x86_64 (SHA-256 `{{LINUX_SHA256}}`) or macOS ARM64
@@ -23,6 +24,7 @@ Live on production — **User** — {{USER_IMPACT_PUNCH}}
 Live on production — **Dev** — {{DEV_IMPACT_PUNCH}}
 
 **Reply (Was → Now):**
+
 - Was: {{DEV_WAS}} Now: {{DEV_NOW}}
 - Validation and artifact: {{VALIDATION_SUMMARY}} The published archives are
   `cas-x86_64-unknown-linux-gnu.tar.gz` (SHA-256 `{{LINUX_SHA256}}`) and
@@ -32,11 +34,9 @@ Live on production — **Dev** — {{DEV_IMPACT_PUNCH}}
 ## Posting sequence
 
 1. Replace the narrative placeholders after the release PR is merged.
-2. The supervisor/operator runs `./scripts/release.sh --publish-tag` from an
-   unguarded release worktree at the fetched `origin/main` landing. A worker
-   can prepare the annotated local tag and hand off its exact commit; the
-   worker's push guard forbids publishing it. A bare `release.sh` is a local
-   audit and does not touch the remote.
+2. `scripts/release.sh` committed this draft with the version bump in the
+   epic PR. When that PR lands, `release.yml` tags and publishes both assets;
+   nobody pushes a tag.
 3. Run `release-published-receipt.sh --write-draft` against this draft. It
    downloads and hashes both published assets before replacing every digest
    placeholder; never type a digest from a local audit archive.

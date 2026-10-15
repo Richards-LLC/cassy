@@ -201,6 +201,17 @@ impl Config {
         if self.retired_jev.is_some() {
             NOTED.call_once(|| eprintln!("{RETIRED_JEV_SECTION_NOTE}"));
         }
+        // cas-fd0a: one line naming the retired [factory] sweep keys.
+        static NOTED_FACTORY: std::sync::Once = std::sync::Once::new();
+        let retired = self.factory.as_ref().map(FactoryConfig::retired_keys).unwrap_or_default();
+        if !retired.is_empty() {
+            NOTED_FACTORY.call_once(|| {
+                eprintln!(
+                    "note: config.toml [factory] {} retired (the daemon no longer sweeps after merges; the merge queue is the integration proof); ignored and dropped on the next save.",
+                    retired.join(", ")
+                )
+            });
+        }
     }
 
     /// Load project config with host-level `~/.cas/config.toml` staging defaults.

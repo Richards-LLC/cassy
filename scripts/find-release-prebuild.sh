@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Locate prebuilt release artifacts for an exact commit (cas-3b7c0).
 #
-# Prints `found=`, `run-id=` and `reason=` for the tag-time release workflow.
+# Prints `found=`, `run-id=` and `reason=` for the release workflow.
 #
 # GITHUB_REPOSITORY defaults to the gh default repository, then the origin
 # remote, for a run by hand; when neither resolves the script exits 2 with an
@@ -15,15 +15,18 @@
 # accelerator; it can never be the reason a release cannot ship.
 #
 # The only accepted match is a *successful* Release Prebuild run whose head
-# commit is the commit being published or has exactly its tree (cas-28eb: the
-# release/** push builds the landing tree before the merge queue lands it), so
-# adopted bytes always come from the tagged tree.
+# commit is the commit being published or has exactly its tree (cas-28eb), so
+# adopted bytes always come from the tagged tree. The release builds run on
+# the merge_group event: the queue builds one entry at a time and lands its
+# merge commit as main, so the queue run's head is the main commit itself.
+# RELEASE_PREBUILD_EVENT names the event searched for same-tree runs.
 set -euo pipefail
 
 sha="${1:-${GITHUB_SHA:-}}"
 repo="${GITHUB_REPOSITORY:-}"
 gh_bin="${GH_BIN:-gh}"
 workflow="${RELEASE_PREBUILD_WORKFLOW:-release-prebuild.yml}"
+event="${RELEASE_PREBUILD_EVENT:-merge_group}"
 wait_seconds="${RELEASE_PREBUILD_WAIT_SECONDS:-900}"
 poll_seconds="${RELEASE_PREBUILD_POLL_SECONDS:-15}"
 required_artifacts=("cas-x86_64-unknown-linux-gnu" "cas-aarch64-apple-darwin")
@@ -107,7 +110,7 @@ if [[ -z "$repo" ]]; then
     fi
 fi
 
-# Runs for this exact commit, plus recent push runs whose head commit has its
+# Runs for this exact commit, plus recent $event runs whose head commit has its
 # tree. A failed tree or recent-run lookup leaves only the exact-commit runs.
 target_tree="$("$gh_bin" api "repos/$repo/git/commits/$sha" --jq .tree.sha 2>/dev/null || true)"
 fetch_runs() {
@@ -116,7 +119,7 @@ fetch_runs() {
         "repos/$repo/actions/workflows/$workflow/runs?head_sha=$sha&per_page=20" 2>/dev/null)" || return 1
     if [[ "$target_tree" =~ ^[0-9a-f]{40}$ ]] \
         && recent="$("$gh_bin" api \
-            "repos/$repo/actions/workflows/$workflow/runs?event=push&per_page=30" 2>/dev/null)" \
+            "repos/$repo/actions/workflows/$workflow/runs?event=$event&per_page=30" 2>/dev/null)" \
         && jq -s --arg tree "$target_tree" \
             '{workflow_runs: ([.[0].workflow_runs[]?]
               + [.[1].workflow_runs[]? | select(.head_commit.tree_id == $tree)] | unique_by(.id))}' \

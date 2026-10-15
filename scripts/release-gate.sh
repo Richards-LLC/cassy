@@ -1646,14 +1646,14 @@ check_publish_toolchain() {
 }
 
 check_release_script() {
+    # cas-f95b: scripts/release.sh is the one-command release. It must parse
+    # and answer --help without touching git or the network.
     [[ -f scripts/release.sh ]] || {
         printf 'release-script: scripts/release.sh is missing\n'
         return 1
     }
-    grep -qF 'target/$target/release/build"/blake3-*' scripts/release.sh
-    grep -qF 'target/$target/release/.fingerprint"/blake3-*' scripts/release.sh
-    grep -qF 'Pre-warming rule: in a tag worktree' scripts/release.sh
-    grep -qF 'audit-only and remote-safe' scripts/release.sh
+    bash -n scripts/release.sh
+    bash scripts/release.sh --help >/dev/null
 }
 
 check_release_notes_shell_injection() {
@@ -1666,25 +1666,15 @@ check_procedure_guardrails() {
         printf 'procedure-guardrails: missing %s\n' "$skill"
         return 1
     }
-    grep -qF 'kill -0' "$skill"
-    grep -qF 'full suite on the assembled tree' "$skill"
+    grep -qF 'scripts/release.sh --next-version' "$skill"
+    grep -qF 'scripts/release.sh --hotfix' "$skill"
+    grep -qF 'compile-checked and launch-tested' "$skill"
+    grep -qF 'scripts/install-on-publish.sh --install' "$skill"
     grep -qF 'stranded_branch_override' "$skill"
     grep -qF 'release-published-receipt.sh --write-draft' "$skill"
     grep -qF 'cas --version' "$skill"
-    grep -qF 'Scoped Validation' "$skill"
-    grep -qF 'ledger is the last prep step' "$skill"
-    grep -qF 'cause class' "$skill"
     grep -qF '9.99.x' "$skill"
     grep -qF 'workers never poll CI' "$skill"
-    grep -qF 'reviewed snapshot update' "$skill"
-    grep -qF 'competing release' "$skill"
-    grep -qF 'merge-queue GraphQL query' "$skill"
-    grep -qF 'CAS_RELEASE_ENV_FILE' "$skill"
-    grep -qF 'annotated tag peels' "$skill"
-    grep -qF 'four Slack POSTED' "$skill"
-    grep -qF 'refresh_binary_version' "$skill"
-    grep -qF 'release.tag-complete.epoch' "$skill"
-    grep -qF 'release-published.receipt' "$skill"
 }
 
 check_test_targets() {
@@ -2263,13 +2253,13 @@ gate_row changelog-and-versions \
     'CHANGELOG [Unreleased]/[version] bullet plus six release-train Cargo.toml versions' \
     check_changelog_and_versions
 gate_row release-script \
-    'release.sh stale duplicate cleanup and audit-only pre-warm contract' \
+    'scripts/release.sh parses and answers --help (one-command release)' \
     check_release_script
 gate_row release-notes-shell-injection \
     'all workflow run blocks reject GitHub expression interpolation' \
     check_release_notes_shell_injection
 gate_row procedure-guardrails \
-    'cas-cut-release reconciliation, queue, PID, receipt, and host guardrails' \
+    'cas-cut-release one-command release, hotfix, platform and install guardrails' \
     check_procedure_guardrails
 gate_row test-targets 'python3 scripts/cas-test-targets.py cas-cli --check' check_test_targets
 gate_row markdown-lint 'markdownlint-cli2 on changed Markdown (repository policy)' check_markdown_lint
@@ -2314,7 +2304,7 @@ fast_row_fix() {
     case "$1" in
         failure-log) printf 'give every entry in %s a **<gate-row-id>** that exists in release-gate.sh, or a manual: marker' "$failure_log_rel" ;;
         changelog-and-versions) printf 'keep ## [Unreleased] and the current release section (with a bullet) in CHANGELOG.md; put new bullets under [Unreleased]' ;;
-        release-script) printf 'restore the guarded contract lines in scripts/release.sh that the row log names' ;;
+        release-script) printf 'make scripts/release.sh pass bash -n and exit 0 on --help' ;;
         release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
         procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;

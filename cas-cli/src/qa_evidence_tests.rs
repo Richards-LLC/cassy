@@ -2258,48 +2258,6 @@ fn scoped_visual_qa_translation_preserves_new_findings_cas_5488() {
     assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
 }
 
-/// cas-1ca0: a valid pixel/trace bundle cannot cover a journey it never ran.
-#[test]
-fn cas_1ca0_close_refuses_a_hand_picked_journey_subset() {
-    let fx = Fixture::new();
-    fx.write_bundle(|_| {});
-    let notes = fx.notes();
-    let ctx = EvidenceContext {
-        task_id: TASK,
-        task_artifacts_dir: &fx.task_dir,
-        repo: &fx.repo,
-        delivered_head: &fx.head,
-        notes: &notes,
-        deployed_origins: &[],
-    };
-    let error = run_close_gate(
-        &ctx, EvidenceTier::Bundle,
-        &["affected-journeys".into(), "journeys:HUB-J7".into()], &[],
-    ).expect_err("selected HUB-J7 is missing even though the hand-picked evidence passes");
-    assert!(error.contains("HUB-J7"), "{error}");
-    assert!(error.contains("scripts/journey-eval.sh"), "{error}");
-}
-
-fn write_journey_receipt(
-    fx: &Fixture,
-    ids: &[&str],
-    scope: &str,
-    edit: impl FnOnce(&mut serde_json::Value),
-) -> PathBuf {
-    let path = fx.task_dir.join("journey-receipt.json");
-    let mut value = serde_json::json!({
-        "schema": 1, "producer": "journey-eval", "kind": "local", "scope": scope,
-        "base_sha": fx.head, "head_sha": fx.head, "selection_ids": ids,
-        "tool_version": "playwright 1.63.0", "suite_exit": 0,
-        "results": ids.iter().map(|id| serde_json::json!({
-            "id": id, "status": "PASS", "passed": 2, "failed": 0, "skipped": 0,
-        })).collect::<Vec<_>>()
-    });
-    edit(&mut value);
-    std::fs::write(&path, value.to_string()).unwrap();
-    path
-}
-
 fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
     EvidenceContext {
         task_id: TASK,
@@ -2311,262 +2269,29 @@ fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
     }
 }
 
+/// cas-38e7: the close gate no longer asks for a journey receipt. A delivery
+/// whose diff touches a catalog journey closes on its valid QA bundle; the
+/// merge queue runs the journeys once.
 #[test]
-fn cas_1ca0_close_accepts_complete_affected_receipt_and_ci_receipt() {
+fn cas_38e7_close_needs_no_journey_receipt() {
     let fx = Fixture::new();
-    let receipt = write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |_| {});
-    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
+    fx.write_bundle(|_| {});
     let notes = fx.notes();
     let ctx = journey_context(&fx, &notes);
-    let reasons = vec![journeys::selection_reason(
-        &fx.head,
-        &["HUB-J1".into(), "HUB-J7".into()],
-    )];
-    let pass = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap();
-    assert!(
-        pass.notes
-            .iter()
-            .any(|n| n.contains("JOURNEY_SELECTION:") && n.contains("HUB-J7"))
-    );
-    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
-        v["kind"] = serde_json::json!("ci");
-        v["ci_run_url"] = serde_json::json!("https://github.com/org/repo/actions/runs/42");
-    });
-    run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap();
+    let pass = run_close_gate(&ctx, EvidenceTier::Bundle, &["journeys:HUB-J7".into()], &[])
+        .expect("a valid bundle closes without a journey receipt");
+    assert!(pass.notes.iter().any(|note| note.contains("QA evidence bundle accepted")), "{:?}", pass.notes);
+    assert!(!pass.notes.iter().any(|note| note.contains("JOURNEY_SELECTION")), "{:?}", pass.notes);
 }
 
 #[test]
-fn cas_1ca0_missing_selected_failed_skipped_and_stale_receipts_refuse() {
-    let fx = Fixture::new();
-    let receipt = write_journey_receipt(&fx, &["HUB-J1"], "affected", |_| {});
-    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
-    let notes = fx.notes();
-    let ctx = journey_context(&fx, &notes);
-    let reasons = vec![journeys::selection_reason(
-        &fx.head,
-        &["HUB-J1".into(), "HUB-J7".into()],
-    )];
-    let error = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap_err();
-    assert!(error.contains("missing selected IDs [HUB-J7]"), "{error}");
-    assert!(error.contains("scripts/journey-eval.sh"), "{error}");
-    for key in ["failed", "skipped"] {
-        write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
-            v["results"][1][key] = serde_json::json!(1)
-        });
-        let error = run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[]).unwrap_err();
-        assert!(error.contains("nonpassing IDs [HUB-J7]"), "{error}");
-    }
-    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |v| {
-        v["head_sha"] = serde_json::json!("0".repeat(40))
-    });
-    assert!(
-        run_close_gate(&ctx, EvidenceTier::Bundle, &reasons, &[])
-            .unwrap_err()
-            .contains("exact delivered tip")
-    );
-}
-
-#[test]
-fn cas_1ca0_receipt_provenance_and_task_namespace_are_required() {
-    let fx = Fixture::new();
-    let notes = fx.notes();
-    let ctx = journey_context(&fx, &notes);
-    let ids = vec!["HUB-J7".into()];
-    for key in ["suite_exit", "schema"] {
-        let path = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
-            v[key] = serde_json::json!(99)
-        });
-        assert!(journeys::validate_journey_receipt(&ctx, &path, &fx.head, &ids, false).is_err());
-    }
-    let path = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
-        v["tool_version"] = serde_json::json!("")
-    });
-    assert!(journeys::validate_journey_receipt(&ctx, &path, &fx.head, &ids, false).is_err());
-    let outside = fx.repo.join("foreign-receipt.json");
-    std::fs::copy(path, &outside).unwrap();
-    assert!(
-        journeys::validate_journey_receipt(&ctx, &outside, &fx.head, &ids, false)
-            .unwrap_err()
-            .problem
-            .contains("escapes")
-    );
-}
-
-#[test]
-fn cas_1ca0_independent_qa_reuses_exact_tip_implementer_receipt() {
-    let fx = Fixture::new();
-    let receipt = write_journey_receipt(&fx, &["HUB-J7"], "affected", |_| {});
-    let manifest = fx.write_bundle(|v| {
-        v["producer"] = serde_json::json!("independent-qa");
-        v["journey_receipt"] = serde_json::json!(receipt);
-    });
-    let recorded = format!(
-        "JOURNEY_SELECTION: head={} base={} ids=HUB-J7",
-        fx.head, fx.head
-    );
-    let ctx = journey_context(&fx, &recorded);
-    let reused = journeys::check_round_journeys(&ctx, &manifest, &recorded, &[])
-        .unwrap()
-        .unwrap();
-    assert_eq!(reused, receipt.canonicalize().unwrap());
-    write_journey_receipt(&fx, &["HUB-J1"], "affected", |_| {});
-    assert!(
-        journeys::check_round_journeys(&ctx, &manifest, &recorded, &[])
-            .unwrap_err()
-            .problem
-            .contains("HUB-J7")
-    );
-    assert!(
-        journeys::check_round_journeys(&ctx, &manifest, "", &["hub-web/src/main.ts".into()])
-            .unwrap_err()
-            .problem
-            .contains("no affected-journey selection")
-    );
-}
-
-#[test]
-fn cas_1ca0_epic_requires_full_catalog_receipt_and_selector_errors_refuse() {
-    let mut fx = Fixture::new();
-    assert!(journeys::select_journeys(&fx.repo, &fx.head, &fx.head, None).is_err());
-    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
-    // Real Python call validates reviewed revision/base env; this fixture
-    // selector stands in for the source-graph owner's separate implementation.
-    std::fs::write(
-        fx.repo.join("scripts/journeys-for-diff.py"),
-        r#"
-import json, os
-assert len(os.environ['CAS_JOURNEYS_HEAD']) == 40
-assert len(os.environ['CAS_JOURNEYS_BASE']) == 40
-print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J7'}]}))
-"#,
-    )
-    .unwrap();
-    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
-    git_ok(&fx.repo, &["commit", "-q", "-m", "fixture selector"]);
-    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
-    let path = write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "affected", |_| {});
-    let notes = format!("journey-receipt: {}", path.display());
-    let ctx = journey_context(&fx, &notes);
-    let error = journeys::check_epic_journeys(&ctx).unwrap_err();
-    assert!(error.problem.contains("full-suite"), "{error:?}");
-    assert!(error.command.contains("no journey filter"), "{error:?}");
-    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "full", |_| {});
-    journeys::check_epic_journeys(&ctx).unwrap();
-    write_journey_receipt(&fx, &["HUB-J1"], "full", |_| {});
-    assert!(
-        journeys::check_epic_journeys(&ctx)
-            .unwrap_err()
-            .problem
-            .contains("HUB-J7")
-    );
-    std::fs::write(
-        fx.repo.join("scripts/journeys-for-diff.py"),
-        "raise SystemExit(2)\n",
-    )
-    .unwrap();
-    // Uncommitted checkout drift cannot replace the reviewed selector.
-    write_journey_receipt(&fx, &["HUB-J1", "HUB-J7"], "full", |_| {});
-    journeys::check_epic_journeys(&ctx).unwrap();
-    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
-    git_ok(&fx.repo, &["commit", "-q", "-m", "broken committed selector"]);
-    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
-    let ctx = journey_context(&fx, &notes);
-    assert!(
-        journeys::check_epic_journeys(&ctx)
-            .unwrap_err()
-            .problem
-            .contains("selection failed")
-    );
-}
-
-/// cas-147e: with no qa-bundle note, a valid journey receipt already on disk
-/// is not "missing": the refusal names the missing bundle citation, points
-/// at the existing receipt and does not send the worker back to the browsers.
-/// Without a usable receipt the journey-eval repair stays.
-#[test]
-fn cas_147e_missing_bundle_citation_is_named_not_a_missing_receipt() {
-    let fx = Fixture::new();
-    let ids = ["HUB-J1", "HUB-J7"];
-    let reason = journeys::selection_reason(&fx.head, &ids.map(String::from));
-    let ctx = journey_context(&fx, "");
-
-    // No receipt either: the receipt really is missing.
-    let missing = journeys::check_close_journeys(&ctx, std::slice::from_ref(&reason)).unwrap_err();
-    assert!(
-        missing.problem.contains("missing journey receipt"),
-        "{missing:?}"
-    );
-    assert!(
-        missing.command.contains("scripts/journey-eval.sh"),
-        "{missing:?}"
-    );
-
-    // A valid exact-tip receipt is on disk; only the bundle citation is absent.
-    let receipt = write_journey_receipt(&fx, &ids, "affected", |_| {});
-    let uncited = journeys::check_close_journeys(&ctx, std::slice::from_ref(&reason)).unwrap_err();
-    assert!(
-        !uncited.problem.contains("missing journey receipt"),
-        "{uncited:?}"
-    );
-    assert!(
-        uncited.problem.contains("no qa-bundle cited"),
-        "{uncited:?}"
-    );
-    assert!(uncited.problem.contains("HUB-J1, HUB-J7"), "{uncited:?}");
-    assert!(uncited.problem.contains("qa-bundle: "), "{uncited:?}");
-    assert!(!uncited.command.contains("journey-eval"), "{uncited:?}");
-    assert!(
-        uncited.command.contains(&receipt.display().to_string()),
-        "{uncited:?}"
-    );
-    assert!(uncited.command.contains(&fx.head), "{uncited:?}");
-    assert!(
-        uncited
-            .command
-            .contains("only the bundle citation is missing"),
-        "{uncited:?}"
-    );
-
-    // A receipt for another head is not usable: rerun journey-eval.
-    write_journey_receipt(&fx, &ids, "affected", |v| {
-        v["head_sha"] = serde_json::json!("1".repeat(40))
-    });
-    let stale = journeys::check_close_journeys(&ctx, std::slice::from_ref(&reason)).unwrap_err();
-    assert!(stale.problem.contains("no qa-bundle cited"), "{stale:?}");
-    assert!(stale.problem.contains("does not bind"), "{stale:?}");
-    assert!(
-        stale.command.contains("scripts/journey-eval.sh"),
-        "{stale:?}"
-    );
-}
-
-#[test]
-fn cas_1ca0_empty_impact_does_not_require_browser_run() {
-    let fx = Fixture::new();
-    let receipt = write_journey_receipt(&fx, &[], "affected", |_| {});
-    fx.write_bundle(|v| v["journey_receipt"] = serde_json::json!(receipt));
-    let notes = fx.notes();
-    let ctx = journey_context(&fx, &notes);
-    let selection =
-        journeys::check_close_journeys(&ctx, &[journeys::selection_reason(&fx.head, &[])])
-            .unwrap()
-            .unwrap();
-    assert!(selection.contains("no affected journeys"));
-}
-
-#[test]
-fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_refuse() {
+fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_do_not_rebind() {
     let mut fx = Fixture::new();
     let executed = fx.head.clone();
     std::fs::create_dir_all(fx.repo.join("docs")).unwrap();
     fx.head = commit(&fx.repo, "docs/QA.md", 0);
     assert!(journeys::doc_only_rebind(&fx.repo, &executed, &fx.head));
-    let receipt = write_journey_receipt(&fx, &["HUB-J7"], "affected", |v| {
-        v["base_sha"] = serde_json::json!(executed);
-        v["executed_head_sha"] = serde_json::json!(executed);
-    });
     fx.write_bundle(|v| {
-        v["journey_receipt"] = serde_json::json!(receipt);
         v["executed_head_sha"] = serde_json::json!(executed);
         v["created_at"] =
             serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339());
@@ -2592,7 +2317,7 @@ fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_refuse() 
     run_close_gate(
         &ctx,
         EvidenceTier::Bundle,
-        &[journeys::selection_reason(&executed, &["HUB-J7".into()])],
+        &["journeys:HUB-J7".into()],
         &[],
     )
     .unwrap();
@@ -2609,160 +2334,4 @@ fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_refuse() 
         &executed,
         &source_change
     ));
-}
-
-/// cas-e6038: a merged epic. Its tip commits the selector; `trunk` contains
-/// the tip plus one later commit; `side` descends from the tip off trunk.
-/// Returns the fixture (head = epic tip), the trunk head, the side head and
-/// the root commit (on trunk, older than the tip).
-fn merged_epic_fixture_cas_e6038() -> (Fixture, String, String, String) {
-    let mut fx = Fixture::new();
-    let root = fx.head.clone();
-    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
-    std::fs::write(
-        fx.repo.join("scripts/journeys-for-diff.py"),
-        r#"
-import json, os
-assert len(os.environ['CAS_JOURNEYS_HEAD']) == 40
-print(json.dumps({'journeys': [{'id': 'HUB-J1'}, {'id': 'HUB-J7'}]}))
-"#,
-    )
-    .unwrap();
-    git_ok(&fx.repo, &["add", "scripts/journeys-for-diff.py"]);
-    git_ok(&fx.repo, &["commit", "-q", "-m", "epic delivery"]);
-    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
-    git_ok(&fx.repo, &["checkout", "-q", "-b", "trunk"]);
-    let trunk = commit(&fx.repo, "later.ts", 60);
-    git_ok(&fx.repo, &["checkout", "-q", "-b", "side", &fx.head]);
-    let side = commit(&fx.repo, "side.ts", 30);
-    git_ok(&fx.repo, &["checkout", "-q", "trunk"]);
-    (fx, trunk, side, root)
-}
-
-/// Write a receipt for `head` into `dir` and return its path.
-fn receipt_at_cas_e6038(fx: &Fixture, dir: &Path, head: &str, ids: &[&str], scope: &str) -> PathBuf {
-    let written = write_journey_receipt(fx, ids, scope, |v| {
-        v["head_sha"] = serde_json::json!(head);
-        v["base_sha"] = serde_json::json!(head);
-    });
-    std::fs::create_dir_all(dir).unwrap();
-    let path = dir.join("journey-receipt.json");
-    std::fs::rename(written, &path).unwrap();
-    path
-}
-
-#[test]
-fn cas_e6038_merged_epic_accepts_descendant_trunk_receipt_from_project_root() {
-    let (fx, trunk, _side, _root) = merged_epic_fixture_cas_e6038();
-    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
-    let other = artifacts_root.join("cas-other");
-    let path = receipt_at_cas_e6038(&fx, &other, &trunk, &["HUB-J1", "HUB-J7"], "full");
-    let notes = format!("journey-receipt: {}", path.display());
-    let ctx = journey_context(&fx, &notes);
-    let contained = vec![fx.head.clone()];
-    let binding = journeys::TrunkBinding {
-        trunk: "trunk",
-        contained: &contained,
-        artifacts_root: &artifacts_root,
-    };
-    let accepted = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap();
-    assert_eq!(accepted.head, trunk);
-    assert_eq!(accepted.receipt, path.canonicalize().unwrap());
-    assert!(accepted.proof.contains(&format!("contained in trunk and contains {}", fx.head)), "{}", accepted.proof);
-
-    // The exact-tip rule refuses the same citation: it lives outside the
-    // epic's own directory.
-    assert!(journeys::check_epic_journeys(&ctx).unwrap_err().problem.contains("escapes"));
-
-    // A full receipt missing a catalog journey at the receipt head refuses.
-    receipt_at_cas_e6038(&fx, &other, &trunk, &["HUB-J1"], "full");
-    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
-    assert!(error.problem.contains("HUB-J7"), "{error:?}");
-    assert!(error.command.contains("trunk"), "{error:?}");
-
-    // Affected scope never satisfies an epic.
-    receipt_at_cas_e6038(&fx, &other, &trunk, &["HUB-J1", "HUB-J7"], "affected");
-    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
-    assert!(error.problem.contains("full-suite"), "{error:?}");
-}
-
-#[test]
-fn cas_e6038_merged_epic_refuses_receipts_that_do_not_contain_the_tip() {
-    let (fx, _trunk, side, root) = merged_epic_fixture_cas_e6038();
-    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
-    let contained = vec![fx.head.clone()];
-    let binding = journeys::TrunkBinding {
-        trunk: "trunk",
-        contained: &contained,
-        artifacts_root: &artifacts_root,
-    };
-    // On trunk but older than the epic tip.
-    let path = receipt_at_cas_e6038(&fx, &fx.task_dir, &root, &["HUB-J1", "HUB-J7"], "full");
-    let notes = format!("journey-receipt: {}", path.display());
-    let ctx = journey_context(&fx, &notes);
-    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
-    assert!(error.problem.contains("does not contain the epic delivery"), "{error:?}");
-    // Contains the tip but is not on trunk.
-    receipt_at_cas_e6038(&fx, &fx.task_dir, &side, &["HUB-J1", "HUB-J7"], "full");
-    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
-    assert!(error.problem.contains("is not a commit contained in trunk"), "{error:?}");
-}
-
-#[test]
-fn cas_e6038_unmerged_epic_refuses_descendant_receipt() {
-    let (fx, trunk, _side, _root) = merged_epic_fixture_cas_e6038();
-    // Exact-tip rule: a descendant receipt in the epic's own directory.
-    let path = receipt_at_cas_e6038(&fx, &fx.task_dir, &trunk, &["HUB-J1", "HUB-J7"], "full");
-    let notes = format!("journey-receipt: {}", path.display());
-    let ctx = journey_context(&fx, &notes);
-    let error = journeys::check_epic_journeys(&ctx).unwrap_err();
-    assert!(error.problem.contains("exact delivered tip"), "{error:?}");
-}
-
-#[test]
-fn cas_e6038_branchless_epic_accepts_full_trunk_receipt() {
-    let (fx, trunk, side, _root) = merged_epic_fixture_cas_e6038();
-    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
-    let binding = journeys::TrunkBinding {
-        trunk: "trunk",
-        contained: &[],
-        artifacts_root: &artifacts_root,
-    };
-    let path = receipt_at_cas_e6038(&fx, &fx.task_dir, &trunk, &["HUB-J1", "HUB-J7"], "full");
-    let notes = format!("journey-receipt: {}", path.display());
-    let ctx = journey_context(&fx, &notes);
-    let accepted = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap();
-    assert_eq!(accepted.head, trunk);
-    assert_eq!(accepted.proof, format!("receipt head {trunk} is contained in trunk"));
-    // Trunk membership is still required.
-    receipt_at_cas_e6038(&fx, &fx.task_dir, &side, &["HUB-J1", "HUB-J7"], "full");
-    assert!(
-        journeys::check_merged_epic_journeys(&ctx, &binding)
-            .unwrap_err()
-            .problem
-            .contains("not a commit contained in trunk")
-    );
-}
-
-#[test]
-fn cas_e6038_receipt_outside_project_artifacts_root_refuses() {
-    let (fx, trunk, _side, _root) = merged_epic_fixture_cas_e6038();
-    let artifacts_root = fx.task_dir.parent().unwrap().to_path_buf();
-    let foreign = fx.repo.join("foreign");
-    let path = receipt_at_cas_e6038(&fx, &foreign, &trunk, &["HUB-J1", "HUB-J7"], "full");
-    let notes = format!("journey-receipt: {}", path.display());
-    let ctx = journey_context(&fx, &notes);
-    let contained = vec![fx.head.clone()];
-    let binding = journeys::TrunkBinding {
-        trunk: "trunk",
-        contained: &contained,
-        artifacts_root: &artifacts_root,
-    };
-    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
-    assert!(error.problem.contains("escapes the project artifacts root"), "{error:?}");
-    // A relative citation climbing out of the root refuses the same way.
-    let notes = "journey-receipt: ../../repo/foreign/journey-receipt.json".to_string();
-    let ctx = journey_context(&fx, &notes);
-    let error = journeys::check_merged_epic_journeys(&ctx, &binding).unwrap_err();
-    assert!(error.problem.contains("escapes the project artifacts root"), "{error:?}");
 }

@@ -117,7 +117,6 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "release_worker",
     "worker_status",
     "worker_activity",
-    "sweep_tasks",
     "clear_context",
     "sync_all_workers",
     "gc_report",

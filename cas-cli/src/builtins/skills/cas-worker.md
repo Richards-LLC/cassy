@@ -26,18 +26,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 3. Implement its scope and commit logical units with the task ID, locally. Push
    once, right before the close that parks it for merge (and once per review
    round after that), unless `delivery_mode=local_merge`: every push to a
-   factory branch starts a CI run. Where the repo ships the fast release rows
-   (`scripts/release-gate.sh --fast-rows`), run them on the committed tip first:
-   `./scripts/release-gate.sh --fast-rows --base origin/<target>`. The park
-   refuses a tip without that PASS receipt. The rows take seconds and catch the
-   mistakes that otherwise cost a CI or merge-queue round: version literals
-   (current and next release, comments included), changed-Markdown lint,
-   test shape (no `env!("CARGO_BIN_EXE_*")` in integration tests), test
-   environment, runtime checkout reads, CHANGELOG versions and builtin
-   projections, MCP call shapes. Each failure prints `FIX <row>: …`, and a park
-   refusal quotes it; apply that fix, commit, rerun. A push of a factory branch
-   runs them too (the pre-push guard reuses the same-tip PASS); skip only with
-   `CAS_SKIP_FAST_ROWS=<reason> git push`, which is logged. Add milestone `note_type=progress` notes.
+   factory branch starts a CI run, and lane CI runs the project's lint and fast
+   checks once. The park needs no local check receipt and the push hook runs no
+   check suite. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
    and read [close-gate.md](references/close-gate.md). Close with
    `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain
@@ -65,12 +56,12 @@ use assigned work; `ready` and `available` are backlog
 For projects with `scripts/journey-eval.sh`, run vitest, tsc and affected
 journeys while iterating. `scripts/journey-eval.sh <task-artifact-dir>` resolves
 the task target and runs every selected ID at four workers; `--affected <base>`
-sets an explicit base. Retain the final code tip receipt. Workers and QA cannot
-run `--full` or unfiltered Playwright; the supervisor owns one full run at epic
-assembly and the merge queue runs it again. Reuse exact-tip receipts, and do
-not rerun browsers after doc/ledger-only commits when evaluated inputs are
-unchanged. For a failure control, rerun only that spec at one worker and retain
-the original failure. A hand-picked subset cannot replace selected proof.
+sets an explicit base. Close does not require a journey receipt; the merge
+queue runs the full journey suite once. Workers and QA cannot run `--full` or
+unfiltered Playwright. Do not rerun browsers after doc/ledger-only commits when
+evaluated inputs are unchanged. For a failure control, rerun only that spec at
+one worker and keep the original failure. A hand-picked subset cannot replace
+the selected journeys.
 
 ## Conditional references
 

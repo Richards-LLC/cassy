@@ -76,11 +76,11 @@ filters cannot substitute for the producer's selection. Manual named-spec or
 canonical-ID runs remain available for iteration and failure controls.
 
 The hook denies factory workers/reviewers `--full`, unfiltered Playwright and
-unfiltered journey npm scripts. Supervisor `--full` runs once at epic assembly;
-merge queue runs the full suite. Reuse implementer receipts at the exact QA tip.
-Documentation/ledger-only rebinds must prove product/catalog/tool inputs are
-unchanged. A failure control runs only the failing spec with one worker, keeps
-the original failure, and never turns that original receipt into PASS.
+unfiltered journey npm scripts. The merge queue runs the full suite once; close
+and QA do not require a journey receipt. Documentation/ledger-only rebinds must
+prove product/catalog/tool inputs are unchanged. A failure control runs only
+the failing spec with one worker and keeps the original failure; it never
+reports that failure as PASS.
 
 ## Other non-Rust checks
 

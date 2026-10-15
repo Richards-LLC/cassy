@@ -3175,6 +3175,92 @@ impl SqlitePromptQueueStore {
 
     /// A maintenance sweep may expire an entire backlog. Resolve authenticated
     /// sender identities first, then leave at most one notice in each inbox.
+    /// Give each aged, unprocessed row an honest terminal state (cas-f7b0;
+    /// communication contract v2, P1.3). Shared by the roster sweep and the
+    /// 24 h stale expiry, so the two cannot disagree.
+    ///
+    /// - surfaced: a hook, poll or observed wake put the body in the
+    ///   recipient's turn, or the recipient acked it. It was read, so it
+    ///   settles as `delivered` and is not returned.
+    /// - existed: the recipient was a real member of the row's session. It
+    ///   was registered there, or a transport claimed or handed off the row
+    ///   for it. The row ends `recipient_ended_unread`.
+    /// - otherwise the address never resolved: `abandoned_unknown_target`.
+    ///
+    /// Returns the abandoned ids. The caller notifies their senders.
+    fn settle_aged_rows_in_tx(
+        tx: &Connection,
+        ids: &[i64],
+        now: &str,
+        existed_detail: &str,
+        unresolved_detail: &str,
+    ) -> Result<Vec<i64>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let agents_table: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+            [],
+            |row| row.get(0),
+        )?;
+        let registered_here = if agents_table {
+            "OR EXISTS (SELECT 1 FROM agents a
+                        WHERE a.name = q.target AND a.factory_session = q.factory_session)"
+        } else {
+            ""
+        };
+        let classify_sql = format!(
+            "SELECT (q.acked_at IS NOT NULL
+                     OR EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                                WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                                  AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL})),
+                    (EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target)
+                     OR EXISTS (SELECT 1 FROM prompt_queue_recipient_transport rt
+                                WHERE rt.prompt_id = q.id)
+                     {registered_here})
+             FROM prompt_queue q WHERE q.id = ?"
+        );
+        let mut classify = tx.prepare(&classify_sql)?;
+        let mut abandoned = Vec::new();
+        for &id in ids {
+            let Some((surfaced, existed)) = classify
+                .query_row(params![id], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)))
+                .optional()?
+            else {
+                continue;
+            };
+            if surfaced {
+                Self::atomic_stage_stamp_in_tx(
+                    tx,
+                    id,
+                    DeliveryStage::Delivered,
+                    AtomicStampOpts::detail(
+                        "surfaced to the recipient before the queue gave up on it",
+                    ),
+                )?;
+                continue;
+            }
+            let (reason, detail) = if existed {
+                (PendingReason::RecipientEndedUnread, existed_detail)
+            } else {
+                (PendingReason::AbandonedUnknownTarget, unresolved_detail)
+            };
+            tx.execute(
+                "UPDATE prompt_queue
+                 SET processed_at = COALESCE(processed_at, ?),
+                     highest_stage = 'abandoned',
+                     last_pending_reason = ?,
+                     last_pending_detail = ?,
+                     next_attempt_at = NULL
+                 WHERE id = ? AND processed_at IS NULL",
+                params![now, reason.as_str(), detail, id],
+            )?;
+            abandoned.push(id);
+        }
+        Ok(abandoned)
+    }
+
     fn notify_bulk_abandoned_senders_in_tx(tx: &Connection, prompt_ids: &[i64]) -> Result<()> {
         use std::collections::{BTreeMap, BTreeSet};
 
@@ -6630,35 +6716,40 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             let now = Utc::now().to_rfc3339();
 
-            let stale: Vec<QueuedPrompt> = {
-                let mut stmt = tx.prepare_cached(
+            // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
+            // rows, so this roster-independent expiry skips them as the roster
+            // sweep does. The rest are classified the same way: surfaced rows
+            // settle as delivered, unread rows for a real recipient end
+            // recipient_ended_unread, and only unresolved addresses keep
+            // abandoned_unknown_target.
+            let candidates: Vec<QueuedPrompt> = {
+                let mut stmt = tx.prepare_cached(&format!(
                     "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
                      FROM prompt_queue
                      WHERE processed_at IS NULL AND created_at < ?
-                     ORDER BY id ASC",
-                )?;
+                       AND {OPERATOR_LANE_EXCLUSION}
+                     ORDER BY id ASC"
+                ))?;
                 stmt.query_map(params![cutoff], Self::prompt_from_row)?
                     .collect::<std::result::Result<Vec<_>, _>>()?
             };
 
-            if !stale.is_empty() {
-                let detail = format!(
-                    "stale queue item: pending {older_than_secs}s+ with no successful handoff — \
-                     quarantined instead of delivered (cas-d047)"
-                );
-                tx.execute(
-                    "UPDATE prompt_queue
-                     SET processed_at = COALESCE(processed_at, ?),
-                         highest_stage = 'abandoned',
-                         last_pending_reason = 'abandoned_unknown_target',
-                         last_pending_detail = ?,
-                         next_attempt_at = NULL
-                     WHERE processed_at IS NULL AND created_at < ?",
-                    params![now, detail, cutoff],
-                )?;
-                let ids: Vec<_> = stale.iter().map(|row| row.id).collect();
-                Self::notify_bulk_abandoned_senders_in_tx(&tx, &ids)?;
-            }
+            let ids: Vec<_> = candidates.iter().map(|row| row.id).collect();
+            let existed_detail = format!(
+                "stale queue item: pending {older_than_secs}s+ and never surfaced to its \
+                 recipient — quarantined instead of delivered (cas-d047)"
+            );
+            let unresolved_detail = format!(
+                "stale queue item: pending {older_than_secs}s+ with no successful handoff — \
+                 quarantined instead of delivered (cas-d047)"
+            );
+            let abandoned =
+                Self::settle_aged_rows_in_tx(&tx, &ids, &now, &existed_detail, &unresolved_detail)?;
+            Self::notify_bulk_abandoned_senders_in_tx(&tx, &abandoned)?;
+            let stale: Vec<QueuedPrompt> = candidates
+                .into_iter()
+                .filter(|row| abandoned.contains(&row.id))
+                .collect();
 
             tx.commit()?;
             Ok(stale)
@@ -6681,38 +6772,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let placeholders = std::iter::repeat_n("?", targets.len())
                 .collect::<Vec<_>>()
                 .join(", ");
-            // cas-f7b0 (contract v2, P1.3): classify each aged row before
-            // stamping it, so the terminal reason says what happened.
-            //   surfaced: a hook, poll or observed wake put the body in the
-            //     recipient's turn, or the recipient acked it. It was read,
-            //     so it settles as delivered, never abandoned.
-            //   existed: the recipient was a real member of this session.
-            //     It was registered here, or a transport claimed or handed
-            //     off the row for it. The row ends recipient_ended_unread.
-            //   otherwise the address never resolved: abandoned_unknown_target.
-            let agents_table: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
-                [],
-                |row| row.get(0),
-            )?;
-            let registered_here = if agents_table {
-                "OR EXISTS (SELECT 1 FROM agents a
-                            WHERE a.name = q.target AND a.factory_session = q.factory_session)"
-            } else {
-                ""
-            };
             let sql = format!(
-                "SELECT q.id,
-                        (q.acked_at IS NOT NULL
-                         OR EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
-                                    WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                                      AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL})),
-                        (EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
-                                 WHERE seen.prompt_id = q.id AND seen.recipient = q.target)
-                         OR EXISTS (SELECT 1 FROM prompt_queue_recipient_transport rt
-                                    WHERE rt.prompt_id = q.id)
-                         {registered_here})
-                 FROM prompt_queue q
+                "SELECT q.id FROM prompt_queue q
                  WHERE q.processed_at IS NULL
                    AND q.factory_session = ?
                    AND q.created_at < ?
@@ -6729,50 +6790,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     .iter()
                     .map(|target| Box::new((*target).to_string()) as Box<dyn rusqlite::ToSql>),
             );
-            let rows = tx
+            let ids = tx
                 .prepare(&sql)?
                 .query_map(
                     rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?)),
+                    |row| row.get::<_, i64>(0),
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            let mut abandoned = Vec::new();
-            for (id, surfaced, existed) in rows {
-                if surfaced {
-                    Self::atomic_stage_stamp_in_tx(
-                        &tx,
-                        id,
-                        DeliveryStage::Delivered,
-                        AtomicStampOpts::detail(
-                            "surfaced to the recipient before it left the factory session",
-                        ),
-                    )?;
-                    continue;
-                }
-                let (reason, detail) = if existed {
-                    (
-                        PendingReason::RecipientEndedUnread,
-                        "recipient left the factory session before the message surfaced to it",
-                    )
-                } else {
-                    (
-                        PendingReason::AbandonedUnknownTarget,
-                        "target no longer belongs to factory session",
-                    )
-                };
-                tx.execute(
-                    "UPDATE prompt_queue
-                     SET processed_at = COALESCE(processed_at, ?),
-                         highest_stage = 'abandoned',
-                         last_pending_reason = ?,
-                         last_pending_detail = ?,
-                         next_attempt_at = NULL
-                     WHERE id = ? AND processed_at IS NULL",
-                    params![now, reason.as_str(), detail, id],
-                )?;
-                abandoned.push(id);
-            }
+            let abandoned = Self::settle_aged_rows_in_tx(
+                &tx,
+                &ids,
+                &now,
+                "recipient left the factory session before the message surfaced to it",
+                "target no longer belongs to factory session",
+            )?;
             Self::notify_bulk_abandoned_senders_in_tx(&tx, &abandoned)?;
             tx.commit()?;
             Ok(abandoned.len())
@@ -10799,6 +10830,74 @@ mod tests {
         assert!(candidate_ids(&store).contains(&id));
         store.ack(id).unwrap();
         assert!(!candidate_ids(&store).contains(&id));
+    }
+
+    /// Communication contract v2, P3.1/P1.3 (cas-f7b0): the 24 h stale
+    /// expiry is a roster-independent sweep, and it too must leave the
+    /// operator lane's rows alone. Aged operator and `commander:<label>` rows
+    /// keep their pending state and stay drainable, with no sender notice. A
+    /// stale row that was already surfaced settles as delivered. A stale
+    /// unread row for a recipient that existed ends recipient_ended_unread.
+    #[test]
+    fn ct2_p3_operator_row_survives_24h_expiry() {
+        let (_temp, store) = create_test_store();
+        register_bounce_sender(&store, "retired-worker", "factory-a");
+        let operator = store
+            .enqueue_with_session("lead-sup", "operator", "status: green", "factory-a")
+            .unwrap();
+        let commander = store
+            .enqueue_with_session("lead-sup", "commander:Daniel@phone-7", "answer", "factory-a")
+            .unwrap();
+        let surfaced = store
+            .enqueue_with_session("lead-sup", "retired-worker", "read it", "factory-a")
+            .unwrap();
+        store
+            .record_recipient_surfaced(surfaced, "retired-worker", SurfacingSource::ObservedWake)
+            .unwrap();
+        let unread = store
+            .enqueue_with_session("lead-sup", "retired-worker", "never read", "factory-a")
+            .unwrap();
+        let unknown = store
+            .enqueue_with_session("other-sender", "typo-worker", "lost", "factory-a")
+            .unwrap();
+        for id in [operator, commander, surfaced, unread, unknown] {
+            backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
+        }
+
+        let expired = store
+            .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(expired, vec![unread, unknown], "only undelivered roster-lane rows expire");
+
+        for id in [operator, commander] {
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_ne!(report.stage, DeliveryStage::Abandoned, "operator-lane row {id}");
+        }
+        assert!(
+            store
+                .peek_operator_replies("factory-a", 10)
+                .unwrap()
+                .iter()
+                .any(|row| row.id == operator),
+            "the hub can still drain the operator reply"
+        );
+        assert_eq!(
+            store.message_delivery_report(surfaced).unwrap().unwrap().stage,
+            DeliveryStage::Delivered
+        );
+        assert_eq!(
+            store.message_delivery_report(unread).unwrap().unwrap().pending_reason,
+            Some(PendingReason::RecipientEndedUnread)
+        );
+        assert_eq!(
+            store.message_delivery_report(unknown).unwrap().unwrap().pending_reason,
+            Some(PendingReason::AbandonedUnknownTarget)
+        );
+        assert_eq!(notices_to(&store, "lead-sup"), 1, "one notice, for the unread row only");
+        assert_eq!(notices_to(&store, "other-sender"), 1);
     }
 
     /// Communication contract v2, P3.1/P3.3 (cas-d88c): the roster sweep owns

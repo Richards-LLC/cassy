@@ -4797,15 +4797,20 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.unwrap());
-        assert!(response.contains("Message queued"), "{response}");
+        assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&root)
             .unwrap()
             .peek_all(20)
             .unwrap();
-        let envelope = rows
+        let (row, envelope) = rows
             .iter()
-            .find_map(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt))
+            .find_map(|row| {
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+                    .map(|envelope| (row, envelope))
+            })
             .expect("typed merge request is durable");
+        assert_eq!(row.target, "supervisor");
+        assert_eq!(response, format!("queued #{} → supervisor (enqueued)", row.id));
         assert_eq!(envelope.branch_tip, tip);
         let reopened = tasks.get(&task.id).unwrap();
         let git = crate::prompt_revalidation::queued_merge_request_decision(
@@ -5184,7 +5189,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.expect("merge request"));
-        assert!(response.contains("Message queued"), "{response}");
+        assert_queued_receipt(&response);
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
             .poll_all(10)
@@ -5197,6 +5202,8 @@ mod cas_89e1_post_merge_message_type_tests {
             })
             .expect("typed request carries the merge envelope");
 
+        assert_eq!(row.target, "supervisor");
+        assert_eq!(response, format!("queued #{} → supervisor (enqueued)", row.id));
         assert_eq!(envelope.branch_tip, live_tip);
         assert_eq!(envelope.anchor_tip.as_deref(), Some(old_anchor.as_str()));
         assert_eq!(envelope.target_branch_tip, target_tip);

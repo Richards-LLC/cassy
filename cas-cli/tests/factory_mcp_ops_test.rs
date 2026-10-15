@@ -7620,10 +7620,12 @@ async fn test_real_factory_codex_worker_can_message_supervisor_alias() {
         .await
         .expect("worker must resolve and enqueue to supervisor alias");
     let text = get_text(&result);
-    assert!(text.contains("To: cosmic-bear-43"), "{text}");
+    let id = queued_notification_id(&text);
+    assert_eq!(text, format!("queued #{id} → cosmic-bear-43 (enqueued)"));
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek messages");
     assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].id, id);
     assert_eq!(prompts[0].target, "cosmic-bear-43");
 }
 

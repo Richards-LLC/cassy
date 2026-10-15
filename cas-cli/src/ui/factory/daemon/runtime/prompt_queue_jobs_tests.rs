@@ -834,3 +834,37 @@ fn a_stale_mirror_result_is_ignored() {
     jobs.mirror_failed(current.saturating_sub(1));
     assert!(jobs.mirror_state.is_some());
 }
+
+/// cas-4272: a terminal stamp now lands on the writer, so until it does the
+/// row is held out of delivery; a re-read that still shows it pending must
+/// not deliver it.
+#[test]
+fn a_row_with_a_terminal_stamp_in_flight_is_held_out_of_delivery() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "superseded");
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    jobs.stamp(
+        &cas_dir,
+        row_id,
+        "worker-a",
+        QueueStamp::Superseded { detail: "premise expired".into() },
+    );
+    let now = Instant::now();
+    assert!(jobs.row_settling(row_id, now), "held while the stamp is queued");
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(queue.queued_prompt(row_id).unwrap().unwrap().processed_at.is_none());
+    writer.open();
+    settle(&mut jobs, |jobs| !jobs.row_settling(row_id, Instant::now()));
+    assert!(queue.queued_prompt(row_id).unwrap().unwrap().processed_at.is_some());
+
+    // A refused terminal stamp is deferred, and the row is held meanwhile.
+    let other = enqueue(&cas_dir, "worker-a", "dropped");
+    jobs.close_lanes_for_test();
+    jobs.stamp(&cas_dir, other, "worker-a", QueueStamp::Dropped { detail: None });
+    assert!(jobs.row_settling(other, Instant::now()));
+    assert!(
+        !jobs.row_settling(other, Instant::now() + SETTLING_DEFERRED_HOLD),
+        "the hold ends after the deferred write had time to land"
+    );
+}

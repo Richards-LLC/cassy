@@ -6404,7 +6404,11 @@ impl FactoryDaemon {
             if queued.processed_at.is_some() { continue; }
             // Spec §4.5 rule 2: a row whose earlier inject has not settled is
             // not delivered again, even if a selection picked it again.
-            if self.queue_jobs.in_flight().holds_row(queued.id) {
+            // cas-4272: a row whose terminal or delivered stamp has not landed
+            // is settled already, even if the re-read still shows it pending.
+            if self.queue_jobs.in_flight().holds_row(queued.id)
+                || self.queue_jobs.row_settling(queued.id, Instant::now())
+            {
                 tracing::debug!(
                     target: "cas::coordination",
                     message_id = queued.id,
@@ -6462,17 +6466,23 @@ impl FactoryDaemon {
                         );
                     }
                     super::delivery::ContextResetDelivery::NotReady => {
-                        let _ = queue.record_pending_reason(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            cas_store::PendingReason::GatedNotReady,
-                            Some("pane not ready for injection — context reset retries next tick"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason { reason: cas_store::PendingReason::GatedNotReady, detail: (Some("pane not ready for injection — context reset retries next tick")).map(|detail| detail.to_string()) },
                         );
                     }
                     super::delivery::ContextResetDelivery::Unsupported { detail } => {
                         // Terminal: retrying cannot make an unsupported harness
                         // resettable, and leaving the row pending would wedge
                         // the queue behind an impossible command.
-                        let _ = queue.mark_dropped(queued.id, Some(&detail));
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Dropped { detail: (Some(&detail)).map(|detail| detail.to_string()) },
+                        );
                         tracing::warn!(
                             target: "cas::coordination",
                             stage = "context_reset_unsupported",
@@ -6483,10 +6493,11 @@ impl FactoryDaemon {
                         );
                     }
                     super::delivery::ContextResetDelivery::Failed { detail } => {
-                        let _ = queue.record_retry(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            cas_store::PendingReason::AdapterRetryable,
-                            Some(&detail),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::AdapterRetryable, detail: (Some(&detail)).map(|detail| detail.to_string()) },
                         );
                     }
                 }
@@ -6643,7 +6654,12 @@ impl FactoryDaemon {
                             // name that says so. The worker has already been
                             // told (the guidance enqueue above succeeded), so
                             // the premise-expiry is recorded, not silent.
-                            let _ = queue.mark_superseded(queued.id, &detail);
+                            self.queue_jobs.stamp(
+                                self.app.cas_dir(),
+                                queued.id,
+                                &queued.target,
+                                super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&detail).to_string() },
+                            );
                             continue;
                         }
                         Err(error) => {
@@ -6718,13 +6734,15 @@ impl FactoryDaemon {
                         // chatter. The name is now the honest one, and the
                         // detail says which task moved on — a terminal row has
                         // to be answerable for itself.
-                        let _ = queue.mark_superseded(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            &format!(
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&format!(
                                 "withdrawn before transport: {} left the status this \
                                  notification announces",
                                 envelope.task_id
-                            ),
+                            )).to_string() },
                         );
                         tracing::debug!(
                             prompt_id = queued.id,
@@ -6781,7 +6799,12 @@ impl FactoryDaemon {
                     "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
                     status
                 );
-                let _ = queue.mark_superseded(queued.id, &detail);
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&detail).to_string() },
+                );
                 self.forget_row_delivery_state(queued.id);
                 tracing::info!(
                     target: "cas::coordination",
@@ -7140,9 +7163,11 @@ impl FactoryDaemon {
                         continue;
                     }
                     ClaudeRedelivery::StopAcknowledged => {
-                        let _ = queue.mark_suppressed(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            Some("Claude inbox notification already acknowledged by the recipient"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Suppressed { detail: (Some("Claude inbox notification already acknowledged by the recipient")).map(|detail| detail.to_string()) },
                         );
                         self.forget_row_delivery_state(queued.id);
                         continue;
@@ -7270,9 +7295,11 @@ impl FactoryDaemon {
                         continue;
                     }
                     LifecycleRedelivery::StopAcknowledged => {
-                        let _ = queue.mark_suppressed(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            Some("lifecycle notification already acknowledged by the recipient"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Suppressed { detail: (Some("lifecycle notification already acknowledged by the recipient")).map(|detail| detail.to_string()) },
                         );
                         self.forget_row_delivery_state(queued.id);
                         tracing::info!(
@@ -7362,7 +7389,12 @@ impl FactoryDaemon {
                     "Dropping message from dead worker"
                 );
                 // cas-2c5f: not transport delivery — structured stage=dropped.
-                let _ = queue.mark_dropped(queued.id, Some("source worker is dead/shut down"));
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::Dropped { detail: (Some("source worker is dead/shut down")).map(|detail| detail.to_string()) },
+                );
                 continue;
             }
 
@@ -7386,9 +7418,11 @@ impl FactoryDaemon {
                         "Suppressing duplicate idle message (rate-limited to 5min)"
                     );
                     // cas-2c5f: not transport delivery — structured stage=suppressed.
-                    let _ = queue.mark_suppressed(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        Some("duplicate idle message rate-limited (5min)"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Suppressed { detail: (Some("duplicate idle message rate-limited (5min)")).map(|detail| detail.to_string()) },
                     );
                     continue;
                 }
@@ -7558,17 +7592,17 @@ impl FactoryDaemon {
                 tracing::info!("all_workers target, workers: {:?}", workers);
                 let attempted = workers.len() as u32;
                 if attempted == 0 {
-                    let _ = queue.mark_broadcast_outcome(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        0,
-                        0,
-                        0,
-                        Some("no non-native workers for all_workers broadcast"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::BroadcastOutcome { attempted: 0, succeeded: 0, failed: 0, detail: (Some("no non-native workers for all_workers broadcast")).map(|detail| detail.to_string()) },
                     );
-                    let _ = queue.record_retry(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        cas_store::PendingReason::TargetUnavailable,
-                        Some("all_workers broadcast has no non-native recipients"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::TargetUnavailable, detail: (Some("all_workers broadcast has no non-native recipients")).map(|detail| detail.to_string()) },
                     );
                     continue;
                 }
@@ -7740,12 +7774,13 @@ impl FactoryDaemon {
                     }
                 }
                 if succeeded == 0 {
-                    let _ = queue.record_retry(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        cas_store::PendingReason::AdapterRetryable,
-                        detail
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::AdapterRetryable, detail: (detail
                             .as_deref()
-                            .or(Some("all_workers broadcast reached zero recipients")),
+                            .or(Some("all_workers broadcast reached zero recipients"))).map(|detail| detail.to_string()) },
                     );
                 }
                 // Do not fall through to mark_transport_delivered — outcome already stamped.
@@ -8141,10 +8176,11 @@ impl FactoryDaemon {
                             target_agent = %pane_target,
                             "prompt_queue message remains durable pending a clean composer"
                         );
-                        let _ = queue.record_retry(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            cas_store::PendingReason::GatedNotReady,
-                            Some("operator composer is dirty"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::GatedNotReady, detail: (Some("operator composer is dirty")).map(|detail| detail.to_string()) },
                         );
                         if let Some(ref store) = event_store {
                             record_injection(
@@ -8192,10 +8228,11 @@ impl FactoryDaemon {
                                     // next tick.
                                     tracing::error!("Failed to inject to '{}': {}", pane_target, e);
                                     // cas-2c5f: adapter failure leaves row pending for retry.
-                                    let _ = queue.record_retry(
+                                    self.queue_jobs.stamp(
+                                        self.app.cas_dir(),
                                         queued.id,
-                                        cas_store::PendingReason::AdapterRetryable,
-                                        Some(&e.to_string()),
+                                        &queued.target,
+                                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::AdapterRetryable, detail: (Some(&e.to_string())).map(|detail| detail.to_string()) },
                                     );
                                     if let Some(ref store) = event_store {
                                         record_injection(
@@ -8212,10 +8249,11 @@ impl FactoryDaemon {
                                     // Pane missing but the target is still a current
                                     // session member (mid-spawn) — bare retry.
                                     // cas-2c5f: known target still spawning — retryable unavail.
-                                    let _ = queue.record_retry(
+                                    self.queue_jobs.stamp(
+                                        self.app.cas_dir(),
                                         queued.id,
-                                        cas_store::PendingReason::TargetUnavailable,
-                                        Some("pane missing; target is current session member"),
+                                        &queued.target,
+                                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::TargetUnavailable, detail: (Some("pane missing; target is current session member")).map(|detail| detail.to_string()) },
                                     );
                                 }
                             }
@@ -8233,11 +8271,13 @@ impl FactoryDaemon {
                                      message will not be delivered"
                                 );
                                 // cas-2c5f: not transport delivery — structured stage=abandoned.
-                                let _ = queue.mark_abandoned(
+                                self.queue_jobs.stamp(
+                                    self.app.cas_dir(),
                                     queued.id,
-                                    Some(&format!(
+                                    &queued.target,
+                                    super::prompt_queue_jobs::QueueStamp::Abandoned { detail: (Some(&format!(
                                         "target '{pane_target}' not found in current session"
-                                    )),
+                                    ))).map(|detail| detail.to_string()) },
                                 );
                                 // cas-ceae: terminal row — drop its clocks.
                                 // cas-ac7e (GH #130): go through the helper
@@ -8304,13 +8344,14 @@ impl FactoryDaemon {
                 // through the interrupt. Hold the row pending; the probe
                 // resolves it on a later poll, and the re-nudge cadence gate
                 // bounds any re-interrupt to one per interval.
-                let _ = queue.record_pending_reason(
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
                     queued.id,
-                    cas_store::PendingReason::GatedNotReady,
-                    Some(
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::PendingReason { reason: cas_store::PendingReason::GatedNotReady, detail: (Some(
                         "urgent redirect typed into the pane; awaiting evidence the \
                          interrupt granted a turn",
-                    ),
+                    )).map(|detail| detail.to_string()) },
                 );
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)
@@ -8331,13 +8372,14 @@ impl FactoryDaemon {
                 // later tick, with a clean composer / quiescent pane / free
                 // wake slot, can actually deliver the turn. The repeat inbox
                 // write is content-deduped, so this cannot double-post.
-                let _ = queue.record_pending_reason(
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
                     queued.id,
-                    cas_store::PendingReason::GatedNotReady,
-                    Some(
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::PendingReason { reason: cas_store::PendingReason::GatedNotReady, detail: (Some(
                         "wake deferred — pane busy, tool call in flight, operator composing, \
                          or wake slot taken",
-                    ),
+                    )).map(|detail| detail.to_string()) },
                 );
                 tracing::info!(
                     target: "cas::coordination",

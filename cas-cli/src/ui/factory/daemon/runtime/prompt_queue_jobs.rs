@@ -74,6 +74,26 @@ pub(crate) enum QueueStamp {
         attempt: cas_store::WakeAttempt,
         detail: Option<String>,
     },
+    /// Retry later for `reason` (cas-4272).
+    Retry {
+        reason: cas_store::PendingReason,
+        detail: Option<String>,
+    },
+    /// Terminal: dropped (cas-4272).
+    Dropped { detail: Option<String> },
+    /// Terminal: superseded by a newer premise (cas-4272).
+    Superseded { detail: String },
+    /// Terminal: suppressed (cas-4272).
+    Suppressed { detail: Option<String> },
+    /// Terminal: abandoned, target unknown (cas-4272).
+    Abandoned { detail: Option<String> },
+    /// A broadcast's per-recipient outcome (cas-4272).
+    BroadcastOutcome {
+        attempted: u32,
+        succeeded: u32,
+        failed: u32,
+        detail: Option<String>,
+    },
     /// No write: completes after every earlier stamp for the same row and
     /// recipient, and clears the row's in-flight entry.
     Settled,
@@ -87,8 +107,28 @@ impl QueueStamp {
             Self::TransportReceipt => "transport_receipt",
             Self::PendingReason { .. } => "pending_reason",
             Self::WakeAttempt { .. } => "wake_attempt",
+            Self::Retry { .. } => "retry",
+            Self::Dropped { .. } => "dropped",
+            Self::Superseded { .. } => "superseded",
+            Self::Suppressed { .. } => "suppressed",
+            Self::Abandoned { .. } => "abandoned",
+            Self::BroadcastOutcome { .. } => "broadcast_outcome",
             Self::Settled => "settled",
         }
+    }
+
+    /// A stamp that settles the row: until it lands, a later pass must not
+    /// read the row as still pending and deliver it (cas-4272).
+    fn settles_row(&self) -> bool {
+        matches!(
+            self,
+            Self::Dropped { .. }
+                | Self::Superseded { .. }
+                | Self::Suppressed { .. }
+                | Self::Abandoned { .. }
+                | Self::BroadcastOutcome { .. }
+                | Self::TransportDelivered
+        )
     }
 
     fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
@@ -108,10 +148,27 @@ impl QueueStamp {
             Self::WakeAttempt { attempt, detail } => {
                 queue.record_wake_attempt(row, *attempt, detail.as_deref())
             }
+            Self::Retry { reason, detail } => queue
+                .record_retry(row, *reason, detail.as_deref())
+                .map(drop),
+            Self::Dropped { detail } => queue.mark_dropped(row, detail.as_deref()),
+            Self::Superseded { detail } => queue.mark_superseded(row, detail),
+            Self::Suppressed { detail } => queue.mark_suppressed(row, detail.as_deref()),
+            Self::Abandoned { detail } => queue.mark_abandoned(row, detail.as_deref()),
+            Self::BroadcastOutcome {
+                attempted,
+                succeeded,
+                failed,
+                detail,
+            } => queue.mark_broadcast_outcome(row, *attempted, *succeeded, *failed, detail.as_deref()),
             Self::Settled => Ok(()),
         }
     }
 }
+
+/// How long a row whose settling stamp failed (and was handed to the
+/// StoreWorker) stays out of delivery while the deferred write lands.
+pub(crate) const SETTLING_DEFERRED_HOLD: Duration = Duration::from_secs(30);
 
 /// The finished store write for one stamp.
 #[derive(Debug)]
@@ -614,6 +671,9 @@ pub(crate) struct QueueJobs {
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
     /// Wake-gate "tool call in flight" probes, per pane.
     pub(crate) tool_call_probes: TranscriptProbeCache<bool>,
+    /// Rows with a settling stamp not yet landed, by row: the count of such
+    /// stamps outstanding, and a hold deadline once one was deferred.
+    settling_rows: HashMap<i64, (usize, Option<Instant>)>,
     /// Inbox prunes completed (watchdog and tests).
     pub(crate) prunes_done: u64,
 }
@@ -666,6 +726,7 @@ impl QueueJobs {
             store: None,
             tool_call_probes: TranscriptProbeCache::default(),
             prunes_done: 0,
+            settling_rows: HashMap::new(),
         }
     }
 
@@ -769,6 +830,9 @@ impl QueueJobs {
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
+        if stamp.settles_row() {
+            self.settling_rows.entry(row).or_insert((0, None)).0 += 1;
+        }
         let refused = (stamp != QueueStamp::Settled)
             .then(|| (cas_dir.clone(), recipient.clone(), stamp.clone()));
         let submitted = self.submit_job(spec, false, move || {
@@ -801,6 +865,12 @@ impl QueueJobs {
             // The lane refused it (closed at shutdown): the StoreWorker
             // still takes it, never the loop.
             defer_stamp(&cas_dir, row, &recipient, &stamp, "the queue job lane refused the stamp");
+            if stamp.settles_row()
+                && let Some(entry) = self.settling_rows.get_mut(&row)
+            {
+                entry.0 = entry.0.saturating_sub(1);
+                entry.1 = Some(Instant::now() + SETTLING_DEFERRED_HOLD);
+            }
         }
         submitted
     }
@@ -1060,6 +1130,7 @@ impl QueueJobs {
                     }
                 }
                 QueueJobOutcome::Stamped(done) => {
+                    self.stamp_landed(&done);
                     if let Some(error) = &done.error {
                         tracing::warn!(
                             target: "cas::coordination",
@@ -1359,6 +1430,39 @@ impl QueueJobs {
         if self.mirror_in_flight && generation == self.mirror_generation {
             self.mirror_in_flight = false;
             self.mirror_state = Some(Box::default());
+        }
+    }
+
+    /// Whether `row` has a settling stamp (a terminal mark or a delivered
+    /// stamp) not yet landed, so delivery must skip it this pass.
+    pub(crate) fn row_settling(&mut self, row: i64, now: Instant) -> bool {
+        match self.settling_rows.get(&row) {
+            None => false,
+            Some((0, Some(until))) if now >= *until => {
+                self.settling_rows.remove(&row);
+                false
+            }
+            Some(_) => true,
+        }
+    }
+
+    fn stamp_landed(&mut self, done: &StampDone) {
+        let settles = matches!(
+            done.stamp,
+            "dropped" | "superseded" | "suppressed" | "abandoned" | "broadcast_outcome" | "transport_delivered"
+        );
+        if !settles {
+            return;
+        }
+        if let Some(entry) = self.settling_rows.get_mut(&done.row) {
+            entry.0 = entry.0.saturating_sub(1);
+            if done.error.is_some() {
+                // Handed to the StoreWorker: hold the row while it lands.
+                entry.1 = Some(Instant::now() + SETTLING_DEFERRED_HOLD);
+            }
+            if entry.0 == 0 && entry.1.is_none() {
+                self.settling_rows.remove(&done.row);
+            }
         }
     }
 

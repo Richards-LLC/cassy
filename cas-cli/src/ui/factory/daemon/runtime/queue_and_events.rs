@@ -11289,7 +11289,7 @@ mod tests {
 
     use super::{
         PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE,
-        ToolCallEvidence, WakeOutcome, WakeSender,
+        SupervisorWakeClass, ToolCallEvidence, WakeOutcome, WakeSender,
     };
 
     /// A pane that has been silent long enough to wake even a recipient the

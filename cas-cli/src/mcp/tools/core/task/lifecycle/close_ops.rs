@@ -1,4 +1,6 @@
 pub(crate) mod gate_text;
+#[cfg(test)]
+mod loaded_proof_tests;
 mod task_attribution;
 mod evidence_only;
 mod delivery_evolution;

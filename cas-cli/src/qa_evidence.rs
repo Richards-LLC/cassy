@@ -2056,11 +2056,18 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 
 /// The commit range a delivery contributes: `merge-base(target, head)..head`
 /// before it merges; after it merges, the first merge on the ancestry path
-/// from `head` to `target` (`M^1..M`). `None` when neither can be computed
+/// from `head` to `target` (`M^1..M`). An integrated merge receipt itself
+/// contributes `head^1..head`; later target merges cannot replace its diff.
+/// `None` when neither can be computed
 /// (for example a fast-forward merge, which leaves no merge commit).
 pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, String)> {
     let merged = git(repo, &["merge-base", "--is-ancestor", head, target]).is_some();
     if merged {
+        // GH #1181: an integration merge is already the receipt. Searching
+        // after it picked a later PR's UI paths (or no range at all).
+        if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_some() {
+            return Some((format!("{head}^1"), head.to_string()));
+        }
         let merges = git(
             repo,
             &[

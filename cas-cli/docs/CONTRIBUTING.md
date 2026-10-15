@@ -1375,6 +1375,9 @@ A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
 Named task commits and unclaimed unmerged changes still require delivery proof.
+QA classification of an integrated merge receipt uses that merge's own
+first-parent diff. Later PR merges cannot add their UI paths to the receipt's
+evidence requirements or hide UI that the receipt itself delivered.
 
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`

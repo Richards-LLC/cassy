@@ -3736,6 +3736,26 @@ fn require_operator_session(target: &str, factory_session: Option<&str>) -> Resu
     Ok(())
 }
 
+/// A transport claim's `seen_at`, which is also its release token
+/// ([`PromptQueueStore::release_recipient_transport_claim`]). A real
+/// RFC 3339 timestamp, so `julianday(seen_at)` comparisons keep working, but
+/// strictly increasing in nanoseconds within the process, so two claims never
+/// share a token even on a coarse clock.
+fn transport_claim_token() -> String {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+    let mut previous = LAST.load(Ordering::Relaxed);
+    let nanos = loop {
+        let next = now.max(previous.saturating_add(1));
+        match LAST.compare_exchange_weak(previous, next, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => break next,
+            Err(actual) => previous = actual,
+        }
+    };
+    DateTime::<Utc>::from_timestamp_nanos(nanos).to_rfc3339_opts(chrono::SecondsFormat::Nanos, false)
+}
+
 impl SqlitePromptQueueStore {
     /// [`PromptQueueStore::peek_for_targets`] on a held connection, so
     /// [`PromptQueueStore::select_for_targets`] can select inside
@@ -3915,7 +3935,7 @@ impl SqlitePromptQueueStore {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other("transport claim requires a recipient".into()));
         }
-        let token = Utc::now().to_rfc3339();
+        let token = transport_claim_token();
         let changed = conn.execute(
             "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
              SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
@@ -11169,7 +11189,6 @@ mod tests {
         let first = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
         assert!(store.claim_recipient_transport_token(id, "worker").unwrap().is_none());
         assert!(store.release_recipient_transport_claim(id, "worker", &first).unwrap());
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let second = store.claim_recipient_transport_token(id, "worker").unwrap().unwrap();
         assert_ne!(first, second);
         assert!(

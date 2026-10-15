@@ -720,10 +720,24 @@ impl QueueJobs {
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
-        self.exec.submit(spec, move || {
-            let error = (stamp != QueueStamp::Settled)
-                .then(|| apply_stamp_with_retry(&cas_dir, row, &recipient, &stamp))
-                .flatten();
+        let refused = (stamp != QueueStamp::Settled)
+            .then(|| (cas_dir.clone(), recipient.clone(), stamp.clone()));
+        let submitted = self.exec.submit(spec, move || {
+            let error = if stamp == QueueStamp::Settled {
+                None
+            } else {
+                // A stamp records something already done (a handoff, a
+                // claim): never drop it. Past its retries, or if it panics,
+                // the StoreWorker retries it as `persist_or_defer` did before
+                // C3 (review round 2).
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    apply_stamp_with_retry(&cas_dir, row, &recipient, &stamp)
+                }))
+                .unwrap_or_else(|_| Some("the stamp panicked".to_string()));
+                outcome.inspect(|error| {
+                    defer_stamp(&cas_dir, row, &recipient, &stamp, error);
+                })
+            };
             QueueJobOutcome::Stamped(StampDone {
                 row,
                 recipient,
@@ -731,7 +745,15 @@ impl QueueJobs {
                 stamp: stamp.label(),
                 error,
             })
-        })
+        });
+        if !accepted(&submitted)
+            && let Some((cas_dir, recipient, stamp)) = refused
+        {
+            // The lane refused it (closed at shutdown): the StoreWorker
+            // still takes it, never the loop.
+            defer_stamp(&cas_dir, row, &recipient, &stamp, "the queue job lane refused the stamp");
+        }
+        submitted
     }
 
     /// Decide whether control may inject `(row, recipient)` now (spec §4.5
@@ -984,13 +1006,13 @@ impl QueueJobs {
                 }
                 QueueJobOutcome::Stamped(done) => {
                     if let Some(error) = &done.error {
-                        tracing::error!(
+                        tracing::warn!(
                             target: "cas::coordination",
                             message_id = done.row,
                             recipient = %done.recipient,
                             stamp = done.stamp,
                             %error,
-                            "factory loop v2: queue stamp failed after retries"
+                            "factory loop v2: queue stamp failed its retries; handed to the store worker"
                         );
                     }
                     if done.stamp == "settled" {
@@ -1097,6 +1119,14 @@ impl QueueJobs {
         }
     }
 
+    /// Stop the lanes taking work, as at shutdown (tests).
+    #[cfg(test)]
+    pub(crate) fn close_lanes_for_test(&self) {
+        if let Exec::Lanes(runtime) = &self.exec {
+            runtime.close();
+        }
+    }
+
     /// The lanes, for the loop watchdog (`loop.json` and wedge reports).
     /// `None` inline.
     pub(crate) fn job_lanes(&self) -> Option<Arc<dyn super::loop_watchdog::JobLanes>> {
@@ -1169,6 +1199,38 @@ pub(crate) fn job_thread_prompt_queue(
     job_thread_store("prompt_queue", cas_dir, |dir| {
         Ok(crate::store::open_prompt_queue_store(dir)?)
     })
+}
+
+/// Hand a stamp that could not land to the StoreWorker, which retries it
+/// without a budget (GH #1165 `defer`). Never runs the write on the caller.
+pub(crate) fn defer_stamp(
+    cas_dir: &Path,
+    row: i64,
+    recipient: &str,
+    stamp: &QueueStamp,
+    first_error: &str,
+) -> super::store_worker::Persisted {
+    let label = stamp.label();
+    let cas_dir = cas_dir.to_path_buf();
+    let deferred_recipient = recipient.to_string();
+    let stamp = stamp.clone();
+    let persisted = super::store_worker::defer("queue stamp", first_error, move || {
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|error| error.to_string())?;
+        stamp
+            .apply(queue.as_ref(), row, &deferred_recipient)
+            .map_err(|error| error.to_string())
+    });
+    if persisted == super::store_worker::Persisted::Dropped {
+        tracing::error!(
+            target: "cas::coordination",
+            message_id = row,
+            %recipient,
+            stamp = label,
+            error = %first_error,
+            "factory loop v2: queue stamp failed and could not be handed to the store worker"
+        );
+    }
+    persisted
 }
 
 /// Run one stamp, retrying a busy store a few times on the writer. Returns

@@ -632,3 +632,44 @@ fn flv2_retraction_reads_fresh_through_the_daemon() {
     assert_eq!(daemon.queue_jobs.prunes_done, 2);
     assert!(pruner.unread_alerts("supervisor").is_empty(), "a fresh read showing the assignment retracts it");
 }
+
+/// Review round 2: a stamp the lane refuses (closed at shutdown) is handed
+/// to the StoreWorker, never dropped and never written on the caller.
+#[test]
+fn a_refused_stamp_is_handed_to_the_store_worker() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "handed off");
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    jobs.close_lanes_for_test();
+    jobs.stamp(&cas_dir, row_id, "worker-a", QueueStamp::TransportDelivered);
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while queue.queued_prompt(row_id).unwrap().unwrap().processed_at.is_none() {
+        assert!(Instant::now() < deadline, "the refused stamp never landed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(writer.ran().is_empty(), "the closed lane ran nothing");
+}
+
+/// Review round 2: a stamp that failed every retry is deferred, as
+/// `persist_or_defer` did before C3.
+#[test]
+fn an_exhausted_stamp_is_deferred_not_dropped() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "deferred");
+    let token = store_claim(&cas_dir, row_id, "worker-a").unwrap().unwrap();
+    let persisted = defer_stamp(
+        &cas_dir,
+        row_id,
+        "worker-a",
+        &QueueStamp::ReleaseClaim { token },
+        "store busy",
+    );
+    assert_ne!(persisted, super::super::store_worker::Persisted::Dropped);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while claim_source(&cas_dir, row_id, "worker-a").is_some() {
+        assert!(Instant::now() < deadline, "the deferred release never landed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

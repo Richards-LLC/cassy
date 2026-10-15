@@ -417,10 +417,9 @@ pub fn default_terminal_render_paths() -> Vec<String> {
         "**/cli/**",
         "**/ui/**",
         "**/tui/**",
-        "**/*render*",
-        "**/*output*",
-        "**/*theme*",
-        "**/*progress*",
+        "**/terminal/**",
+        "**/doctor.rs",
+        "**/doctor/**",
     ]
     .into_iter()
     .map(ToOwned::to_owned)

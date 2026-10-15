@@ -545,16 +545,52 @@ fn fresh_ledger(f: &Recovery) -> std::path::PathBuf {
 async fn backend_renderer_log_only_close_parks_and_dispatches_qa_cas_2de9() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture_with_surface(&mut env, "src/contracts/pdf.renderer.ts", true);
-    fresh_ledger(&f);
+    let task_dir = fresh_ledger(&f);
     let parked = close(&f).await;
     assert_eq!(
         parked.deliverables.factory_branch_anchor.as_deref(),
         Some(f.final_tip.as_str())
     );
     assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    let rounds = cas_store::list_qa_passes(&f.dir.path().join(".cas"), TASK).unwrap();
+    let cas_dir = f.dir.path().join(".cas");
+    let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
     assert_eq!(rounds.len(), 1);
     assert_eq!(rounds[0].bound_head, f.final_tip);
+    // Simulate the independent reviewer through the real store boundary, so
+    // re-close tests implementer evidence without a supervisor evidence waiver.
+    cas_store::claim_qa_pass(&cas_dir, TASK, "independent-reviewer", chrono::Utc::now()).unwrap();
+    cas_store::resolve_qa_pass(
+        &cas_dir,
+        TASK,
+        "independent-reviewer",
+        cas_types::QaVerdict::Approved,
+        "fixture independent review",
+        None,
+        task_dir.join("LEDGER.md").to_str().unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    git(
+        f.dir.path(),
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            BRANCH,
+            "-m",
+            "Integrate reviewed delivery",
+        ],
+    );
+    git(
+        f.dir.path(),
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
+    let output = close_output(&f).await;
+    assert_eq!(
+        open_task_store(&cas_dir).unwrap().get(TASK).unwrap().status,
+        TaskStatus::Closed,
+        "{output}"
+    );
 }
 
 #[tokio::test]
@@ -584,4 +620,33 @@ async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
         .unwrap();
         close(&f).await;
     }
+}
+
+#[tokio::test]
+async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "src/cli/status.rs", true);
+    let cas_dir = f.dir.path().join(".cas");
+    cas_store::waive_qa_pass(
+        &cas_dir,
+        TASK,
+        "supervisor-session",
+        WORKER,
+        BRANCH,
+        &f.final_tip,
+        "fixture exact-head terminal evidence waiver",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let parked = close(&f).await;
+    assert_eq!(
+        parked.deliverables.factory_branch_anchor.as_deref(),
+        Some(f.final_tip.as_str())
+    );
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    assert!(parked.notes.contains("QA evidence ledger waived"));
+    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+    assert_eq!(passes.len(), 1);
+    assert_eq!(passes[0].bound_head, f.final_tip);
+    assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
 }

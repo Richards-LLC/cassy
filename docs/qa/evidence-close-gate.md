@@ -67,9 +67,15 @@ This gate adds one refinement, because the bundle is a Playwright artifact:
 
 Every changed surface path is classified independently. A factory input or
 geometry change cannot exempt another CLI/output path in the same delivery.
-The default output globs include `**/cli/**`; matching CLI command paths always
-require terminal-qa while output checks are enabled, even if an interaction
-glob also matches or a stored configuration retains older output globs. Other projects
+The default output globs identify CLI, UI/TUI, terminal and doctor modules;
+a backend PDF/HTML renderer or a server debug-log edit is not terminal output
+merely because its filename contains `render`, `output`, `theme` or `progress`.
+The two historical default lists containing those broad filename guesses are
+interpreted as the current terminal-context defaults. Custom configured paths
+still declare terminal surfaces, and an empty list disables terminal receipts.
+Matching CLI command paths always require terminal-qa while output checks are
+enabled, even if an interaction glob also matches or a stored configuration
+retains older output globs. Other projects
 can configure interaction globs for their TUI modules; an empty list restores
 terminal-qa for all output matches. The ledger's freshness and real-build PASS
 checks still apply, and web/journey bundles and skip-marker gates are unchanged.

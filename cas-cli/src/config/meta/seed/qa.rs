@@ -163,7 +163,7 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         name: "Terminal Rendering Paths",
         description: "Comma-separated repo-relative globs for terminal output. A demo-only delivery touching one needs terminal-qa PASS plus its real-build ledger, except for interactive surfaces in qa.terminal_interaction_paths. CLI command paths still need terminal-qa.",
         value_type: ConfigType::String,
-        default: "**/cli/**,**/ui/**,**/tui/**,**/*render*,**/*output*,**/*theme*,**/*progress*",
+        default: "**/cli/**,**/ui/**,**/tui/**,**/terminal/**,**/doctor.rs,**/doctor/**",
         constraint: Constraint::None,
         advanced: true,
         requires_feature: None,

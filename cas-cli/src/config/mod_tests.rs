@@ -46,6 +46,19 @@ fn test_config_defaults() {
 }
 
 #[test]
+fn terminal_render_defaults_and_explicit_paths_round_trip_cas_2de9() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let root = env.home().join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    let key = "qa.terminal_render_paths";
+    let mut config = Config::default();
+    assert_eq!(config.get(key).unwrap(), meta::registry().get(key).unwrap().default);
+    config.set(key, "src/shared/console.rs").unwrap();
+    config.save(&root).unwrap();
+    assert_eq!(Config::load(&root).unwrap().get(key).as_deref(), Some("src/shared/console.rs"));
+}
+
+#[test]
 fn terminal_interaction_config_round_trips_and_resets_cas_266e() {
     let temp = TempDir::new().unwrap();
     let mut config: Config = toml::from_str("[qa]\nevidence_gate = true\n").unwrap();

@@ -1,6 +1,21 @@
 //! Linux process evidence. Missing/inaccessible evidence is never proof of idle.
 use super::*;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Evidence {
+    Idle,
+    Live { pid: Option<u32>, field: &'static str },
+    Opaque { pid: Option<u32> },
+}
+
+pub(super) fn linux_evidence_many(proc_root: &Path, worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> Evidence {
+    if linux_uses_many(proc_root, worktree, cache, own_lock_fds) {
+        Evidence::Live { pid: None, field: "unclassified" }
+    } else {
+        Evidence::Idle
+    }
+}
+
 #[cfg(all(test, unix))]
 pub(super) fn linux_uses(
     proc_root: &Path,
@@ -196,6 +211,17 @@ fn maps_use(maps: &[u8], worktree: &Path, cache: &Path) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn opaque_unrelated_process_is_indeterminate_not_positive_cache_evidence() {
+        let (_temp, root, process, cache) = fixture();
+        fs::remove_file(process.join("maps")).unwrap();
+        fs::create_dir(process.join("maps")).unwrap();
+        assert!(matches!(linux_evidence_many(&root, &cache, &cache, &[]), Evidence::Opaque { .. }));
+        fs::remove_file(process.join("cwd")).unwrap();
+        symlink(&cache, process.join("cwd")).unwrap();
+        assert!(matches!(linux_evidence_many(&root, &cache, &cache, &[]), Evidence::Live { .. }));
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();

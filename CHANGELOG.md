@@ -7,6 +7,92 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — upgrades keep Violet working across Claude profiles (cas-678d)
+
+- `cas update` migrates older Violet credentials in every Claude and Codex
+  profile and verifies each profile before reporting success. Empty
+  credentials are refused instead of being sent as an empty bearer token.
+
+### Fixed — deliveries stay tied to their actual target (#1179, cas-1cc7, cas-4a65)
+
+- The close gate refuses a retargeted delivery until its claimed commit is on
+  the task's current target.
+- A merge request after a rebase uses the pushed branch tip and its matching
+  diff summary, not the old pre-rebase commit.
+
+### Fixed — worker builds stay within their memory limit (#1213, cas-8f64)
+
+- Each worker build runs in its own configurable memory-limited scope, so a
+  simultaneous build cannot consume the host's remaining memory.
+
+### Added — factory loop v2 job framework and watchdog (#1211, cas-5c24, cas-1240, cas-6931)
+
+- The internal design spec maps loop steps, measured costs, named acceptance
+  tests and implementation ownership.
+- The internal job framework adds bounded queues, single-flight jobs,
+  generation tracking, completion handling and separate reader/writer paths.
+- The watchdog names each step, tracks its budget and displays slow or wedged
+  work in the TUI.
+
+### Changed — coordination send receipts are compact (cas-1b2e)
+
+- Successful sends return a one-line queued receipt. Gated, unregistered or
+  failing targets still receive the full explanation, and `message_status`
+  retains delivery detail.
+
+### Fixed — recycle diagnostics describe only the current process (#1178, cas-c1a2)
+
+- A same-name relaunch clears the prior session output before emitting new
+  diagnostics, so stale pane text is not attributed to the replacement.
+
+### Fixed — named worker proofs run the guard set (cas-9387)
+
+- Worker proofs run the repository's fixed guard set and detect named tests
+  that still pin strings removed from the source.
+
+### Fixed — MCP boolean inputs accept string values (#1215, cas-8405)
+
+- Boolean parameters accept `"true"` and `"false"` as well as native boolean
+  values; malformed values remain errors.
+
+### Fixed — release reports count summarized changelog entries (cas-2789)
+
+- `Fixed` and `Changed` headings with descriptive text count correctly, while
+  draft presentation headings are not treated as release groups.
+
+### Fixed — process controls follow ownership and messaging rules (cas-51c7, cas-dd09)
+
+- Worker commands refuse process-name and pattern-based kills, while
+  PID-scoped stops remain available.
+- Native worker `SendMessage` is refused with coordination guidance, so it
+  cannot bypass routing, authorization, limits or delivery receipts.
+
+### Fixed — requested shutdowns produce one clear receipt (#197, cas-b06f)
+
+- A requested multi-worker shutdown produces one non-critical summary instead
+  of a critical relay for each worker. Unexpected deaths still alert with a
+  cleaned, capped pane tail.
+
+### Fixed — active work no longer triggers repeated stall nudges (cas-7156)
+
+- Activity is tracked per worker, an in-flight tool call counts as activity,
+  and stale nudges coalesce to one current message.
+
+### Fixed — writing tasks do not consume Cargo builder capacity (cas-d051)
+
+- Preassigned no-code and docs-only tasks can start at the builder limit;
+  Rust tasks still receive the named capacity refusal.
+
+### Changed — all runtime factory settings are available through config (cas-f7b9)
+
+- The config registry now covers every runtime `FactoryConfig` field,
+  including `factory.nice_cargo`, with typed get, set and list support.
+
+### Changed — contributor guidance matches the current release checks (cas-82f1)
+
+- `CONTRIBUTING`, the supervisor skill and the agent summaries describe each
+  current check at its stage and remove the retired duplicate checks.
+
 ## [3.56.0] - 2026-10-15
 
 ### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)

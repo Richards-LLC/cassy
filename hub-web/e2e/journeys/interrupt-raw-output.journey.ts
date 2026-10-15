@@ -136,6 +136,10 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     await expect(page.getByText("Interrupted the cas-src supervisor.")).toHaveCount(0);
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
+    // The reopened conversation has read who holds control before the press:
+    // with the holder still unknown, the take is not forced (queue run
+    // 38742699142, a slow lease read on a shard's first test).
+    await expect(page.locator("#conversation-control")).toHaveText(" · Studio iPad in control");
     await expect(interrupt).not.toHaveAttribute("aria-disabled", "true");
     await interrupt.click();
     // Taking it over is never silent: this hub-admin pairing forces the

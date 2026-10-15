@@ -935,41 +935,74 @@ fn record_shutdown_outcome(
         &detail,
     );
     if let Some(id) = request_id {
-        let state_dir = cas_dir.to_path_buf();
-        let state_detail = detail.clone();
-        super::store_worker::persist_or_defer("record shutdown outcome", move || {
-            crate::store::open_spawn_queue_store(&state_dir)
-                .map_err(|error| error.to_string())?
-                .record_spawn_state(id, state, None, Some(&state_detail))
-                .map_err(|error| error.to_string())
-        });
+        record_terminal_spawn_state(cas_dir, id, state, None, &detail);
     }
     if outcome.is_err() {
         let request = request_id
             .map(|id| format!("request {id}"))
             .unwrap_or_else(|| "direct request".to_string());
-        let message = format!(
-            "Factory shutdown {request} did not complete. {detail} Workers that failed may still be running; retry shutdown_workers or check worker_status."
+        notify_supervisor_or_defer(
+            cas_dir,
+            supervisor_name,
+            factory_session,
+            format!("Worker shutdown failed: {target}"),
+            format!(
+                "Factory shutdown {request} did not complete. {detail} Workers that failed may still be running; retry shutdown_workers or check worker_status."
+            ),
         );
-        let summary = format!("Worker shutdown failed: {target}");
-        let enqueued = open_prompt_queue_store(cas_dir).and_then(|queue| {
-            queue
-                .enqueue_with_summary(
-                    "director",
-                    supervisor_name,
-                    &message,
-                    Some(factory_session),
-                    Some(&summary),
-                )
-                .map_err(Into::into)
-        });
-        match enqueued {
-            Ok(_) => super::delivery::wake_daemon_after_enqueue(cas_dir),
-            Err(error) => {
-                tracing::warn!(%error, "failed to tell the supervisor a shutdown failed")
-            }
-        }
     }
+}
+
+/// Record a terminal lifecycle state on a queue row. Tried on the loop
+/// thread, then deferred to the store worker when this pass's store budget is
+/// spent, so a processed request never stays at `provisioning` (cas-00d5,
+/// cas-981e).
+fn record_terminal_spawn_state(
+    cas_dir: &std::path::Path,
+    request_id: i64,
+    state: cas_store::SpawnLifecycleState,
+    worker: Option<&str>,
+    detail: &str,
+) {
+    let cas_dir = cas_dir.to_path_buf();
+    let worker = worker.map(str::to_owned);
+    let detail = detail.to_owned();
+    super::store_worker::persist_or_defer("record lifecycle outcome", move || {
+        crate::store::open_spawn_queue_store(&cas_dir)
+            .map_err(|error| error.to_string())?
+            .record_spawn_state(request_id, state, worker.as_deref(), Some(&detail))
+            .map_err(|error| error.to_string())
+    });
+}
+
+/// Queue a director notice to the supervisor that must not be lost to a spent
+/// store budget: tried now, deferred to the store worker otherwise
+/// (cas-00d5, cas-981e). A failed enqueue inserts nothing, so a retry cannot
+/// duplicate it.
+fn notify_supervisor_or_defer(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    summary: String,
+    message: String,
+) {
+    let cas_dir = cas_dir.to_path_buf();
+    let supervisor = supervisor_name.to_owned();
+    let session = factory_session.to_owned();
+    super::store_worker::persist_or_defer("notify supervisor of lifecycle outcome", move || {
+        open_prompt_queue_store(&cas_dir)
+            .map_err(|error| error.to_string())?
+            .enqueue_with_summary(
+                "director",
+                &supervisor,
+                &message,
+                Some(&session),
+                Some(&summary),
+            )
+            .map_err(|error| error.to_string())?;
+        super::delivery::wake_daemon_after_enqueue(&cas_dir);
+        Ok::<(), String>(())
+    });
 }
 
 fn enqueue_spawn_outcome_notice(
@@ -8947,6 +8980,12 @@ impl FactoryDaemon {
                         )
                     })?;
                     self.app.shutdown_worker_for_recycle(&name).await?;
+                    // cas-981e: the relaunch queues the worker's intro and
+                    // tracks its process group; give it the same bounded
+                    // budget as the shutdown, not the pass's leftovers.
+                    let _respawn_budget = cas_store::wait_budget::grant_waits_for(
+                        super::store_worker::SHUTDOWN_STORE_WAIT_BUDGET,
+                    );
                     let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
                         .respawn_worker_with_spec(&name, teams_config, Some(spec))
@@ -9011,6 +9050,33 @@ impl FactoryDaemon {
                             "recycle",
                             "failed",
                             &detail,
+                        );
+                        // cas-981e (GH #1185): the clear_context caller was
+                        // told "Queued recycle" and nothing after. The row
+                        // must end `failed` and the supervisor must hear why,
+                        // even when this pass's store budget is spent.
+                        record_terminal_spawn_state(
+                            self.app.cas_dir(),
+                            request_id,
+                            cas_store::SpawnLifecycleState::Failed,
+                            Some(&name),
+                            &detail,
+                        );
+                        let still_running =
+                            self.app.worker_names().iter().any(|worker| worker == &name);
+                        notify_supervisor_or_defer(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            format!("Worker recycle failed: {name}"),
+                            format!(
+                                "Factory recycle request {request_id} for worker '{name}' did not take effect. {detail} {}",
+                                if still_running {
+                                    "The worker is still running with its old context; retry clear_context or shut it down and spawn a fresh worker."
+                                } else {
+                                    "The old worker was stopped but its replacement did not start; spawn a fresh worker for its tasks."
+                                }
+                            ),
                         );
                     }
                 }

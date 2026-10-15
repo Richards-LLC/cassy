@@ -102,7 +102,8 @@ async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_
     let written = std::fs::read_to_string(&inbox).unwrap_or_default();
     let tree: Vec<_> = walk(&claude_config);
     assert!(
-        written.contains(decision),
+        // The Teams copy is the body or, since cas-1f0c, a pointer naming it.
+        written.contains(&format!("[cas #{id} ")),
         "the Teams inbox write must not wait on the silence gate: {written:?}\nfiles: {tree:?}\nreport: {report:?}"
     );
 

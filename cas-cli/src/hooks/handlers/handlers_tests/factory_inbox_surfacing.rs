@@ -1262,7 +1262,9 @@ fn cas_1f0c_a_broadcast_pointer_turn_without_a_tool_call_still_delivers_once() {
 
     let pointer_turn = worker.next_teammate_turn_without_tool_call().unwrap();
     assert!(!pointer_turn.contains(body), "{pointer_turn}");
-    let quiet = worker.take_turn("continuing my work");
+    // cas-a1ed: a later tool call would surface the claimed row; this turn
+    // makes none, so only the time fallback can reach it.
+    let quiet = worker.start_turn("continuing my work");
     assert!(!quiet.contains(body), "no hook path reaches the row: {quiet}");
 
     let candidates = store
@@ -1416,7 +1418,9 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
     worker.teams_inbox.push_back(format!(
         "[cas #{shown} supervisor-authored 40s first]\n\nTake (B), but keep the flag operator-only."
     ));
-    let repeat = worker.next_teammate_turn().unwrap();
+    // cas-a1ed: no tool call in this turn; one would surface `unseen` (an
+    // unfinished claim), and its copy would then rightly read as shown.
+    let repeat = worker.next_teammate_turn_without_tool_call().unwrap();
     assert!(repeat.contains(&format!("#{shown}")), "{repeat}");
     assert!(repeat.contains("already shown"), "{repeat}");
     assert_eq!(repeat.matches("Take (B), but keep the flag operator-only.").count(), 1, "{repeat}");

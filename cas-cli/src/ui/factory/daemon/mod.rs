@@ -368,8 +368,9 @@ pub struct FactoryDaemon {
         Option<std::sync::Arc<crate::ui::factory::app::provisioning::ProvisioningCancellation>>,
     /// cas-2702: last scan for queue rows this daemon never drained (GH #58).
     last_spawn_queue_stall_scan: Option<Instant>,
-    /// Last bounded probe for durable external reminder conditions.
-    last_external_wake_scan: Option<Instant>,
+    /// GH #1208: background scan of durable external reminder conditions;
+    /// the loop only collects finished scans.
+    external_wake: runtime::external_wake::ExternalWakeScanner,
     /// cas-0f05: satisfied `ci_completed` reminders from the GitHub watcher,
     /// fired on the next reminder pass.
     pending_ci_wakes: Vec<runtime::ci_watch::CiWake>,

@@ -363,3 +363,82 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
     assert!(agents.list(None).is_ok());
     assert!(events.list_recent(10).is_ok());
 }
+
+/// GH #1208: with pending external reminders whose origin is slow, the
+/// reminder pass on the loop stays under the #1165 pass limit. Before the fix
+/// it ran one `git fetch` per reminder inline, here at least 5 × 400 ms. The
+/// fetches still happen, on the scanner thread, and their failures back off.
+#[tokio::test]
+async fn reminder_pass_never_waits_for_external_git_fetches() {
+    const EXTERNAL_REMINDERS: usize = 5;
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let project = dir.path();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    // Every fetch is a slow round trip to an origin that never answers.
+    git(&["remote", "add", "origin", "ssh://cas-test.invalid/repo.git"]);
+    git(&["config", "core.sshCommand", "sleep 0.4; false"]);
+
+    let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+    agents
+        .register(&cas_types::Agent::new("sup".into(), "supervisor".into()))
+        .unwrap();
+    let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+    for n in 0..EXTERNAL_REMINDERS {
+        let filter = serde_json::json!({"commit": "HEAD", "target_branch": format!("epic/{n}")});
+        reminders
+            .create_with_scope(
+                "sup",
+                None,
+                "landed",
+                cas_store::ReminderTriggerType::Event,
+                None,
+                Some(super::ci_watch::EXTERNAL_BRANCH_CONTAINED_EVENT),
+                Some(&filter),
+                0,
+                Some("another-factory"),
+                None,
+                true,
+                None,
+            )
+            .unwrap();
+    }
+
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    assert_eq!(daemon.app.project_path(), project);
+    let started = Instant::now();
+    daemon.process_reminders(&[]);
+    let pass = started.elapsed();
+    assert!(
+        pass < PASS_LATENCY_LIMIT,
+        "reminders step took {pass:?} with {EXTERNAL_REMINDERS} pending external reminders"
+    );
+
+    // The scan ran off the loop: every branch was fetched, failed, and is
+    // now backing off. No condition was true, so nothing fired.
+    let ready = daemon
+        .external_wake
+        .wait_for_scan(Duration::from_secs(30))
+        .expect("the background scan finishes");
+    assert!(ready.is_empty());
+    let backoff = daemon.external_wake.backoff().expect("backoff returned with the scan");
+    for n in 0..EXTERNAL_REMINDERS {
+        let key = super::ci_watch::ExternalProbeKey::Branch(format!("epic/{n}"));
+        assert_eq!(backoff.failures(&key), 1, "{key}");
+    }
+    assert_eq!(reminders.get_event_reminders("branch_contained_in").unwrap().len(), EXTERNAL_REMINDERS);
+
+    // A second pass inside the interval neither waits nor starts a scan.
+    let started = Instant::now();
+    daemon.process_reminders(&[]);
+    assert!(started.elapsed() < PASS_LATENCY_LIMIT);
+    assert!(daemon.external_wake.wait_for_scan(Duration::ZERO).is_none());
+}

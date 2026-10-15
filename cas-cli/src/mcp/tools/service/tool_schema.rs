@@ -109,7 +109,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     ("remind_filter", "remind: JSON filter for the event, e.g. {\"task_id\":\"cas-a1b2\"}."),
     ("remind_id", "remind_cancel: the reminder id."),
-    ("remind_ttl_secs", "remind: seconds an undelivered reminder lives (default 3600, 0 = never)."),
+    ("remind_ttl_secs", "remind: seconds an undelivered reminder lives (default 3600; 604800 for branch_contained_in, tag_exists and ci_completed; 0 = never)."),
     ("cross_session", "remind: keep the reminder across session end and task close."),
 ];
 

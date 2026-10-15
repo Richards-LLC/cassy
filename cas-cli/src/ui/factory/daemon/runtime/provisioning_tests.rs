@@ -70,7 +70,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         spawn_started_at: None,
         spawn_cancellation: None,
         last_spawn_queue_stall_scan: None,
-        last_external_wake_scan: None,
+        external_wake: Default::default(),
         pending_ci_wakes: Vec::new(),
         reported_stalled_spawn_requests: std::collections::HashSet::new(),
     }

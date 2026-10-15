@@ -4,6 +4,39 @@ const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
 use crate::ui::factory::daemon::runtime::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
 
+/// GH #1208: default lifetime of an external (`branch_contained_in`,
+/// `tag_exists`, `ci_completed`) reminder when `remind_ttl_secs` is omitted.
+/// Long enough for a merge queue or release; an explicit `0` still opts into
+/// no expiry. Before this, the default `0` left dead sessions' wakes probing
+/// origin forever.
+pub(crate) const EXTERNAL_REMINDER_DEFAULT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Default `remind_ttl_secs` for an event (or time) reminder.
+fn default_reminder_ttl_secs(remind_event: Option<&str>) -> i64 {
+    if remind_event.is_some_and(is_external_reminder_event) {
+        EXTERNAL_REMINDER_DEFAULT_TTL_SECS
+    } else {
+        3600
+    }
+}
+
+/// GH #1208: store a `branch_contained_in` target as the bare origin branch,
+/// so `origin/staging` cannot become a reminder that never fires.
+fn normalize_external_filter(event_type: &str, filter: &mut serde_json::Value) {
+    if event_type != EXTERNAL_BRANCH_CONTAINED_EVENT {
+        return;
+    }
+    let Some(object) = filter.as_object_mut() else {
+        return;
+    };
+    for key in ["target_branch", "target"] {
+        if let Some(serde_json::Value::String(value)) = object.get_mut(key) {
+            *value = crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(value)
+                .to_string();
+        }
+    }
+}
+
 fn is_external_reminder_event(event_type: &str) -> bool {
     matches!(
         event_type,
@@ -69,6 +102,18 @@ fn validate_external_reminder(
             if commit.is_none() || target.is_none() {
                 return Err(
                     "branch_contained_in remind_filter requires string fields `commit` and `target_branch`"
+                        .to_string(),
+                );
+            }
+            let target = target.map(|value| {
+                crate::ui::factory::daemon::runtime::ci_watch::normalize_external_target_branch(
+                    &value,
+                )
+                .to_string()
+            });
+            if target.as_deref().is_some_and(str::is_empty) {
+                return Err(
+                    "branch_contained_in target_branch must name a branch on origin, e.g. \"main\""
                         .to_string(),
                 );
             }
@@ -189,17 +234,9 @@ impl CasService {
             (None, None)
         };
 
-        let ttl_secs = req.remind_ttl_secs.unwrap_or_else(|| {
-            if req
-                .remind_event
-                .as_deref()
-                .is_some_and(is_external_reminder_event)
-            {
-                0
-            } else {
-                3600
-            }
-        });
+        let ttl_secs = req
+            .remind_ttl_secs
+            .unwrap_or_else(|| default_reminder_ttl_secs(req.remind_event.as_deref()));
         if ttl_secs < 0 {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -392,6 +429,10 @@ impl CasService {
                 ttl_secs,
             ) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, error));
+            }
+            let mut filter = filter;
+            if let Some(filter) = filter.as_mut() {
+                normalize_external_filter(&event_type, filter);
             }
 
             let id = store

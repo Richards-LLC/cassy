@@ -13,6 +13,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   profile, and Cassy launches load each profile's private credentials. Empty
   tokens are never sent.
 
+### Fixed — terminal QA checks only apply to terminal output (#1212, cas-2de9)
+
+- A terminal-QA receipt is required only for terminal-drawing CLI paths and
+  `cas-mux` `render.rs`, `pane/style.rs` and `pane/snapshot.rs`.
+- Tasks without a CLI/TUI surface, and mux input, PTY and resize changes, use
+  the real-build interaction ledger and no longer block park, receipt or QA.
+
 ### Fixed — supervisors wake for peer replies and requests (#1215 b, cas-1f25)
 
 - Idle supervisors wake for peer replies and ask/blocker messages, while FYIs
@@ -64,6 +71,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Each worker build runs in its own configurable memory-limited scope, so a
   simultaneous build cannot consume the host's remaining memory.
+
+### Fixed — systemd worker builds preserve embedded test scripts (cas-192b)
+
+- On systemd 254+, worker builds disable `systemd-run` environment expansion
+  with `--expand-environment=no`, so `$VAR` reaches Bash and Python unchanged.
 
 ### Added — factory loop v2 job framework and watchdog (#1211, cas-5c24, cas-1240, cas-6931)
 

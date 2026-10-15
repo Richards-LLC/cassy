@@ -3451,7 +3451,9 @@ fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_reco
     worker.metadata.insert("worker_cli".into(), "codex".into());
     worker.metadata.insert("worker_account_dir".into(), account.path().to_str().unwrap().into());
     worker.metadata.insert("clone_path".into(), root.path().to_str().unwrap().into());
-    cas_store::SqliteAgentStore::open(root.path()).unwrap().register(&worker).unwrap();
+    let store = cas_store::SqliteAgentStore::open(root.path()).unwrap();
+    store.init().unwrap();
+    store.register(&worker).unwrap();
     let meta = serde_json::json!({"type":"session_meta","payload":{"session_id":worker.id,"cwd":root.path(),"originator":"codex_cli_rs","source":"cli"}});
     let call = serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"open","name":"shell","arguments":"{}"}});
     let cold = std::time::SystemTime::now() - Duration::from_secs(1800);

@@ -5942,6 +5942,7 @@ impl CasCore {
                 self.retire_delivered_worker_cache(&parked);
                 // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
                 // relay. A refused close stays a tool error for the worker.
+                // CloseRejected remains readable for legacy outbox records.
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
                 let actor_name = self
                     .open_agent_store()
@@ -23972,7 +23973,7 @@ mod merge_state_gate_tests {
         assert_eq!(payload["task_id"], task.id);
         assert_eq!(payload["branch_tip"], "delivery-tip");
         let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
-        assert_eq!(prompts.len(), 1, "one actionable body, not a misleading refusal twin");
+        assert_eq!(prompts.len(), 1);
         assert!(prompts[0].prompt.contains("task_awaiting_merge"));
     }
 

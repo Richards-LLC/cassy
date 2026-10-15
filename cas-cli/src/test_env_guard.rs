@@ -346,12 +346,14 @@ mod ambient_scrub_tests {
         let fixture = TempDir::new().unwrap();
         // Inject hook state into a separate test process, avoiding global
         // environment mutations in this parallel test runner.
+        // This shared file is also compiled below integration-test modules.
+        // libtest names omit the crate segment but retain those module names.
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, module)| module);
+        let child_test = format!("{module}::hook_environment_bare_fixture_child_cas_ea62");
         let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "test_env_guard::ambient_scrub_tests::hook_environment_bare_fixture_child_cas_ea62",
-            ])
+            .args(["--ignored", "--exact", &child_test])
             .env("GIT_DIR", parent.path().join(".git"))
             .env("GIT_COMMON_DIR", parent.path().join(".git"))
             .env("GIT_WORK_TREE", parent.path())
@@ -369,6 +371,11 @@ mod ambient_scrub_tests {
             "{}\n{}",
             String::from_utf8_lossy(&child.stdout),
             String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+            "child filter must run its test: {}",
+            String::from_utf8_lossy(&child.stdout)
         );
         assert!(fixture.path().join("HEAD").is_file());
     }

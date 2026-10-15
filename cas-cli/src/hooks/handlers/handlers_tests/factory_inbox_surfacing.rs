@@ -721,7 +721,7 @@ fn cas_27ad_subagent_post_tool_does_not_consume_parent_mail() {
             hook.transcript_path = Some("/tmp/session/subagents/agent-child.jsonl".into());
         }
         let surfaced = super::super::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
-            Some(temp.path()), &hook, None);
+            Some(temp.path()), &hook, None, &mut cas_store::HOOK_SURFACE_BUDGET_CHARS.clone());
         assert!(surfaced.is_none(), "a child consumed the parent's mail: {surfaced:?}");
         let output = crate::hooks::handle_post_tool_use(&hook, Some(temp.path())).unwrap();
         let rendered = serde_json::to_string(&output).unwrap();
@@ -748,28 +748,125 @@ fn cas_27ad_first_hook_claim_ignores_queue_processing_timestamp() {
 }
 
 /// cas-ad92: a Claude-harness worker double. The daemon's Claude+teams
-/// delivery writes the body to the teams inbox file and types a pointer wake
+/// delivery writes a copy to the teams inbox file and types a pointer wake
 /// into the idle pane; Claude Code queues the teams copy and shows it only at
-/// the next turn boundary, so the wake turn comes first. `take_turn` returns
+/// the next turn boundary, so the wake turn comes first. Each method returns
 /// everything the model sees in that turn: the submitted prompt plus the
-/// hook's additional context.
+/// hooks' additional context.
+///
+/// cas-1f0c (review item 4): the double drives the real hooks the way a
+/// Claude Agent Teams member fires them. Every payload carries the member's
+/// own `<name>@<team>` agent_id (cas-7bfa). A typed turn fires
+/// UserPromptSubmit and then one tool call; a teammate-message turn fires no
+/// UserPromptSubmit, only PostToolUse at its tool call, read against the
+/// transcript's newest user entry.
 struct ClaudeTeamsWorkerDouble<'a> {
     cas_root: &'a std::path::Path,
     teams_inbox: std::collections::VecDeque<String>,
+    turns: usize,
 }
 
-impl ClaudeTeamsWorkerDouble<'_> {
+impl<'a> ClaudeTeamsWorkerDouble<'a> {
+    fn new(cas_root: &'a std::path::Path) -> Self {
+        Self { cas_root, teams_inbox: Default::default(), turns: 0 }
+    }
+
+    fn transcript(&self) -> std::path::PathBuf {
+        self.cas_root.join("teams-member-session.jsonl")
+    }
+
+    fn hook_input(&self, event: &str) -> HookInput {
+        let mut hook = input("worker");
+        hook.hook_event_name = event.to_string();
+        hook.cwd = self.cas_root.parent().unwrap_or(self.cas_root).to_string_lossy().into_owned();
+        hook.transcript_path = Some(self.transcript().to_string_lossy().into_owned());
+        hook.agent_id = Some(format!("{WORKER}@{SESSION}"));
+        hook.agent_type = Some("general-purpose".into());
+        hook
+    }
+
+    /// Append the turn's user entry to the transcript; returns its key.
+    fn begin_turn(&mut self, prompt: &str) -> String {
+        use std::io::Write as _;
+        self.turns += 1;
+        let key = format!("turn-{}", self.turns);
+        let line = serde_json::json!({
+            "type": "user",
+            "sessionId": "hook-test-session",
+            "promptId": key,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "message": {"content": prompt},
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.transcript())
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+        key
+    }
+
+    /// A turn typed into the pane (a pointer wake or the operator):
+    /// UserPromptSubmit, then one tool call.
     fn take_turn(&mut self, prompt: &str) -> String {
-        let mut turn = input("worker");
-        turn.user_prompt = Some(prompt.to_string());
+        let mut seen = self.start_turn(prompt);
+        seen.push_str(&self.tool_call());
+        seen
+    }
+
+    /// Only the start of a typed turn: the prompt and UserPromptSubmit.
+    fn start_turn(&mut self, prompt: &str) -> String {
+        let turn = self.prompt_hook_input(prompt);
         let output = handle_user_prompt_submit(&turn, Some(self.cas_root)).unwrap();
+        // What `hooks::dispatch` does after a successful prompt hook.
+        crate::hooks::turn_context::record_prompt_hook(self.cas_root, &turn);
         format!("{prompt}\n{}", output.user_prompt_context().unwrap_or_default())
+    }
+
+    /// A typed turn whose prompt hook ran but surfaced nothing (its drain
+    /// failed): the turn counts as served.
+    fn start_turn_with_failed_surfacing(&mut self, prompt: &str) -> String {
+        let turn = self.prompt_hook_input(prompt);
+        crate::hooks::turn_context::record_prompt_hook(self.cas_root, &turn);
+        format!("{prompt}\n")
+    }
+
+    fn prompt_hook_input(&mut self, prompt: &str) -> HookInput {
+        let key = self.begin_turn(prompt);
+        let mut turn = self.hook_input("UserPromptSubmit");
+        turn.user_prompt = Some(prompt.to_string());
+        turn.prompt_id = Some(key);
+        turn
+    }
+
+    /// A turn whose UserPromptSubmit hook never ran: a teammate-message turn,
+    /// or a typed turn whose hook failed or is not installed.
+    fn take_turn_without_prompt_hook(&mut self, prompt: &str) -> String {
+        self.begin_turn(prompt);
+        format!("{prompt}\n{}", self.tool_call())
     }
 
     /// The turn boundary after the wake: Claude renders the queued copy.
     fn next_teammate_turn(&mut self) -> Option<String> {
-        let body = self.teams_inbox.pop_front()?;
-        Some(self.take_turn(&format!("<teammate-message teammate_id=\"supervisor\">\n{body}\n</teammate-message>")))
+        let copy = self.teams_inbox.pop_front()?;
+        Some(self.take_turn_without_prompt_hook(&format!(
+            "<teammate-message teammate_id=\"supervisor\">\n{copy}\n</teammate-message>"
+        )))
+    }
+
+    /// One more tool call in the current turn: the PostToolUse context.
+    fn tool_call(&mut self) -> String {
+        let mut hook = self.hook_input("PostToolUse");
+        hook.tool_name = Some("Read".into());
+        match crate::hooks::handle_post_tool_use(&hook, Some(self.cas_root))
+            .unwrap()
+            .hook_specific_output
+        {
+            Some(HookSpecificOutput::PostToolUse { additional_context: Some(context) }) => {
+                format!("{context}\n")
+            }
+            _ => String::new(),
+        }
     }
 }
 
@@ -785,6 +882,7 @@ fn claim_for_claude_teams(
     worker.teams_inbox.push_back(
         crate::ui::factory::daemon::runtime::delivery::claude_teams_inbox_text(
             &format!("[cas #{id} supervisor-authored 0s first]\n\n{body}"),
+            body,
             "supervisor",
             id,
         ),
@@ -817,8 +915,9 @@ fn a_pointer_wake_turn_carries_the_body_it_names() {
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let temp = TempDir::new().unwrap();
-    let store = store_at(&temp);
-    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
     let body = "Make cas-e4e3 deterministic: assert the concurrency itself.";
     let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
 
@@ -850,8 +949,9 @@ fn ct2_p1_one_body_per_message_teams() {
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let temp = TempDir::new().unwrap();
-    let store = store_at(&temp);
-    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     // 1. Idle recipient: the pointer wake starts a turn, then Claude Code
     // renders its held Teams copy, then the agent works on.
@@ -904,8 +1004,9 @@ fn ct2_p1_wake_text_truthful() {
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let temp = TempDir::new().unwrap();
-    let store = store_at(&temp);
-    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
     let body = "Ship the dedupe and close GH #1208.";
     let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
 
@@ -928,6 +1029,179 @@ fn ct2_p1_wake_text_truthful() {
     assert!(teammate_turn.contains(&format!("[already shown] Message #{id}")), "{teammate_turn}");
 }
 
+/// Fresh Claude Teams member fixture: an initialised CAS root, its queue and
+/// the double.
+fn teams_member_root() -> (TempDir, std::path::PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    (temp, cas_root)
+}
+
+/// Claude Code keeps hook context whole only up to about this many
+/// characters, then shows a short preview (cas-1f0c review item 1).
+const CLAUDE_HOOK_CONTEXT_CAP: usize = 10_000;
+
+/// cas-1f0c review item 1: a body no hook can show whole is not "delivered"
+/// by a hook that showed a preview. Its Teams copy carries it in full, the
+/// wake turn says so without any part of it, the row stays unread until the
+/// teammate turn that carries it records it (cas-7bfa), and the agent reads
+/// the body exactly once.
+#[test]
+fn cas_1f0c_a_body_too_long_for_any_hook_reaches_the_agent_once_in_full() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+    let body = format!("Spawn brief for cas-1f0c.\n{}", "One numbered detail of the brief.\n".repeat(320));
+    assert!(!cas_store::fits_hook_surface(&body), "precondition: {} chars", body.len());
+    let id = store.enqueue_with_session("supervisor", WORKER, &body, SESSION).unwrap();
+
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, &body);
+    let wake_turn = worker.take_turn(&wake);
+    assert!(!wake_turn.contains("One numbered detail"), "no preview of the body: {wake_turn}");
+    assert!(
+        wake_turn.contains(&format!("[not shown here] Message #{id} is too long")),
+        "{wake_turn}"
+    );
+    assert!(wake_turn.len() < CLAUDE_HOOK_CONTEXT_CAP, "{} chars", wake_turn.len());
+    assert_eq!(
+        store.recipient_receipt(id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::TransportClaimed),
+        "a hook that did not show the body must not receipt it"
+    );
+
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert_eq!(
+        store.recipient_receipt(id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced),
+        "the teammate turn that carried the body records it"
+    );
+    let later = worker.take_turn("continuing my work");
+    let seen = format!("{wake_turn}{teammate_turn}{later}");
+    assert_eq!(seen.matches(body.trim()).count(), 1, "one full body");
+}
+
+/// cas-1f0c review item 1: the turn-start block spends a budget that keeps
+/// it under Claude Code's hook cap. A row that does not fit stays unread
+/// (no `hook_surfaced` receipt), the block names it, and the next tool call
+/// shows it in full.
+#[test]
+fn cas_1f0c_turn_start_receipts_only_the_rows_it_renders_in_full() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+    let bodies: Vec<String> = (1..=3)
+        .map(|n| format!("Row {n} of the backlog: {}", "y".repeat(2_000)))
+        .collect();
+    let ids: Vec<i64> = bodies
+        .iter()
+        .map(|body| store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap())
+        .collect();
+
+    let start = worker.start_turn("continuing my work");
+    assert!(start.len() < CLAUDE_HOOK_CONTEXT_CAP, "{} chars", start.len());
+    assert_eq!(start.matches(&bodies[0]).count(), 1, "{start}");
+    assert_eq!(start.matches(&bodies[1]).count(), 1, "{start}");
+    assert!(!start.contains(&bodies[2]), "{start}");
+    assert!(
+        start.contains(&format!("[not shown here] Message #{} did not fit", ids[2])),
+        "{start}"
+    );
+    assert_eq!(store.recipient_receipt(ids[2], WORKER).unwrap(), None);
+
+    let tool = worker.tool_call();
+    assert_eq!(tool.matches(&bodies[2]).count(), 1, "{tool}");
+    assert!(!tool.contains(&bodies[0]) && !tool.contains(&bodies[1]), "{tool}");
+    assert_eq!(
+        store.recipient_receipt(ids[2], WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+}
+
+/// cas-1f0c review item 2: the body path must not depend on the turn-start
+/// hook. When UserPromptSubmit never ran for a pointer-woken turn, or ran but
+/// its drain failed, the turn's tool call shows the row its pointer names,
+/// once; the Teams pointer that follows says it was already shown.
+#[test]
+fn cas_1f0c_a_pointer_turn_without_its_prompt_hook_gets_the_body_at_its_tool_call() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    // No prompt hook at all.
+    let body = "Rebase onto the epic tip, then park.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
+    let turn = worker.take_turn_without_prompt_hook(&wake);
+    assert_eq!(turn.matches(body).count(), 1, "{turn}");
+    assert_eq!(
+        store.recipient_receipt(id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+    assert!(!worker.tool_call().contains(body), "shown once");
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert!(!teammate_turn.contains(body), "{teammate_turn}");
+    assert!(teammate_turn.contains(&format!("[already shown] Message #{id}")), "{teammate_turn}");
+
+    // The prompt hook ran, but its drain failed: the turn counts as served.
+    let body = "Second decision: keep the flag operator-only.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
+    let mut turn = worker.start_turn_with_failed_surfacing(&wake);
+    turn.push_str(&worker.tool_call());
+    turn.push_str(&worker.tool_call());
+    assert_eq!(turn.matches(body).count(), 1, "{turn}");
+}
+
+/// cas-1f0c review item 3: the wake promises the body or a reason. A named
+/// assignment that went stale while it waited is withheld and receipted, and
+/// the block now says so instead of ending in silence.
+#[test]
+fn cas_1f0c_a_wake_for_a_withdrawn_assignment_says_why_no_body_follows() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+    let mut task = Task::new("cas-7c1e".to_string(), "spawn brief already acted on".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some(WORKER.to_string());
+    crate::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
+    let brief = "You were spawned for task cas-7c1e — \"spawn brief already acted on\" — and it is assigned to you now.\nStart with `mcp__cas__task action=show id=cas-7c1e`, then `mcp__cas__task action=start id=cas-7c1e` before you change any code.";
+    let id = store.enqueue_with_session("director", WORKER, brief, SESSION).unwrap();
+
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, brief);
+    let turn = worker.take_turn(&wake);
+    assert!(!turn.contains("it is assigned to you now"), "{turn}");
+    assert!(turn.contains(&format!("[withdrawn] Message #{id}")), "{turn}");
+}
+
+/// cas-1f0c review item 3: a broadcast's read state is per recipient, so the
+/// `[already shown]` check reads this agent's own receipt. It used to compare
+/// the row's target (`all_workers`) with the agent's names and never matched.
+#[test]
+fn cas_1f0c_a_pointer_to_a_broadcast_already_shown_says_so() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+    let body = "All workers: rebase onto the new epic tip.";
+    let id = store.enqueue_with_session("supervisor", "all_workers", body, SESSION).unwrap();
+
+    let wake = deliver_to_claude_worker(&store, &mut worker, id, body);
+    let wake_turn = worker.take_turn(&wake);
+    assert_eq!(wake_turn.matches(body).count(), 1, "{wake_turn}");
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert!(!teammate_turn.contains(body), "{teammate_turn}");
+    assert!(teammate_turn.contains(&format!("[already shown] Message #{id}")), "{teammate_turn}");
+}
+
 /// cas-ad92 boundaries: an ordinary turn still leaves a claimed row to its
 /// transport (cas-27ad), and a wake line naming a row addressed to another
 /// recipient surfaces nothing.
@@ -936,8 +1210,9 @@ fn only_a_wake_naming_this_recipients_row_takes_the_claim() {
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let temp = TempDir::new().unwrap();
-    let store = store_at(&temp);
-    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
     let mine = store.enqueue_with_session("supervisor", WORKER, "mine to read", SESSION).unwrap();
     let theirs = store.enqueue_with_session("supervisor", "other-worker", "not mine", SESSION).unwrap();
     assert!(store.claim_recipient_transport(theirs, "other-worker").unwrap());
@@ -1026,8 +1301,9 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let temp = TempDir::new().unwrap();
-    let store = store_at(&temp);
-    let mut worker = ClaudeTeamsWorkerDouble { cas_root: temp.path(), teams_inbox: Default::default() };
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
 
     let shown = store
         .enqueue_with_session("supervisor", WORKER, "Take (B), but keep the flag operator-only.", SESSION)

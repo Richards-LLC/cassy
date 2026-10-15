@@ -264,6 +264,8 @@ pub use surfaced_artifact_store::{
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
     AdmissionOutcome, OperatorCommandAdmission,
+    BudgetedSurface, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
+    fits_hook_surface, hook_surface_cost,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
     session_routing_id,

@@ -192,6 +192,55 @@ enum TransportEligibility {
     WakeNamed,
 }
 
+/// cas-1f0c: the characters a hook may spend on message bodies in one output.
+///
+/// Claude Code keeps a hook's additional context whole only up to about
+/// 10,000 characters and shows a short preview past that. The turn-start
+/// block also carries the supervisor reminder and recall, so mail gets this
+/// share. A row is receipted as `hook_surfaced` only when its whole body fits;
+/// the rest stay unread for a later surfacing.
+pub const HOOK_SURFACE_BUDGET_CHARS: usize = 5_000;
+
+/// cas-1f0c: what rendering one row costs beyond its body: the `--- from`
+/// frame, the `[cas #N …]` provenance line and a reply hint.
+pub const HOOK_SURFACE_ROW_OVERHEAD_CHARS: usize = 400;
+
+/// cas-1f0c: the share of [`HOOK_SURFACE_BUDGET_CHARS`] rendering `prompt`
+/// takes.
+pub fn hook_surface_cost(prompt: &str) -> usize {
+    prompt.trim().chars().count() + HOOK_SURFACE_ROW_OVERHEAD_CHARS
+}
+
+/// cas-1f0c: whether a hook can ever show `prompt` whole. A row that cannot
+/// reaches a Claude Teams recipient as a full-body Teams copy instead of a
+/// pointer, so no row depends on a hook that cannot render it.
+pub fn fits_hook_surface(prompt: &str) -> bool {
+    hook_surface_cost(prompt) <= HOOK_SURFACE_BUDGET_CHARS
+}
+
+/// cas-1f0c: which rows a budgeted hook drain may take; the hook variants of
+/// [`TransportEligibility`].
+#[derive(Debug, Clone, Copy)]
+pub enum HookDrain<'a> {
+    /// Turn start: unread rows, including provisional transport deliveries.
+    Unseen,
+    /// A tool boundary with no known turn: rows with no transport marker.
+    WithoutTransport,
+    /// A tool boundary inside a turn that began at this time (cas-b5e4).
+    DeliveredAfter(DateTime<Utc>),
+    /// The rows a pointer wake named, over the daemon's claim (cas-ad92).
+    WakeNamed(&'a [i64]),
+}
+
+/// cas-1f0c: the result of a budgeted hook drain.
+#[derive(Debug, Clone, Default)]
+pub struct BudgetedSurface {
+    /// Rows receipted `hook_surfaced`; the caller must render each in full.
+    pub rows: Vec<QueuedPrompt>,
+    /// `(id, cost)` of eligible rows left unread because they did not fit.
+    pub over_budget: Vec<(i64, usize)>,
+}
+
 /// cas-098d (GH #904): the order an inbox poll drains a recipient's unread
 /// rows in. Rows no transport has handed over come first, by priority and then
 /// oldest first. Transport-delivered rows follow, most recently delivered
@@ -1677,6 +1726,13 @@ const PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_bytes INTEGER;
 "#;
 
+/// cas-1f0c: when the daemon wrote a row's full body to a Claude Teams inbox
+/// because no hook or poll showed the pointer copy in time. One-shot across
+/// daemon restarts.
+const PROMPT_QUEUE_TEAMS_BODY_FALLBACK_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN teams_body_fallback_at TEXT;
+"#;
+
 /// cas-6853 (communication contract v2, P2.4/P3.7): broadcast audience
 /// policy. A newer `all_workers` row with the same `supersede_key` replaces an
 /// older one for every recipient that has not read it. `sticky` marks
@@ -2096,6 +2152,46 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: Option<&str>,
         ids: &[i64],
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// cas-1f0c: a hook drain that receipts only the rows it can render whole.
+    ///
+    /// Selection is `drain`'s, in its usual order, up to `limit` rows. A row
+    /// is taken while its [`hook_surface_cost`] fits what is left of
+    /// `budget_chars`; a row that does not fit is skipped, keeps its current
+    /// receipt and is reported in [`BudgetedSurface::over_budget`]. Selection
+    /// and receipt stay in one transaction, as for
+    /// [`Self::surface_unseen_for_recipient`].
+    fn surface_for_recipient_within_budget(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        drain: HookDrain<'_>,
+        limit: usize,
+        budget_chars: usize,
+    ) -> Result<BudgetedSurface>;
+
+    /// cas-1f0c: the receipt `recipient` holds for `prompt_id`, if any. Works
+    /// for broadcasts, whose read state is per recipient.
+    fn recipient_receipt(&self, prompt_id: i64, recipient: &str)
+    -> Result<Option<SurfacingSource>>;
+
+    /// cas-1f0c: direct rows whose Claude Teams copy was a pointer and that no
+    /// hook or poll has shown since: the recipient holds only a transport
+    /// receipt taken between `handed_off_after` and `handed_off_before`, the
+    /// row is unacked, not urgent, not terminal and has no body fallback yet.
+    /// The daemon filters the recipients and rows it wrote pointers for.
+    fn teams_pointer_fallback_candidates(
+        &self,
+        factory_session: &str,
+        handed_off_after: DateTime<Utc>,
+        handed_off_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// cas-1f0c: claim the one full-body Teams fallback for `prompt_id`.
+    /// `true` only for the first caller, and only while the row is still
+    /// unacked and its recipient still holds only a transport receipt.
+    fn claim_teams_body_fallback(&self, prompt_id: i64) -> Result<bool>;
 
     /// cas-ad92: the hook-free counterpart of
     /// [`Self::surface_wake_named_for_recipient`] for an `inbox_poll` that
@@ -3788,6 +3884,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "deferred_inbox_bytes",
                     PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION,
                 ),
+                (
+                    "teams_body_fallback_at",
+                    PROMPT_QUEUE_TEAMS_BODY_FALLBACK_AT_MIGRATION,
+                ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
@@ -5052,6 +5152,113 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             TransportEligibility::WakeNamed,
             ids,
         )
+    }
+
+    fn surface_for_recipient_within_budget(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        drain: HookDrain<'_>,
+        limit: usize,
+        budget_chars: usize,
+    ) -> Result<BudgetedSurface> {
+        let (transport, ids, limit) = match drain {
+            HookDrain::Unseen => (TransportEligibility::Any, &[][..], limit),
+            HookDrain::WithoutTransport => (TransportEligibility::NoneRecorded, &[][..], limit),
+            HookDrain::DeliveredAfter(at) => (TransportEligibility::After(at), &[][..], limit),
+            HookDrain::WakeNamed(ids) => (TransportEligibility::WakeNamed, ids, limit.min(ids.len())),
+        };
+        let (rows, over_budget) = self.drain_unseen_for_recipient_budgeted(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::HookSurfaced,
+            None,
+            transport,
+            ids,
+            Some(budget_chars),
+        )?;
+        Ok(BudgetedSurface { rows, over_budget })
+    }
+
+    fn recipient_receipt(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+    ) -> Result<Option<SurfacingSource>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn
+            .query_row(
+                "SELECT source FROM prompt_queue_recipient_seen
+                  WHERE prompt_id = ? AND recipient = ?",
+                params![prompt_id, recipient],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .as_deref()
+            .and_then(SurfacingSource::parse))
+    }
+
+    fn teams_pointer_fallback_candidates(
+        &self,
+        factory_session: &str,
+        handed_off_after: DateTime<Utc>,
+        handed_off_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary,
+                    q.priority, q.acked_at, q.urgent, q.factory_session, q.origin_agent_id,
+                    q.origin_kind
+               FROM prompt_queue q
+               JOIN prompt_queue_recipient_seen seen
+                 ON seen.prompt_id = q.id AND seen.recipient = q.target
+              WHERE q.factory_session = ?
+                AND q.target <> 'all_workers'
+                AND q.urgent = 0
+                AND q.acked_at IS NULL
+                AND q.teams_body_fallback_at IS NULL
+                AND (q.highest_stage IS NULL
+                     OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})
+                AND seen.source IN ('transport_claimed', 'transport_delivered')
+                AND julianday(seen.seen_at) >= julianday(?)
+                AND julianday(seen.seen_at) <= julianday(?)
+              ORDER BY q.id ASC
+              LIMIT ?"
+        ))?;
+        Ok(stmt
+            .query_map(
+                params![
+                    factory_session,
+                    handed_off_after.to_rfc3339(),
+                    handed_off_before.to_rfc3339(),
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                Self::prompt_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    fn claim_teams_body_fallback(&self, prompt_id: i64) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let changed = conn.execute(
+                "UPDATE prompt_queue
+                    SET teams_body_fallback_at = ?
+                  WHERE id = ?
+                    AND teams_body_fallback_at IS NULL
+                    AND acked_at IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM prompt_queue_recipient_seen seen
+                         WHERE seen.prompt_id = prompt_queue.id
+                           AND seen.recipient = prompt_queue.target
+                           AND seen.source IN ('transport_claimed', 'transport_delivered'))",
+                params![Utc::now().to_rfc3339(), prompt_id],
+            )?;
+            Ok(changed == 1)
+        })
     }
 
     fn surface_unseen_from_sources_for_recipient(
@@ -7414,13 +7621,41 @@ impl SqlitePromptQueueStore {
         transport: TransportEligibility,
         only_ids: &[i64],
     ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient_budgeted(
+            recipient,
+            factory_session,
+            limit,
+            source,
+            source_filter,
+            transport,
+            only_ids,
+            None,
+        )
+        .map(|(rows, _)| rows)
+    }
+
+    /// [`Self::drain_unseen_for_recipient`] with an optional render budget
+    /// (cas-1f0c): selected rows that do not fit are dropped before any
+    /// receipt is written and returned as `(id, cost)` instead.
+    #[allow(clippy::too_many_arguments)]
+    fn drain_unseen_for_recipient_budgeted(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+        source: SurfacingSource,
+        source_filter: Option<&[&str]>,
+        transport: TransportEligibility,
+        only_ids: &[i64],
+        budget_chars: Option<usize>,
+    ) -> Result<(Vec<QueuedPrompt>, Vec<(i64, usize)>)> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other(
                 "poll_unseen_for_recipient requires a recipient".to_string(),
             ));
         }
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let normalized_sources = source_filter
             .map(|sources| {
@@ -7432,10 +7667,10 @@ impl SqlitePromptQueueStore {
             })
             .unwrap_or_default();
         if source_filter.is_some() && normalized_sources.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         if matches!(transport, TransportEligibility::WakeNamed) && only_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
 
@@ -7609,6 +7844,28 @@ impl SqlitePromptQueueStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
+            // cas-1f0c: keep only what the caller can render whole; a row
+            // that does not fit gets no receipt and stays unread.
+            let mut over_budget: Vec<(i64, usize)> = Vec::new();
+            let prompts: Vec<QueuedPrompt> = match budget_chars {
+                None => prompts,
+                Some(budget) => {
+                    let mut left = budget;
+                    prompts
+                        .into_iter()
+                        .filter(|prompt| {
+                            let cost = hook_surface_cost(&prompt.prompt);
+                            if cost <= left {
+                                left -= cost;
+                                true
+                            } else {
+                                over_budget.push((prompt.id, cost));
+                                false
+                            }
+                        })
+                        .collect()
+                }
+            };
 
             if !prompts.is_empty() {
                 let seen_at = Utc::now().to_rfc3339();
@@ -7719,7 +7976,7 @@ impl SqlitePromptQueueStore {
             }
 
             tx.commit()?;
-            Ok(prompts)
+            Ok((prompts, over_budget))
         })
     }
 }

@@ -1063,6 +1063,46 @@ mod tests {
     }
 
     #[test]
+    fn ct2_p3_operator_mirror_resume_starts_at_config_save() {
+        let (temp, root, queue) = terminal_session(vec![]);
+        let mut config = crate::config::Config::default();
+        config
+            .set("factory.commander_mirror_enabled", "false")
+            .unwrap();
+        config.save(&root).unwrap();
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        config
+            .set("factory.commander_mirror_enabled", "true")
+            .unwrap();
+        config.save(&root).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(
+                temp.path()
+                    .join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl"),
+            )
+            .unwrap();
+        let at = Utc::now();
+        for mut value in codex_turn_at(
+            "public-after-resume",
+            "[cas #78 agent-authored] update",
+            "Reply before first enabled poll.",
+            at,
+        ) {
+            value["timestamp"] = serde_json::json!(at.to_rfc3339());
+            writeln!(file, "{value}").unwrap();
+        }
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        let replies = operator_replies(&queue);
+        assert_eq!(
+            replies.len(),
+            1,
+            "resume starts at CLI save, not the later daemon poll"
+        );
+        assert_eq!(replies[0].message, "Reply before first enabled poll.");
+    }
+
+    #[test]
     fn ct2_p3_operator_mirror_excludes_workers_and_other_sessions() {
         for (role, status, session) in [
             (AgentRole::Worker, cas_types::AgentStatus::Idle, "factory-1"),

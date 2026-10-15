@@ -2765,6 +2765,35 @@ mod tests {
     }
 
     #[test]
+    fn changelog_summarized_356_headings_count_changed_and_fixed_entries() {
+        // These entries use the actual 3.56.0 CHANGELOG heading form.
+        let fixture = "# Changelog\n\n## [3.56.0] - 2026-10-15\n\n### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)\n- External reminder probes run off the daemon loop.\n\n### Changed — coordination and tools (#1188, #1197, #1207)\n- Verification accepts structured issues and artifact uploads support video/webm.\n\n## [3.55.0] - 2026-10-15\n";
+        let changelog = parse_changelog_section(fixture, "3.56.0").expect("section");
+        assert_eq!(changelog.entries[0].category, "Fixed");
+        assert_eq!(changelog.entries[1].category, "Changed");
+
+        let sources = AcquiredSources {
+            project: "fixture".to_string(),
+            changelog: Some(changelog),
+            changelog_path: None,
+            release_notes: None,
+            release_note_articles: Vec::new(),
+            release_note_user_punch: None,
+            release: None,
+            issues: Vec::new(),
+            assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(),
+            github_repo: None,
+            issue_count: 0,
+            warnings: Vec::new(),
+            retrieved_at: "2026-10-15T00:00:00Z".to_string(),
+        };
+        let report = assemble_markdown(Path::new("."), "3.56.0", "v3.56.0", &sources);
+        assert!(report.contains("| Fix entries | 1 |"), "{report}");
+        assert!(report.contains("| Changed entries | 1 |"), "{report}");
+    }
+
+    #[test]
     fn changelog_parser_joins_wrapped_entries_and_preserves_inline_code_heading() {
         let fixture = "# Changelog\n\n## [2.4.0] - 2026-09-01\n\n### Changed\n- `cas release report` assembles the\n  complete report from project sources.\n\n### Fixed\n- The report reports supervisor\n  delivery evidence without truncation.\n";
         let section = parse_changelog_section(fixture, "2.4.0").expect("section");
@@ -2970,6 +2999,43 @@ Dev reply
             format_publication_line("2026-09-09T16:51:40Z"),
             "Published 9 September 2026 · 16:51 UTC"
         );
+    }
+
+    #[test]
+    fn reply_was_now_headings_do_not_become_release_groups_or_themes() {
+        let draft = include_str!("../../../docs/release-notes/2026-10-15-v3.55.0-slack.md");
+        let parsed = parse_release_note_draft(draft);
+        let themes = draft_theme_order(&parsed.articles);
+        assert!(
+            themes.iter().all(|theme| !theme.contains("Reply (Was → Now)")),
+            "unexpected presentation heading in themes: {themes:?}"
+        );
+
+        let sources = AcquiredSources {
+            project: "fixture".to_string(),
+            changelog: None,
+            changelog_path: None,
+            release_notes: Some((
+                PathBuf::from("docs/release-notes/2026-10-15-v3.55.0-slack.md"),
+                draft.to_string(),
+            )),
+            release_note_articles: parsed.articles,
+            release_note_user_punch: parsed.user_punch,
+            release: None,
+            issues: Vec::new(),
+            assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(),
+            github_repo: None,
+            issue_count: 0,
+            warnings: Vec::new(),
+            retrieved_at: "2026-10-15T00:00:00Z".to_string(),
+        };
+        let user = was_now_sections(&sources, true);
+        let dev = was_now_sections(&sources, false);
+        assert!(!user.contains("### Reply (Was → Now)"), "{user}");
+        assert!(!dev.contains("### Reply (Was → Now)"), "{dev}");
+        assert!(user.contains("### Release changes"), "{user}");
+        assert!(dev.contains("### Release changes"), "{dev}");
     }
 
     #[test]

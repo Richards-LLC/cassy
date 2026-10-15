@@ -1476,10 +1476,18 @@ fn reset_stale_preassign_holder(
         format!("{}\n\n{audit}", reset.notes)
     };
     reset.updated_at = chrono::Utc::now();
-    store
-        .update(&reset)
-        .map(|_| ())
-        .map_err(|e| format!("could not persist stale-holder reset: {e}"))
+    store.update(&reset)
+        .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
+    // Reset settles only the retired identities captured above. A replacement
+    // that wins between persistence and this cloud call must keep its claim.
+    let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
+        .filter(|agent| agent.name == holder).map(|agent| agent.id.clone()).collect();
+    if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(cas_dir)
+        && let Err(error) = claims.release_local(&task.id, &|id| retired_ids.contains(id))
+    {
+        tracing::debug!(task = %task.id, %error, "stale assignee cloud release failed; start will retry");
+    }
+    Ok(())
 }
 
 /// Why a worker's process was retired, which decides what happens to the

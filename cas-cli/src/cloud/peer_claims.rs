@@ -318,6 +318,7 @@ impl PeerClaims {
         duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
     ) -> Acquire {
+        let deadline = Instant::now() + PEER_BUDGET;
         let key = self.key(task_id);
         let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
         let coordinator = match self.coordinator(agent_id) {
@@ -348,7 +349,32 @@ impl PeerClaims {
         if is_local(&held_by) {
             return Acquire::LocalHolder(held_by);
         }
-        self.conflict_answer(&key, &held_by, expires_at)
+        let answer = self.conflict_answer(&key, &held_by, expires_at);
+        match answer {
+            Acquire::StalePeer(hold) => self.take_stale_peer(
+                task_id, kind, &hold, agent_id, agent_name, duration_secs, deadline,
+            ),
+            answer => answer,
+        }
+    }
+
+    /// A stale observation is not permission to release a later owner's claim.
+    /// Re-read ownership and liveness, then use the wire protocol's owner-scoped
+    /// release. A raced live holder is reported rather than overwritten.
+    fn take_stale_peer(
+        &self, task_id: &str, kind: ClaimKind, observed: &PeerHold,
+        agent_id: &str, agent_name: &str, duration_secs: u32, deadline: Instant,
+    ) -> Acquire {
+        let key = self.key(task_id);
+        let current = match self.coordinator(agent_id).and_then(|c| c.get_lock(&key)) {
+            Ok(Some(lock)) => self.hold(&key, &lock.agent_id),
+            Ok(None) => return Acquire::Unavailable("the stale claim disappeared; retry claiming".into()),
+            Err(error) => return Acquire::Unavailable(error.to_string()),
+        };
+        if current.agent_id != observed.agent_id || !current.is_stale(Utc::now()) {
+            return Self::answer(current);
+        }
+        self.move_claim(task_id, kind, &current.agent_id, agent_id, agent_name, duration_secs, deadline)
     }
 
     /// A peer's hold from a refused claim. The 409 names the holder and when
@@ -384,12 +410,26 @@ impl PeerClaims {
         agent_name: &str,
         duration_secs: u32,
     ) -> Acquire {
+        self.move_claim(task_id, kind, from, agent_id, agent_name, duration_secs,
+            Instant::now() + CLAIM_TIMEOUT)
+    }
+
+    fn move_claim(
+        &self, task_id: &str, kind: ClaimKind, from: &str,
+        agent_id: &str, agent_name: &str, duration_secs: u32, deadline: Instant,
+    ) -> Acquire {
         let key = self.key(task_id);
         let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
-        let moved = self
-            .coordinator(from)
+        let remaining = || {
+            let left = deadline.saturating_duration_since(Instant::now()).min(CLAIM_TIMEOUT);
+            if left.is_zero() { Err(CasError::Other("stale claim recovery budget exhausted".into())) }
+            else { Ok(left) }
+        };
+        let moved = remaining()
+            .and_then(|left| self.coordinator(from).map(|c| c.with_timeout(left)))
             .and_then(|holder| holder.release(&key))
-            .and_then(|()| self.coordinator(agent_id))
+            .and_then(|()| remaining())
+            .and_then(|left| self.coordinator(agent_id).map(|c| c.with_timeout(left)))
             .and_then(|coordinator| coordinator.claim(&key, duration_secs, Some(&reason)));
         match moved {
             Ok(ClaimResult::Success(_)) => Acquire::Claimed,
@@ -505,8 +545,8 @@ impl PeerClaims {
             Listed::Missing | Listed::Unknown => (None, None),
         };
         let live = match (listed_live, renewed_recently) {
-            (Some(true), _) | (_, Some(true)) => Some(true),
-            (Some(false), _) | (None, Some(false)) => Some(false),
+            (Some(live), _) => Some(live),
+            (None, Some(live)) => Some(live),
             (None, None) => None,
         };
         PeerHold {
@@ -646,7 +686,11 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
             // A focus another agent of this database also claims: the epic is
             // still claimed for this repository, and nothing is lost.
             Acquire::LocalHolder(_) => {}
-            Acquire::PeerHolds(hold) | Acquire::StalePeer(hold) => {
+            Acquire::StalePeer(_) => {
+                // Staleness is not a competing worker. Retry recovery next beat.
+                report.failed += 1;
+            }
+            Acquire::PeerHolds(hold) => {
                 notify_claim_lost(cas_root, agents.as_ref(), me.as_ref(), agent_id, &task_id, &hold);
                 report.conflicts.push((task_id, hold));
             }
@@ -843,14 +887,19 @@ pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Optio
         .map(|agent| agent.name)
         .unwrap_or_else(|_| agent_id.to_string());
     let is_local = |id: &str| agents.get(id).is_ok();
-    Some(claims.acquire(
-        epic_id,
-        ClaimKind::Epic,
-        agent_id,
-        &name,
-        lease_duration_secs(cas_root),
-        &is_local,
-    ))
+    let duration = lease_duration_secs(cas_root);
+    let answer = claims.acquire(epic_id, ClaimKind::Epic, agent_id, &name, duration, &is_local);
+    let answer = match answer {
+        Acquire::LocalHolder(ref from) if agents.get(from).ok().is_some_and(|holder| {
+            !crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+                &holder,
+                crate::mcp::tools::service::agent_liveness::agent_process_is_alive(&holder),
+                crate::cloud::peers::PEER_LIVE_SECS,
+            ).is_live()
+        }) => claims.take_from_local(epic_id, ClaimKind::Epic, from, agent_id, &name, duration),
+        answer => answer,
+    };
+    Some(answer)
 }
 
 /// Forget `agent_id`'s focus claim and release it in the cloud. Returns the

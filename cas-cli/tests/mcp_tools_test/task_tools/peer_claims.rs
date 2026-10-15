@@ -598,9 +598,8 @@ async fn a_claim_whose_holder_is_not_a_live_agent_is_stale() {
     let taken = start(&bravo.core, "cas-p010", false)
         .await
         .expect("a claim nobody keeps alive does not block");
-    assert!(taken.contains("alpha-sup"), "{taken}");
-    assert!(taken.contains("STALE PEER CLAIM"), "{taken}");
-    assert!(taken.contains("not seen alive"), "{taken}");
+    assert!(!taken.contains("STALE PEER CLAIM"), "{taken}");
+    assert_eq!(cloud.active_lock("cas-p010").unwrap().1.agent_id, bravo.agent_id);
 }
 
 /// cas-0078 (e): a holder whose cloud registration failed is not listed, but

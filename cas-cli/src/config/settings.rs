@@ -604,6 +604,12 @@ pub struct FactoryConfig {
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 
+    /// Per-build systemd MemoryHigh in GiB. 0 reserves half of host RAM
+    /// across max_concurrent_builders (bounded to 256 MiB..16 GiB per build).
+    /// Non-Linux hosts or unavailable user sessions log and run unscoped.
+    #[serde(default)]
+    pub worker_memory_high_gib: u32,
+
     /// Minimum GiB available before starting a worker on its filesystem.
     /// Checked before creating or reusing a worktree, even with target seeding off. 0 disables it.
     #[serde(default = "default_spawn_min_free_gib")]
@@ -902,6 +908,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            worker_memory_high_gib: 0,
             spawn_min_free_gib: default_spawn_min_free_gib(),
             prompt_retention_days: default_prompt_retention_days(),
             event_telemetry_retention_days: default_event_telemetry_retention_days(),

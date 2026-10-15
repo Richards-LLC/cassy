@@ -188,6 +188,10 @@ impl Config {
                 factory.max_concurrent_builders.to_string(),
             ),
             (
+                "factory.worker_memory_high_gib".to_string(),
+                factory.worker_memory_high_gib.to_string(),
+            ),
+            (
                 "factory.warn_stale_assignment".to_string(),
                 factory.warn_stale_assignment.to_string(),
             ),

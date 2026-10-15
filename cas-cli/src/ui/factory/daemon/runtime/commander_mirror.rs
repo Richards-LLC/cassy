@@ -255,31 +255,79 @@ fn activation_time(
         .or(Some(initial))
 }
 
+/// An explicit opt-out ends the capture window. Persist the resume floor so
+/// neither daemon restarts nor terminal-answer backfill expose disabled turns.
+fn resume_floor(
+    root: &Path,
+    session: &str,
+    enabled: bool,
+) -> std::io::Result<Option<DateTime<Utc>>> {
+    let directory = root.join("commander-mirror");
+    std::fs::create_dir_all(&directory)?;
+    let hash = format!("{:x}", Sha256::digest(session.as_bytes()));
+    let disabled = directory.join(format!("{hash}.disabled"));
+    let resumed = directory.join(format!("{hash}.resumed"));
+    if !enabled {
+        std::fs::write(disabled, b"disabled\n")?;
+        return Ok(None);
+    }
+    if disabled.exists() {
+        std::fs::write(&resumed, Utc::now().to_rfc3339())?;
+        std::fs::remove_file(disabled)?;
+    }
+    match std::fs::read_to_string(resumed) {
+        Ok(at) => DateTime::parse_from_rfc3339(&at)
+            .map(|at| Some(at.with_timezone(&Utc)))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn mirror_supervisor_replies(
     root: &Path,
     project_path: &Path,
     session: &str,
     queue: &dyn PromptQueueStore,
 ) {
-    // cas-5c89: an operator who only types in the supervisor's terminal is an
-    // operator too. Gating on a paired-device Commander send left a
-    // terminal-only conversation showing questions and never their answers.
-    let Ok(Some(first_operator_at)) = queue.first_operator_activity_at(session) else {
+    let Ok(config) = crate::config::Config::load(root) else {
+        return;
+    };
+    if !config.factory().commander_mirror_enabled {
+        let _ = resume_floor(root, session, false);
+        return;
+    }
+    let Ok(agents) = crate::store::open_agent_store(root) else {
+        return;
+    };
+    let Ok(agents) = agents.list(None) else {
+        return;
+    };
+    let supervisors = agents
+        .iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor
+                && agent.factory_session.as_deref() == Some(session)
+        })
+        .collect::<Vec<_>>();
+    if supervisors.is_empty() {
+        return;
+    }
+    // P3: the local operator lane exists before its reader first sends a
+    // message. Enrollment gates remote delivery, not local capture. Final
+    // replies remain owed even if registration became Idle/Stale/Shutdown.
+    let first_operator_at = queue
+        .first_operator_activity_at(session)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::minutes(2));
+    let Ok(resumed_since) = resume_floor(root, session, true) else {
         return;
     };
     let Some(active_since) = activation_time(root, session, first_operator_at) else {
         return;
     };
-    let Ok(agents) = crate::store::open_agent_store(root) else {
-        return;
-    };
-    let Ok(agents) = agents.list(Some(cas_types::AgentStatus::Active)) else {
-        return;
-    };
-    for agent in agents.iter().filter(|agent| {
-        agent.role == cas_types::AgentRole::Supervisor
-            && agent.factory_session.as_deref() == Some(session)
-    }) {
+    for agent in supervisors {
         // Supervisor registration persists its own harness under
         // `supervisor_cli`; `worker_cli` names the default child harness.
         let cli = agent
@@ -305,6 +353,9 @@ pub(super) fn mirror_supervisor_replies(
             continue;
         };
         for turn in completed_turns(&values, cli) {
+            if resumed_since.is_some_and(|floor| turn.completed_at < floor) {
+                continue;
+            }
             // cas-5c89: the answer to a question the operator typed in the
             // terminal threads under that question, and is mirrored even if it
             // completed before mirroring started; other turns are not

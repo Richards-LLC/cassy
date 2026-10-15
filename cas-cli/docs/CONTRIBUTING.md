@@ -2,6 +2,13 @@
 
 ## Factory cloud client (disabled by default)
 
+Completed supervisor replies are mirrored to local operator conversation history
+by default, including before the operator sends a first message and after the
+supervisor becomes idle. This local recording is independent of cloud enrollment.
+To opt out, run `cas config set factory.commander_mirror_enabled false`.
+Setting it back to `true` starts a new capture window; replies from the disabled
+period are not replayed. Existing conversation history is retained.
+
 The factory daemon ships with a live-stream WebSocket client
 (`cas-cli/src/ui/factory/daemon/cloud_client.rs`) that pushes factory state,
 events, and pane output to a Phoenix-framework endpoint

@@ -525,6 +525,12 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
+    /// Mirror completed supervisor text into local operator history. This
+    /// does not enroll a cloud audience. Set false to opt out; re-enabling
+    /// starts a new window without replaying replies from the disabled period.
+    #[serde(default = "default_true")]
+    pub commander_mirror_enabled: bool,
+
     /// Directories outside the worktree where this project's factory agents
     /// (supervisor and workers) may create, edit and delete files (GH #1182).
     /// Operator-only: set with `cas config set factory.write_roots`, which
@@ -884,6 +890,7 @@ impl Default for FactoryConfig {
         Self {
             worker_policy: Default::default(),
             artifacts_root: None,
+            commander_mirror_enabled: true,
             write_roots: Vec::new(),
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),

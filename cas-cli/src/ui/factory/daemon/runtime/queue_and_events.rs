@@ -9586,9 +9586,35 @@ fn fire_reminder(
             )
         };
 
-        if let Err(e) =
-            queue.enqueue_with_session(&reminder.owner_id, &target, &prompt, session_name)
+        // cas-207e: a Commander ask's deadline wakes the supervisor as a
+        // blocker, stamped by the daemon, so an idle pane acts on it now.
+        let enqueued = if reminder
+            .trigger_filter
+            .as_ref()
+            .is_some_and(|filter| filter.get("operator_ask").is_some())
         {
+            queue
+                .enqueue_idempotent(
+                    &format!("operator-ask-deadline:{}", reminder.id),
+                    &target,
+                    &crate::prompt_revalidation::attach_blocker_envelope(
+                        &prompt,
+                        "operator ask deadline",
+                        None,
+                    ),
+                    Some(session_name),
+                    Some("operator ask deadline"),
+                    Some(cas_store::NotificationPriority::High),
+                    &format!("operator-ask-deadline:{}", reminder.id),
+                    Some(&cas_store::QueueOrigin::Daemon),
+                )
+                .map(|_| ())
+        } else {
+            queue
+                .enqueue_with_session(&reminder.owner_id, &target, &prompt, session_name)
+                .map(|_| ())
+        };
+        if let Err(e) = enqueued {
             tracing::error!("Failed to enqueue reminder prompt: {}", e);
         } else {
             super::delivery::wake_daemon_after_enqueue(cas_dir);
@@ -10019,6 +10045,70 @@ mod tests {
         assert_eq!(prompts[0].target, "young-swan-22");
         assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
         assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
+    }
+
+    /// cas-207e: a Commander ask's deadline reminder fires as a
+    /// Daemon-stamped blocker wake carrying the default to proceed with.
+    #[test]
+    fn operator_ask_deadline_fires_as_a_blocker_wake_cas_207e() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
+        reminder_store.init().unwrap();
+        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
+            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
+        prompt_store.init().unwrap();
+        let id = reminder_store
+            .create_with_scope(
+                "owner-id",
+                None,
+                "Operator ask #7 reached its deadline unanswered. Proceed now with the default: cut 3.54.",
+                cas_store::ReminderTriggerType::Time,
+                Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                None,
+                Some(&serde_json::json!({ "operator_ask": 7 })),
+                0,
+                Some("factory"),
+                Some("creator-session"),
+                false,
+                None,
+            )
+            .unwrap();
+        let reminder = reminder_store
+            .get_due_time_reminders()
+            .unwrap()
+            .into_iter()
+            .find(|reminder| reminder.id == id)
+            .unwrap();
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &None,
+            &Some(Arc::clone(&prompt_store)),
+            "factory",
+            "young-swan-22",
+            &HashMap::from([("owner-id".into(), "young-swan-22".into())]),
+            None,
+            temp.path(),
+        );
+        let prompts = prompt_store.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "young-swan-22");
+        assert!(
+            prompts[0]
+                .prompt
+                .contains("Proceed now with the default: cut 3.54.")
+        );
+        assert_eq!(prompts[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &super::WakeSender::Daemon,
+                "young-swan-22",
+                &prompts[0].source,
+                &prompts[0].prompt
+            ),
+            Some(super::SupervisorWakeClass::Blocker)
+        );
     }
 
     #[test]

@@ -294,7 +294,7 @@ pub(crate) struct MirrorScanState {
 }
 
 struct TranscriptCursor {
-    source: (String, String, Option<String>),
+    source: (String, cas_mux::SupervisorCli, Option<String>),
     path: PathBuf,
     length: u64,
     modified: Option<SystemTime>,
@@ -359,7 +359,7 @@ pub(super) fn scan_supervisor_replies(
             .unwrap_or(cas_mux::SupervisorCli::Claude);
         let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
         let account = agent.metadata.get("supervisor_account_dir").cloned();
-        let source = (session_id.to_owned(), cli.to_string(), account.clone());
+        let source = (session_id.to_owned(), cli, account.clone());
         // Keep resolution out of the steady-state poll as well: scan-based
         // harness resolvers can themselves read transcript metadata. /clear,
         // account/harness changes, and a removed path invalidate this cache.

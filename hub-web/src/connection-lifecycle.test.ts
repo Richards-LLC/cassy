@@ -2,7 +2,7 @@ import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { replaceMachineConnection } from "./connection-lifecycle";
 import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
-import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS } from "./connection-state";
+import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS, STAGE_TIMEOUT_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
 import { ConversationHistory } from "./conversation-history";
 import type { MessageQueued, StoredMachine } from "./types";
@@ -1043,5 +1043,76 @@ describe("Commander live connection lifecycle", () => {
     socket.receive({ channel: "health", pong: ping });
     // 17ms for the catalog refresh plus 24ms for the socket's answer.
     expect(connection.snapshot().latencyMs).toBe(41);
+  });
+});
+
+/** A half-open socket: close() starts the closing handshake, which never completes, so onclose never fires. */
+class HalfOpenSocket extends TransportSocket {
+  static override instances: HalfOpenSocket[] = [];
+  constructor(url: URL) { super(url); HalfOpenSocket.instances.push(this); }
+  override close(): void { this.readyState = 2; }
+}
+
+// cas-5dbc: after an outage the legacy attach chain could die, leaving the
+// session "Reconnecting" with no further attempt (HUB-J4, 1 in ~300 runs).
+// Every path that ends an attempt must leave the next one scheduled.
+describe("a session's attach chain always has its next attempt (cas-5dbc)", () => {
+  const timers = { toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] as ("setTimeout" | "clearTimeout" | "setInterval" | "clearInterval")[] };
+
+  it("replaces a dial stuck on a half-open socket on the backoff, without waiting for its close", async () => {
+    transport();
+    HalfOpenSocket.instances = [];
+    vi.stubGlobal("WebSocket", HalfOpenSocket);
+    const connection = supervisor(await storedMachine("half-open-dial"));
+    vi.useFakeTimers(timers);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    expect(HalfOpenSocket.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.dialing + MACHINE_RETRY_CEILING_MS);
+    expect(HalfOpenSocket.instances.length, "a new attempt after the dial timed out").toBeGreaterThan(1);
+  });
+
+  it("replaces an opened socket that sends no session state and never finishes closing", async () => {
+    transport();
+    HalfOpenSocket.instances = [];
+    vi.stubGlobal("WebSocket", HalfOpenSocket);
+    const connection = supervisor(await storedMachine("half-open-ready"));
+    vi.useFakeTimers(timers);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    HalfOpenSocket.instances[0]!.open();
+    await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.attaching + MACHINE_RETRY_CEILING_MS);
+    expect(HalfOpenSocket.instances.length, "a new attempt after the ready deadline").toBeGreaterThan(1);
+  });
+
+  it("reattaches a session whose attempt was abandoned while its ticket was in flight", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const fetchNow = globalThis.fetch;
+    const tickets: Array<() => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/auth/websocket-ticket" && tickets.length === 0) {
+        await new Promise<void>(resolve => tickets.push(resolve));
+      }
+      return fetchNow(input, init);
+    }));
+    const connection = supervisor(await storedMachine("abandoned-ticket"));
+    vi.useFakeTimers(timers);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attempt = connection.attach("session-a");
+    await vi.waitFor(() => expect(tickets).toHaveLength(1));
+    // The machine's sockets are dropped (lost heartbeats, a half-open
+    // machine socket) while this attempt awaits its ticket: the attempt
+    // ends without a socket, and no retry was pending.
+    (connection as unknown as { abandonSockets(reason: string): void }).abandonSockets("Lost connection to the machine");
+    tickets[0]!();
+    await attempt;
+    expect(TransportSocket.instances).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS + MACHINE_RETRY_CEILING_MS);
+    expect(TransportSocket.instances.length, "the live machine's heartbeat reattached the session").toBeGreaterThan(0);
   });
 });

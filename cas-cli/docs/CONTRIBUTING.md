@@ -519,7 +519,7 @@ cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
 cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
 scripts/run-scoped-tests.sh -p cas --lib module_name
 scripts/run-scoped-tests.sh -p cas --test integration_cli cli_test::
-cargo nextest run -p cas             # Full suite: epic assembly and release gates
+cargo nextest run -p cas             # Full suite: final-tree integration gate
 cargo test -p cas --doc              # Doctests (nextest does not support them)
 cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
@@ -536,7 +536,7 @@ Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
 
-### Worker checks, targeted tests and supervisor assembly
+### Worker checks, targeted tests and merge-queue integration
 
 Workers may type-check their committed change with exactly
 `cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or
@@ -562,24 +562,6 @@ Git-ignored `target/worker-check.log` or the task's artifacts directory; create
 the parent directory first. In-repo logs that Git does not ignore are refused
 by the hook. The clean-head gate still rejects source changes.
 
-Rust-touching supervisor lane merges require separate combined-tree evidence.
-Run `python3 scripts/check-lane-compile.py . <target> <source> --prove` as a
-supervisor before merging, backgrounded with a log. It uses the same capped
-runner for package-scoped `--lib` and `--tests` checks in a private preview and
-records PASS only for the resulting tree. Lane-tip receipts do not qualify.
-The preview preflight, `release-train.sh --check-lane`, and the actual detached
-Git merge enforce this evidence before the epic ref advances. Docs/scripts-only
-merges need no compile receipt. Rust merges require clean linked target checkouts.
-
-The no-build lane preview uses a load-aware wall budget for fast rows: 60 seconds
-times `(1 + one-minute load / CPU count)`, capped at 600 seconds. At load of
-1–1.5 times the core count, this allows 120–150 seconds. An exhausted budget
-reports unfinished rows from the gate's plan and timing receipts, plus a retry
-command. Supervisors can rerun
-`python3 scripts/check-lane-fast-rows.py . <target> <source> --timeout-secs 180`
-with an explicit bound of 1–1800 seconds. The preview preserves branch refs and
-cleans its temporary checkout on success, row failure, and timeout.
-
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
 An omitted target selects `--lib`; `--test` must name one explicit harness from
@@ -593,31 +575,20 @@ against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
-The merge queue is the integration proof (cas-2970). The path from a green
-lane to `main` runs no local full suite: lane CI (Scoped Validation) and the
-supervisor's lane compile admit each lane to the epic; the epic PR enters the
-merge queue; the queue's Fast Validation runs the CI script tiers, the
-Commander web checks, the complete workspace suite sharded from an archive in
-a plain checkout, doctests and macOS Check on the exact merged tree; that tree
-becomes `main`. Do not run `python3 scripts/assembly-proof.py prove
-<epic-worktree>` before opening the PR. It stays an opt-in diagnostic: run it
-when a queue run fails and the failure needs a local two-context reproduction,
-and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic when you do. An epic closes once its tip is contained
-in the default branch, or with a covering `ASSEMBLY_PROOF`.
-Workers still cannot run build/test/clippy/run or unfiltered nextest,
-`rustc`, scoped-test scripts, or `make test*`. Child closes reference the
-epic's integration proof rather than scoped `--proof` or `loaded_proof` notes.
-That holds for a worker's close and for a supervisor closing an epic child
-whose delivery is already on the integration branch: close records a
-pending-integration note until the epic lands through the queue or carries a
-covering `ASSEMBLY_PROOF`. Standalone tasks still carry
-their own receipts. A scoped receipt may be the runner's `SCOPED_PROOF:
-targets=…` or `command=…` line, or, when that exceeds the task-note limit, the
-short `SCOPED_PROOF_RECEIPT: id=… path=…` line; `--proof` always writes that
-file (default `<git-common-dir>/cas/scoped-proof/<head>.receipt`) and close
-verifies its digest. Non-Rust suites are unaffected. An older runtime that denies the check exception requires parking
-with the unverified crates and test filters named for assembly.
+Lane CI runs the project's fast checks once for each lane. The merge queue is
+the final-tree integration gate and the only gate to `main`; its required
+checks, including the Rust suite, run once on the exact merged tree. Commander
+journeys run there only when `hub-web/` product inputs change. Do not add
+lane-merge compile or fast-row checks, park receipts, or a separate assembly
+journey run. The normal epic close follows the green queue landing. Where the
+epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
+suite only; it does not replace the queue's path to `main` or require a
+journey receipt.
+
+Workers may run the capped compile checks and named targeted tests described
+above, but the full Rust build and suite run in the merge queue. Child closes
+reference the epic integration proof. Non-Rust suites retain their own task
+checks; a documentation-only change proves its documentation acceptance check.
 
 The opt-in assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
@@ -630,9 +601,8 @@ or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
 row.
 
-The fast rows also run the no-build checks that the October 2026 release cut
-found only at assembly.
-Each runs when the lane changes its inputs, and the full gate always runs it:
+Fast rows include the no-build checks below. Lane CI selects each row when its
+inputs change; the merge queue runs its required fast-row job on the final tree:
 
 - `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
   still matches a `test.step` title in its journey spec.
@@ -647,9 +617,7 @@ Each runs when the lane changes its inputs, and the full gate always runs it:
 Contract phrases were already part of `builtin-doc-hygiene`. On this host a
 lane spanning that release's three epics ran every fast row in about 25 seconds.
 
-Each second-scale failure that reached CI or the merge queue on 2026-10-14
-is refused at park (cas-7bce). `scripts/test-fast-release-rows.py` holds one
-fixture per failure:
+`scripts/test-fast-release-rows.py` holds a fixture for each fast-row failure:
 
 - `test-shape`: integration tests under `cas-cli/tests` and `crates/*/tests`
   may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
@@ -663,8 +631,8 @@ fixture per failure:
 - `builtin-projections-src`: the no-build half of `builtin-projections`. It
   checks that the root task-verifier projection matches its embedded body.
 
-A failed row prints `FIX <row>: …`. On a committed tree the run writes a FAIL
-receipt that names the rows and those fixes, and the park refusal quotes them.
+A failed row prints `FIX <row>: …` so lane CI or the merge queue identifies the
+row to repair.
 
 The `call-shapes` row is the only implementation of the MCP call-shape lint
 (cas-043b). It runs `scripts/check-call-shapes.py` over shipped builtins and
@@ -672,12 +640,6 @@ runtime Rust templates, using the committed `scripts/mcp-call-surface.json`.
 `mcp_action_surface_test::call_shape_surface_snapshot_matches_the_published_surface`
 keeps that snapshot equal to the live surface. On drift the test prints the
 `cp` command that refreshes the snapshot.
-
-The worker pre-push guard runs `scripts/fast-rows-pre-push.sh` for pushes of
-`refs/heads/factory/*`. A same-tip PASS receipt is reused. Otherwise the guard
-runs the fast rows against the CI push base and refuses a failure with its
-`FIX` lines. `CAS_SKIP_FAST_ROWS=<reason> git push` skips the guard. Each skip
-is appended to `<git-common-dir>/cas/fast-rows/overrides.log`.
 
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
@@ -1513,12 +1475,13 @@ selection; it emits an explicit receipt. Caller spec/grep filters are refused.
 Factory PreToolUse denies worker/reviewer `--full`, unfiltered Playwright and
 unfiltered journey npm scripts. Named spec or canonical-ID runs remain allowed
 for iteration; a failing spec may be rerun at one worker, retaining the original
-failure. Reuse implementer exact-tip receipts in independent QA and do not
-rerun browsers for doc/ledger-only commits with unchanged evaluated inputs.
-The supervisor runs `scripts/journey-eval.sh <epic-artifact-dir> --full --workers=4`
-once at epic assembly; merge queue runs the full suite again. Receipts fold all
-native parts by actual catalog ID and record full base/head, pass/fail/skip
-counts, Playwright version and the native exit code. Native runners refuse
+failure. Do not rerun browsers for doc/ledger-only commits with unchanged
+evaluated inputs.
+Do not require a journey receipt at task close, independent QA, or epic
+assembly. The merge queue runs Commander journeys only when `hub-web/` product
+inputs change. Receipts fold all native parts by actual catalog ID and record
+full base/head, pass/fail/skip counts, Playwright version and the native exit
+code. Native runners refuse
 successful zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
 when requested. Rust re-exec helpers require the exact child name, one selected
 test, and one passing result; intentional signal/atexit children instead prove
@@ -1534,10 +1497,10 @@ lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
 worker-memory wrapper with its imports, and the classifier itself. Any other
 `scripts/` or `.github/` change skips them, including a `.github/workflows/ci.yml`
 edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead; a
-classifier failure runs them. The release train still runs the full journeys.
+classifier failure runs them.
 `scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
 the list omits. Markdown fixtures beneath hub-web still require web tests. The
-no-build fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
+scoped lane and merge queue select web checks from their changed inputs.
 
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires one task decision note per

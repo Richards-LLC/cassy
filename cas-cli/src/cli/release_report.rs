@@ -995,7 +995,12 @@ fn parse_changelog_section(content: &str, version: &str) -> Option<ChangelogSect
             if let Some(entry) = current.take() {
                 entries.push(entry);
             }
-            category = value.trim().to_string();
+            category = value
+                .split_once(" — ")
+                .map(|(kind, _)| kind)
+                .unwrap_or(value)
+                .trim()
+                .to_string();
         } else if let Some(value) = line.trim_start().strip_prefix("- ") {
             if let Some(entry) = current.take() {
                 entries.push(entry);
@@ -1901,6 +1906,7 @@ fn release_note_title(value: &str) -> String {
 
 fn release_note_group_label(line: &str) -> Option<String> {
     let value = line.trim();
+    let value = value.strip_prefix("### ").unwrap_or(value);
     let value = value
         .strip_prefix("**")
         .and_then(|value| value.strip_suffix("**"))
@@ -1910,14 +1916,17 @@ fn release_note_group_label(line: &str) -> Option<String> {
                 .and_then(|value| value.strip_suffix('*'))
         })?
         .trim();
-    if value.is_empty()
-        || value.contains("Was:")
-        || value.contains("Now:")
-        || is_release_note_top_level(value)
+    let normalized = value.trim_end_matches(':').trim();
+    if normalized.is_empty()
+        || normalized.eq_ignore_ascii_case("Top-level")
+        || normalized.eq_ignore_ascii_case("Reply (Was → Now)")
+        || normalized.contains("Was:")
+        || normalized.contains("Now:")
+        || is_release_note_top_level(normalized)
     {
         return None;
     }
-    Some(value.to_string())
+    Some(normalized.to_string())
 }
 
 fn is_release_note_top_level(value: &str) -> bool {
@@ -2765,6 +2774,35 @@ mod tests {
     }
 
     #[test]
+    fn changelog_summarized_356_headings_count_changed_and_fixed_entries() {
+        // These entries use the actual 3.56-style CHANGELOG summary headings.
+        let fixture = "# Changelog\n\n## [9.99.1] - 2026-10-15\n\n### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)\n- External reminder probes (`branch_contained_in`, `tag_exists`, `ci_completed`) run off the daemon loop.\n\n### Changed — coordination and tools (#1188, #1197, #1207, cas-6853, cas-fa1c, cas-48e5, cas-b58a)\n- One `remind` refusal lists every missing requirement with an example.\n\n## [9.99.2] - 2026-10-15\n";
+        let changelog = parse_changelog_section(fixture, "9.99.1").expect("section");
+        assert_eq!(changelog.entries[0].category, "Fixed");
+        assert_eq!(changelog.entries[1].category, "Changed");
+
+        let sources = AcquiredSources {
+            project: "fixture".to_string(),
+            changelog: Some(changelog),
+            changelog_path: None,
+            release_notes: None,
+            release_note_articles: Vec::new(),
+            release_note_user_punch: None,
+            release: None,
+            issues: Vec::new(),
+            assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(),
+            github_repo: None,
+            issue_count: 0,
+            warnings: Vec::new(),
+            retrieved_at: "2026-10-15T00:00:00Z".to_string(),
+        };
+        let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
+        assert!(report.contains("| Fix entries | 1 |"), "{report}");
+        assert!(report.contains("| Changed entries | 1 |"), "{report}");
+    }
+
+    #[test]
     fn changelog_parser_joins_wrapped_entries_and_preserves_inline_code_heading() {
         let fixture = "# Changelog\n\n## [2.4.0] - 2026-09-01\n\n### Changed\n- `cas release report` assembles the\n  complete report from project sources.\n\n### Fixed\n- The report reports supervisor\n  delivery evidence without truncation.\n";
         let section = parse_changelog_section(fixture, "2.4.0").expect("section");
@@ -2970,6 +3008,73 @@ Dev reply
             format_publication_line("2026-09-09T16:51:40Z"),
             "Published 9 September 2026 · 16:51 UTC"
         );
+    }
+
+    #[test]
+    fn reply_was_now_headings_do_not_become_release_groups_or_themes() {
+        let draft = r#"## User thread
+
+**Top-level:**
+
+```text
+*Live on production — User — Cassy v9.99.1*
+Was: release notes had structural headings. Now: report headings describe changes.
+```
+
+**Reply (Was → Now):**
+
+```text
+• *Wait for results* — Was: checks could finish later. Now: the change waits for checks.
+```
+
+## Dev thread
+
+**Top-level:**
+
+```text
+*Live on production — Dev — Cassy v9.99.1*
+Was: reports lacked evidence. Now: reports include verification evidence.
+```
+
+**Reply (Was → Now):**
+
+```text
+• *Merge admission* — Was: pending checks were advisory. Now: merges wait for them.
+```
+"#;
+        let parsed = parse_release_note_draft(draft);
+        let themes = draft_theme_order(&parsed.articles);
+        assert!(
+            themes
+                .iter()
+                .all(|theme| !theme.contains("Reply (Was → Now)")),
+            "unexpected presentation heading in themes: {themes:?}"
+        );
+
+        let sources = AcquiredSources {
+            project: "fixture".to_string(),
+            changelog: None,
+            changelog_path: None,
+            release_notes: Some((PathBuf::from("release-notes.md"), draft.to_string())),
+            release_note_articles: parsed.articles,
+            release_note_user_punch: parsed.user_punch,
+            release: None,
+            issues: Vec::new(),
+            assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(),
+            github_repo: None,
+            issue_count: 0,
+            warnings: Vec::new(),
+            retrieved_at: "2026-10-15T00:00:00Z".to_string(),
+        };
+        let user = was_now_sections(&sources, true);
+        let dev = was_now_sections(&sources, false);
+        assert!(!user.contains("### Reply (Was → Now)"), "{user}");
+        assert!(!dev.contains("### Reply (Was → Now)"), "{dev}");
+        assert!(!user.contains("### Top-level"), "{user}");
+        assert!(!dev.contains("### Top-level"), "{dev}");
+        assert!(user.contains("### Release changes"), "{user}");
+        assert!(dev.contains("### Release changes"), "{dev}");
     }
 
     #[test]

@@ -2491,12 +2491,15 @@ fn test_9829_worker_stalled_streak_resets_when_activity_resumes() {
     );
 
     // Goes stale again — must nudge again (streak was cleared), not jump
-    // straight to escalate. Advance `Instant` past `DEBOUNCE_DURATION` (30s)
+    // straight to escalate. Advance `Instant` past the task threshold (300s)
     // so the generic per-key debounce in `debounce_events` isn't the thing
     // suppressing re-emission — this test is isolating the streak-reset
     // logic specifically, not the debounce window.
-    let t1 = t0 + std::time::Duration::from_secs(31);
-    let ev3 = detector.detect_changes_at(&stalled, None, t1, base_utc);
+    let t1 = t0 + std::time::Duration::from_secs(301);
+    let now = base_utc + chrono::Duration::seconds(301);
+    let mut stalled = stalled;
+    stalled.agents[0].last_heartbeat = Some(now);
+    let ev3 = detector.detect_changes_at(&stalled, None, t1, now);
     assert!(
         ev3.iter().any(|e| matches!(
             e,
@@ -3284,4 +3287,222 @@ fn ct2_p2_stall_episode_baseline_tracks_activity() {
         let event = events.iter().find(|event| matches!(event, DirectorEvent::WorkerStalled { .. })).unwrap();
         assert_eq!(detector.worker_attention_episode_start(event), Some(resumed));
     }
+}
+
+#[test]
+fn ct2_p2_sleep_poll_one_nudge_per_window() {
+    let base = chrono::Utc::now();
+    let tick = std::time::Instant::now();
+    let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(300);
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "a",
+        "poller",
+        "cas-poll",
+        0,
+        Some(1800),
+        base,
+    ));
+    detector.initialize(&data);
+    let mut nudges = 0;
+    let mut last_nudge = None;
+    for seconds in (0..900).step_by(31) {
+        let now = base + chrono::Duration::seconds(seconds);
+        data.agents[0].last_heartbeat = Some(now);
+        detector.set_transcript_age_override(HashMap::from([(
+            "poller".into(),
+            Some(Duration::from_secs(1800)),
+        )]));
+        detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), false)]));
+        let count = detector
+            .detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now)
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DirectorEvent::WorkerStalled {
+                        escalate: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        if count > 0 {
+            assert_eq!(count, 1);
+            assert!(last_nudge.is_none_or(|last| seconds - last >= 300), "rolling threshold windows must never overlap");
+            last_nudge = Some(seconds);
+        }
+        nudges += count;
+        assert!(nudges <= 1 + seconds as usize / 300,
+            "at most one nudge per threshold window at {seconds}s");
+        detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), true)]));
+        assert!(
+            !detector
+                .detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), now)
+                .iter()
+                .any(|e| matches!(e, DirectorEvent::WorkerStalled { .. }))
+        );
+    }
+    // Once the loop ends, a genuinely silent worker can nudge again.
+    let now = base + chrono::Duration::seconds(1500);
+    data.agents[0].last_heartbeat = Some(now);
+    detector.set_transcript_in_flight_override(HashMap::from([("poller".into(), false)]));
+    assert!(
+        detector
+            .detect_changes_at(&data, None, tick + Duration::from_secs(1500), now)
+            .iter()
+            .any(|e| matches!(
+                e,
+                DirectorEvent::WorkerStalled {
+                    escalate: false,
+                    ..
+                }
+            ))
+    );
+}
+
+#[test]
+fn stall_cooldown_survives_checkpoint_streak_resets() {
+    let base = chrono::Utc::now();
+    let tick = std::time::Instant::now();
+    let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(300);
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "a",
+        "poller",
+        "cas-poll",
+        0,
+        Some(1800),
+        base,
+    ));
+    detector.initialize(&data);
+    assert!(
+        detector
+            .detect_changes_at(&data, None, tick, base)
+            .iter()
+            .any(|e| matches!(
+                e,
+                DirectorEvent::WorkerStalled {
+                    escalate: false,
+                    ..
+                }
+            ))
+    );
+    let stale = data.agents[0].latest_activity.clone();
+    data.agents[0].latest_activity = Some(("progress".into(), base));
+    detector.detect_changes_at(&data, None, tick, base);
+    // Even if a later snapshot loses that evidence, the cooldown survives.
+    data.agents[0].latest_activity = stale;
+    let now = base + chrono::Duration::seconds(31);
+    data.agents[0].last_heartbeat = Some(now);
+    assert!(
+        !detector
+            .detect_changes_at(&data, None, tick + Duration::from_secs(31), now)
+            .iter()
+            .any(|e| matches!(e, DirectorEvent::WorkerStalled { .. }))
+    );
+}
+
+#[test]
+fn ct2_p2_no_stall_while_tool_open() {
+    test_7e85_in_flight_tool_call_suppresses_stall_alert();
+}
+
+#[test]
+fn ct2_p2_transcript_activity_within_threshold() {
+    let base = chrono::Utc::now();
+    let mut detector = DirectorEventDetector::new(vec!["poller".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(600);
+    detector.set_transcript_age_override(HashMap::from([("poller".into(), Some(Duration::from_secs(400)))]));
+    let data = stalled_data_for(make_agent_working_stalled("a", "poller", "cas-poll", 0, Some(900), base));
+    detector.initialize(&data);
+    assert!(!detector.detect_changes_at(&data, None, std::time::Instant::now(), base).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+}
+
+#[test]
+fn stall_confirmation_does_not_open_stores_below_threshold() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    for assigned_open in [false, true] {
+        let data = if assigned_open { assigned_unstarted_data(now, 10) }
+            else { stalled_data_for(make_agent_working_stalled("a", "lively-crow", "cas-probe", 0, Some(10), now)) };
+        let mut detector = DirectorEventDetector::new(vec!["lively-crow".into()], "supervisor".into());
+        detector.set_stall_threshold_secs(300);
+        detector.set_cas_root(root.path().into());
+        detector.initialize(&data);
+        assert!(!detector.detect_changes_at(&data, None, std::time::Instant::now(), now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+        assert!(!root.path().join("cas.db").exists(), "a below-threshold tick must not resolve/open the agent store");
+    }
+}
+
+#[test]
+fn stall_confirmation_real_resolution_failure_keeps_checkpoint_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let data = stalled_data_for(make_agent_working_stalled("a", "unknown-worker", "cas-probe", 0, Some(900), now));
+    let mut detector = DirectorEventDetector::new(vec!["unknown-worker".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(300);
+    detector.set_cas_root(root.path().into());
+    detector.initialize(&data);
+    assert!(detector.detect_changes_at(&data, None, std::time::Instant::now(), now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })));
+}
+
+#[test]
+fn stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_recovers() {
+    let root = tempfile::tempdir().unwrap();
+    let account = tempfile::tempdir().unwrap();
+    let rollout = account.path().join("sessions/2026/10/15/rollout-stall-real.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let now = chrono::Utc::now();
+    let mut worker = Agent::new_with_role("real-codex-session".into(), "real-stall-poller".into(), AgentRole::Worker);
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    worker.metadata.insert("worker_account_dir".into(), account.path().to_str().unwrap().into());
+    worker.metadata.insert("clone_path".into(), root.path().to_str().unwrap().into());
+    let store = cas_store::SqliteAgentStore::open(root.path()).unwrap();
+    store.init().unwrap();
+    store.register(&worker).unwrap();
+    let meta = serde_json::json!({"type":"session_meta","payload":{"session_id":worker.id,"cwd":root.path(),"originator":"codex_cli_rs","source":"cli"}});
+    let call = serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"open","name":"shell","arguments":"{}"}});
+    let cold = std::time::SystemTime::now() - Duration::from_secs(1800);
+    std::fs::write(&rollout, format!("{meta}\n{call}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
+    assert_eq!(crate::cli::factory::wedged::resolve_worker(root.path(), &worker.name).unwrap().transcript_path.as_deref(), Some(rollout.as_path()));
+    let mut data = stalled_data_for(make_agent_working_stalled(&worker.id, &worker.name, "cas-real", 0, Some(1800), now));
+    let mut detector = DirectorEventDetector::new(vec![worker.name.clone()], "supervisor".into());
+    detector.set_cas_root(root.path().into());
+    detector.set_stall_threshold_secs(300);
+    detector.initialize(&data);
+    let tick = std::time::Instant::now();
+    assert!(!detector.detect_changes_at(&data, None, tick, now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+    let result = serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"open","output":"done"}});
+    std::fs::write(&rollout, format!("{meta}\n{call}\n{result}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
+    let later = now + chrono::Duration::seconds(301);
+    data.agents[0].last_heartbeat = Some(later);
+    assert!(detector.detect_changes_at(&data, None, tick + Duration::from_secs(301), later).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })));
+    let reopened = serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"reopened","name":"shell","arguments":"{}"}});
+    std::fs::write(&rollout, format!("{meta}\n{call}\n{result}\n{reopened}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(cold).unwrap();
+    let at = later + chrono::Duration::seconds(1);
+    data.agents[0].last_heartbeat = Some(at);
+    assert!(!detector.detect_changes_at(&data, None, tick + Duration::from_secs(302), at).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+    assert_eq!(detector.stall_probe_count, 3, "a transcript write invalidates the cached cold verdict immediately");
+}
+
+#[test]
+fn cold_stall_confirmation_backs_off_real_probes_between_ticks() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let mut data = stalled_data_for(make_agent_working_stalled("a", "cold-worker", "cas-cold", 0, Some(900), now));
+    let mut detector = DirectorEventDetector::new(vec!["cold-worker".into()], "supervisor".into());
+    detector.set_cas_root(root.path().into());
+    detector.set_stall_threshold_secs(300);
+    detector.initialize(&data);
+    let tick = std::time::Instant::now();
+    for seconds in 0..5 {
+        let at = now + chrono::Duration::seconds(seconds);
+        data.agents[0].last_heartbeat = Some(at);
+        detector.detect_changes_at(&data, None, tick + Duration::from_secs(seconds as u64), at);
+    }
+    assert_eq!(detector.stall_probe_count, 1, "cold workers must not scan /proc and reopen stores on every pass");
 }

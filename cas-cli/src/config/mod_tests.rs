@@ -954,6 +954,20 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.supervisor_queue_retention_days", "28", "28"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
+        ("factory.nice_cargo", "false", "false"),
+        ("factory.warn_stale_assignment", "false", "false"),
+        ("factory.block_stale_assignment", "false", "false"),
+        ("factory.stale_threshold_commits", "3", "3"),
+        ("factory.stall_threshold_secs", "420", "420"),
+        ("factory.context_recycle_threshold_percent", "85", "85"),
+        ("factory.stall_after_secs", "900", "900"),
+        ("factory.delivery_stalled_priority_secs", "120", "120"),
+        ("factory.delivery_stalled_normal_secs", "240", "240"),
+        ("factory.strict_cli", "true", "true"),
+        ("factory.target_cache_high_watermark_percent", "90", "90"),
+        ("factory.target_cache_low_watermark_percent", "70", "70"),
+        ("factory.target_cache_min_idle_secs", "7200", "7200"),
+        ("factory.target_cache_retention_count", "2", "2"),
         ("factory.epic_base_branch", "staging", "staging"),
         ("factory.ai_enrichment.enabled", "true", "true"),
         ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
@@ -1030,6 +1044,92 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         Some(FACTORY_ARTIFACTS_ROOT_DEFAULT),
         "an unset artifacts_root reads as its default"
     );
+}
+
+#[test]
+fn factory_nice_cargo_round_trips_cas_f7b9() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let mut config = Config::default();
+    let registry = meta::registry();
+    registry.validate("factory.nice_cargo", "false").unwrap();
+    config.set("factory.nice_cargo", "false").unwrap();
+    assert!(!config.factory().nice_cargo);
+    assert_eq!(config.get("factory.nice_cargo").as_deref(), Some("false"));
+    assert!(config.list().contains(&("factory.nice_cargo".into(), "false".into())));
+    config.save(env.home()).unwrap();
+    let mut loaded = Config::load(env.home()).unwrap();
+    assert!(!loaded.factory().nice_cargo);
+    loaded.set("factory.nice_cargo", "true").unwrap();
+    assert!(loaded.factory().nice_cargo);
+    assert!(loaded.set("factory.nice_cargo", "invalid").is_err());
+    assert!(loaded.factory().nice_cargo, "invalid input must preserve the value");
+}
+
+/// Discover fields from the serialized runtime configuration, independently
+/// of the registry, so an omitted registry entry cannot hide from coverage.
+#[test]
+fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
+    // Populate fields omitted when empty/None. Retired compatibility fields
+    // deliberately do not serialize and are not runtime settings.
+    let factory = FactoryConfig {
+        artifacts_root: Some("/mnt/factory-artifacts".into()),
+        epic_base_branch: Some("main".into()),
+        write_roots: vec!["/mnt/operator-approved".into()],
+        ..FactoryConfig::default()
+    };
+    let config = Config { factory: Some(factory.clone()), ..Config::default() };
+    let serialized = serde_json::to_value(factory).unwrap();
+    fn collect_keys(prefix: &str, value: &serde_json::Value, keys: &mut Vec<String>) {
+        if let Some(object) = value.as_object() {
+            for (field, value) in object {
+                collect_keys(&format!("{prefix}.{field}"), value, keys);
+            }
+        } else {
+            keys.push(prefix.to_string());
+        }
+    }
+    let mut keys = Vec::new();
+    collect_keys("factory", &serialized, &mut keys);
+    // Each exception must name an internal field and explain why operators
+    // cannot configure it. Currently every serialized field is public.
+    const INTERNAL: &[(&str, &str)] = &[];
+    for (key, reason) in INTERNAL {
+        assert!(!reason.trim().is_empty(), "{key}: internal exception needs a reason");
+        assert!(keys.iter().any(|field| field == key), "{key}: stale internal exception");
+    }
+    let registry = meta::registry();
+    let listed: std::collections::HashMap<_, _> = config.list().into_iter().collect();
+    let mut missing = Vec::new();
+    for key in keys {
+        if INTERNAL.iter().any(|(internal, _)| *internal == key) {
+            continue;
+        }
+        // The serialized legacy name remains settable; discovery lists its
+        // canonical worker_build_jobs name.
+        let canonical = if key == "factory.cargo_build_jobs" {
+            "factory.worker_build_jobs"
+        } else {
+            &key
+        };
+        if registry.get(canonical).is_none() {
+            missing.push(key);
+            continue;
+        }
+        assert!(config.get(&key).is_some(), "{key}: missing get support");
+        assert!(listed.contains_key(canonical), "{key}: missing list support");
+        let pointer = format!("/{}", key.strip_prefix("factory.").unwrap().replace('.', "/"));
+        let value = serialized.pointer(&pointer).unwrap();
+        let expected = match value {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Array(values) => values.iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>().join(","),
+            _ => value.to_string(),
+        };
+        assert_eq!(config.get(&key).as_deref(), Some(expected.as_str()), "{key}: runtime field differs from get");
+        assert_eq!(listed.get(canonical), Some(&expected), "{key}: runtime field differs from list");
+    }
+    assert!(missing.is_empty(), "serialized factory fields missing registry entries: {missing:?}");
 }
 
 /// GH #1182: `[factory] write_roots` lives in config.toml, is shown by `get`

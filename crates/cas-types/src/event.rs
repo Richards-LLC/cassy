@@ -68,6 +68,8 @@ pub enum EventType {
     WorkerVerificationBlocked,
     /// Worker push was refused by the factory branch guard
     WorkerPushBlocked,
+    /// Observed worker activity, including an activity-bearing wake-gate decline.
+    WorkerActivity,
 
     /// All subtasks of an epic are closed — epic ready to close
     EpicSubtasksComplete,
@@ -111,6 +113,7 @@ impl fmt::Display for EventType {
             EventType::WorkerGitCommit => write!(f, "worker_git_commit"),
             EventType::WorkerVerificationBlocked => write!(f, "worker_verification_blocked"),
             EventType::WorkerPushBlocked => write!(f, "worker_push_blocked"),
+            EventType::WorkerActivity => write!(f, "worker_activity"),
             EventType::EpicSubtasksComplete => write!(f, "epic_subtasks_complete"),
             EventType::VerificationStarted => write!(f, "verification_started"),
             EventType::VerificationAdded => write!(f, "verification_added"),
@@ -149,6 +152,7 @@ impl FromStr for EventType {
             "worker_git_commit" => Ok(EventType::WorkerGitCommit),
             "worker_verification_blocked" => Ok(EventType::WorkerVerificationBlocked),
             "worker_push_blocked" => Ok(EventType::WorkerPushBlocked),
+            "worker_activity" => Ok(EventType::WorkerActivity),
             "epic_subtasks_complete" => Ok(EventType::EpicSubtasksComplete),
             "verification_started" => Ok(EventType::VerificationStarted),
             "verification_added" => Ok(EventType::VerificationAdded),
@@ -285,7 +289,8 @@ impl Event {
             EventType::WorkerGitCommit => "⬆",            // Up arrow (commit)
             EventType::WorkerVerificationBlocked => "🔒", // Lock (blocked)
             EventType::WorkerPushBlocked => "🚫",         // No entry (push blocked)
-            EventType::EpicSubtasksComplete => "🎉",       // Party (all subtasks done)
+            EventType::WorkerActivity => "→",             // Observed progress
+            EventType::EpicSubtasksComplete => "🎉",      // Party (all subtasks done)
             EventType::VerificationStarted => "🔍",       // Magnifying glass (verifying)
             EventType::VerificationAdded => "📋",         // Clipboard (result recorded)
             EventType::AuditTrailGap => "⚠",             // Warning (audit gap)

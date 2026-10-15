@@ -404,6 +404,29 @@ pub(crate) fn enqueue_director_prompt(
     Ok(id)
 }
 
+/// Stall nudges always enter the durable lane, even for a ready pane.
+/// The episode identity and its session scope survive daemon retries.
+pub(crate) fn enqueue_worker_stall_nudge(
+    cas_dir: &Path,
+    factory_session: &str,
+    worker: &str,
+    task_id: &str,
+    text: &str,
+    episode_start: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<i64> {
+    let subject = serde_json::json!([worker, task_id]).to_string();
+    let episode =
+        super::lifecycle::attention_episode_key("worker_stall_nudge", &subject, episode_start);
+    let key = format!("worker-attention:{factory_session}:{episode}");
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = match queue.enqueue_worker_stall_nudge(worker, text, factory_session, task_id, &key)? {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    };
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
 /// Prefix PTY-delivered text with literal sender attribution.
 ///
 /// Emits exactly `Message from <sender>: <text>` — no summary interpolation before
@@ -1319,6 +1342,35 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ct2_p1_director_nudge_is_measurable() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let start = chrono::Utc::now();
+        let first = enqueue_worker_stall_nudge(
+            &cas_dir,
+            "session",
+            "worker",
+            "cas-poll",
+            "gone quiet",
+            start,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            enqueue_worker_stall_nudge(&cas_dir, "session", "worker", "cas-poll", "replay", start)
+                .unwrap()
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, first);
+        // Match the daemon's full-row reread; legacy feed peeks omit kind.
+        let row = queue.queued_prompt(first).unwrap().unwrap();
+        assert_eq!(row.kind.as_deref(), Some("worker_stall_nudge"));
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
 
     #[test]
     fn missing_team_path_triggers_fallback_but_other_errors_do_not() {

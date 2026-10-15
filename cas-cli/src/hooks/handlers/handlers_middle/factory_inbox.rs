@@ -726,6 +726,35 @@ mod tests {
     /// literal to use `user_prompt`; that is precisely the assumption that made
     /// the bug invisible for a full release.
     #[test]
+    fn stalled_nudge_hooks_skip_routine_alarm_at_turn_and_tool_boundaries() {
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("worker-stall-hook")),
+            ("CAS_FACTORY_SESSION", Some("stall-hook-session")),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let outcome = store.enqueue_worker_stall_nudge("worker-stall-hook", "you are stalled",
+            "stall-hook-session", "cas-stall-hook", "worker-attention:hook-test").unwrap();
+        let id = match outcome {
+            cas_store::EnqueueIdempotentResult::Created(id) | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        let mut input: HookInput = serde_json::from_str(r#"{
+            "session_id":"hook-stall", "cwd":"/tmp", "hook_event_name":"UserPromptSubmit", "prompt":"continue"
+        }"#).unwrap();
+        input.agent_role = Some("worker".into());
+        let at_turn = surface_factory_inbox(Some(temp.path()), &input);
+        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None);
+        let in_turn = surface_factory_inbox_after_tool_result(Some(temp.path()), &input,
+            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }));
+        assert!(at_turn.is_none() && at_tool.is_none() && in_turn.is_none(),
+            "automatic hook surfacing must leave premise-sensitive nudges to the daemon");
+        let queued = store.queued_prompt(id).unwrap().unwrap();
+        assert!(queued.processed_at.is_none() && queued.acked_at.is_none(),
+            "skipped nudges must not acquire false delivery receipts");
+    }
+
+    #[test]
     fn claude_real_payload_surfaces_mail_and_stamps_hook_surfaced() {
         let _guard = crate::hooks::test_env_lock();
         let temp = TempDir::new().unwrap();

@@ -103,6 +103,12 @@ fn handle_pre_tool_use_inner(
             .as_ref()
             .and_then(|tool_input| tool_input.get("command"))
             .and_then(|command| command.as_str());
+        if command.is_some_and(worker_command_pattern_kill) {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "WORKER PROCESS SIGNAL: pattern-based kills can terminate another worker's processes on this shared host. Kill by the PID you started: capture $! or use your own PID file, then run `kill <pid>` (or `kill -0 <pid>` to inspect it). Do not use pkill, killall, or pgrep results to send signals.",
+            ));
+        }
         if command.is_some_and(worker_command_runs_dangerous_formatter) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -278,6 +284,15 @@ fn handle_pre_tool_use_inner(
         && crate::harness_policy::is_supervisor(input)
     {
         return Ok(deny_factory_supervisor_send_message());
+    }
+
+    // Native SendMessage bypasses the policy and origin stamps on the CAS
+    // coordination path, so factory workers must use that path directly.
+    if is_factory_agent
+        && tool_name == "SendMessage"
+        && crate::harness_policy::is_worker(input)
+    {
+        return Ok(deny_factory_worker_send_message());
     }
 
     // ========================================================================
@@ -556,26 +571,10 @@ fn handle_pre_tool_use_inner(
         .unwrap_or_default();
 
     // ========================================================================
-    // FACTORY MODE: Route SendMessage through Cassy coordination (cas-f32b)
+    // FACTORY MODE: clean up stranded legacy native SendMessage copies
     //
-    // In factory mode, agents communicate through Cassy coordination (push-based
-    // via the Director/TUI). The built-in SendMessage tool bypasses this system
-    // and would cause messages to be lost.
-    //
-    // Claude Code's Team Coordination system-reminder tells agents to use
-    // `SendMessage`, so agents default to it. Previously this hook just
-    // denied-with-guidance, but agents frequently spammed retries before
-    // switching tools — effectively wedging workers on the deny loop
-    // (observed 2026-04-23 in gabber-studio).
-    //
-    // Workers use the auto-route below because the Claude Code system
-    // reminder still steers them toward SendMessage. Supervisors are denied
-    // before that route: returning `allow` lets the host harness run its
-    // native SendMessage transport after this hook, which bypasses the durable
-    // CAS queue and can strand assignments (GH #793).
-    //
-    // On any failure (missing fields, queue open error, enqueue error) we
-    // fall back to the original deny-with-guidance path — never silently drop.
+    // New messages use the dedicated coordination command. Keep this
+    // housekeeping for inert copies left by older auto-routing hooks.
     // ========================================================================
     // `is_factory_agent` already computed above for the hoisted
     // cas_root=None auto-approve check (cas-7f33).
@@ -594,14 +593,6 @@ fn handle_pre_tool_use_inner(
         // whenever `config.json` says this IS the factory's tree.
         reap_stranded_native_send_message_copies();
     }
-    if is_factory_agent && tool_name == "SendMessage" {
-        return Ok(auto_route_send_message(
-            input.tool_input.as_ref(),
-            cas_root,
-            &current_agent_id,
-        ));
-    }
-
     let is_supervisor = crate::harness_policy::is_supervisor_from_env();
 
     // ========================================================================
@@ -2302,6 +2293,96 @@ pub(crate) const FACTORY_AUTO_APPROVE_TOOLS: &[&str] = &[
 enum ShellToken {
     Word(String),
     Operator(char),
+}
+
+fn worker_command_pattern_kill(command: &str) -> bool {
+    worker_command_pattern_kill_at_depth(command, 0)
+}
+
+fn worker_command_pattern_kill_at_depth(command: &str, depth: usize) -> bool {
+    let command = shell_command_without_heredoc_bodies(command);
+    let mut group = Vec::new();
+    let mut words = Vec::new();
+    let mut piped = false;
+    for token in factory_shell_tokens(&command) {
+        match token {
+            ShellToken::Word(word) => words.push(word),
+            ShellToken::Operator(operator @ (';' | '&' | '|' | '(' | ')')) => {
+                if !words.is_empty() {
+                    group.push(std::mem::take(&mut words));
+                }
+                if matches!(operator, ';' | '&') {
+                    if worker_pattern_kill_group(&group, piped, depth) {
+                        return true;
+                    }
+                    group.clear();
+                    piped = false;
+                } else if operator == '|' {
+                    piped = true;
+                }
+            }
+            ShellToken::Operator(_) => {}
+        }
+    }
+    if !words.is_empty() {
+        group.push(words);
+    }
+    worker_pattern_kill_group(&group, piped, depth)
+}
+
+/// Keep a pipeline/substitution together, but separate independent commands:
+/// a diagnostic `pgrep ...; kill 123` does not derive the signal's PID.
+fn worker_pattern_kill_group(group: &[Vec<String>], piped: bool, depth: usize) -> bool {
+    let mut searches = false;
+    let mut signals = false;
+    let mut dynamic_signal = false;
+    for words in group {
+        // env -S's executable lives inside its split string; the ordinary
+        // wrapper resolver can legitimately return None for this statement.
+        if depth < 4
+            && let Some(script) = env_split_string_payload(words)
+            && worker_command_pattern_kill_at_depth(&script, depth + 1)
+        {
+            return true;
+        }
+        let Some(index) = unwrapped_command_index(words) else { continue };
+        let name = shell_word_basename(&words[index]);
+        let args = &words[index + 1..];
+        match name {
+            "pkill" | "killall" => return true,
+            "pgrep" => searches = true,
+            "kill" => {
+                signals = true;
+                dynamic_signal |= args.iter().any(|arg| arg.contains(['$', '`']));
+                for arg in args {
+                    // Quotes retain the whole substitution in one word;
+                    // unquoted substitutions are separate statements above.
+                    let substitutions = arg.split("$(").skip(1)
+                        .chain(arg.split('`').skip(1).step_by(2));
+                    for payload in substitutions {
+                        if shell_statement_words(payload).iter().any(|words| {
+                            unwrapped_command_index(words)
+                                .is_some_and(|i| shell_word_basename(&words[i]) == "pgrep")
+                        }) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            "sh" | "bash" | "dash" | "zsh" if depth < 4 => {
+                if let Some(flag) = args.iter().position(|arg| {
+                    arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
+                })
+                    && let Some(script) = args.get(flag + 1)
+                    && worker_command_pattern_kill_at_depth(script, depth + 1)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    searches && signals && (piped || dynamic_signal)
 }
 
 /// Split just enough shell syntax to distinguish command arguments from
@@ -7074,174 +7155,12 @@ fn reap_stranded_native_send_message_copies() {
     }
 }
 
-/// Auto-route a factory-mode `SendMessage` tool call onto the Cassy prompt
-/// queue so the message actually reaches its recipient, then return an
-/// `allow` + `additionalContext` success receipt (cas-73c8). Returning
-/// `deny` wrapped the ✅ receipt in Claude Code's `<error>` envelope, which
-/// agents and tooling treated as failure even though delivery succeeded.
-///
-/// On any parse / queue failure, falls back to the original deny-with-
-/// guidance path — we never silently drop the agent's message.
-fn auto_route_send_message(
-    tool_input: Option<&serde_json::Value>,
-    cas_root: &Path,
-    current_agent_id: &str,
-) -> HookOutput {
-    // EPIC cas-8888 (cas-fd9f): own_tool_prefix() — reminder text describing
-    // what THIS agent should call instead of SendMessage.
-    let fallback_guidance = || {
-        let prefix = crate::harness_policy::own_tool_prefix();
-        HookOutput::with_pre_tool_permission(
-            "deny",
-            &format!(
-                "🚫 SendMessage is disabled in factory mode.\n\n\
-                 Use Cassy coordination instead:\n\
-                 {prefix}coordination action=message target=<agent-name> message=\"...\" summary=\"<brief summary>\"\n\n\
-                 This ensures messages are routed through the factory Director."
-            ),
-        )
-    };
-
-    let Some(ti) = tool_input else {
-        return fallback_guidance();
-    };
-
-    let target = match ti.get("to").and_then(|v| v.as_str()) {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return fallback_guidance(),
-    };
-
-    // SendMessage.message may be a plain string OR a structured object
-    // (shutdown_response, plan_approval_response, etc.). Serialize objects
-    // to JSON so downstream reads still carry the full payload.
-    let body = match ti.get("message") {
-        Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-        Some(v) => serde_json::to_string(v).unwrap_or_default(),
-        None => return fallback_guidance(),
-    };
-    if body.trim().is_empty() {
-        return fallback_guidance();
-    }
-
-    let summary = ti
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            body.lines()
-                .next()
-                .unwrap_or(&body)
-                .chars()
-                .take(80)
-                .collect()
-        });
-
-    // Resolve sender display name — prefer CAS_AGENT_NAME env (set by
-    // factory supervisor/worker spawn), fall back to agent_store lookup by
-    // session id, else "unknown".
-    let display_name = std::env::var("CAS_AGENT_NAME")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            crate::store::open_agent_store(cas_root)
-                .ok()
-                .and_then(|store| store.get(current_agent_id).ok())
-                .map(|agent| {
-                    use cas_types::AgentRole;
-                    if agent.role == AgentRole::Supervisor {
-                        "supervisor".to_string()
-                    } else {
-                        agent.name
-                    }
-                })
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let queue = match crate::store::open_prompt_queue_store(cas_root) {
-        Ok(q) => q,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "SendMessage auto-route: failed to open prompt queue — falling back to deny-with-guidance"
-            );
-            return fallback_guidance();
-        }
-    };
-
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let message_id = match queue.enqueue_full(
-        &display_name,
-        &target,
-        &body,
-        factory_session.as_deref(),
-        Some(summary.as_str()),
-        None,
-    ) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!(
-                error = %e,
-                target = target.as_str(),
-                "SendMessage auto-route: enqueue_full failed — falling back to deny-with-guidance"
-            );
-            return fallback_guidance();
-        }
-    };
-
-    // Best-effort: wake the daemon so delivery doesn't wait for the next
-    // poll cycle. Failure just means the daemon isn't running — the row
-    // is still persisted and will be picked up.
-    let _ = cas_factory::notify_daemon(cas_root);
-
-    info!(
-        message_id,
-        source = display_name.as_str(),
-        target = target.as_str(),
-        "SendMessage auto-routed onto Cassy prompt queue"
-    );
-
-    let prefix = crate::harness_policy::own_tool_prefix();
-    // cas-73c8: success-shaped receipt. `permissionDecision=allow` so Claude
-    // Code does not wrap the receipt in `<error>`; the guidance lives in
-    // `additionalContext` (visible to the model next to the tool result).
-    // `permissionDecisionReason` is user-facing only on allow.
-    //
-    // Native SendMessage also runs after allow, writing its own copy into THIS
-    // process's config-dir teams tree. Two cases, and the old comment here
-    // claimed both were covered by one mechanism — cas-7aa2 (GH #176) found
-    // that only the first is:
-    //   - Same tree as the daemon (the common case): covered. The daemon
-    //     delivers `queued.prompt` verbatim (`queue_and_events.rs`:
-    //     `let prompt_with_instructions = queued.prompt.clone();`) under the
-    //     same sender name, so the two rows are byte-identical and the
-    //     `(from, text)` guard in `teams::write_to_inbox_impl` collapses them.
-    //   - Different tree (worker spawned with an explicit `config_dir`): NOT
-    //     covered, and never was. `TeamsManager` only ever looks in the
-    //     daemon's own tree, so it cannot see — let alone dedupe — a row in
-    //     another config dir. That copy is a dead letter: no reader, and
-    //     retention deliberately never prunes unread rows.
-    // `reap_stranded_native_send_message_copies` (called from the factory
-    // branch of this handler) makes those cross-tree strays inert.
-    let receipt = format!(
-        "✅ AUTO-ROUTED via Cassy coordination (message id {message_id}).\n\n\
-         Message delivered to `{target}`. DO NOT retry this SendMessage call.\n\n\
-         For future messages, call `{prefix}coordination action=message target=<name> message=\"...\" summary=\"...\"` directly — skip SendMessage."
-    );
-    HookOutput::with_pre_tool_permission_and_context(
-        "allow",
-        "Cassy auto-routed SendMessage",
-        &receipt,
-    )
-}
-
 /// Deny the host harness transport for factory supervisors (GH #793).
 ///
 /// A `SendMessage` hook result of `allow` does not replace Claude Code's
 /// native delivery: the host runs that transport after the hook returns. A
 /// supervisor assignment therefore has to fail closed here and point at the
-/// durable CAS commands instead. Workers retain the legacy auto-route above
-/// until their harness reminder can be migrated without breaking existing
-/// message flows.
+/// durable CAS commands instead.
 fn deny_factory_supervisor_send_message() -> HookOutput {
     let prefix = crate::harness_policy::own_tool_prefix();
     HookOutput::with_pre_tool_permission(
@@ -7251,6 +7170,19 @@ fn deny_factory_supervisor_send_message() -> HookOutput {
              Use {prefix}coordination action=message target=<worker> summary=\"<brief summary>\" message=\"<message>\"\n\
              For task assignments, use {prefix}task action=update id=<task-id> assignee=<worker>.\n\n\
              The CAS coordination path is the only durable supervisor-to-worker transport."
+        ),
+    )
+}
+
+/// Deny the host harness transport for factory workers.
+fn deny_factory_worker_send_message() -> HookOutput {
+    let prefix = crate::harness_policy::own_tool_prefix();
+    HookOutput::with_pre_tool_permission(
+        "deny",
+        &format!(
+            "🚫 SendMessage is disabled for factory workers.\n\n\
+             Use {prefix}coordination action=message target=<peer> summary=\"<brief summary>\" message=\"<message>\".\n\n\
+             This sends the message through the durable factory coordination path."
         ),
     )
 }

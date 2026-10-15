@@ -1906,10 +1906,28 @@ impl CasService {
                         MergeRequestDecision::AlreadyIntegrated { .. }
                     )
                 });
-                // cas-ba4a: the live tip replaces a parked anchor only when it
-                // descends from it with this task's commits alone. A sibling
-                // task that is Open or Blocked (no active lease) or a force-
-                // pushed lane would otherwise be requested as this delivery.
+                // A rebase rewrites the old delivery's commit IDs, so its
+                // pushed head cannot descend from the recorded anchor. On a
+                // fresh, dedicated per-task push branch, with no active
+                // sibling task and an unmerged anchor, the branch itself is
+                // the delivery identity; report its live origin head instead
+                // of freezing the now-retired SHA. Keep the stricter
+                // attribution rule for shared worker branches.
+                let rebased_task_scoped_branch = task.status
+                    == cas_types::TaskStatus::AwaitingMerge
+                    && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+                    && source_is_fresh
+                    && recorded_anchor.is_some()
+                    && !other_task_active
+                    && !anchor_integrated
+                    && task.assignee.as_deref().is_some_and(|assignee| {
+                        let expected = format!("factory/{assignee}-{}", task.id);
+                        branch.as_deref() == Some(expected.as_str())
+                    });
+                // cas-ba4a: on shared worker branches, the live tip replaces
+                // a parked anchor only when it descends from it with this
+                // task's commits alone. A sibling task that is Open or Blocked
+                // (no active lease) could otherwise be requested as this delivery.
                 let live_tip_continues_delivery = task.status
                     == cas_types::TaskStatus::AwaitingMerge
                     && recorded_anchor.is_some()
@@ -1934,7 +1952,9 @@ impl CasService {
                         })
                         .is_some();
                 let frozen_anchor = (task.status == cas_types::TaskStatus::AwaitingMerge
-                    && (other_task_active || anchor_integrated || !live_tip_continues_delivery))
+                    && (other_task_active
+                        || anchor_integrated
+                        || (!live_tip_continues_delivery && !rebased_task_scoped_branch)))
                     .then(|| recorded_anchor.clone())
                     .flatten();
                 // GH #1022: only a landed anchor with no other active task can
@@ -1952,7 +1972,10 @@ impl CasService {
                         // only when that tip contains it; a recorded branch
                         // from an earlier cycle is not this delivery.
                         Some(match recorded_anchor.as_deref() {
-                            Some(anchor) if task.status == cas_types::TaskStatus::AwaitingMerge => {
+                            Some(anchor)
+                                if task.status == cas_types::TaskStatus::AwaitingMerge
+                                    && !rebased_task_scoped_branch =>
+                            {
                                 crate::prompt_revalidation::merge_request_judged_tip(
                                     &repo.repo_root,
                                     Some(live),
@@ -1966,7 +1989,7 @@ impl CasService {
                     if task.status != cas_types::TaskStatus::AwaitingMerge
                         && task
                             .deliverables
-                            .historical_factory_branch_anchors
+                            .declined_factory_anchors()
                             .iter()
                             .any(|anchor| anchor == &branch_tip)
                     {
@@ -4682,6 +4705,140 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(row.prompt.contains("A\ttask-b.txt"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreviewed_reopen_merge_request_reaches_supervisor_cas_1cc7() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        let root = repo.join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-unreviewed-message-test\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(
+            repo,
+            &["checkout", "-qb", "factory/worker-a-cas-unreviewed-message"],
+        );
+        std::fs::write(repo.join("delivery.txt"), "unreviewed delivery\n").unwrap();
+        git(repo, &["add", "delivery.txt"]);
+        git(
+            repo,
+            &["commit", "-qm", "fix(cas-unreviewed-message): delivery"],
+        );
+        let tip = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "worker-id".into(),
+                "worker-a".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "supervisor-id".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new(
+            "cas-unreviewed-message".into(),
+            "Unreviewed premature close".into(),
+        );
+        task.status = TaskStatus::Closed;
+        task.assignee = Some("worker-a".into());
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some("factory/worker-a-cas-unreviewed-message".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-unreviewed-message-test".into(),
+            target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
+        core.cas_task_reopen(Parameters(
+            serde_json::from_value(
+                serde_json::json!({"id":task.id,"reason":"Unmerged tip was never reviewed"}),
+            )
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("worker-id".into());
+        env.set("CAS_AGENT_ROLE", "worker");
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+        let mut request = message_request(true);
+        request.task_id = Some(task.id.clone());
+        let response = response_text(service.message_send(request).await.unwrap());
+        assert!(response.contains("Message queued"), "{response}");
+        let rows = crate::store::open_prompt_queue_store(&root)
+            .unwrap()
+            .peek_all(20)
+            .unwrap();
+        let envelope = rows
+            .iter()
+            .find_map(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt))
+            .expect("typed merge request is durable");
+        assert_eq!(envelope.branch_tip, tip);
+        let reopened = tasks.get(&task.id).unwrap();
+        let git = crate::prompt_revalidation::queued_merge_request_decision(
+            repo,
+            Some(&reopened),
+            &envelope,
+        );
+        assert_eq!(
+            crate::prompt_revalidation::merge_request_delivery_decision(
+                Some(&reopened),
+                &envelope,
+                &git
+            ),
+            crate::prompt_revalidation::MergeRequestDelivery::Deliver
+        );
+        let inbox_core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        inbox_core.set_agent_id_for_testing("supervisor-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let inbox_service = CasService::new(inbox_core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let inbox_service = CasService::new(inbox_core);
+        let inbox = response_text(
+            inbox_service
+                .inbox_poll(
+                    serde_json::from_value(serde_json::json!({"action":"inbox_poll"})).unwrap(),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(inbox.contains("Fresh worker delivery"), "{inbox}");
+        assert!(inbox.contains(&tip), "{inbox}");
+    }
+
     /// cas-b3ab: a worker whose default `factory/<name>` branch already landed
     /// resumes a task on its per-task branch `factory/<name>-<task>` with
     /// unmerged commits. Its merge request is judged by that branch and
@@ -4938,6 +5095,116 @@ mod cas_89e1_post_merge_message_type_tests {
             assert!(landed.contains("Merge already landed"), "{landed}");
             assert!(landed.contains(&published_tip), "{landed}");
         }
+    }
+
+    /// A parked per-task branch can be rebased and force-pushed after the
+    /// merge request anchor was recorded. The envelope and its human summary
+    /// must describe the published branch head, not that retired anchor.
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_request_rebase_force_push_uses_live_origin_tip_for_envelope_and_summary_cas4a65() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("host repo schema");
+        let origin = tempfile::tempdir().expect("bare origin");
+        git(origin.path(), &["init", "-q", "--bare"]);
+        let project = tempfile::tempdir().expect("temporary project");
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        std::fs::create_dir(repo.join(".cas")).expect("Cassy directory");
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-4a65-message-test\"\n",
+        )
+        .expect("Cassy config");
+        std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        let base = crate::git_evidence::resolve_branch_sha(repo, "HEAD").expect("base SHA");
+        git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main"]);
+
+        let branch = "factory/worker-a-cas-4a65";
+        git(repo, &["checkout", "-qb", branch]);
+        std::fs::write(repo.join("delivery.txt"), "parked task delivery\n")
+            .expect("delivery file");
+        git(repo, &["add", "delivery.txt"]);
+        git(repo, &["commit", "-qm", "cas-4a65 delivery"]);
+        let old_anchor = crate::git_evidence::resolve_branch_sha(repo, "HEAD")
+            .expect("pre-rebase anchor");
+        git(repo, &["push", "-q", "origin", branch]);
+
+        // Advance the target independently, then rewrite the parked task
+        // commit onto it just as a worker does before force-pushing a rebase.
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("main-only.txt"), "new target base\n")
+            .expect("updated target file");
+        git(repo, &["add", "main-only.txt"]);
+        git(repo, &["commit", "-qm", "advance target before rebase"]);
+        let target_tip = crate::git_evidence::resolve_branch_sha(repo, "HEAD")
+            .expect("updated target SHA");
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(repo, &["checkout", "-q", branch]);
+        git(repo, &["rebase", "--onto", "main", &base]);
+        let live_tip = crate::git_evidence::resolve_branch_sha(repo, "HEAD")
+            .expect("rebased source SHA");
+        git(repo, &["push", "-q", "--force", "origin", branch]);
+        assert_ne!(old_anchor, live_tip, "rebase must replace the parked SHA");
+        assert!(
+            !crate::git_evidence::git_commit_is_ancestor(repo, &old_anchor, &live_tip),
+            "rebased source must no longer descend from the stored anchor"
+        );
+
+        let cas_root = repo.join(".cas");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut worker = Agent::new("worker-id".into(), "worker-a".into());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).expect("register worker");
+        let mut supervisor = Agent::new("supervisor-id".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).expect("register supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+        let tasks = core.open_task_store().expect("task store");
+        let mut task = Task::new("cas-4a65".into(), "rebased delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.name);
+        task.deliverables.factory_branch_anchor = Some(old_anchor.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-4a65-message-test".into(),
+            target_branch: "main".into(),
+        });
+        tasks.add(&task).expect("add parked task");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let mut request = message_request(true);
+        request.task_id = Some(task.id.clone());
+        let response = response_text(service.message_send(request).await.expect("merge request"));
+        assert!(response.contains("Message queued"), "{response}");
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        let (row, envelope) = rows
+            .iter()
+            .find_map(|row| {
+                let envelope = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)?;
+                (envelope.task_id == task.id).then_some((row, envelope))
+            })
+            .expect("typed request carries the merge envelope");
+
+        assert_eq!(envelope.branch_tip, live_tip);
+        assert_eq!(envelope.anchor_tip.as_deref(), Some(old_anchor.as_str()));
+        assert_eq!(envelope.target_branch_tip, target_tip);
+        let summary_heads = format!("{target_tip}\n  -> {live_tip}");
+        // pin: verify the generated diff summary is bound to the live source SHA.
+        assert!(row.prompt.contains(&summary_heads), "{}", row.prompt);
+        // pin: verify the rebased task's changed file appears in the summary.
+        assert!(row.prompt.contains("A\tdelivery.txt"), "{}", row.prompt);
     }
 
     #[tokio::test(flavor = "current_thread")]

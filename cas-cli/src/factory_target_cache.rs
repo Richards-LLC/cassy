@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,8 @@ pub struct TargetCacheRecord {
     pub path: PathBuf,
     pub worktree: PathBuf,
     pub bytes: u64,
+    #[serde(default)]
+    pub scan_elapsed_ms: u64,
     pub newest_write_unix_secs: Option<u64>,
     pub disposition: CacheDisposition,
     pub reason: String,
@@ -134,6 +136,8 @@ struct ScannedCache {
     path: PathBuf,
     worktree: PathBuf,
     bytes: u64,
+    scan_elapsed_ms: u64,
+    snapshot: Option<legacy::Snapshot>,
     newest_write: Option<SystemTime>,
     interrupted_cleanup: bool,
     unsafe_reason: Option<String>,
@@ -210,6 +214,8 @@ pub fn inspect(
             &cache.worktree,
             &cache.path,
             &canonical_live_roots,
+            cache.snapshot.as_ref(),
+            false,
         ) {
             (disposition, reason)
         } else if cache.newest_write.is_some_and(|modified| {
@@ -228,13 +234,18 @@ pub fn inspect(
         } else {
             (
                 CacheDisposition::Eligible,
-                "stale regenerable Cargo target cache".to_string(),
+                if legacy::lane_target(cas_root, &cache.worktree, &cache.path) {
+                    "stale regenerable Cargo target cache; cleanup will revalidate lane/Cargo/lifetime locks".to_string()
+                } else {
+                    "stale regenerable Cargo target cache".to_string()
+                },
             )
         };
         records.push(TargetCacheRecord {
             path: cache.path,
             worktree: cache.worktree,
             bytes: cache.bytes,
+            scan_elapsed_ms: cache.scan_elapsed_ms,
             newest_write_unix_secs,
             disposition,
             reason,
@@ -337,6 +348,8 @@ pub fn cleanup_selected(
             &rescanned.worktree,
             &rescanned.path,
             &canonical_live_roots,
+            rescanned.snapshot.as_ref(),
+            true,
         ) {
             Ok(guard) => guard,
             Err((disposition, reason)) => {
@@ -359,11 +372,7 @@ pub fn cleanup_selected(
             .is_some_and(|guard| !guard.unchanged(&record.path))
             || guard.is_some()
                 && (!legacy::lane_target(cas_root, &record.worktree, &record.path)
-                    || !legacy::registry_allows(cas_root, &record.worktree)
-                    || scan_cache(&record.worktree, &record.path, false).map_or(true, |scan| {
-                        scan.unsafe_reason.is_some()
-                            || scan.newest_write.is_none_or(|time| time > cutoff)
-                    }))
+                    || !legacy::registry_allows(cas_root, &record.worktree))
         {
             record.disposition = CacheDisposition::Indeterminate;
             record.reason = "legacy lane guards changed before rename".into();
@@ -786,6 +795,8 @@ fn scan_error_record(
         path,
         worktree,
         bytes: 0,
+        scan_elapsed_ms: 0,
+        snapshot: None,
         newest_write: None,
         interrupted_cleanup,
         unsafe_reason: Some(format!("scan failed closed: {error}")),
@@ -797,12 +808,15 @@ fn scan_error_record(
 }
 
 fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Result<ScannedCache> {
+    let started = Instant::now();
     let worktree_metadata = fs::symlink_metadata(worktree)?;
     if worktree_metadata.file_type().is_symlink() || !worktree_metadata.is_dir() {
         return Ok(ScannedCache {
             path: path.to_path_buf(),
             worktree: worktree.to_path_buf(),
             bytes: 0,
+            scan_elapsed_ms: 0,
+            snapshot: None,
             newest_write: None,
             interrupted_cleanup,
             unsafe_reason: Some("worktree root is a symlink or not a directory".to_string()),
@@ -818,6 +832,8 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
             path: path.to_path_buf(),
             worktree: worktree.to_path_buf(),
             bytes: 0,
+            scan_elapsed_ms: 0,
+            snapshot: None,
             newest_write: None,
             interrupted_cleanup,
             unsafe_reason: Some("cache root is a symlink or not a directory".to_string()),
@@ -837,6 +853,8 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
             path: path.to_path_buf(),
             worktree: canonical_worktree,
             bytes: 0,
+            scan_elapsed_ms: 0,
+            snapshot: None,
             newest_write: None,
             interrupted_cleanup,
             unsafe_reason: Some("cache path escaped its exact worktree parent".to_string()),
@@ -847,11 +865,13 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
         });
     }
 
+    let mut snapshot = legacy::Snapshot::new();
     let mut bytes = 0u64;
     let mut newest_write = metadata.modified().ok();
     for entry in WalkDir::new(&canonical_path).follow_links(false) {
         let entry = entry.map_err(io::Error::other)?;
         let metadata = entry.metadata().map_err(io::Error::other)?;
+        snapshot.record(&canonical_path, &entry, &metadata)?;
         if metadata.is_file() {
             bytes = bytes.saturating_add(metadata.len());
         }
@@ -863,6 +883,8 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
         path: canonical_path,
         worktree: canonical_worktree,
         bytes,
+        scan_elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        snapshot: Some(snapshot),
         newest_write,
         interrupted_cleanup,
         unsafe_reason: None,
@@ -878,6 +900,8 @@ fn cache_admission(
     worktree: &Path,
     cache: &Path,
     live: &HashSet<PathBuf>,
+    snapshot: Option<&legacy::Snapshot>,
+    lock: bool,
 ) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
     if live.contains(worktree) {
         return Err((
@@ -887,11 +911,18 @@ fn cache_admission(
     }
     #[cfg(target_os = "linux")]
     {
-        linux_cache_admission(cas_root, worktree, cache, Path::new("/proc"))
+        linux_cache_admission_scanned(
+            cas_root,
+            worktree,
+            cache,
+            Path::new("/proc"),
+            snapshot,
+            lock,
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = cas_root;
+        let _ = (cas_root, snapshot, lock);
         if live_process_uses(worktree, cache) {
             Err((
                 CacheDisposition::Indeterminate,
@@ -903,12 +934,33 @@ fn cache_admission(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn linux_cache_admission(
     cas_root: &Path,
     worktree: &Path,
     cache: &Path,
     proc_root: &Path,
+) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
+    let scanned = scan_cache(worktree, cache, false)
+        .map_err(|error| (CacheDisposition::Indeterminate, error.to_string()))?;
+    linux_cache_admission_scanned(
+        cas_root,
+        worktree,
+        cache,
+        proc_root,
+        scanned.snapshot.as_ref(),
+        true,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cache_admission_scanned(
+    cas_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    proc_root: &Path,
+    snapshot: Option<&legacy::Snapshot>,
+    lock: bool,
 ) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
     use process_probe::Evidence;
     let evidence = process_probe::linux_evidence_many(proc_root, worktree, cache, &[]);
@@ -919,13 +971,27 @@ fn linux_cache_admission(
         ));
     }
     if legacy::lane_target(cas_root, worktree, cache) {
-        let guard = legacy::acquire(cas_root, worktree, cache).map_err(|error| {
+        legacy::owner_gate(cas_root, worktree)?;
+        let snapshot = snapshot
+            .filter(|snapshot| snapshot.admissible())
+            .ok_or_else(|| {
+                (
+                    CacheDisposition::Indeterminate,
+                    "unsafe or missing cache snapshot".into(),
+                )
+            })?;
+        if !lock {
+            if matches!(evidence, Evidence::Opaque { pid: None }) {
+                return Err((
+                    CacheDisposition::Indeterminate,
+                    "process table unavailable".into(),
+                ));
+            }
+            return Ok(None); // Preview never creates or acquires build locks.
+        }
+        let guard = legacy::acquire(cas_root, worktree, cache, snapshot).map_err(|error| {
             (
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    CacheDisposition::LiveProcess
-                } else {
-                    CacheDisposition::Indeterminate
-                },
+                CacheDisposition::Indeterminate,
                 format!("legacy lane guard refused: {error}"),
             )
         })?;
@@ -1161,6 +1227,7 @@ mod tests {
             path: PathBuf::from(format!("/repo/.cas/worktrees/{name}/target")),
             worktree: PathBuf::from(format!("/repo/.cas/worktrees/{name}")),
             bytes,
+            scan_elapsed_ms: 0,
             newest_write_unix_secs: Some(newest),
             disposition: CacheDisposition::Eligible,
             reason: String::new(),
@@ -1241,8 +1308,9 @@ mod tests {
     #[test]
     fn filesystem_capacity_reports_total_and_unprivileged_available_bytes() {
         let temp = tempfile::tempdir().unwrap();
-        let (total_bytes, available_bytes) =
-            filesystem_capacity(temp.path()).expect("statvfs should inspect a temp directory");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let (total_bytes, available_bytes) = filesystem_capacity(temp_root.as_path())
+            .expect("statvfs should inspect a temp directory");
 
         assert!(total_bytes > 0);
         assert!(
@@ -1283,8 +1351,9 @@ mod tests {
     fn symlink_target_escape_is_reported_and_never_removed() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
-        let worktree = temp.path().join("worker");
-        let outside = temp.path().join("source");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let worktree = temp_root.as_path().join("worker");
+        let outside = temp_root.as_path().join("source");
         fs::create_dir_all(&worktree).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("keep.rs"), "source").unwrap();
@@ -1297,7 +1366,7 @@ mod tests {
             "source"
         );
 
-        let linked_worktree = temp.path().join("linked-worker");
+        let linked_worktree = temp_root.as_path().join("linked-worker");
         fs::create_dir_all(outside.join("target")).unwrap();
         symlink(&outside, &linked_worktree).unwrap();
         let linked = scan_cache(&linked_worktree, &linked_worktree.join("target"), false).unwrap();
@@ -1308,14 +1377,15 @@ mod tests {
     #[test]
     fn interrupted_quarantine_is_discovered_without_touching_source() {
         let temp = tempfile::tempdir().unwrap();
-        let cas_root = temp.path().join(".cas");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let cas_root = temp_root.as_path().join(".cas");
         let worker = cas_root.join("worktrees/dead-worker");
         let quarantine = worker.join(format!("{QUARANTINE_PREFIX}123-1"));
         fs::create_dir_all(&quarantine).unwrap();
         fs::write(quarantine.join("artifact.rlib"), b"artifact").unwrap();
         fs::write(worker.join("source.rs"), b"source").unwrap();
 
-        let caches = discover_caches(temp.path(), &cas_root, &[]);
+        let caches = discover_caches(temp_root.as_path(), &cas_root, &[]);
         assert_eq!(caches.len(), 1);
         assert!(caches[0].interrupted_cleanup);
         assert_eq!(fs::read(worker.join("source.rs")).unwrap(), b"source");
@@ -1324,8 +1394,9 @@ mod tests {
     #[test]
     fn configured_or_store_known_worktree_outside_default_root_is_discovered() {
         let temp = tempfile::tempdir().unwrap();
-        let cas_root = temp.path().join("repo/.cas");
-        let custom = temp.path().join("scratch-worktrees/custom-worker");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let cas_root = temp_root.as_path().join("repo/.cas");
+        let custom = temp_root.as_path().join("scratch-worktrees/custom-worker");
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(custom.join("target")).unwrap();
         fs::write(custom.join("target/artifact"), b"artifact").unwrap();
@@ -1352,7 +1423,8 @@ mod tests {
     #[test]
     fn git_managed_epic_and_release_worktree_targets_are_discovered_but_unrelated_are_ignored() {
         let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let repo = temp_root.as_path().join("repo");
         let cas_root = repo.join(".cas");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet"]);
@@ -1363,7 +1435,7 @@ mod tests {
         git(&repo, &["commit", "--quiet", "-m", "fixture"]);
         fs::create_dir_all(&cas_root).unwrap();
 
-        let epic = temp.path().join("external-epic");
+        let epic = temp_root.as_path().join("external-epic");
         git(
             &repo,
             &[
@@ -1393,7 +1465,7 @@ mod tests {
         fs::create_dir_all(release.join("target")).unwrap();
         fs::write(release.join("target/release-artifact"), b"release").unwrap();
 
-        let user_release = temp.path().join("external-release");
+        let user_release = temp_root.as_path().join("external-release");
         git(
             &repo,
             &[
@@ -1408,7 +1480,7 @@ mod tests {
         fs::create_dir_all(user_release.join("target")).unwrap();
         fs::write(user_release.join("target/user-artifact"), b"user").unwrap();
 
-        let unrelated = temp.path().join("feature-worktree");
+        let unrelated = temp_root.as_path().join("feature-worktree");
         git(
             &repo,
             &[
@@ -1486,7 +1558,8 @@ mod tests {
     #[test]
     fn stale_git_worktree_path_reuse_is_not_treated_as_owned() {
         let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let repo = temp_root.as_path().join("repo");
         let cas_root = repo.join(".cas");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet"]);
@@ -1497,7 +1570,7 @@ mod tests {
         git(&repo, &["commit", "--quiet", "-m", "fixture"]);
         fs::create_dir_all(&cas_root).unwrap();
 
-        let reused = temp.path().join("reused-epic");
+        let reused = temp_root.as_path().join("reused-epic");
         git(
             &repo,
             &[
@@ -1534,7 +1607,8 @@ mod tests {
     #[test]
     fn cleanup_rechecks_git_ownership_after_report_and_deserialization_before_rename() {
         let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let repo = temp_root.as_path().join("repo");
         let cas_root = repo.join(".cas");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet"]);
@@ -1545,7 +1619,7 @@ mod tests {
         git(&repo, &["commit", "--quiet", "-m", "fixture"]);
         fs::create_dir_all(&cas_root).unwrap();
 
-        let owned = temp.path().join("owned-epic");
+        let owned = temp_root.as_path().join("owned-epic");
         git(
             &repo,
             &[
@@ -1619,8 +1693,9 @@ mod tests {
     #[test]
     fn git_discovered_stale_release_target_is_reclaimed_while_active_epic_is_preserved() {
         let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
         let reclaim = reclamation_available();
-        let repo = temp.path().join("repo");
+        let repo = temp_root.as_path().join("repo");
         let cas_root = repo.join(".cas");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet"]);
@@ -1631,7 +1706,7 @@ mod tests {
         git(&repo, &["commit", "--quiet", "-m", "fixture"]);
         fs::create_dir_all(&cas_root).unwrap();
 
-        let epic = temp.path().join("external-epic");
+        let epic = temp_root.as_path().join("external-epic");
         git(
             &repo,
             &[
@@ -1714,7 +1789,8 @@ mod tests {
     #[test]
     fn live_and_recent_caches_are_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
-        let cas_root = temp.path().join(".cas");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let cas_root = temp_root.as_path().join(".cas");
         let worker = cas_root.join("worktrees/live-worker");
         fs::create_dir_all(worker.join("target")).unwrap();
         fs::write(worker.join("target/artifact"), b"artifact").unwrap();
@@ -1768,7 +1844,8 @@ mod tests {
     #[test]
     fn os_process_cwd_marks_cache_live_without_registry_evidence() {
         let temp = tempfile::tempdir().unwrap();
-        let cas_root = temp.path().join(".cas");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let cas_root = temp_root.as_path().join(".cas");
         let worker = cas_root.join("worktrees/process-worker");
         fs::create_dir_all(worker.join("target")).unwrap();
         fs::write(worker.join("target/artifact"), b"artifact").unwrap();
@@ -1803,8 +1880,9 @@ mod tests {
     #[test]
     fn cleanup_removes_only_target_and_resumes_interrupted_quarantine() {
         let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
         let reclaim = reclamation_available();
-        let cas_root = temp.path().join(".cas");
+        let cas_root = temp_root.as_path().join(".cas");
         let worker = cas_root.join("worktrees/dead-worker");
         fs::create_dir_all(worker.join("target/deps")).unwrap();
         fs::write(worker.join("target/deps/artifact.rlib"), vec![0u8; 32]).unwrap();

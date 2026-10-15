@@ -5963,6 +5963,8 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     );
     assert_eq!(preview_status["reclaimed_bytes"], 0);
     assert_eq!(preview_status["caches"][0]["disposition"], disposition);
+    assert!(preview_status["caches"][0]["scan_elapsed_ms"].is_u64());
+    assert!(preview_text.contains("scan_ms="));
     assert_preserved(); // force alone/omitted dry_run never deletes.
 
     let mut cleanup = factory_req("gc_cleanup");

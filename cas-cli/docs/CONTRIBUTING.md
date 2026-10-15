@@ -1033,8 +1033,13 @@ or terminal tasks, and no writes within `factory.target_cache_min_idle_secs`
 (default: 7200 seconds). GC holds the lane lock, every Cargo `.cargo-lock`, and
 any existing target lifetime lease through quarantine and deletion. It checks
 registry, recency, containment, target/worktree inodes and Cargo-lock identities
-again before renaming. Reports distinguish `live_process`, `indeterminate` and
-reclaimable (`eligible` or `selected`) caches. Integration trees, custom targets,
+again before renaming. Preview takes no lane or Cargo locks; selected bytes are
+what cleanup would try. One stat walk records recency, directory identities and
+the Cargo lock set; checks under the locks re-stat directories and known locks
+without walking every artifact again. Output includes per-target `scan_ms` (JSON
+`scan_elapsed_ms`). A busy lock without positive readable process evidence is
+`indeterminate`, with its lock path. Reports distinguish `live_process`,
+`indeterminate` and reclaimable (`eligible` or `selected`) caches. Integration trees, custom targets,
 previews and interrupted quarantines keep conservative opaque-process handling;
 legacy targets are never adopted into the lifetime-owner registry.
 

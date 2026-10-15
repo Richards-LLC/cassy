@@ -6297,7 +6297,7 @@ impl CasService {
         );
         let target_cache_report = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
-            let live_roots = live_target_cache_worktrees(agent_store.as_ref());
+            let live_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
             let known_roots = known_target_cache_worktrees(
                 &self.inner.cas_root,
                 &config,
@@ -6477,9 +6477,10 @@ impl CasService {
                 ));
                 for cache in &report.caches {
                     out.push_str(&format!(
-                        "  - {} bytes={} state={:?} reason={}\n",
+                        "  - {} bytes={} scan_ms={} state={:?} reason={}\n",
                         cache.path.display(),
                         cache.bytes,
+                        cache.scan_elapsed_ms,
                         cache.disposition,
                         cache.reason,
                     ));
@@ -6831,7 +6832,7 @@ impl CasService {
             )
         })?;
         let live_workers = live_factory_workers(agent_store.as_ref());
-        let live_target_cache_roots = live_target_cache_worktrees(agent_store.as_ref());
+        let live_target_cache_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
         let (orphan_process_groups, live_owned_process_groups, _, unverifiable_process_groups) =
             orphan_process_groups(&self.inner.cas_root, stale_after, &live_workers);
         let mut orphan_process_groups_reaped = 0usize;
@@ -7116,9 +7117,10 @@ impl CasService {
                 ));
                 for cache in &report.caches {
                     output.push_str(&format!(
-                        "\n  - {} bytes={} state={:?} reason={}",
+                        "\n  - {} bytes={} scan_ms={} state={:?} reason={}",
                         cache.path.display(),
                         cache.bytes,
+                        cache.scan_elapsed_ms,
                         cache.disposition,
                         cache.reason,
                     ));
@@ -7264,13 +7266,18 @@ fn live_factory_workers(agent_store: &dyn cas_store::AgentStore) -> LiveFactoryW
     live_factory_workers_from_agents(agent_store.list(None).unwrap_or_default())
 }
 
-fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore) -> Vec<std::path::PathBuf> {
+fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore, cas_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     agent_store
         .list(None)
         .unwrap_or_default()
         .into_iter()
         .filter(|agent| {
-            crate::factory_target_cache::legacy::registered_live(agent)
+            let lane = agent.metadata.get("clone_path").is_some_and(|path| {
+                let path = std::path::Path::new(path);
+                crate::factory_target_cache::legacy::lane_target(cas_root, path, &path.join("target"))
+            });
+            if lane { crate::factory_target_cache::legacy::registered_live(agent) }
+            else { crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent).is_live() }
         })
         .filter_map(|agent| {
             agent
@@ -11822,7 +11829,7 @@ mod tests {
         owner.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(3);
         owner.metadata.insert("clone_path".into(), integration.display().to_string());
         store.register(&owner).unwrap();
-        assert!(live_target_cache_worktrees(store.as_ref()).contains(&integration));
+        assert!(live_target_cache_worktrees(store.as_ref(), &root).contains(&integration));
     }
 
     #[test]

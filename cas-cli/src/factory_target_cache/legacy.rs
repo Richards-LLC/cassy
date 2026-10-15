@@ -1,9 +1,74 @@
 //! Narrow exception for rebuildable legacy worker targets, never integration trees.
 use super::*;
 
+#[derive(Debug, Clone)]
+pub(super) struct Snapshot {
+    directories: Vec<(PathBuf, (u64, u64), SystemTime)>,
+    locks: Vec<PathBuf>,
+    safe: bool,
+}
+
+impl Snapshot {
+    pub(super) fn new() -> Self {
+        Self {
+            directories: Vec::new(),
+            locks: Vec::new(),
+            safe: true,
+        }
+    }
+    pub(super) fn record(
+        &mut self,
+        cache: &Path,
+        entry: &walkdir::DirEntry,
+        metadata: &fs::Metadata,
+    ) -> io::Result<()> {
+        let relative = entry
+            .path()
+            .strip_prefix(cache)
+            .map_err(io::Error::other)?
+            .to_path_buf();
+        if entry.file_type().is_symlink() {
+            self.safe = false;
+        }
+        if entry.file_type().is_dir() {
+            self.directories.push((
+                relative.clone(),
+                identity(entry.path())?,
+                metadata.modified()?,
+            ));
+        }
+        // Cargo's current build lock name, at every profile/triple depth.
+        if entry.file_name() == ".cargo-lock" {
+            self.safe &= entry.file_type().is_file();
+            self.locks.push(relative);
+        }
+        Ok(())
+    }
+    pub(super) fn admissible(&self) -> bool {
+        self.safe
+    }
+    // Cargo locks serialize artifact writes. Directory stamps detect changes
+    // to the tree/lock set without stat-ing every artifact again.
+    fn unchanged(&self, cache: &Path) -> bool {
+        self.safe
+            && self
+                .directories
+                .iter()
+                .all(|(relative, expected, modified)| {
+                    let path = cache.join(relative);
+                    identity(&path).ok() == Some(*expected)
+                        && fs::symlink_metadata(path)
+                            .and_then(|meta| meta.modified())
+                            .ok()
+                            == Some(*modified)
+                })
+    }
+}
+
 pub(super) struct Guard {
     _lane: crate::factory_worker_check::LaneLock,
     locks: Vec<(PathBuf, fs::File)>,
+    snapshot: Snapshot,
     worktree: PathBuf,
     worktree_identity: (u64, u64),
     target_identity: (u64, u64),
@@ -43,33 +108,20 @@ impl Guard {
             {
                 return false;
             }
-            let mut count = 0;
-            for entry in WalkDir::new(cache).follow_links(false) {
-                let Ok(entry) = entry else { return false };
-                if entry.file_type().is_symlink() {
-                    return false;
-                }
-                if entry.file_name() != ".cargo-lock" {
-                    continue;
-                }
-                count += 1;
-                let Some((_, file)) = self
-                    .locks
-                    .iter()
-                    .find(|(relative, _)| cache.join(relative) == entry.path())
-                else {
-                    return false;
-                };
-                let (Ok(held), Ok(current)) = (file.metadata(), fs::symlink_metadata(entry.path()))
-                else {
-                    return false;
-                };
-                if !current.is_file() || held.ino() != current.ino() || held.dev() != current.dev()
-                {
-                    return false;
-                }
+            if !self.snapshot.unchanged(cache) {
+                return false;
             }
-            count == self.locks.len()
+            self.locks.iter().all(|(relative, file)| {
+                let (Ok(held), Ok(current)) =
+                    (file.metadata(), fs::symlink_metadata(cache.join(relative)))
+                else {
+                    return false;
+                };
+                current.is_file()
+                    && !current.file_type().is_symlink()
+                    && held.ino() == current.ino()
+                    && held.dev() == current.dev()
+            })
         }
         #[cfg(not(unix))]
         {
@@ -126,6 +178,7 @@ fn registry(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
         .map_err(io::Error::other)?
         .list(None)
         .map_err(io::Error::other)?;
+    // Registry authority is clone_path only; readable process evidence separately protects other owners.
     let owners: Vec<_> = agents
         .iter()
         .filter(|agent| {
@@ -174,7 +227,28 @@ fn registry(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
     }))
 }
 
-pub(super) fn lane_target(cas_root: &Path, worktree: &Path, cache: &Path) -> bool {
+pub(super) fn owner_gate(
+    cas_root: &Path,
+    worktree: &Path,
+) -> Result<(), (CacheDisposition, String)> {
+    match registry(cas_root, worktree) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err((
+            CacheDisposition::Indeterminate,
+            "surviving owner has nonterminal or unknown tasks".into(),
+        )),
+        Err(error) => Err((
+            if error.kind() == io::ErrorKind::WouldBlock {
+                CacheDisposition::LiveProcess
+            } else {
+                CacheDisposition::Indeterminate
+            },
+            error.to_string(),
+        )),
+    }
+}
+
+pub(crate) fn lane_target(cas_root: &Path, worktree: &Path, cache: &Path) -> bool {
     let workers = cas_root.join("worktrees");
     // Equality to canonical paths rejects symlinked intermediate components too.
     workers.canonicalize().ok().as_ref() == Some(&workers)
@@ -185,17 +259,36 @@ pub(super) fn lane_target(cas_root: &Path, worktree: &Path, cache: &Path) -> boo
         && !lane::is_preview_path(cas_root, worktree)
 }
 
-pub(super) fn acquire(cas_root: &Path, worktree: &Path, cache: &Path) -> io::Result<Guard> {
-    acquire_with(cas_root, worktree, cache, registry)
+pub(super) fn acquire(
+    cas_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    snapshot: &Snapshot,
+) -> io::Result<Guard> {
+    acquire_scanned(cas_root, worktree, cache, snapshot, registry)
 }
 
+#[cfg(test)]
 fn acquire_with(
     cas_root: &Path,
     worktree: &Path,
     cache: &Path,
     registry: impl Fn(&Path, &Path) -> io::Result<bool>,
 ) -> io::Result<Guard> {
-    if !lane_target(cas_root, worktree, cache) || !registry(cas_root, worktree)? {
+    let snapshot = scan_cache(worktree, cache, false)?
+        .snapshot
+        .ok_or_else(|| io::Error::other("unsafe cache snapshot"))?;
+    acquire_scanned(cas_root, worktree, cache, &snapshot, registry)
+}
+
+fn acquire_scanned(
+    cas_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    snapshot: &Snapshot,
+    registry: impl Fn(&Path, &Path) -> io::Result<bool>,
+) -> io::Result<Guard> {
+    if !lane_target(cas_root, worktree, cache) || !snapshot.safe || !registry(cas_root, worktree)? {
         return Err(io::Error::other(
             "legacy lane containment or owner gate refused",
         ));
@@ -214,24 +307,15 @@ fn acquire_with(
     let mut guard = Guard {
         _lane: lane,
         locks: Vec::new(),
+        snapshot: snapshot.clone(),
         worktree: worktree.to_path_buf(),
         worktree_identity: identity(worktree)?,
         target_identity: identity(cache)?,
         #[cfg(unix)]
         lease,
     };
-    for entry in WalkDir::new(cache).follow_links(false) {
-        let entry = entry.map_err(io::Error::other)?;
-        // No symlink within the target may hide Cargo locks or cross containment.
-        if entry.file_type().is_symlink() {
-            return Err(io::Error::other("legacy target contains a symlink"));
-        }
-        if entry.file_name() != ".cargo-lock" {
-            continue;
-        }
-        if !entry.file_type().is_file() {
-            return Err(io::Error::other("invalid Cargo lock"));
-        }
+    for relative in &snapshot.locks {
+        let path = cache.join(relative);
         let mut options = OpenOptions::new();
         options.read(true).write(true);
         #[cfg(unix)]
@@ -239,15 +323,23 @@ fn acquire_with(
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        let file = options.open(entry.path())?;
-        file.try_lock_exclusive()?;
-        guard.locks.push((
-            entry
-                .path()
-                .strip_prefix(cache)
-                .map_err(io::Error::other)?
-                .to_path_buf(),
-            file,
+        let file = options.open(&path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Cargo lock {} unavailable: {error}", path.display()),
+            )
+        })?;
+        file.try_lock_exclusive().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Cargo lock {} unavailable: {error}", path.display()),
+            )
+        })?;
+        guard.locks.push((relative.clone(), file));
+    }
+    if !guard.unchanged(cache) {
+        return Err(io::Error::other(
+            "directory or Cargo lock set changed under lock",
         ));
     }
     Ok(guard)
@@ -467,6 +559,27 @@ mod tests {
             !root.join("worker-check-slots").exists(),
             "preview must not create lane locks"
         );
+    }
+
+    #[test]
+    fn locked_recheck_uses_directory_stamps_without_listing_artifacts_cas_cd3e_review() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, root, worker, target) = fixture();
+        let scanned = scan_cache(&worker, &target, false).unwrap();
+        let directory = target.join("debug");
+        let previous = fs::metadata(&directory).unwrap().permissions();
+        // Stat/open of known paths remains possible, but readdir is forbidden.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o111)).unwrap();
+        let guard = acquire_scanned(
+            &root,
+            &worker,
+            &target,
+            scanned.snapshot.as_ref().unwrap(),
+            |_, _| Ok(true),
+        );
+        let unchanged = guard.as_ref().is_ok_and(|guard| guard.unchanged(&target));
+        fs::set_permissions(directory, previous).unwrap();
+        assert!(unchanged, "recheck must not enumerate all artifact files");
     }
 
     #[test]

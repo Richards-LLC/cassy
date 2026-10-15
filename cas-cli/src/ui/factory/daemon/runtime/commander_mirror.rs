@@ -263,6 +263,7 @@ fn resume_floor(
     root: &Path,
     session: &str,
     enabled: bool,
+    policy_floor: Option<DateTime<Utc>>,
 ) -> std::io::Result<Option<DateTime<Utc>>> {
     let directory = root.join("commander-mirror");
     std::fs::create_dir_all(&directory)?;
@@ -274,7 +275,14 @@ fn resume_floor(
         return Ok(None);
     }
     if disabled.exists() {
-        std::fs::write(&resumed, Utc::now().to_rfc3339())?;
+        let disabled_at = DateTime::<Utc>::from(std::fs::metadata(&disabled)?.modified()?);
+        // A CLI resume already opened the window. Don't move it forward to
+        // this poll and discard replies completed since that config save.
+        // A later raw-file opt-out still needs the observed-poll fallback.
+        let floor = policy_floor
+            .filter(|at| *at >= disabled_at)
+            .unwrap_or_else(Utc::now);
+        std::fs::write(&resumed, floor.to_rfc3339())?;
         std::fs::remove_file(disabled)?;
     }
     match std::fs::read_to_string(resumed) {
@@ -313,7 +321,7 @@ pub(super) fn scan_supervisor_replies(
     };
     if !config.factory().commander_mirror_enabled {
         state.cursors.clear();
-        let _ = resume_floor(root, session, false);
+        let _ = resume_floor(root, session, false, None);
         return;
     }
     let supervisors = agents
@@ -334,12 +342,12 @@ pub(super) fn scan_supervisor_replies(
         .ok()
         .flatten()
         .unwrap_or_else(|| Utc::now() - chrono::Duration::minutes(2));
-    let Ok(local_floor) = resume_floor(root, session, true) else {
-        return;
-    };
     // Config saves persist this project-wide boundary even when the daemon
     // never observed false. A pending disable fails closed during the write.
     let Ok(policy_floor) = crate::config::commander_mirror_resume_floor(root) else {
+        return;
+    };
+    let Ok(local_floor) = resume_floor(root, session, true, policy_floor) else {
         return;
     };
     let resumed_since = local_floor.into_iter().chain(policy_floor).max();

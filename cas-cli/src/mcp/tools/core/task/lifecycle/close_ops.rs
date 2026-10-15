@@ -13971,7 +13971,23 @@ fn run_factory_branch_merge_gate_for_delivery(
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
     let mut origin_fetch_attempted = false;
-    let mut stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
+    // cas-1cc7: a new target may exist only on origin after a retarget.
+    // Unknown local Git state is not the local-epic KnownZero exception.
+    let mut stranded = match known_unmerged_factory_commits(repo_path, commit_ish, parent_branch) {
+        KnownUnmergedCount::KnownZero => 0,
+        KnownUnmergedCount::KnownPositive(count) => count,
+        KnownUnmergedCount::Unknown => {
+            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            match known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch) {
+                KnownUnmergedCount::KnownZero if !local_merge => 0,
+                KnownUnmergedCount::KnownPositive(count) if !local_merge => count,
+                _ => return MergeStateGateOutcome::Unresolved(format!(
+                    "MERGE STATE UNVERIFIABLE: delivery `{commit_ish}` could not be measured against target `{parent_branch}`{}. No integration evidence was obtained; restore the target ref and retry close.",
+                    if local_merge { String::new() } else { format!(" or `{origin_parent_branch}`") },
+                )),
+            }
+        }
+    };
     let mut local_only_trunk_target = false;
     if stranded == 0 {
         // A local trunk ref is not shared integration evidence. Refresh and
@@ -24018,9 +24034,37 @@ mod merge_state_gate_tests {
         let reopened = store.get(&task.id).unwrap();
         let envelope = MergeRequestEnvelope { task_id: task.id, branch_tip: tip, target_branch: "epic/new-target".into(), target_branch_tip: "b".repeat(40), anchor_tip: None, commits_not_on_target_base: 8, pr_number: None, source_freshness_unavailable: None };
         assert_eq!(merge_request_delivery_decision(Some(&reopened), &envelope, &MergeRequestDecision::Pending { target_tip: envelope.target_branch_tip.clone() }), MergeRequestDelivery::Deliver);
+        // A later actual review rejection of that same recovered tip must
+        // now suppress it, and the disposition must survive the store roundtrip.
+        let mut reviewed = reopened.clone();
+        reviewed.status = TaskStatus::AwaitingMerge;
+        reviewed.deliverables.factory_branch_anchor = Some(envelope.branch_tip.clone());
+        store.update(&reviewed).unwrap();
+        cas_store::request_changes_for_parked_delivery(dir.path(), &reviewed.id, "reopen-supervisor", "Reviewed delivery needs corrective work").unwrap();
+        let reviewed = store.get(&reviewed.id).unwrap();
+        assert_eq!(merge_request_delivery_decision(Some(&reviewed), &envelope, &MergeRequestDecision::Unverifiable), MergeRequestDelivery::SuppressRequestChanges { status: TaskStatus::Open });
         let mut declined = envelope;
         declined.branch_tip = "2".repeat(40);
         assert_eq!(merge_request_delivery_decision(Some(&reopened), &declined, &MergeRequestDecision::Unverifiable), MergeRequestDelivery::SuppressRequestChanges { status: TaskStatus::Open });
+    }
+
+    #[test]
+    fn remote_only_target_needs_known_integration_cas_1cc7() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main:epic/remote-only"]);
+        std::fs::write(p.join("delivery.rs"), "// cas-test1\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): delivery"]);
+        let task = worker_task("worker");
+        let request = base_req(&task.id);
+        assert!(matches!(run_factory_branch_merge_gate(&task, &request, "epic/remote-only", p), MergeStateGateOutcome::Reject(_)));
+        git(p, &["push", "-q", "origin", "HEAD:epic/remote-only"]);
+        assert!(matches!(run_factory_branch_merge_gate(&task, &request, "epic/remote-only", p), MergeStateGateOutcome::Proceed));
+        assert!(matches!(run_factory_branch_merge_gate(&task, &request, "epic/missing-target", p), MergeStateGateOutcome::Unresolved(_)));
     }
 
     fn close_relay_fixture_cas_3a82(

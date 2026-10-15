@@ -18720,16 +18720,11 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
 /// it is not, is the default branch itself, or cannot be read. Containment
 /// is ancestry of the lane tip (a merge release) or, for a squash release,
 /// the lane tip's tree on the default branch's history.
-const RELEASED_LANE_RED_STUB: bool = true;
-
 fn released_lane_evidence(
     repo_path: &std::path::Path,
     lane: &str,
     snapshot: &EpicGitSnapshot,
 ) -> Option<String> {
-    if RELEASED_LANE_RED_STUB {
-        return None;
-    }
     let default = resolve_standalone_merge_target(repo_path).ok()?;
     if default == lane || !is_safe_git_refname(lane) || !is_safe_git_refname(&default) {
         return None;

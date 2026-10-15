@@ -346,7 +346,10 @@ impl PeerClaims {
     }
 
     fn remaining(&self) -> Result<Duration, CasError> {
-        let left = self.budget.map(|budget| budget.remaining()).unwrap_or(CLAIM_TIMEOUT)
+        let left = self
+            .budget
+            .map(|budget| budget.remaining())
+            .unwrap_or(CLAIM_TIMEOUT)
             .min(CLAIM_TIMEOUT);
         if left.is_zero() {
             Err(CasError::Other("peer check budget exhausted".into()))
@@ -450,7 +453,9 @@ impl PeerClaims {
         let key = claims.key(task_id);
         let lock = match claims.coordinator(agent_id).and_then(|c| c.get_lock(&key)) {
             Ok(Some(lock)) => lock,
-            Ok(None) => return Acquire::Unavailable("the stale claim disappeared; retry claiming".into()),
+            Ok(None) => {
+                return Acquire::Unavailable("the stale claim disappeared; retry claiming".into());
+            }
             Err(error) => return Acquire::Unavailable(error.to_string()),
         };
         let listed = claims.listed_holder(&lock.agent_id);
@@ -460,8 +465,16 @@ impl PeerClaims {
         }
         // The release validates this exact snapshot again, including same-ID
         // renewal/reacquisition, after the final presence observation.
-        claims.move_claim(task_id, kind, &current.agent_id, agent_id, agent_name,
-            duration_secs, deadline, Some(&lock))
+        claims.move_claim(
+            task_id,
+            kind,
+            &current.agent_id,
+            agent_id,
+            agent_name,
+            duration_secs,
+            deadline,
+            Some(&lock),
+        )
     }
 
     /// A peer's hold from a refused claim. The 409 names the holder and when
@@ -519,21 +532,27 @@ impl PeerClaims {
         if let Some(expected) = expected {
             match claims.release_if_unchanged(&key, expected) {
                 Ok(true) => {}
-                Ok(false) => return Acquire::PeerHolds(PeerHold {
-                    agent_id: expected.agent_id.clone(),
-                    holder: ClaimHolder::from_reason(expected.claim_reason.as_deref()),
-                    expires_at: Some(expected.expires_at), live: None,
-                }),
+                Ok(false) => {
+                    return Acquire::PeerHolds(PeerHold {
+                        agent_id: expected.agent_id.clone(),
+                        holder: ClaimHolder::from_reason(expected.claim_reason.as_deref()),
+                        expires_at: Some(expected.expires_at),
+                        live: None,
+                    });
+                }
                 Err(error) => return Acquire::Unavailable(error.to_string()),
             }
         } else if let Err(error) = claims.release_with_reserve(&key, from) {
             return Acquire::Unavailable(error.to_string());
         }
-        let moved = claims.coordinator(agent_id)
+        let moved = claims
+            .coordinator(agent_id)
             .and_then(|coordinator| coordinator.claim(&key, duration_secs, Some(&reason)));
         match moved {
             Ok(ClaimResult::Success(_)) => Acquire::Claimed,
-            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if held_by == agent_id => Acquire::Claimed,
+            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if held_by == agent_id => {
+                Acquire::Claimed
+            }
             // Someone else claimed it between the release and the claim.
             Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if !held_by.is_empty() => {
                 claims.peer_answer(&key, &held_by)
@@ -547,16 +566,23 @@ impl PeerClaims {
     /// claim. A blocking continuation cannot start a call after the deadline.
     fn release_with_reserve(&self, key: &str, agent_id: &str) -> Result<(), CasError> {
         let left = self.remaining()? / 2;
-        if left.is_zero() { return Err(CasError::Other("peer check budget exhausted".into())); }
+        if left.is_zero() {
+            return Err(CasError::Other("peer check budget exhausted".into()));
+        }
         self.coordinator(agent_id)?.with_timeout(left).release(key)
     }
 
     fn release_if_unchanged(&self, key: &str, expected: &TaskLease) -> Result<bool, CasError> {
         let current = self.coordinator(&expected.agent_id)?.get_lock(key)?;
-        let unchanged = current.is_some_and(|current|
-            current.agent_id == expected.agent_id && current.epoch == expected.epoch
-                && current.renewed_at == expected.renewed_at && current.status == expected.status);
-        if !unchanged { return Ok(false); }
+        let unchanged = current.is_some_and(|current| {
+            current.agent_id == expected.agent_id
+                && current.epoch == expected.epoch
+                && current.renewed_at == expected.renewed_at
+                && current.status == expected.status
+        });
+        if !unchanged {
+            return Ok(false);
+        }
         self.release_with_reserve(key, &expected.agent_id)?;
         Ok(true)
     }
@@ -1124,34 +1150,75 @@ mod tests {
 
     #[tokio::test]
     async fn cas_50713_stale_recovery_bounds_reads_by_remaining_budget() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         let key = claim_key("repo", "cas-slow");
         let mut lock = TaskLease::new(key.clone(), "old".into(), 600);
         lock.renewed_at = Utc::now() - chrono::Duration::seconds(301);
-        Mock::given(method("GET")).and(path(format!("/api/agents/tasks/{key}/lock")))
-            .respond_with(ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"lock": lock}))
-                .set_delay(Duration::from_millis(400)))
-            .mount(&server).await;
-        Mock::given(method("GET")).and(path("/api/agents"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": []})))
-            .mount(&server).await;
+        let mut wire_lock = serde_json::to_value(&lock).unwrap();
+        wire_lock["id"] = serde_json::json!("fixture-lock");
+        Mock::given(method("GET"))
+            .and(path(format!("/api/agents/tasks/{key}/lock")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"lock": wire_lock}))
+                    .set_delay(Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/agents"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": []})),
+            )
+            .mount(&server)
+            .await;
         let claims = PeerClaims {
-            config: CloudConfig { endpoint: server.uri(), token: Some("test-token".into()), ..Default::default() },
-            project: "repo".into(), label: "here".into(), retired_local: HashMap::new(), budget: None,
+            config: CloudConfig {
+                endpoint: server.uri(),
+                token: Some("test-token".into()),
+                ..Default::default()
+            },
+            project: "repo".into(),
+            label: "here".into(),
+            retired_local: HashMap::new(),
+            budget: None,
         };
         let started = Instant::now();
         let answer = tokio::task::spawn_blocking(move || {
-            let observed = PeerHold { agent_id: "old".into(), holder: None, expires_at: None, live: Some(false) };
-            claims.take_stale_peer("cas-slow", ClaimKind::Task, &observed, "new", "new", 600,
-                Instant::now() + Duration::from_millis(80))
-        }).await.unwrap();
+            let observed = PeerHold {
+                agent_id: "old".into(),
+                holder: None,
+                expires_at: None,
+                live: Some(false),
+            };
+            claims.take_stale_peer(
+                "cas-slow",
+                ClaimKind::Task,
+                &observed,
+                "new",
+                "new",
+                600,
+                Instant::now() + Duration::from_millis(80),
+            )
+        })
+        .await
+        .unwrap();
         assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
-        assert!(started.elapsed() < Duration::from_millis(300), "{:?}", started.elapsed());
-        assert!(server.received_requests().await.unwrap().iter()
-            .all(|request| !request.url.path().ends_with("/release")));
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.path().ends_with("/release"))
+        );
     }
 
     #[test]

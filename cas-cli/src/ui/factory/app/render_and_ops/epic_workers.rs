@@ -1487,7 +1487,9 @@ fn reset_stale_preassign_holder(
         let task_id = task.id.clone();
         let holder = holder.to_string();
         let release = move || {
-            let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(&cas_dir) else { return; };
+            let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(&cas_dir) else {
+                return;
+            };
             if let Err(error) = claims.release_reset_holder(&task_id, &holder, &retired_ids) {
                 tracing::debug!(task = %task_id, %error, "stale assignee cloud release failed; start will retry");
             }

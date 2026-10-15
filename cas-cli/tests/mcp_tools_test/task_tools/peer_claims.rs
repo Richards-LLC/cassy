@@ -1061,7 +1061,9 @@ async fn cas_50713_late_presence_with_fresh_renewal_refuses_and_reports_claim_lo
         let cloud = FakeCloud::start();
         let old = machine(&cloud.url, PROJECT, "renewing-peer");
         let new = machine(&cloud.url, PROJECT, "contender");
-        for m in [&old, &new] { m.put_task("cas-busy", TaskType::Task); }
+        for m in [&old, &new] {
+            m.put_task("cas-busy", TaskType::Task);
+        }
         new.put_task("cas-lost", TaskType::Task);
         start(&new.core, "cas-lost", false).await.unwrap();
         cloud.live(&old, "renewing-peer");
@@ -1072,35 +1074,58 @@ async fn cas_50713_late_presence_with_fresh_renewal_refuses_and_reports_claim_lo
             state.agents.get_mut(&old.agent_id).unwrap().2 = Utc::now() - Duration::seconds(301);
         }
         assert!(start(&new.core, "cas-busy", false).await.is_err());
-        assert_eq!(cloud.active_lock("cas-busy").unwrap().1.agent_id, old.agent_id);
+        assert_eq!(
+            cloud.active_lock("cas-busy").unwrap().1.agent_id,
+            old.agent_id
+        );
         cloud.give_to("cas-lost", &old.agent_id, None);
         let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
         assert_eq!(report.conflicts.len(), 1, "{report:?}");
-        assert!(cas::store::open_prompt_queue_store(&new.cas_dir).unwrap().peek_all(100).unwrap()
-            .iter()
-            // pin: live competing claims must retain this alarm class even when presence is late.
-            .any(|row| row.prompt.contains("PEER CLAIM LOST")));
+        assert!(
+            cas::store::open_prompt_queue_store(&new.cas_dir)
+                .unwrap()
+                .peek_all(100)
+                .unwrap()
+                .iter()
+                // pin: live competing claims must retain this alarm class even when presence is late.
+                .any(|row| row.prompt.contains("PEER CLAIM LOST"))
+        );
     }
 }
 
 #[tokio::test]
 async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
     for epoch_only in [true, false] {
-    let mut env = TestEnvGuard::temp_home();
-    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
-    let cloud = FakeCloud::start();
-    let old = machine(&cloud.url, PROJECT, "ended-peer");
-    let new = machine(&cloud.url, PROJECT, "contender");
-    for m in [&old, &new] { m.put_task("cas-race", TaskType::Task); }
-    cloud.live(&old, "ended-peer");
-    start(&old.core, "cas-race", false).await.unwrap();
-    {
-        let mut state = cloud.state.lock().unwrap();
-        state.statuses.insert(old.agent_id.clone(), "shutdown".into());
-        state.renew_after_lock_reads = Some((1, epoch_only));
-    }
-    assert!(start(&new.core, "cas-race", false).await.is_err());
-    assert_eq!(cloud.active_lock("cas-race").unwrap().1.agent_id, old.agent_id);
-    assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")));
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "ended-peer");
+        let new = machine(&cloud.url, PROJECT, "contender");
+        for m in [&old, &new] {
+            m.put_task("cas-race", TaskType::Task);
+        }
+        cloud.live(&old, "ended-peer");
+        start(&old.core, "cas-race", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state
+                .statuses
+                .insert(old.agent_id.clone(), "shutdown".into());
+            state.renew_after_lock_reads = Some((1, epoch_only));
+        }
+        assert!(start(&new.core, "cas-race", false).await.is_err());
+        assert_eq!(
+            cloud.active_lock("cas-race").unwrap().1.agent_id,
+            old.agent_id
+        );
+        assert!(
+            !cloud
+                .state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .any(|r| r.ends_with("/release"))
+        );
     }
 }

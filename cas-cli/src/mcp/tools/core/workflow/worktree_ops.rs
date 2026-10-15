@@ -284,6 +284,15 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
     BranchCiState::CodeValidationUnconfirmed { sha, reason }
 }
 
+/// cas-207e: whether a parked delivery's lane CI is still running, so the
+/// supervisor-stall relay does not call it a ready merge (cas-6c13).
+pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> bool {
+    matches!(
+        lookup_branch_ci(branch, target, cwd).state,
+        BranchCiState::Pending { .. } | BranchCiState::CodePending { .. }
+    )
+}
+
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
 /// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
 /// the tip for a pure docs delivery. Both lookups are bounded and never poll.

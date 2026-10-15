@@ -102,5 +102,78 @@ fn cas_0a27_measure_released_epic_close_gate() {
         report.push_str(&format!("bounded {} {:>8.1} ms\n", child.id, elapsed.as_secs_f64() * 1000.0));
     }
     report.push_str(&format!("bounded per-child total {total:?}\n"));
-    std::fs::write(scratch.join("timings-before.txt"), report).unwrap();
+    report.push_str(&fixture_timings());
+    std::fs::write(scratch.join("timings-after.txt"), report).unwrap();
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The 40-child fixture of the gate test, released and not, timed under
+/// the close gate's budget.
+fn fixture_timings() -> String {
+    let mut report = String::new();
+    for released in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        git(p, &["config", "user.email", "t@t"]);
+        git(p, &["config", "user.name", "t"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        let lane = "epic/released-cas-0a27";
+        git(p, &["branch", lane, "main"]);
+        for worker in 0..8 {
+            git(p, &["branch", &format!("factory/w{worker}"), lane]);
+        }
+        let mut children = Vec::new();
+        for index in 0..40 {
+            let worker = format!("w{}", index % 8);
+            let branch = format!("factory/{worker}");
+            git(p, &["checkout", "-q", &branch]);
+            let file = format!("child-{index}.rs");
+            std::fs::write(p.join(&file), format!("// child {index}\n")).unwrap();
+            git(p, &["add", &file]);
+            git(p, &["commit", "-q", "-m", "feat"]);
+            let anchor = git(p, &["rev-parse", "HEAD"]);
+            git(p, &["checkout", "-q", lane]);
+            git(p, &["merge", "-q", "--no-ff", "-m", "merge", &branch]);
+            let mut task = Task::new(format!("cas-rel-{index}"), "child".into());
+            task.status = TaskStatus::Closed;
+            task.assignee = Some(worker.clone());
+            task.deliverables.parked_branch = Some(branch.clone());
+            task.deliverables.factory_branch_anchor = Some(anchor);
+            children.push(task);
+        }
+        for worker in 0..8 {
+            git(p, &["checkout", "-q", &format!("factory/w{worker}")]);
+            let file = format!("later-{worker}.rs");
+            std::fs::write(p.join(&file), "// later\n").unwrap();
+            git(p, &["add", &file]);
+            git(p, &["commit", "-q", "-m", "later"]);
+        }
+        git(p, &["checkout", "-q", "main"]);
+        if released {
+            git(p, &["merge", "-q", "--no-ff", "-m", "release", lane]);
+        }
+        let started = std::time::Instant::now();
+        let gate = collect_epic_branch_statuses_with_options(
+            &children,
+            lane,
+            p,
+            EpicStatusOptions { offset: 0, limit: None, summary: false, budget: EPIC_CLOSE_GATE_BUDGET },
+        );
+        report.push_str(&format!(
+            "40-child fixture released={released}: {} of 40 checked, exhausted={}, blocking={}, {:?}\n",
+            gate.statuses.len(),
+            gate.budget_exhausted,
+            gate.statuses.iter().filter(|s| s.blocks_epic_close()).count(),
+            started.elapsed()
+        ));
+    }
+    report
 }

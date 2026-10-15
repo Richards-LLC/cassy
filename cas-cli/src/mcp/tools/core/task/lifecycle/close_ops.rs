@@ -18137,6 +18137,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     // direction is measured once rather than once per child.
     let mut direction_memo: std::collections::HashMap<(String, String), BranchContentDirection> =
         std::collections::HashMap::new();
+    // cas-0a27: whether each delivery lane is already released (contained in
+    // the default branch), measured once per lane rather than per child.
+    let mut released_lanes: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
 
     for t in subtasks.iter().skip(offset).take(page_len) {
         // GH #1038: retargeting the epic for a follow-up does not retarget
@@ -18185,6 +18189,48 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             .chain(additional_factory_branches.iter())
             .cloned()
             .collect::<Vec<_>>();
+        // cas-0a27: a closed child proved its own delivery onto its lane when
+        // it closed (the merge-state close gate cannot be overridden). Once
+        // that lane is released — contained in the default branch — every
+        // such child is proven by the lane's single ancestry check, with no
+        // per-child Git work. A 41-child released epic otherwise spent its
+        // whole budget re-proving content its children had already proven.
+        if !options.summary && t.status == TaskStatus::Closed && has_delivery {
+            let released = released_lanes
+                .entry(parent_branch.to_string())
+                .or_insert_with(|| released_lane_evidence(repo_path, parent_branch, &git_snapshot))
+                .clone();
+            if let Some(evidence) = released {
+                let checked_ref_reads = fallback_branches
+                    .iter()
+                    .map(|branch| git_snapshot.read_ref(branch))
+                    .collect();
+                statuses.push(EpicChildBranchStatus {
+                    task_id: t.id.clone(),
+                    task_status: t.status,
+                    assignee: t.assignee.clone(),
+                    dead_or_stale_assignee: false,
+                    recorded_anchor: recorded_anchor.map(str::to_string),
+                    factory_branch,
+                    additional_factory_branches,
+                    unmerged_count: 0,
+                    last_commit_unix: None,
+                    merge_evidence_note: Some(format!(
+                        "decision: child task `{}` is closed and its delivery lane \
+                         `{parent_branch}` is released ({evidence}). Its own close proved \
+                         the delivery onto that lane, so it was not re-proven.",
+                        t.id
+                    )),
+                    content_evolution_note: None,
+                    dropped_paths: Vec::new(),
+                    content_check_error: None,
+                    checked_ref_reads,
+                    refs_unresolved: false,
+                    content_directions: Vec::new(),
+                });
+                continue;
+            }
+        }
         let mut cache_key = (!options.summary).then(|| {
             epic_verdict_cache::verdict_key(
                 t,
@@ -18667,6 +18713,49 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         budget_exhausted,
         reused_verdicts,
     }
+}
+
+/// cas-0a27: how `lane` is contained in the repository's default branch
+/// (`[factory] epic_base_branch`, else the detected default), or `None` when
+/// it is not, is the default branch itself, or cannot be read. Containment
+/// is ancestry of the lane tip (a merge release) or, for a squash release,
+/// the lane tip's tree on the default branch's history.
+const RELEASED_LANE_RED_STUB: bool = true;
+
+fn released_lane_evidence(
+    repo_path: &std::path::Path,
+    lane: &str,
+    snapshot: &EpicGitSnapshot,
+) -> Option<String> {
+    if RELEASED_LANE_RED_STUB {
+        return None;
+    }
+    let default = resolve_standalone_merge_target(repo_path).ok()?;
+    if default == lane || !is_safe_git_refname(lane) || !is_safe_git_refname(&default) {
+        return None;
+    }
+    let lane_read = snapshot.read_ref(lane);
+    let lane_ref = lane_read.read_ref()?.to_string();
+    let candidates: Vec<String> = [format!("origin/{default}"), default]
+        .into_iter()
+        .filter(|candidate| git_ref_exists(repo_path, candidate))
+        .collect();
+    let lane_sha = snapshot
+        .ref_info(&lane_ref)
+        .map(|info| info.commit.chars().take(10).collect::<String>())
+        .unwrap_or_default();
+    if let Some(candidate) = candidates
+        .iter()
+        .find(|candidate| git_commit_is_ancestor(repo_path, &lane_ref, candidate))
+    {
+        return Some(format!("`{lane_ref}` @ {lane_sha} is an ancestor of `{candidate}`"));
+    }
+    candidates
+        .iter()
+        .find(|candidate| commit_tip_tree_reachable_from(repo_path, &lane_ref, candidate))
+        .map(|candidate| {
+            format!("the tree of `{lane_ref}` @ {lane_sha} is on `{candidate}`'s history")
+        })
 }
 
 fn memoized_branch_content_direction(
@@ -33420,6 +33509,143 @@ mod epic_status_gate_tests {
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }
+    }
+
+    /// An epic lane with `children` closed children, each merged into the
+    /// lane from a reusable worker lane that later moved on to other work,
+    /// as a real burn-down epic looks after its last child closes. With
+    /// `released`, the lane is merged into `main`.
+    fn released_epic_fixture(children: usize, released: bool) -> (TempDir, Vec<Task>) {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let lane = "epic/released-cas-0a27";
+        git(p, &["branch", lane, "main"]);
+        let workers = 8;
+        for worker in 0..workers {
+            git(p, &["branch", &format!("factory/w{worker}"), lane]);
+        }
+        let mut subtasks = Vec::new();
+        for index in 0..children {
+            let worker = format!("w{}", index % workers);
+            let branch = format!("factory/{worker}");
+            git(p, &["checkout", "-q", &branch]);
+            let file = format!("child-{index}.rs");
+            std::fs::write(p.join(&file), format!("// child {index}\n")).unwrap();
+            git(p, &["add", &file]);
+            git(p, &["commit", "-q", "-m", &format!("feat: child {index}")]);
+            let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+            git(p, &["checkout", "-q", lane]);
+            git(p, &["merge", "-q", "--no-ff", "-m", &format!("merge child {index}"), &branch]);
+            let mut task = child(&format!("cas-rel-{index}"), TaskStatus::Closed, Some(&worker));
+            task.deliverables.factory_branch_anchor = Some(anchor);
+            subtasks.push(task);
+        }
+        // The reused lanes carry later, unrelated work past the epic.
+        for worker in 0..workers {
+            git(p, &["checkout", "-q", &format!("factory/w{worker}")]);
+            let file = format!("later-{worker}.rs");
+            std::fs::write(p.join(&file), "// later work\n").unwrap();
+            git(p, &["add", &file]);
+            git(p, &["commit", "-q", "-m", "feat: a later task"]);
+        }
+        git(p, &["checkout", "-q", "main"]);
+        if released {
+            git(p, &["merge", "-q", "--no-ff", "-m", "release", lane]);
+        }
+        (dir, subtasks)
+    }
+
+    /// cas-0a27: closing the released v41 epic proved about one child per
+    /// attempt in the 8 s budget. A released lane proves every closed child
+    /// with one ancestry check: a 40-child epic closes in one attempt, well
+    /// inside the budget, with each child's evidence recorded.
+    #[test]
+    fn released_epic_closes_in_one_attempt_with_every_child_proven_cas_0a27() {
+        let (dir, subtasks) = released_epic_fixture(40, true);
+        let task = epic("cas-rel-epic");
+        let req = base_req(&task.id);
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate(
+            &task,
+            &req,
+            "epic/released-cas-0a27",
+            dir.path(),
+            &subtasks,
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)),
+            "a released 40-child epic must close in one attempt: {outcome:?}"
+        );
+        assert!(
+            elapsed < EPIC_CLOSE_GATE_BUDGET / 4,
+            "40 released children took {elapsed:?} of the {EPIC_CLOSE_GATE_BUDGET:?} budget"
+        );
+
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "epic/released-cas-0a27",
+            dir.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: false,
+                budget: EPIC_CLOSE_GATE_BUDGET,
+            },
+        );
+        assert!(!collection.budget_exhausted);
+        assert_eq!(collection.statuses.len(), 40);
+        for status in &collection.statuses {
+            assert!(!status.blocks_epic_close(), "{status:?}");
+            let note = status.merge_evidence_note.as_deref().unwrap_or_default();
+            assert!(
+                note.contains("is released") && note.contains("is an ancestor of `main`"),
+                "{note}"
+            );
+        }
+    }
+
+    /// cas-0a27: an unreleased lane keeps the per-child proof, and an open
+    /// child of a released lane is still measured, not waved through.
+    #[test]
+    fn unreleased_epic_keeps_per_child_proofs_cas_0a27() {
+        let (dir, mut subtasks) = released_epic_fixture(4, false);
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "epic/released-cas-0a27",
+            dir.path(),
+            EpicStatusOptions::full_unbounded(),
+        );
+        assert_eq!(collection.statuses.len(), 4);
+        for status in &collection.statuses {
+            assert!(!status.blocks_epic_close(), "{status:?}");
+            assert!(
+                !status
+                    .merge_evidence_note
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("is released"),
+                "{status:?}"
+            );
+        }
+
+        // Released lane, but one child is still in progress with unmerged
+        // work on its lane: it is measured and blocks.
+        let (dir, _) = released_epic_fixture(0, true);
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "factory/open-worker", "main"]);
+        std::fs::write(p.join("open.rs"), "// unmerged\n").unwrap();
+        git(p, &["add", "open.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: open work"]);
+        git(p, &["checkout", "-q", "main"]);
+        subtasks = vec![child("cas-rel-open", TaskStatus::InProgress, Some("open-worker"))];
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "epic/released-cas-0a27",
+            p,
+            EpicStatusOptions::full_unbounded(),
+        );
+        assert!(collection.statuses[0].blocks_epic_close(), "{:?}", collection.statuses[0]);
     }
 
     #[test]

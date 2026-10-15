@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+/// First and longest wait between exit checks of a bounded probe.
+const POLL_START: Duration = Duration::from_micros(100);
+const POLL_MAX: Duration = Duration::from_millis(5);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Deadline {
     expires_at: Instant,
@@ -70,11 +74,16 @@ pub(crate) fn run_command_with_stdin(
     configure_process_group(command);
     let mut child = command.spawn().map_err(|_| BoundedCommandError::Io)?;
     let probe_deadline = Instant::now() + timeout;
+    // cas-0a27: most probes are millisecond Git reads. A fixed 5 ms poll
+    // made each one cost at least 5 ms, about 4x the unbounded cost of an
+    // epic close proof; back off from 100 µs instead.
+    let mut poll = POLL_START;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < probe_deadline => {
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(poll);
+                poll = (poll * 2).min(POLL_MAX);
             }
             Ok(None) => {
                 terminate_process_group(&mut child);
@@ -96,17 +105,10 @@ pub(crate) fn run_command_with_stdin(
 #[cfg(unix)]
 pub(crate) fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: setpgid is async-signal-safe and the closure touches no shared
-    // Rust state between fork and exec.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        });
-    }
+    // `process_group(0)` is the same setpgid(0, 0) as a pre_exec hook, but
+    // lets std spawn with posix_spawn instead of forking the whole process
+    // for every probe (cas-0a27).
+    command.process_group(0);
 }
 
 #[cfg(not(unix))]

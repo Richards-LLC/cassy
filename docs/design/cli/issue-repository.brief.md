@@ -10,7 +10,7 @@
 
 ## Critique
 
-terminal-qa: PASS issue-repo-origin-fixed · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-828c/terminal-qa/issue-repo-origin-fixed/report.json
+terminal-qa: PASS issue-repo-origin-merged · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-828c/terminal-qa/issue-repo-origin-merged/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -22,4 +22,5 @@ terminal-qa: PASS issue-repo-origin-fixed · 12 runs · 0 fail · 0 warn · 0 al
 
 Scored by vivid-robin-62 on 2026-10-15 after the contrast fix. The installed
 baseline and initial candidate failures remain preserved under the cas-f398
-artifact root; the final no-allowlist receipt is preserved under cas-828c.
+artifact root; the final no-allowlist receipt is preserved under cas-828c and
+was run against merged tip ee30320db.

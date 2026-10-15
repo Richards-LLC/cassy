@@ -2,6 +2,7 @@ mod loop_tools;
 pub(crate) mod shadow_review;
 pub(crate) mod verification_tools;
 mod worktree_ops;
+pub(crate) use worktree_ops::delivery_ci_pending;
 
 /// Guidance shared by the public coordination gate and the underlying
 /// worktree operation. System A's opt-in configuration is distinct from the

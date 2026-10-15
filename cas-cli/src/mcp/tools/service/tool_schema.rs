@@ -100,8 +100,8 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("agent_type", "register / session_start: primary, sub_agent, worker or ci."),
     ("parent_id", "register / session_start: parent agent id for a sub-agent."),
     ("session_id", "register / session_start / session_end: harness session id."),
-    ("remind_message", "remind: the text delivered when it fires (required)."),
-    ("remind_delay_secs", "remind: fire after this many seconds."),
+    ("remind_message", "remind: the text delivered when it fires (required). message kind=ask: the default taken at the deadline."),
+    ("remind_delay_secs", "remind: fire after this many seconds. message kind=ask: the deadline."),
     (
         "remind_event",
         "remind: fire on task_completed, task_blocked, worker_idle, epic_completed, \

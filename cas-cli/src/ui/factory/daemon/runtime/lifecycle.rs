@@ -949,9 +949,14 @@ fn enqueue_worker_attention_relay_detail_with_key(
         .and_then(crate::harness_policy::agent_tool_prefix)
         .unwrap_or("");
     let detail = detail(prefix);
-    let body = format!(
+    let mut body = format!(
         "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `{prefix}factory action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
     );
+    // cas-207e: ready tasks or merges waiting on an actionable-idle
+    // supervisor are a blocker, not routine: idle workers burn wall clock.
+    if kind == "supervisor_stalled" {
+        body = crate::prompt_revalidation::attach_blocker_envelope(&body, "ready work", task_id);
+    }
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if let Err(error) = prompt_queue.enqueue_idempotent(
         &source,
@@ -1157,6 +1162,47 @@ mod worker_attention_tests {
             1,
             "a later window may report a new incident"
         );
+    }
+
+    /// cas-207e: ready work waiting on an actionable-idle supervisor wakes it
+    /// as a blocker (Daemon-stamped cas-blocker envelope), not as routine.
+    #[test]
+    fn ready_work_with_idle_workers_wakes_the_supervisor_as_a_blocker_cas_207e() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "ready-work-blocker-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "ready-work-blocker-test");
+        let outcome = enqueue_worker_attention_relay(
+            &cas_dir,
+            &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step:
+                    crate::ui::factory::director::SupervisorActionableState::AssignReadyWork {
+                        task_ids: vec!["cas-ready".into()],
+                        idle_workers: vec!["calm-owl".into()],
+                    },
+                occurrence: "episode-1".into(),
+                actionable_idle_secs: 600,
+            },
+        );
+        assert!(matches!(
+            outcome,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let rows = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].prompt.contains("cas-ready"));
+        assert!(
+            crate::prompt_revalidation::parse_blocker_envelope(&rows[0].prompt).is_some(),
+            "{}",
+            rows[0].prompt
+        );
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }
 
     #[test]
@@ -2330,8 +2376,10 @@ impl FactoryDaemon {
                             super::ci_watch::collect_ci_wakes(&transport, &candidates),
                             !candidates.is_empty(),
                         );
-                        let failures =
-                            super::ci_watch::collect_failures(&transport, &watched_branches)?;
+                        let failures = super::ci_watch::mark_merged_failures(
+                            &project,
+                            super::ci_watch::collect_failures(&transport, &watched_branches)?,
+                        );
                         let mut queue_poll = super::ci_watch::collect_tracked_merge_queue_ejections(
                             &transport,
                             &deliveries,

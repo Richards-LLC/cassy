@@ -96,8 +96,17 @@ pub(super) fn park_refusal(
     let judged = for_close(cas_root, proof_repo, task, changed_paths, Some(head));
     let targets = judged.as_ref().map_or(&task.proof_targets, |(judged, _)| &judged.proof_targets);
     let uncovered = super::uncovered_blast_radius_modules(changed_paths, targets);
+    // cas-6c13: a crate that depends on a changed crate can fail on the change
+    // (a cas-pty prompt edit broke a cas-mux snapshot test, found 9 h later).
+    let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
+    let dependents = untested_dependents(proof_repo, changed_paths, &tested);
+    let short = &head[..head.len().min(12)];
     if uncovered.is_empty() {
-        return None;
+        return (!dependents.is_empty()).then(|| format!(
+            "⚠️ PROOF SCOPE INCOMPLETE (cas-6c13): task {} changes crates that other workspace crates depend on, and these dependents have no passing worker test receipt at {short}: {}. Run a capped targeted test in each (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`) at {short}, then retry close.",
+            task.id,
+            dependents.join(", "),
+        ));
     }
     let mut widened = cas_types::normalize_proof_targets(&task.proof_targets);
     for module in &uncovered {
@@ -106,9 +115,16 @@ pub(super) fn park_refusal(
         }
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let short = &head[..head.len().min(12)];
+    let dependents = if dependents.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Dependent crates without a passing receipt at {short} need one too (cas-6c13): {}.",
+            dependents.join(", ")
+        )
+    };
     Some(format!(
-        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
+        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.{dependents}",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
@@ -213,12 +229,74 @@ fn package_covers(
     }
 }
 
-/// Map each workspace package name to its crate directory's name, as
-/// [`changed_source_modules`] records it (lowercase basename).
-fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
-    let mut dirs = BTreeMap::new();
+/// cas-6c13: workspace packages that depend directly on a crate the delivery
+/// changes and have no passing test receipt in `tested`, as
+/// `dependent (depends on changed)`. A cas-pty change selects cas-mux.
+fn untested_dependents(repo: &Path, changed_paths: &[String], tested: &[String]) -> Vec<String> {
+    let package_dirs = workspace_package_dirs(repo);
+    let changed: Vec<&String> = changed_source_modules(changed_paths)
+        .iter()
+        .filter_map(|module| {
+            package_dirs
+                .iter()
+                .find(|(_, dir)| **dir == module.crate_dir)
+                .map(|(name, _)| name)
+        })
+        .collect();
+    let tested: Vec<String> = tested
+        .iter()
+        .map(|package| package.to_ascii_lowercase())
+        .collect();
+    let mut missing = Vec::new();
+    for manifest in workspace_manifests(repo)
+        .iter()
+        .filter_map(|path| read_manifest(path))
+    {
+        let Some(name) = manifest
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(toml::Value::as_str)
+        else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        if changed.contains(&&name) || tested.contains(&name) {
+            continue;
+        }
+        let sections = std::iter::once(&manifest).chain(
+            manifest
+                .get("target")
+                .and_then(toml::Value::as_table)
+                .into_iter()
+                .flat_map(|t| t.values()),
+        );
+        let dependency = sections
+            .flat_map(|section| {
+                ["dependencies", "dev-dependencies", "build-dependencies"]
+                    .map(|key| section.get(key))
+            })
+            .flatten()
+            .filter_map(toml::Value::as_table)
+            .flat_map(|table| table.iter())
+            .map(|(key, config)| {
+                config
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key)
+                    .to_ascii_lowercase()
+            })
+            .find(|dependency| changed.contains(&dependency));
+        if let Some(dependency) = dependency {
+            missing.push(format!("{name} (depends on {dependency})"));
+        }
+    }
+    missing
+}
+
+/// The root and member manifests of the workspace at `repo`.
+fn workspace_manifests(repo: &Path) -> Vec<std::path::PathBuf> {
     let Some(root) = read_manifest(&repo.join("Cargo.toml")) else {
-        return dirs;
+        return Vec::new();
     };
     let mut manifests = vec![repo.join("Cargo.toml")];
     if let Some(members) = root
@@ -233,7 +311,14 @@ fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
             }
         }
     }
-    for path in manifests {
+    manifests
+}
+
+/// Map each workspace package name to its crate directory's name, as
+/// [`changed_source_modules`] records it (lowercase basename).
+fn workspace_package_dirs(repo: &Path) -> BTreeMap<String, String> {
+    let mut dirs = BTreeMap::new();
+    for path in workspace_manifests(repo) {
         let Some(name) = read_manifest(&path).and_then(|manifest| {
             manifest
                 .get("package")
@@ -262,6 +347,51 @@ fn read_manifest(path: &Path) -> Option<toml::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-6c13: a cas-pty-only change selects cas-mux (and the other direct
+    /// dependents) until each has a passing test receipt; unrelated crates
+    /// and the changed crate itself are not selected.
+    #[test]
+    fn a_cas_pty_change_selects_its_untested_dependents_cas_6c13() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"cas-cli\", \"crates/*\"]\n",
+        )
+        .unwrap();
+        for (dir, manifest) in [
+            ("crates/cas-pty", "[package]\nname = \"cas-pty\"\n"),
+            (
+                "crates/cas-mux",
+                "[package]\nname = \"cas-mux\"\n[dependencies]\ncas-pty = { path = \"../cas-pty\" }\n",
+            ),
+            ("crates/cas-store", "[package]\nname = \"cas-store\"\n"),
+            (
+                "cas-cli",
+                "[package]\nname = \"cas\"\n[target.'cfg(unix)'.dependencies]\npty = { package = \"cas-pty\", path = \"../crates/cas-pty\" }\n",
+            ),
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("Cargo.toml"), manifest).unwrap();
+        }
+        let changed = vec!["crates/cas-pty/src/pty.rs".to_string()];
+        assert_eq!(
+            untested_dependents(root, &changed, &["cas-pty".to_string()]),
+            vec![
+                "cas (depends on cas-pty)".to_string(),
+                "cas-mux (depends on cas-pty)".to_string()
+            ]
+        );
+        assert_eq!(
+            untested_dependents(root, &changed, &["cas".to_string(), "cas-mux".to_string()]),
+            Vec::<String>::new(),
+            "a passing receipt in each dependent satisfies the selection"
+        );
+        assert!(
+            untested_dependents(root, &["crates/cas-store/src/lib.rs".to_string()], &[]).is_empty()
+        );
+    }
 
     fn workspace() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

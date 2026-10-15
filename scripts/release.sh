@@ -16,7 +16,8 @@
 #      [Unreleased] to a dated [x.y.z] section, and names the release-notes
 #      draft docs/release-notes/<date>-v<x.y.z>-slack.md;
 #   4. commits "release: v<x.y.z>", pushes, opens the PR to the base branch
-#      (or retitles the open one), and enables auto-merge.
+#      (or retitles the open one), waits for the PR's one CI run (Scoped
+#      Validation) to go green, and only then enables auto-merge (cas-2aef).
 # Then it watches the PR until it merges. When another release lands on the
 # base first, it re-bumps: merges the base, takes the next version, pushes
 # again and re-enables auto-merge. It never waits for a person on that path.
@@ -31,7 +32,8 @@
 #
 # Exit codes: 0 merged (or prepared with --no-watch); 1 usage or setup error;
 # 3 the merge queue ejected the PR or auto-merge was turned off (repair, then
-# rerun this command); 4 a merge conflict outside the release files.
+# rerun this command); 4 a merge conflict outside the release files; 5 the
+# PR's CI is red, reported with its failing tests (it never entered the queue).
 
 set -euo pipefail
 # prepare runs in a command substitution; keep errexit there too.
@@ -323,8 +325,43 @@ open_or_update_pr() {
     fi
     "$gh_bin" pr edit "$pr_number" --add-label release >/dev/null 2>&1 || true
     rm -f "$body"
+    wait_for_pr_ci
     "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
     say "auto-merge enabled on PR #$pr_number; the merge queue takes it when admission is green"
+}
+
+# cas-2aef: the queue's 30 s admission check passed a tree whose real CI failed
+# 15 minutes later, wasting the queue cycle. The PR's one CI run (Scoped
+# Validation) must be green before auto-merge; a red run is reported once,
+# with its failing tests, and the PR stays out of the queue.
+wait_for_pr_ci() {
+    local checks failed names tests
+    while :; do
+        checks="$("$gh_bin" pr checks "$pr_number" --json name,bucket,link 2>/dev/null || true)"
+        jq -e '[.[] | select(.name | startswith("Scoped Validation"))] | length > 0 and all(.bucket != "pending")' \
+            <<<"${checks:-[]}" >/dev/null 2>&1 && break
+        sleep "$watch_interval"
+    done
+    failed="$(jq -r '.[] | select((.name | startswith("Scoped Validation")) and (.bucket == "fail" or .bucket == "cancel")) | "\(.name)\t\(.link)"' <<<"$checks")"
+    if [[ -z "$failed" ]]; then
+        say "PR #$pr_number CI is green"
+        return 0
+    fi
+    names="$(cut -f1 <<<"$failed" | paste -sd ',' - | sed 's/,/, /g')"
+    tests="$(cut -f2 <<<"$failed" | while read -r link; do
+        "$gh_bin" run view --job "${link##*/job/}" --log-failed 2>/dev/null || true
+    done | failing_tests)"
+    printf 'error: PR #%s CI is red (%s), so it was not added to the merge queue.\nFailing tests: %s\nFix them, push, then rerun scripts/release.sh.\n' \
+        "$pr_number" "$names" "${tests:-none named in the log; open the run}" >&2
+    exit 5
+}
+
+# Failing test names from CI logs: nextest, cargo test, Python unittest and
+# the scripts' own "FAIL <name>" lines, de-duplicated, at most 20.
+failing_tests() {
+    sed -E 's/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
+        | sed -nE 's/^ *FAIL \[ *[0-9.]+s\] +(.*)$/\1/p; s/^test (.+) \.\.\. FAILED$/\1/p; s/^(FAIL|ERROR): (.+)$/\2/p; s/^FAIL (.+)$/\1/p' \
+        | awk '!seen[$0]++' | head -20 | paste -sd ';' - | sed 's/;/; /g'
 }
 
 publish_branch() {

@@ -1438,6 +1438,8 @@ impl CoordinationRequest {
             task_id: self.task_id.clone(),
             merge_request: self.merge_request,
             blocker: self.blocker,
+            remind_delay_secs: self.remind_delay_secs,
+            remind_message: self.remind_message.clone(),
             in_reply_to: self.in_reply_to,
             kind: self.kind.clone(),
             attachment: self.attachment.clone(),

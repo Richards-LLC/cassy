@@ -926,3 +926,57 @@ fn merge_alert_names_the_per_task_branch_and_anchor_not_the_worker_base_cas_58d3
         }),
     );
 }
+
+/// cas-207e (after cas-6c13): a parked delivery whose lane CI is still running
+/// is not a ready merge. Only green-CI deliveries are named, and pending ones
+/// alone wake nobody.
+#[test]
+fn lane_ci_pending_delivery_is_not_a_ready_merge_cas_207e() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 15, 14, 52, 0).unwrap();
+    let mut snapshot = held_delivery_snapshot();
+    snapshot.in_progress_tasks.push(task(
+        "cas-green",
+        TaskStatus::AwaitingMerge,
+        Some("red-kite"),
+        Some("cas-epic"),
+    ));
+    let pending_ci = |task: &TaskSummary, _: &str| {
+        (task.id == "cas-held").then_some(DeliveryHold::LaneCiPending)
+    };
+    let state = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        worker_branch_tip,
+        |_, _, _, _| None,
+        pending_ci,
+    );
+    assert_eq!(
+        state,
+        Some(SupervisorActionableState::MergeBranches {
+            branches: vec![(
+                "cas-green".into(),
+                "factory/red-kite".into(),
+                "factory/red-kite-tip".into(),
+            )],
+        }),
+        "only the green-CI delivery is a ready merge"
+    );
+
+    let only_pending = supervisor_actionable_state_with_classifiers(
+        &held_delivery_snapshot(),
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        worker_branch_tip,
+        |_, _, _, _| None,
+        |_, _| Some(DeliveryHold::LaneCiPending),
+    );
+    assert_eq!(only_pending, None);
+    assert!(!wake_for(only_pending, now), "pending CI alone is no nudge");
+}

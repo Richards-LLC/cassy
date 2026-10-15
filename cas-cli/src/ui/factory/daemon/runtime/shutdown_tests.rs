@@ -301,3 +301,99 @@ async fn recycle_under_a_spent_budget_stops_the_old_worker_and_reports_its_outco
         "the supervisor is told the recycle failed"
     );
 }
+
+fn register_supervisor(cas_dir: &std::path::Path) -> String {
+    let mut agent = cas_types::Agent::new("agent-test-supervisor".into(), "test-supervisor".into());
+    agent.role = cas_types::AgentRole::Supervisor;
+    open_agent_store(cas_dir).unwrap().register(&agent).unwrap();
+    agent.id
+}
+
+/// cas-b06f (spec-6194 P2.6, GH #197): a shutdown the supervisor asked for is
+/// not N deaths. Two workers stopped on request yield one receipt naming each
+/// worker's outcome and the task it released, and no Critical `worker_died`
+/// relay. The held task is still released, as GH #197 requires.
+#[tokio::test(flavor = "current_thread")]
+async fn ct2_p2_requested_shutdown_one_receipt_cas_b06f() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let Fixture {
+        _dir,
+        mut daemon,
+        request_id,
+        pids,
+    } = processed_but_unexecuted_shutdown();
+    let cas_dir = daemon.app.cas_dir().to_path_buf();
+    let supervisor_id = register_supervisor(&cas_dir);
+    let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+    let mut held = cas_types::Task::new("cas-held1".into(), "held by idle-claude".into());
+    held.assignee = Some("idle-claude".into());
+    held.status = cas_types::TaskStatus::InProgress;
+    tasks.add(&held).unwrap();
+
+    daemon.process_pending_spawns().await;
+
+    for (name, pid) in &pids {
+        assert!(
+            wait_until(Duration::from_secs(5), || !alive(*pid)),
+            "{name} stops"
+        );
+    }
+    assert_ne!(
+        tasks.get("cas-held1").unwrap().assignee.as_deref(),
+        Some("idle-claude"),
+        "GH #197: the stopped worker's task is released"
+    );
+    let notices = crate::store::open_supervisor_queue_store(&cas_dir)
+        .unwrap()
+        .peek(&supervisor_id, 50)
+        .unwrap();
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice.event_type != "worker_died"),
+        "a requested shutdown raises no death alarm: {:?}",
+        notices
+            .iter()
+            .map(|notice| &notice.event_type)
+            .collect::<Vec<_>>()
+    );
+    let prompts = open_prompt_queue_store(&cas_dir).unwrap();
+    assert!(wait_until(Duration::from_secs(10), || !receipts(
+        &prompts, request_id
+    )
+    .is_empty()));
+    let rows = prompts.peek_all(100).unwrap();
+    assert!(
+        rows.iter().all(|row| !row.source.contains("worker-died")),
+        "no worker_died prompt relay: {rows:#?}"
+    );
+    let receipts = receipts(&prompts, request_id);
+    assert_eq!(receipts.len(), 1, "one receipt: {rows:#?}");
+    let receipt = &receipts[0];
+    for (name, _) in &pids {
+        assert!(
+            receipt.contains(name.as_str()),
+            "{name} is listed: {receipt}"
+        );
+    }
+    assert!(
+        receipt.contains("cas-held1"),
+        "the released task is listed: {receipt}"
+    );
+}
+
+fn receipts(
+    prompts: &std::sync::Arc<dyn cas_store::PromptQueueStore>,
+    request_id: i64,
+) -> Vec<String> {
+    prompts
+        .peek_all(100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| {
+            row.prompt
+                .contains(&format!("shutdown request {request_id}"))
+        })
+        .map(|row| row.prompt)
+        .collect()
+}

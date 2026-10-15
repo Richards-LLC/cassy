@@ -761,3 +761,70 @@ fn a_dropped_job_is_reported_to_its_owner() {
     );
     release.send(()).unwrap();
 }
+
+/// cas-4272: a drop is reported with the dropped job's own generation, a
+/// coalesced rerun of the same key still reports Done with its generation
+/// afterwards, and the owner map forgets keys with nothing outstanding.
+#[test]
+fn a_drop_names_its_own_generation_and_a_later_rerun_still_reports() {
+    let writer = TestWriter::start(false);
+    let mut jobs = QueueJobs::start_with_capacity(
+        LaneWiring {
+            reader: None,
+            writer: Arc::new(SharedWriter(Arc::clone(&writer))),
+        },
+        1,
+    );
+    let (release, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    jobs.submit_external(refresh_spec("Busy", "busy", Lane::Blocking, 1), move || {
+        let _ = held.lock().unwrap().recv();
+        Box::new(())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let probe = "WorkerHealthProbe:worker-a";
+    jobs.submit_external(refresh_spec("WorkerHealthProbe", probe, Lane::Blocking, 10), || {
+        Box::new(10_u64)
+    });
+    assert_eq!(
+        jobs.submit_external(refresh_spec("WorkerHealthProbe", probe, Lane::Blocking, 11), || {
+            Box::new(11_u64)
+        }),
+        super::super::jobs::Submitted::Coalesced
+    );
+    jobs.submit_external(refresh_spec("DirectorSnapshot", "DirectorSnapshot", Lane::Blocking, 12), || {
+        Box::new(12_u64)
+    });
+    jobs.apply_completions();
+    let dropped = jobs.take_external_completions();
+    assert_eq!(dropped.len(), 1);
+    assert_eq!((dropped[0].key.as_str(), dropped[0].generation), (probe, 10));
+    assert!(matches!(dropped[0].outcome, Ok(ExternalOutcome::Dropped)));
+
+    release.send(()).unwrap();
+    let mut done = Vec::new();
+    settle(&mut jobs, |jobs| {
+        done.extend(jobs.take_external_completions());
+        done.len() == 3
+    });
+    let rerun = done.iter().find(|result| result.key == probe).expect("the rerun reports");
+    assert_eq!(rerun.generation, 11, "the rerun reports its own generation");
+    assert!(matches!(rerun.outcome, Ok(ExternalOutcome::Done(_))));
+    assert!(jobs.job_owners.is_empty(), "keys with nothing outstanding are forgotten");
+}
+
+/// cas-4272: a stale mirror result (its drop already reported, a newer scan
+/// in flight) never overwrites the newer scan's slot.
+#[test]
+fn a_stale_mirror_result_is_ignored() {
+    let mut jobs = QueueJobs::inline();
+    jobs.mirror_failed(0);
+    jobs.submit_mirror_scan(|_| {});
+    // Inline: the scan already ran; its result waits for apply.
+    let current = jobs.mirror_generation;
+    jobs.apply_completions();
+    assert!(!jobs.mirror_in_flight);
+    // A drop report for an older scan changes nothing.
+    jobs.mirror_failed(current.saturating_sub(1));
+    assert!(jobs.mirror_state.is_some());
+}

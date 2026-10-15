@@ -181,8 +181,8 @@ pub(crate) enum QueueJobOutcome {
     External(Box<dyn std::any::Any + Send>),
     /// The lane dropped this refresh job to make room (or the lane was full
     /// of critical work). It never ran; its owner must clear its in-flight
-    /// state (C2 review).
-    Dropped,
+    /// state (C2 review). `external` says which owner hears of it.
+    Dropped { external: bool },
 }
 
 /// A finished job submitted by another child through
@@ -194,13 +194,24 @@ pub(crate) enum ExternalOutcome {
     Dropped,
 }
 
-/// Who learns a refresh job's result, kept so a drop can be reported to the
-/// job's owner rather than only to whoever's submit displaced it.
-#[derive(Debug, Clone, Copy)]
-struct JobOwner {
+/// A refresh job just submitted, before the lane says what it did with it.
+struct SubmittedRefresh {
+    key: String,
     kind: &'static str,
     generation: u64,
     external: bool,
+}
+
+/// Who learns a refresh key's results, kept so a drop can be reported to the
+/// job's owner rather than only to whoever's submit displaced it.
+#[derive(Debug, Clone)]
+struct KeyOwner {
+    kind: &'static str,
+    external: bool,
+    /// Generations submitted for this key whose result has not arrived,
+    /// oldest first: the queued or running job, then at most one coalesced
+    /// rerun. A drop names the oldest, which is the queued one (cas-4272).
+    outstanding: VecDeque<u64>,
 }
 
 /// Where queue jobs run. `Inline` runs each job on the submitting thread
@@ -587,14 +598,17 @@ pub(crate) struct QueueJobs {
     /// submitted again. Cleared when the generation settles.
     submitted_stamps: HashSet<(i64, String, u64, String)>,
     /// Retractions waiting for their fresh read: recipient -> (pruner, repo).
-    retractions: HashMap<String, (InboxPruner, PathBuf)>,
+    retractions: HashMap<String, (InboxPruner, PathBuf, u64)>,
     /// Finished jobs other children submitted to this runtime, until taken.
     external: Vec<JobResult<ExternalOutcome>>,
-    /// The owner of each refresh key last submitted, by key.
-    job_owners: HashMap<String, JobOwner>,
+    /// The owner of each refresh key with a result still to come, by key.
+    /// A key is forgotten once nothing is outstanding (cas-4272).
+    job_owners: HashMap<String, KeyOwner>,
     /// Dropped jobs, reported as results on the next apply.
     dropped: Vec<JobResult<QueueJobOutcome>>,
     mirror_in_flight: bool,
+    /// The generation of the mirror scan in flight; an older result is stale.
+    mirror_generation: u64,
     mirror_state: Option<Box<super::MirrorScanState>>,
     config: ConfigCache,
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
@@ -646,6 +660,7 @@ impl QueueJobs {
             job_owners: HashMap::new(),
             dropped: Vec::new(),
             mirror_in_flight: false,
+            mirror_generation: 0,
             mirror_state: Some(Box::default()),
             config: ConfigCache::default(),
             store: None,
@@ -917,12 +932,12 @@ impl QueueJobs {
         });
         if accepted(&submitted) {
             self.retractions
-                .insert(recipient.to_string(), (pruner, repo_root));
+                .insert(recipient.to_string(), (pruner, repo_root, generation));
         }
     }
 
     fn submit_inbox_prune(&mut self, recipient: String, data: DirectorData) {
-        let Some((pruner, repo_root)) = self.retractions.remove(&recipient) else {
+        let Some((pruner, repo_root, _)) = self.retractions.remove(&recipient) else {
             return;
         };
         let generation = self.generation();
@@ -966,6 +981,7 @@ impl QueueJobs {
         });
         if accepted(&submitted) {
             self.mirror_in_flight = true;
+            self.mirror_generation = generation;
         } else {
             // A refused or dropped job never runs; start over with fresh
             // cursors rather than lose the slot.
@@ -978,7 +994,13 @@ impl QueueJobs {
     pub(crate) fn apply_completions(&mut self) {
         self.ready.store(false, Ordering::Release);
         let mut finished = std::mem::take(&mut self.dropped);
-        finished.extend(self.exec.drain());
+        let ran = self.exec.drain();
+        // A job that ran (or panicked) settles its key's oldest generation;
+        // a synthetic drop report was settled when it was made.
+        for result in &ran {
+            self.finish_key(&result.key);
+        }
+        finished.extend(ran);
         for result in finished {
             let outcome = match result.outcome {
                 Ok(outcome) => outcome,
@@ -992,13 +1014,10 @@ impl QueueJobs {
                     );
                     match result.kind {
                         "QueueSelect" => self.select_in_flight = false,
-                        "MirrorWrite" => {
-                            self.mirror_in_flight = false;
-                            self.mirror_state = Some(Box::default());
-                        }
+                        "MirrorWrite" => self.mirror_failed(result.generation),
                         "RevalidateFresh" if result.key.starts_with("RevalidateFresh:inbox:") => {
                             if let Some(recipient) = result.key.strip_prefix("RevalidateFresh:inbox:") {
-                                self.retractions.remove(recipient);
+                                self.retraction_failed(recipient, result.generation);
                             }
                         }
                         "QueueStamp" => {
@@ -1058,6 +1077,12 @@ impl QueueJobs {
                         });
                     }
                 }
+                QueueJobOutcome::Revalidated { recipient, data } if !self
+                    .retraction_is_current(&recipient, result.generation) =>
+                {
+                    // A newer retraction owns the slot; this read is stale.
+                    drop(data);
+                }
                 QueueJobOutcome::Revalidated { recipient, data } => match data {
                     Ok(data) => self.submit_inbox_prune(recipient, data),
                     Err(error) => {
@@ -1068,7 +1093,7 @@ impl QueueJobs {
                             %error,
                             "inbox retraction skipped: the fresh read failed"
                         );
-                        self.retractions.remove(&recipient);
+                        self.retraction_failed(&recipient, result.generation);
                     }
                 },
                 QueueJobOutcome::Pruned(report) => {
@@ -1076,14 +1101,14 @@ impl QueueJobs {
                     log_prune(&report);
                 }
                 QueueJobOutcome::Mirrored(state) => {
-                    self.mirror_in_flight = false;
-                    self.mirror_state = Some(state);
+                    // cas-4272: only the scan in flight hands its cursors
+                    // back; a scan whose drop was already reported is stale.
+                    if self.mirror_in_flight && result.generation == self.mirror_generation {
+                        self.mirror_in_flight = false;
+                        self.mirror_state = Some(state);
+                    }
                 }
-                QueueJobOutcome::Dropped => {
-                    let external = self
-                        .job_owners
-                        .get(&result.key)
-                        .is_some_and(|owner| owner.external);
+                QueueJobOutcome::Dropped { external } => {
                     tracing::debug!(
                         target: "cas::coordination",
                         kind = result.kind,
@@ -1105,14 +1130,11 @@ impl QueueJobs {
                     match result.kind {
                         "RevalidateFresh" => {
                             if let Some(recipient) = result.key.strip_prefix("RevalidateFresh:inbox:") {
-                                self.retractions.remove(recipient);
+                                self.retraction_failed(recipient, result.generation);
                             }
                         }
-                        "MirrorWrite" => {
-                            // Its cursor state went with the dropped job.
-                            self.mirror_in_flight = false;
-                            self.mirror_state = Some(Box::default());
-                        }
+                        // Its cursor state went with the dropped job.
+                        "MirrorWrite" => self.mirror_failed(result.generation),
                         _ => {}
                     }
                 }
@@ -1155,44 +1177,84 @@ impl QueueJobs {
         submitted
     }
 
-    fn owner_of(&self, spec: &JobSpec, external: bool) -> Option<(String, JobOwner)> {
-        (spec.criticality == Criticality::Refresh).then(|| {
-            (
-                spec.key.clone(),
-                JobOwner {
-                    kind: spec.kind,
-                    generation: spec.generation,
-                    external,
-                },
-            )
+    fn owner_of(&self, spec: &JobSpec, external: bool) -> Option<SubmittedRefresh> {
+        (spec.criticality == Criticality::Refresh).then(|| SubmittedRefresh {
+            key: spec.key.clone(),
+            kind: spec.kind,
+            generation: spec.generation,
+            external,
         })
     }
 
-    /// Record a refresh job's owner, and report every job a submit dropped
-    /// to that job's owner (C2 review): the displaced one, or the submitted
-    /// one itself when the lane was full of critical work.
-    fn track(&mut self, owner: Option<(String, JobOwner)>, submitted: &Submitted) {
-        let submitted_key = owner.as_ref().map(|(key, _)| key.clone());
-        if let Some((key, owner)) = owner {
-            self.job_owners.insert(key, owner);
-        }
-        let dropped_key = match submitted {
-            Submitted::QueuedDroppedOldest { dropped_key } => Some(dropped_key.clone()),
-            Submitted::DroppedRefresh => submitted_key,
-            _ => None,
+    /// Record a refresh job's owner and generation, and report every job a
+    /// submit dropped to that job's owner, with that job's own generation
+    /// (C2 review; cas-4272): the queued job a full lane displaced, or the
+    /// submitted one itself when the lane was full of critical work.
+    fn track(&mut self, refresh: Option<SubmittedRefresh>, submitted: &Submitted) {
+        let Some(refresh) = refresh else {
+            return;
         };
-        if let Some(key) = dropped_key
-            && let Some(owner) = self.job_owners.get(&key).copied()
+        match submitted {
+            Submitted::Queued | Submitted::QueuedDroppedOldest { .. } => {
+                self.owner_entry(&refresh).outstanding.push_back(refresh.generation);
+            }
+            Submitted::Coalesced => {
+                // The newest refresh replaces any earlier rerun of the key.
+                let owner = self.owner_entry(&refresh);
+                if owner.outstanding.len() >= 2 {
+                    owner.outstanding.pop_back();
+                }
+                owner.outstanding.push_back(refresh.generation);
+            }
+            Submitted::DroppedRefresh => {
+                self.report_dropped(refresh.key, refresh.kind, refresh.generation, refresh.external);
+            }
+            Submitted::QueuedBehindKey
+            | Submitted::Closed
+            | Submitted::LaneMismatch { .. } => {}
+        }
+        if let Submitted::QueuedDroppedOldest { dropped_key } = submitted
+            && let Some(owner) = self.job_owners.get_mut(dropped_key)
+            && let Some(generation) = owner.outstanding.pop_front()
         {
-            self.dropped.push(JobResult {
-                kind: owner.kind,
-                key,
-                generation: owner.generation,
-                outcome: Ok(QueueJobOutcome::Dropped),
-                elapsed: Duration::ZERO,
-                writer_wait: Duration::ZERO,
-                over_budget: false,
-            });
+            let (kind, external) = (owner.kind, owner.external);
+            if owner.outstanding.is_empty() {
+                self.job_owners.remove(dropped_key);
+            }
+            self.report_dropped(dropped_key.clone(), kind, generation, external);
+        }
+    }
+
+    fn owner_entry(&mut self, refresh: &SubmittedRefresh) -> &mut KeyOwner {
+        self.job_owners
+            .entry(refresh.key.clone())
+            .or_insert_with(|| KeyOwner {
+                kind: refresh.kind,
+                external: refresh.external,
+                outstanding: VecDeque::new(),
+            })
+    }
+
+    fn report_dropped(&mut self, key: String, kind: &'static str, generation: u64, external: bool) {
+        self.dropped.push(JobResult {
+            kind,
+            key,
+            generation,
+            outcome: Ok(QueueJobOutcome::Dropped { external }),
+            elapsed: Duration::ZERO,
+            writer_wait: Duration::ZERO,
+            over_budget: false,
+        });
+    }
+
+    /// A refresh key's job finished (or panicked): its oldest outstanding
+    /// generation is done. The key is forgotten when nothing is left.
+    fn finish_key(&mut self, key: &str) {
+        if let Some(owner) = self.job_owners.get_mut(key) {
+            owner.outstanding.pop_front();
+            if owner.outstanding.is_empty() {
+                self.job_owners.remove(key);
+            }
         }
     }
 
@@ -1270,6 +1332,30 @@ impl QueueJobs {
                 Some(Arc::clone(runtime) as Arc<dyn super::loop_watchdog::JobLanes>)
             }
             Exec::Inline(_) => None,
+        }
+    }
+
+    fn retraction_is_current(&self, recipient: &str, generation: u64) -> bool {
+        self.retractions
+            .get(recipient)
+            .is_some_and(|(_, _, current)| *current == generation)
+    }
+
+    /// The retraction read of `generation` failed, panicked or was dropped:
+    /// free the slot, unless a newer retraction already holds it.
+    fn retraction_failed(&mut self, recipient: &str, generation: u64) {
+        if self.retraction_is_current(recipient, generation) {
+            self.retractions.remove(recipient);
+        }
+    }
+
+    /// The mirror scan of `generation` failed, panicked or was dropped: its
+    /// cursor state is gone, so start over with fresh cursors. A stale
+    /// report for an older scan changes nothing.
+    fn mirror_failed(&mut self, generation: u64) {
+        if self.mirror_in_flight && generation == self.mirror_generation {
+            self.mirror_in_flight = false;
+            self.mirror_state = Some(Box::default());
         }
     }
 

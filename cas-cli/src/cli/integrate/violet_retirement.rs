@@ -1072,7 +1072,7 @@ mod tests {
 
     #[test]
     fn cas_678d_round4_other_managed_account_is_never_rebound() {
-        let (env, probe) = update_fixture();
+        let (_env, probe) = update_fixture();
         let path = Scope::User.config_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let original = format!(

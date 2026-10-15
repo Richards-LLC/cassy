@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Lint changed Markdown with the repository policy, without downloading tools."""
+"""Lint changed Markdown with the repository policy and the pinned linter.
+
+The linter resolves one way: scripts/markdownlint.py (the root devDependency).
+"""
 
 from pathlib import Path
-import shutil
 import subprocess
 import sys
+
+LINTER = Path(__file__).resolve().parent / "markdownlint.py"
 
 
 def main():
@@ -24,17 +28,12 @@ def main():
     if not paths:
         print("No changed Markdown files")
         return 0
-    if shutil.which("markdownlint-cli2"):
-        command = ["markdownlint-cli2"]
-    elif shutil.which("npx"):
-        command = ["npx", "--no-install", "markdownlint-cli2@0.18.1"]
-    else:
-        raise ValueError("no Markdown linter on PATH; FIX: npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund (the version CI pins), then rerun")
+    command = [sys.executable, str(LINTER)]
     sys.stdout.flush()
     status = subprocess.run(command + ["--config", ".markdownlint-cli2.jsonc", *paths]).returncode
     if status:
         # The exact repair, so a park refusal never needs a CI round to explain.
-        print("FIX: run `npx --yes markdownlint-cli2@0.18.1 --fix --config .markdownlint-cli2.jsonc "
+        print("FIX: run `scripts/markdownlint.py --fix --config .markdownlint-cli2.jsonc "
               + " ".join(paths) + "`, then hand-fix what remains (MD034: wrap bare URLs in <>; "
               "MD036: make bold-only lines headings) and commit", flush=True)
     return status

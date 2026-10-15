@@ -54,13 +54,6 @@ pub(crate) enum FrameCause {
 }
 
 impl FrameCause {
-    pub(crate) const ALL: [FrameCause; 4] = [
-        FrameCause::Input,
-        FrameCause::Layout,
-        FrameCause::OutputFocused,
-        FrameCause::OutputUnfocused,
-    ];
-
     /// The `loop.json` key for frames of this cause.
     pub(crate) fn name(self) -> &'static str {
         match self {

@@ -20,6 +20,15 @@ pub struct Palette {
     pub text_muted: Color,
     pub text_disabled: Color,
 
+    // Semantic foreground colors for readable text. These are separate
+    // from accent/status colors because those also serve as saturated chip
+    // backgrounds in both modes.
+    pub text_accent: Color,
+    pub text_success: Color,
+    pub text_warning: Color,
+    pub text_error: Color,
+    pub text_info: Color,
+
     pub border_default: Color,
     pub border_focused: Color,
     pub border_muted: Color,
@@ -162,6 +171,12 @@ impl Palette {
             text_muted: colors.gray_400,
             text_disabled: colors.gray_500,
 
+            text_accent: colors.primary_400,
+            text_success: colors.success,
+            text_warning: colors.warning,
+            text_error: colors.error,
+            text_info: colors.info,
+
             border_default: colors.gray_400,
             border_focused: colors.primary_400,
             border_muted: colors.gray_400,
@@ -289,6 +304,15 @@ impl Palette {
             text_secondary: colors.gray_300,
             text_muted: colors.gray_500,
             text_disabled: colors.gray_600,
+
+            // Foreground-safe variants for normal text on light terminal
+            // backgrounds. Keep accent/status tokens below unchanged: their
+            // saturated colors are used as chip fills elsewhere.
+            text_accent: Color::Rgb(20, 92, 87),
+            text_success: Color::Rgb(24, 96, 48),
+            text_warning: Color::Rgb(113, 76, 27),
+            text_error: Color::Rgb(152, 46, 46),
+            text_info: Color::Rgb(29, 87, 122),
 
             border_default: colors.gray_600,
             border_focused: colors.primary_400,
@@ -516,10 +540,18 @@ mod contrast_guard {
         ] {
             let p = Palette::from_colors(colors, is_dark);
             for (role, fg) in [
-                ("section heading", p.accent),
-                ("modified key", p.status_warning),
-                ("modified value", p.status_success),
+                ("accent text", p.text_accent),
+                ("success text", p.text_success),
+                ("warning text", p.text_warning),
+                ("error text", p.text_error),
+                ("info text", p.text_info),
             ] {
+                assert_pair(
+                    &format!("{mode} {role} on elevated terminal surface"),
+                    fg,
+                    p.bg_elevated,
+                    AA_NORMAL_TEXT,
+                );
                 for (terminal_palette, bg) in backgrounds {
                     assert_pair(
                         &format!("{mode} {role} on {terminal_palette}"),

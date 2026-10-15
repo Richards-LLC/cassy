@@ -4389,8 +4389,11 @@ mod tests {
         };
         let scripts = repo.join("scripts");
         let gate = scripts.join("fast-rows-pre-push.sh");
-        let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        std::fs::copy(project_root.join("scripts/fast-rows-pre-push.sh"), &gate).unwrap();
+        std::fs::write(
+            &gate,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/fast-rows-pre-push.sh")),
+        )
+        .unwrap();
         let release_gate = scripts.join("release-gate.sh");
         std::fs::write(
             &release_gate,

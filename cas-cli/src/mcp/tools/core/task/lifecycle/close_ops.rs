@@ -2442,6 +2442,7 @@ fn close_build_proofs(
     }
 }
 
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 fn validate_risk_close_proofs(
     task: &Task,
     changed_paths: &[String],
@@ -2460,6 +2461,7 @@ fn validate_risk_close_proofs(
     )
 }
 
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 fn validate_risk_close_proofs_with_base(
     task: &Task,
     changed_paths: &[String],
@@ -2475,6 +2477,7 @@ fn validate_risk_close_proofs_with_base(
     )
 }
 
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 fn validate_risk_close_proofs_with_base_and_head(
     task: &Task,
     changed_paths: &[String],
@@ -11154,38 +11157,6 @@ impl CasCore {
         )))
     }
 
-    /// Emit a `DaemonEvent::WorkerActivity { event_type = "audit_trail_gap" }` to
-    /// the supervisor TUI, fire-and-forget.
-    ///
-    /// Uses `get_agent_id()` to identify the sender; falls back to the sentinel
-    /// `"unknown-session"` when the agent ID is unavailable (e.g., no SessionStart
-    /// hook ran, `CAS_SESSION_ID` unset in CI). This ensures the gap event always
-    /// reaches the TUI even when agent metadata is missing — losing fidelity on the
-    /// sender is better than silently dropping the event.
-    ///
-    /// cas-eeab (Item 4+5): extracted from the two duplicated inline blocks in the
-    /// `match verification_store.generate_id()` arm.
-    fn emit_audit_gap_event(&self, task_id: &str, description: String) {
-        let session_id = self
-            .get_agent_id()
-            .unwrap_or_else(|_| "unknown-session".to_string());
-        let gap_event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-            session_id,
-            event_type: "audit_trail_gap".to_string(),
-            description,
-            entity_id: Some(task_id.to_string()),
-        };
-        if let Err(e) = crate::mcp::socket::send_event(&self.cas_root, &gap_event) {
-            // Fire-and-forget, but log the failure so that a double-silent failure
-            // (store write fails AND socket send fails) leaves at least a trace.
-            // cas-eeab: safe_auto autofix for silently discarded send_event result.
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "failed to emit audit_trail_gap event to daemon socket"
-            );
-        }
-    }
 }
 
 /// Audit text recorded on a `depth=light` task at close time, stating exactly
@@ -11510,6 +11481,7 @@ pub(crate) struct UncommittedEntry {
 ///   * If the worker *did* intend to commit them, they would have run
 ///     `git add` first, which promotes them to the `A ` status and the
 ///     gate catches them.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<UncommittedEntry> {
     clean_tree_receipt(project_root).tracked_dirty
 }
@@ -11547,6 +11519,7 @@ pub(crate) struct CleanTreeReceipt {
 impl CleanTreeReceipt {
     /// True only when git actually answered and reported no tracked changes.
     /// An unavailable receipt is NOT clean — it is unknown.
+    #[cfg(test)] // cas-38e7: test-only delegate to the live gate
     pub(crate) fn is_clean(&self) -> bool {
         self.unavailable.is_none() && self.tracked_dirty.is_empty()
     }
@@ -11560,6 +11533,7 @@ impl CleanTreeReceipt {
     /// This is the "everything the old code passed over in silence" path:
     /// an unavailable check, stray untracked files, and a HEAD that is not
     /// the commit the worker claims to have delivered.
+    #[cfg(test)] // cas-38e7: test-only delegate to the live gate
     pub(crate) fn discrepancy_note(&self, claimed_commit: Option<&str>) -> Option<String> {
         self.discrepancy_note_with_provenance(claimed_commit, &ReceiptProvenance::Unknown)
     }
@@ -13146,6 +13120,7 @@ fn delivery_content_anchor_at_close<'a>(
 /// ref when it exists; local_merge deliberately uses the checked-out target
 /// branch as its authority. Missing or unresolvable Git state fails closed
 /// because a delivery transition must never be based on a cached anchor alone.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn validate_current_factory_branch_tip_ancestry(
     repo_path: &std::path::Path,
     factory_branch: &str,
@@ -15089,6 +15064,7 @@ pub(crate) enum MergeRealityOutcome {
 /// - `execution_note != "additive-only"` — no commit expected
 /// - `!bypass_close_gates` — delivered closes retain the merge-state guard
 /// - `effective_has_reviewable` — zero-diff tasks don't need commits
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn check_factory_branch_merge_reality(
     repo_path: &std::path::Path,
     assignee: &str,
@@ -17575,6 +17551,7 @@ pub(crate) struct EpicStatusOptions {
 }
 
 impl EpicStatusOptions {
+    #[cfg(test)] // cas-38e7: test-only delegate to the live gate
     pub(crate) const fn full_unbounded() -> Self {
         Self {
             offset: 0,
@@ -18037,6 +18014,7 @@ fn reanchored_delivery_content_in_parent(
 /// `blocks_epic_close()` so a valid anchor still blocks when its content proof
 /// reports a real drop or an unknown result even if the live branch count is
 /// zero.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn collect_epic_branch_statuses(
     subtasks: &[Task],
     parent_branch: &str,
@@ -18660,6 +18638,7 @@ fn memoized_branch_content_direction(
 /// Render the per-child branch statuses as a Markdown report for the
 /// supervisor-facing `factory_epic_status` action. Stable shape; the
 /// snapshot test in `epic_status_gate_tests` pins the exact layout.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn render_epic_status_report(
     epic_id: &str,
     parent_branch: &str,
@@ -18674,6 +18653,7 @@ pub(crate) fn render_epic_status_report(
 /// `stacked_on` is trunk-first, so the landing order is that list followed by
 /// this epic's own branch. An empty slice renders exactly the pre-existing
 /// report, which is why the plain [`render_epic_status_report`] delegates here.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn render_epic_status_report_with_stack(
     epic_id: &str,
     parent_branch: &str,
@@ -21633,180 +21613,6 @@ fn reverse_delivery_patch_applies_to_tree(
         .map_err(|error| format!("failed to verify delivery patch for `{path}`: {error}"))
 }
 
-/// Checks whether every added zero-context hunk from a delivery still occurs
-/// verbatim in the target file. Reverse-applying a normal-context patch is a
-/// stronger proof, but it spuriously fails when sibling lanes edit nearby
-/// context while leaving the delivery's own lines intact. Generated shared
-/// files can also reorder otherwise byte-identical delivery blocks while
-/// producing a strict superset, so after the contiguous-hunk proof fails we
-/// accept a multiset containment proof for every non-blank added line. A
-/// conflict-resolution union can also insert symbols into one added line, so
-/// the final fallback proves each added line's lexical tokens survive in
-/// order somewhere in the target file (GH #597).
-fn delivery_added_hunks_survive_on_tree(
-    repo_path: &std::path::Path,
-    delivery_parent: &str,
-    delivery_commit: &str,
-    target_tree: &str,
-    path: &str,
-) -> Result<bool, String> {
-    use std::process::Command;
-
-    let patch = Command::new("git")
-        .args([
-            "diff",
-            "--unified=0",
-            "--no-renames",
-            delivery_parent,
-            delivery_commit,
-            "--",
-            path,
-        ])
-        .current_dir(repo_path)
-        .measurement_output()
-        .map_err(|error| {
-            format!("failed to render zero-context delivery patch for `{path}`: {error}")
-        })?;
-    if !patch.status.success() {
-        return Err(format!(
-            "Git could not render the zero-context delivery patch for `{path}` (exit {})",
-            patch.status
-        ));
-    }
-    let patch = String::from_utf8_lossy(&patch.stdout);
-    let mut hunks = Vec::<Vec<&str>>::new();
-    let mut current = None;
-    for line in patch.lines() {
-        if line.starts_with("@@") {
-            hunks.push(Vec::new());
-            current = Some(hunks.len() - 1);
-        } else if let Some(index) = current {
-            if let Some(line) = line.strip_prefix('+') {
-                if !line.starts_with("+++") {
-                    hunks[index].push(line);
-                }
-            }
-        }
-    }
-    hunks.retain(|hunk| !hunk.is_empty());
-    if hunks.is_empty() {
-        return Ok(false);
-    }
-
-    let target = Command::new("git")
-        .args(["show", &format!("{target_tree}:{path}")])
-        .current_dir(repo_path)
-        .measurement_output()
-        .map_err(|error| format!("failed to read `{path}` from target `{target_tree}`: {error}"))?;
-    if !target.status.success() {
-        return Ok(false);
-    }
-    let target = String::from_utf8_lossy(&target.stdout);
-    let target_lines = target.lines().collect::<Vec<_>>();
-    if hunks.iter().all(|hunk| {
-        target_lines
-            .windows(hunk.len())
-            .any(|candidate| candidate == hunk.as_slice())
-    }) {
-        return Ok(true);
-    }
-
-    // GH #495: a DB-first schema regeneration may insert another lane's
-    // generated block between blocks from this delivery. The result is a
-    // strict superset even though the original multi-block hunk is no longer
-    // contiguous. Count duplicate lines so repeated field declarations still
-    // need to be present as many times as the delivery added them.
-    let mut target_line_counts = std::collections::HashMap::<&str, u32>::new();
-    for line in &target_lines {
-        *target_line_counts.entry(*line).or_default() += 1;
-    }
-    let multiset_survives = hunks
-        .iter()
-        .flatten()
-        .copied()
-        .filter(|line| !line.trim().is_empty())
-        .all(|line| {
-            let Some(count) = target_line_counts.get_mut(line) else {
-                return false;
-            };
-            if *count == 0 {
-                return false;
-            }
-            *count -= 1;
-            true
-        });
-    if multiset_survives {
-        return Ok(true);
-    }
-    let target_tokens = target_lines
-        .iter()
-        .flat_map(|target_line| {
-            target_line
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .filter(|token| !token.is_empty())
-        })
-        .collect::<Vec<_>>();
-    if hunks
-        .iter()
-        .flatten()
-        .filter(|line| !line.trim().is_empty())
-        .all(|line| {
-            let added_tokens = line
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .filter(|token| !token.is_empty())
-                .collect::<Vec<_>>();
-            if added_tokens.is_empty() {
-                return true;
-            }
-            target_tokens
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| **candidate == added_tokens[0])
-                .any(|(start, _)| {
-                    let mut cursor = start + 1;
-                    added_tokens[1..].iter().all(|token| {
-                        let Some(offset) = target_tokens[cursor..]
-                            .iter()
-                            .position(|candidate| candidate == token)
-                        else {
-                            return false;
-                        };
-                        cursor += offset + 1;
-                        true
-                    })
-                })
-        })
-    {
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn delivery_path_effect_survives_on_tree(
-    repo_path: &std::path::Path,
-    delivery_parent: &str,
-    delivery_commit: &str,
-    target_tree: &str,
-    path: &str,
-) -> Result<bool, String> {
-    if reverse_delivery_path_applies_to_tree(
-        repo_path,
-        delivery_parent,
-        delivery_commit,
-        target_tree,
-        path,
-    )? {
-        return Ok(true);
-    }
-    delivery_added_hunks_survive_on_tree(
-        repo_path,
-        delivery_parent,
-        delivery_commit,
-        target_tree,
-        path,
-    )
-}
-
 fn commit_changes_path(
     repo_path: &std::path::Path,
     commit: &str,
@@ -22172,6 +21978,7 @@ fn git_branch_name(repo_path: &std::path::Path) -> Option<String> {
 /// Prefer [`run_lightweight_structural_lint_with_scope`] for isolated factory
 /// workers (cas-dc5d) so lint evaluates the committed task range inside the
 /// worker worktree rather than shared main-checkout WIP.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn run_lightweight_structural_lint(
     project_root: &std::path::Path,
 ) -> LightweightLintOutcome {
@@ -22202,6 +22009,7 @@ pub(crate) fn run_lightweight_structural_lint(
 /// - `committed_range_parent = None` — legacy working-tree `git diff HEAD`
 ///   (then `--cached`) in `project_root`, for non-isolated closes. Empty
 ///   diff still Passes (graceful degradation).
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn run_lightweight_structural_lint_with_scope(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,

@@ -9285,9 +9285,6 @@ impl FactoryDaemon {
                     tracing::error!("Failed to shutdown {}: {}", name, error);
                 }
                 for (name, _) in &report.stopped {
-                    // cas-c1a2: the stopped session's output must never be
-                    // quoted for a later worker reusing this name.
-                    self.pane_buffers.remove(name);
                     // Remove shut-down workers from native Agent Teams
                     if let Some(ref teams) = self.teams {
                         let _ = teams.remove_member(name);
@@ -9297,9 +9294,6 @@ impl FactoryDaemon {
                 }
             }
             PendingSpawn::Respawn(name) => {
-                // cas-c1a2: the relaunch reuses the pane name; start its
-                // buffer empty so diagnostics quote the new process only.
-                self.pane_buffers.remove(&name);
                 // Build per-worker Teams config for the respawned worker
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
@@ -9345,11 +9339,6 @@ impl FactoryDaemon {
                 name,
                 spec,
             } => {
-                // cas-c1a2 (GH #1178): the replacement reuses this pane name,
-                // and pane buffers are keyed by name and append-only. Without
-                // this, its register-timeout detail quoted the previous
-                // session's transcript and hid what the new Codex printed.
-                self.pane_buffers.remove(&name);
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
                     let color_idx = self.app.worker_names().len();

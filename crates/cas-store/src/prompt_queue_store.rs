@@ -51,9 +51,11 @@ pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
 /// stamp them `abandoned_unknown_target`. Doing that marked 100 of 105
 /// supervisor→operator turns in one session abandoned about 930 s after
 /// enqueue. It also hid them from the hub drain (`processed_at IS NULL`) and
-/// sent the supervisor a false abandonment notice for each one.
+/// sent the supervisor a false abandonment notice for each one. The predicate
+/// matches the hub drain's own `lower(target) = 'operator'`, so the sweep and
+/// the drain agree on which rows the operator lane owns.
 const OPERATOR_LANE_EXCLUSION: &str =
-    "lower(trim(target)) <> 'operator' AND lower(trim(target)) NOT LIKE 'commander:%'";
+    "lower(target) <> 'operator' AND lower(target) NOT LIKE 'commander:%'";
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
 const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// Exact-content worker reports are collapsed only while a recent,
@@ -10464,7 +10466,7 @@ mod tests {
             .unwrap()
             .id();
         let mixed_case = store
-            .enqueue_with_session("lead-sup", " Operator ", "answer", "factory-a")
+            .enqueue_with_session("lead-sup", "Operator", "answer", "factory-a")
             .unwrap();
         let commander = store
             .enqueue_with_session("lead-sup", "commander:Daniel@phone-7", "answer", "factory-a")

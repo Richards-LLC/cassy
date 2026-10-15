@@ -272,7 +272,8 @@ The control lane talks to the io lane only through two channels:
   the wake gate and the stall detector read today from `self.app.mux`.
 
 Nothing on the io lane may allocate unboundedly or wait on the control lane.
-If the command channel is full, the control lane waits, not the io lane.
+If the command channel is full, the control lane keeps the command and
+retries on its next pass; neither lane waits on the other.
 
 Two io-lane hazards found in §2 must be handled inside the lane:
 
@@ -331,7 +332,7 @@ this shape. v2 makes it the only path and extends it to reads.
 
 | Today (on the loop) | v2 job kind | Notes |
 |---|---|---|
-| Director refresh: task, agent, lease, epic, reminder reads (`apply director read`, `change detection`) | `DirectorSnapshot` | One read transaction builds the snapshot **and** its change set off-loop; control applies a diff in memory. Today's 1,915 ms p99 becomes a job metric, not a stall. |
+| Director refresh: task, agent, lease, epic, reminder reads (`apply director read`, `change detection`) | `DirectorSnapshot` | One read transaction builds the snapshot **and** its change set off-loop; control applies a diff in memory. Today's 1,913 ms p99 becomes a job metric, not a stall. |
 | Supervisor-stall evaluation (`supervisor stall` step) | input to `DirectorSnapshot` | Needs lane CI state (cas-207e cache) and task state; both arrive in the snapshot. |
 | Stall confirmation: agent-store open, `/proc` cmdline/environ scan (`wedged.rs:1441`), child walk, transcript tail (cas-7156) | `WorkerHealthProbe(worker)` | Single-flight per worker, cas-7156's backoff kept; the result feeds the detector. |
 | Reminders: time reminders (store), external wake probes (git, gh) | `ReminderScan`, `GitFetch(remote, branch)`, `CiStatus(sha)` | cas-a222 already moved the external probe; the expiry write (6,207 busy deferrals) moves to the store worker too. |
@@ -470,7 +471,23 @@ and rebase on each other's merged tips.
 cas-77f39 (GH #1210) can still ship its point fix (an output-frame cap in the
 current loop) before C5; C5 then replaces it.
 
-## 9. Out of scope
+## 9. Open questions for review
+
+1. **Thread or async for the io lane.** This spec asks for a dedicated OS
+   thread with its own epoll set, so it never shares a tokio worker with
+   jobs. A separate single-threaded tokio runtime would also satisfy §3;
+   C4 should choose and record why.
+2. **Snapshot staleness for revalidation.** Using the last `DirectorSnapshot`
+   (≤ 2 s old) instead of a fresh load in `prompt_is_still_deliverable` is a
+   semantic change. A row whose premise expires inside that window is
+   delivered once; spec-6194 P1.7 still withdraws it at the next pass.
+3. **Urgent-inject readiness.** Today's 1.2 s settle plus up to 4 s polling
+   exists for cas-eacc (operator drafts). As an io-lane state machine it
+   blocks only that pane; confirm no caller relies on the loop pausing.
+4. **Load harness.** cas-98b24's harness drives 16 agents; §7 also needs
+   ≥ 3 codex-heavy panes at GH #1210's write rates. C6 extends it.
+
+## 10. Out of scope
 
 - Cgroup isolation of worker builds (GH #1213). This spec makes echo
   independent of a stalled control lane, but not of the io thread being

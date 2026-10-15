@@ -627,21 +627,19 @@ fn refusal_for_merge(
             .or_else(|| {
                 head_branch
                     .as_deref()
-                    .and_then(|branch| super::pushed_branch_tip(cwd, branch)
-                        .or_else(|| git_output(cwd, &["rev-parse", "--verify", branch])))
+                    .and_then(|branch| {
+                        super::pushed_branch_tip(cwd, branch)
+                            .or_else(|| git_output(cwd, &["rev-parse", "--verify", branch]))
+                    })
             })
             .or_else(|| {
-                task.deliverables
-                    .parked_branch
-                    .as_deref()
-                    .or_else(|| {
-                        passes
-                            .iter()
-                            .find(|pass| !pass.is_withdrawn())
-                            .map(|pass| pass.branch.as_str())
-                    })
-                    .and_then(|branch| super::pushed_branch_tip(cwd, branch)
-                        .or_else(|| git_output(cwd, &["rev-parse", "--verify", branch])))
+                let implementer = super::delivery_implementer(cas_root, task);
+                let branch = super::delivery_branch(task, passes, &implementer, |candidate| {
+                    super::branch_tip(cwd, candidate).is_some()
+                        || super::pushed_branch_tip(cwd, candidate).is_some()
+                });
+                super::pushed_branch_tip(cwd, &branch)
+                    .or_else(|| git_output(cwd, &["rev-parse", "--verify", &branch]))
             });
         let refusal = match head {
             Some(head) => merge_gate(task, qa, passes, &head).err(),

@@ -1500,13 +1500,22 @@ async fn merge_hook_fresh_origin_cas_3288() {
     let gh = stub_dir.path().join("gh");
     cas::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
     test_env.set("CAS_QA_GH", &gh);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.deliverables.delivery_pr_number = Some(3374);
+    tasks.update(&task).unwrap();
     let command = format!("gh pr merge {branch}");
     let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, &command)
         .expect("origin has new work that the local head's waiver cannot cover");
     assert!(refusal.contains(&task_id), "{refusal}");
+    let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3374")
+        .expect("a recorded PR must resolve this task's fresh delivery branch");
+    assert!(refusal.contains(&task_id), "{refusal}");
     cas_store::waive_qa_pass(&cas_dir, &task_id, "supervisor", "test-agent",
         &branch, &head, "origin head reviewed", chrono::Utc::now()).unwrap();
     assert!(cas::qa_pass::github_merge_refusal(&cas_dir, &repo, &command).is_none());
+    assert!(cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3374").is_none());
 }
 
 #[tokio::test]

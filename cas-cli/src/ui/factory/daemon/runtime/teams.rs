@@ -1715,6 +1715,8 @@ esac
     /// Push-time hard floor for cas-0efb / GH #337/#339. PreToolUse catches
     /// the ordinary model-visible path; this hook rechecks at Git's own push
     /// boundary, after any preceding command in a compound shell invocation.
+    /// Once the branch and requested refs are valid, the buffered refs go to
+    /// `scripts/fast-rows-pre-push.sh` before Git updates the remote.
     pub const WORKER_PRE_PUSH_HOOK: &'static str = "#!/bin/sh
 # Cassy factory worker push guard — installed by cas factory in the worker-private hooksPath.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
@@ -1758,6 +1760,20 @@ while read local_ref local_sha remote_ref remote_sha; do
   refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha
 \"
 done
+if [ -n \"$refs\" ]; then
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo \"Cassy PUSH GUARD: cannot locate the worker repository for fast rows.\" >&2
+    exit 1
+  }
+  fast_rows=\"$root/scripts/fast-rows-pre-push.sh\"
+  if [ ! -x \"$fast_rows\" ]; then
+    echo \"Cassy PUSH GUARD: fast-rows pre-push gate is missing or not executable at '$fast_rows'.\" >&2
+    exit 1
+  fi
+  if ! printf '%s' \"$refs\" | \"$fast_rows\" \"$@\"; then
+    exit 1
+  fi
+fi
 exit 0
 ";
 
@@ -2032,9 +2048,8 @@ exit 0
         let push_hook_path = private_hooks_dir.join("pre-push");
         let installed_push_guard = std::fs::read_to_string(&push_hook_path).unwrap_or_default();
         if installed_push_guard.contains("Cassy factory worker push guard") {
-            // Refresh any installed guard in place, keeping its chain. cas-38e7:
-            // this also drops the retired fast-rows delegation (cas-043b) from
-            // guards installed by earlier builds.
+            // Refresh older installed guards in place, restoring the current
+            // fast-rows delegate and keeping any chained project hook.
             let chained = private_hooks_dir.join("pre-push-project-hook");
             if chained.exists() {
                 let existing = std::fs::read_to_string(&chained)?;

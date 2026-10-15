@@ -13784,20 +13784,26 @@ fn run_factory_branch_merge_gate_for_delivery(
     // holds the task's commits.
     // cas-93db: never measure another task's delivery as this one. A valid
     // receipt still proves an integrated delivery after its branch is gone.
+    // GH #1202: retain the receipt's actual refusal. An unresolved delivery
+    // is missing evidence, not a measured branch that can be parked for merge.
+    let receipt_validation = attribution.receipt.map(|receipt| {
+        attribution
+            .window
+            .ok_or_else(|| "task attribution window is unavailable".to_string())
+            .and_then(|window| validate_task_commit_receipt(repo_path, receipt, parent_branch, window))
+    });
     let factory_branch = match validated_recovery_branch.map(str::to_string)
         .map(Ok).unwrap_or_else(|| resolve_close_delivery_branch(repo_path, task, assignee)) {
         Ok(branch) => branch,
-        Err(reason)
-            if !attribution.receipt.is_some_and(|receipt| {
-                attribution.window.is_some_and(|window| {
-                    validate_task_commit_receipt(repo_path, receipt, parent_branch, window)
-                        .is_ok()
-                })
-            }) =>
-        {
-            return MergeStateGateOutcome::Reject(reason);
-        }
-        Err(_) => crate::factory_isolation::worker_task_branch(assignee, &task.id),
+        Err(reason) => match (attribution.receipt, receipt_validation.as_ref()) {
+            (Some(receipt), Some(Err(receipt_reason))) => {
+                return MergeStateGateOutcome::Unresolved(commit_receipt_rejection(
+                    repo_path, &task.id, receipt, parent_branch, receipt_reason,
+                ));
+            }
+            (_, Some(Ok(_))) => crate::factory_isolation::worker_task_branch(assignee, &task.id),
+            _ => return MergeStateGateOutcome::Unresolved(reason),
+        },
     };
     let fallback_content_identity = TaskCommitIdentity {
         task_id: Some(task.id.clone()),
@@ -13811,11 +13817,8 @@ fn run_factory_branch_merge_gate_for_delivery(
     // after the ordinary receipt validator has established its repository,
     // target, timestamp, diff, and content predicates. A merge-tip receipt
     // is intentionally excluded later because it is not task content.
-    let validated_content_receipt = attribution.receipt.filter(|receipt| {
-        attribution.window.is_some_and(|window| {
-            validate_task_commit_receipt(repo_path, receipt, parent_branch, window).is_ok()
-        })
-    });
+    let validated_content_receipt = attribution.receipt
+        .filter(|_| receipt_validation.as_ref().is_some_and(Result::is_ok));
     // A missing local ref can still be measured through origin. Resolve
     // both before count helpers: Unknown must never become a fictitious 1.
     let origin_factory_branch = if factory_branch.starts_with("origin/") {
@@ -13928,6 +13931,11 @@ fn run_factory_branch_merge_gate_for_delivery(
             && task.execution_note.as_deref() != Some("no-code")
         {
             return MergeStateGateOutcome::Proceed;
+        }
+        if let (Some(receipt), Some(Err(reason))) = (attribution.receipt, receipt_validation.as_ref()) {
+            return MergeStateGateOutcome::Unresolved(commit_receipt_rejection(
+                repo_path, &task.id, receipt, parent_branch, reason,
+            ));
         }
         return MergeStateGateOutcome::Unresolved(format!(
             "⚠️ FACTORY BRANCH MISSING\n\nTask {} cannot be measured: `{factory_branch}` is missing locally and on origin, and no usable delivery anchor or validated commit_receipt resolves. No branch commit count was obtained.\n\nAsk the supervisor to restore the recorded delivery evidence, or retry with commit_receipt=<integrated-delivery-sha>. If this task delivers only external work, a live registered supervisor can clear the stale code scope with `{supervisor}task action=update id={} proof_scope_fix=true target_repo=\"\" reason=\"reviewed external-only delivery\"` after recording execution_note=no-code, then close with external_ref=<portable-proof-reference>.",
@@ -26668,7 +26676,7 @@ mod merge_state_gate_tests {
         let task = worker_task("worker");
         assert_ne!(close_measured_factory_branch(p, &task, "worker"), "factory/worker");
         match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
-            MergeStateGateOutcome::Reject(message) => {
+            MergeStateGateOutcome::Unresolved(message) => {
                 assert!(message.contains("DELIVERY BRANCH UNRESOLVED"), "{message}");
                 assert!(message.contains("cas-0906"), "{message}");
             }

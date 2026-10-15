@@ -73,11 +73,16 @@ step):
 | supervisor stall | 10-15 | 4,060 | 128 | 1,820 | 3,264 | 946 s |
 | auth-failure / permission / usage-limit relays | 10-15 | 646 | 50–86 | 50–203 | 282 | 50 s |
 
+The timers nest: "apply director read" (LC:3106) wraps all of
+`apply_director_refresh`, which contains the "change detection"
+(ADR:238) and "supervisor stall" timers. Those two rows are parts of the
+first, not additions to it.
+
 `reminders` is GH #1208 (synchronous `git fetch` per external reminder); the
-fix cas-a222 is merged into v41 but the measured daemons still ran 3.55.0. The
-other three rows are not fixed by anything in v41: **apply director read,
-change detection and supervisor stall together blocked the loop for about
-4,300 s on 2026-10-15**, before the reminders.
+fix cas-a222 is merged into v41 but the measured daemons still ran 3.55.0.
+Nothing in v41 fixes the director apply: **it blocked the loop for about
+2,170 s on 2026-10-15** (1,516 s on 10-14), on top of the reminders. Change
+detection and the supervisor-stall check account for most of it.
 
 ### 1.3 Lock contention on the loop's stores
 
@@ -97,7 +102,7 @@ processes.
 
 | Task | Finding | Status |
 |---|---|---|
-| cas-a222 (GH #1208) | `process_reminders → external_wake_condition_observation` ran one `git fetch` per pending external reminder on the loop every 60 s: 2.5–9 s stalls | Fixed in v41: probe off the loop, one fetch per ref, backoff, TTLs |
+| cas-a222 (GH #1208) | `process_reminders → external_wake_condition_observation` ran one `git fetch` per pending external reminder on the loop every 60 s: 2.5–9 s stalls | Fixed in v41: probe off the loop, one fetch per ref, backoff. It also delivered GH #1211 item 5 (reminder hygiene): 7-day default TTL for external reminders, expiry of dead-session cross-session reminders after a 24 h grace, `origin/` target normalisation at remind time. Not repeated here. |
 | cas-7156 | `transcript_confirms_stall` ran on every working pass per worker: agent-store open, 2 `list()`s, a full `/proc` cmdline/environ scan (`wedged.rs:1441`), a child walk and a transcript-tail read, all inside the director refresh at `director_refresh.rs:240` | Gated behind threshold and backoff in v42; still synchronous on the loop |
 | cas-0028 | Worker-attention relays: the daemon snapshots episode baselines on the loop, then hands the store write to the store worker | Precedent for "snapshot on loop, write off loop" |
 | cas-874e | Merge-request revalidation resolves live branch tips (`prompt_revalidation.rs:962`) and now does a bounded source fetch on the MCP side | Daemon-side revalidation must stay ref-local or move off-loop (§4.3) |
@@ -143,7 +148,7 @@ Costs: **M** = measured (§1); **E** = estimated from the code.
 | # | Step (loop.json phase) | Location | Cadence | Blocks on | Cost |
 |---|---|---|---|---|---|
 | 1 | accept clients (client input) | LC:2385, client_input.rs:6 | every pass | 50 ms `write_all` of init bytes, new clients only | M: 0 ms |
-| 2 | client input → PTY (client input) | LC:2394, client_input.rs:65–236 | every pass | **unbounded PTY `write_all`** (cas-pty pty.rs:2681); Ctrl+R runs a full director read and apply on the loop (client_input.rs:860) | M: 0 ms |
+| 2 | client input → PTY (client input) | LC:2394, client_input.rs:65–236 | every pass | **unbounded PTY `write_all`** (cas-pty pty.rs:2684); Ctrl+R runs a full director read and apply on the loop (client_input.rs:860) | M: 0 ms |
 | 3 | PTY output (pty output) | LC:2402, terminal_exchange.rs:37–115, mux.rs:1384 | every pass | CPU: VT feed of every queued byte; on a worker exit, `handle_worker_crash` (QE:4102) opens the agent store | M: 0 ms |
 | 4 | session summarizer | LC:2411 | rate-limited | CPU (transcript build); LLM call is off-loop | E: small |
 | 5 | cloud relay (cloud relay) | LC:2423 | every pass | PTY write | M: 0 ms |
@@ -159,7 +164,7 @@ Costs: **M** = measured (§1); **E** = estimated from the code.
 | 15 | **reminders** | QE:9203 | ~2 s | reminder store (100 ms busy budget); external probe off-loop since cas-a222 | **M: p50 2,563 ms before cas-a222; expiry busy deferrals 6,207/day** |
 | 16 | epic events | QE:9356 | rare | `create_epic_branch` does a `git fetch` (branch_ops.rs:395); merges on completion | E: seconds, rare |
 | 17 | inbox retraction | LC:3261–3357, teams.rs:1409–1460 | per applied read | **unbounded inbox flock**, and a **bounded `git fetch` per unread tagged row while holding it** (LC:3302, PR:1040–1069) | E: up to 5 s per row |
-| 18 | inject loop (refresh: prompt injection) | LC:3361–3537, APP:1540 | per applied read | `prompt_is_still_deliverable`: **full DirectorData load on the loop**, merge freshness (`git fetch`), `/proc` scan; inbox flock or PTY write | E: 100 ms – 5 s |
+| 18 | inject loop (refresh: prompt injection) | LC:3361–3537, APP:1540 | per applied read | `prompt_is_still_deliverable`: **full DirectorData load on the loop**, merge freshness (`git fetch`), `/proc` scan; task-store read and assignment enqueue write (LC:3394–3397); inbox flock or PTY write | E: 100 ms – 5 s |
 | 19 | resize, redraw reset | LC:2699–2816 | on event | CPU | — |
 | 20 | **draw** (render) | LC:2829–2885 | when dirty | CPU, in-memory `BufferBackend` | M: max 3 ms |
 | 21 | flush | LC:2887–2901 | when buffered | non-blocking sockets | M: in render |
@@ -193,7 +198,7 @@ Not sub-timed today; all of this is on the loop every 100 ms:
 | `/proc` full scan | wedged.rs:1365–1441 via `idle_worker_liveness` (PR:680) and `transcript_confirms_stall` (EV:1489) | O(processes); hundreds on this host |
 | Whole-transcript reads | wedged.rs:600–613, 785; EV:1465 | O(transcript size) |
 | Inbox flock (unbounded) | teams.rs:170, 1409–1460 | unbounded |
-| PTY `write_all` (unbounded) | cas-pty pty.rs:2681 | unbounded on a full PTY buffer |
+| PTY `write_all` (unbounded) | cas-pty pty.rs:2684 | unbounded on a full PTY buffer |
 | Inline awaits | urgent and context-reset inject (QE:5395, mux.rs:1169–1215) | 1.2–5.2 s |
 | SQLite and intents flock | every `open_*` and query | budgeted 50 ms per pass (GH #1165 fix) |
 
@@ -239,7 +244,7 @@ v2 splits today's single loop into three lanes with one rule each.
 |---|---|---|---|---|
 | **io** | dedicated OS thread | client socket, every PTY master (read and write), per-pane terminal state, render scheduler, client frames | never calls a store, git, gh, network, `/proc` or a transcript | one iteration < 5 ms; key → echo p99 < 50 ms |
 | **control** | today's loop thread | prompt-queue decisions, director state machine, spawn/shutdown orchestration, relays | only in-memory work and channel traffic; never blocks on I/O | one pass p99 < 100 ms with 16 agents |
-| **jobs** | the store worker plus a bounded blocking pool | every call that can block: SQLite, flocks, git, gh, HTTP, `/proc`, transcript reads | single-flight per key, results posted back, budgets and backoff per kind | per kind, §4.4 |
+| **jobs** | the refresh reader's dedicated read connection, the store-worker writer, and a bounded blocking pool | every call that can block: SQLite, flocks, git, gh, HTTP, `/proc`, transcript reads | single-flight per key, results posted back, budgets and backoff per kind | per kind, §4.4 |
 
 ### 3.1 Input/echo isolation (io lane)
 
@@ -250,49 +255,106 @@ anywhere (§1.2) delays echo in every pane.
 
 In v2 the io lane does the whole round trip on its own thread:
 
-1. It reads the client socket and writes keystrokes straight to the focused
-   pane's PTY master. No other lane is involved.
+1. It reads every client socket and classifies each input event (§3.3).
+   Keystrokes for the focused pane are written straight to that pane's PTY
+   master. No other lane is involved.
 2. Per-pane PTY reader threads (or one `poll` set) feed bytes into that pane's
    terminal emulator, which the io lane owns.
 3. Any output from the pane that received input in the last 250 ms is an
-   **echo frame**: it is rendered and flushed immediately, damage-only for
-   that pane, ahead of any capped output frame (§5).
-
-The control lane talks to the io lane only through two channels:
-
-- **commands** (control → io): `InjectPrompt { pane, bytes, urgent }`,
-  `Interrupt { pane }`, `Layout(..)`, `Notice(..)`, `SpawnPane(..)`,
-  `ClosePane(..)`. Prompt injection, the only PTY write the control lane needs,
-  becomes a command. An attached operator draft still blocks injection
-  (cas-eacc), now checked by the io lane, which owns the composer state.
-- **pane snapshots** (io → control): one small struct per pane, published by
-  the io lane after each iteration and read by the control lane without a
-  lock (`ArcSwap` or a seqlock): `last_output_at`, `last_input_at`,
-  `silent_since`, `composer_dirty`, `bytes_received`, `alive`. These are what
-  the wake gate and the stall detector read today from `self.app.mux`.
-
-Nothing on the io lane may allocate unboundedly or wait on the control lane.
-If the command channel is full, the control lane keeps the command and
-retries on its next pass; neither lane waits on the other.
+   **echo frame**: it is drawn and flushed at once, ahead of any capped output
+   frame (§5).
 
 Two io-lane hazards found in §2 must be handled inside the lane:
 
-- **PTY writes are blocking `write_all` today** (cas-pty pty.rs:2681). The io
+- **PTY writes are blocking `write_all` today** (cas-pty pty.rs:2684). The io
   lane writes non-blocking and keeps a per-pane pending buffer; a pane whose
   buffer is full stops taking input for that pane only.
 - **Keystrokes don't wake the loop today** (§2.1). The io lane waits on the
-  client socket and every PTY reader with one `poll`/epoll set, so a key is
+  client sockets and every PTY reader with one `poll`/epoll set, so a key is
   handled on arrival, not on the next timer tick.
 
-### 3.2 Who owns state
+### 3.2 What the io lane draws: panes plus a published view model
+
+Today `terminal.draw(|f| self.app.render(f))` (LC:2853) renders the whole
+`FactoryApp`: panes, director panels, dialogs, sidebar and status line, and
+`mux` is a `FactoryApp` field (app/mod.rs:921). v2 splits that object:
+
+- **Panes** (the `mux`: PTY masters, emulators, per-pane scrollback and
+  scroll offset, composer state, focus) move into the io lane. The io lane is
+  their only owner.
+- **Everything else** (director data, panels, dialogs, sidebar contents,
+  selection, notices, task-dialog state) stays in the control lane's
+  `FactoryApp`. After every change the control lane publishes an immutable
+  `ViewModel` (an `Arc` swapped atomically): the rendered-ready text, rows and
+  styles for each non-pane region, plus the layout (which panes are visible
+  and where).
+- **Drawing.** The io lane renders each frame from its own panes plus the
+  latest `ViewModel`. `FactoryApp::render` is split into a pane renderer (io)
+  and a view-model builder (control). A new `ViewModel` is a **layout frame**
+  (§5.1): drawn on the next io iteration, coalesced within 16 ms.
+
+The control lane reads pane state only through **pane snapshots**: one small
+struct per pane, published by the io lane after each iteration and read
+without a lock (`ArcSwap` or a seqlock): `last_output_at`, `last_input_at`,
+`silent_since`, `composer_dirty`, `bytes_received`, `alive`. These are what
+the wake gate and the stall detector read today from `self.app.mux`.
+
+### 3.3 Input routing
+
+`process_client_input` (client_input.rs:163–938) handles more than pane
+keystrokes. In v2 the io lane classifies each event:
+
+| Event | Handled by | How |
+|---|---|---|
+| Keys and paste for the focused pane | io | written to the PTY |
+| Pane scroll (keys, mouse wheel over a pane), focus changes between panes | io | updates io-owned pane state; a layout frame |
+| Mouse on panels, sidebar or dialogs; dialog keys; panel navigation; operator commands | control | sent as `UiInput(event)` on the io → control channel; control updates `FactoryApp` and publishes a new `ViewModel` |
+| Ctrl+R (`refresh_data()`, client_input.rs:860) | control | submits a `DirectorSnapshot` job instead of reading on the loop |
+
+The io lane decides by hit-testing against the current `ViewModel` layout, so
+routing needs no round trip to the control lane.
+
+### 3.4 Other clients
+
+All client sockets are io-lane I/O: Full clients, compact clients, the GUI
+and WS clients, and the cloud relay (LC:2846–2900). The io lane accepts them,
+reads them, and flushes frames to them non-blocking, as today's
+`flush_outputs` does.
+
+- **Full and compact clients** get frames from the io lane's renderer (the
+  compact layout is a second `ViewModel` layout).
+- **GUI and WS clients** get structured state, not terminal frames. Today
+  `send_state_update` (gui_client.rs:258) builds it on the loop; in v2 the
+  control lane builds it alongside the `ViewModel` and the io lane only sends
+  it. GUI and WS operator commands are `UiInput` events to control.
+- **Cloud relay** input that targets a pane (relay.rs:~325) is pane input on
+  the io lane; relay control messages go to control.
+
+### 3.5 Channels and who owns state
+
+The lanes talk through three channels and two published values:
+
+- **commands** (control → io): `InjectPrompt { row, generation, pane, bytes,
+  urgent }`, `Interrupt { pane }`, `SpawnPane(..)`, `ClosePane(..)`,
+  `SendState(..)` (GUI/WS). An attached operator draft still blocks injection
+  (cas-eacc), now checked by the io lane, which owns the composer.
+- **events** (io → control): `UiInput(..)`, `InjectOutcome { row,
+  generation, outcome }`, `PaneExited(..)`, `ClientAttached(..)`.
+- **completions** (jobs → control): `JobResult`s (§4).
+- **published**: `ViewModel` (control → io) and pane snapshots (io →
+  control).
+
+No lane ever waits on another. A full channel means the sender keeps the item
+and retries on its next iteration.
 
 | State | Owner | Readers |
 |---|---|---|
-| PTY masters, terminal emulators, composer, focus, layout | io | control via pane snapshots |
-| Prompt queue rows, receipts, stages | SQLite, written only by jobs | control via job results |
-| Director data (tasks, agents, leases, reminders, epics) | jobs build an immutable `DirectorSnapshot` | control applies it; io renders the parts on screen via `Notice`/`Layout` |
-| Delivery decisions (wake gate, nudges, relays) | control | io executes the resulting commands |
-| Loop metrics, watchdog ring | each lane writes its own counters; the watchdog thread aggregates | `loop.json`, TUI status |
+| PTY masters, emulators, pane scrollback and scroll, composer, focus | io | control via pane snapshots |
+| `FactoryApp` non-pane state: director data, panels, dialogs, sidebar, notices | control | io via `ViewModel` |
+| Prompt-queue rows, receipts, stages | SQLite, written by the jobs writer | control via job results |
+| Director data | built by jobs as `DirectorSnapshot` | control applies it to `FactoryApp` |
+| Delivery decisions (wake gate, nudges, relays), in-flight deliveries (§4.5) | control | io executes the resulting commands |
+| Loop metrics, watchdog ring | each lane its own counters; the watchdog thread aggregates | `loop.json`, TUI status |
 
 ## 4. Off-loop I/O model (jobs lane)
 
@@ -301,7 +363,8 @@ Two io-lane hazards found in §2 must be handled inside the lane:
 The control lane may only do in-memory work and channel sends and receives.
 Every operation that can block for more than 1 ms is a **job**: the control
 lane submits `Job { kind, key, generation, payload }` and keeps going. A job
-runs on the store worker (SQLite) or the blocking pool (everything else) and
+runs on a reader (SQLite reads), the store-worker writer (SQLite writes) or
+the blocking pool (everything else) and
 posts `JobResult { key, generation, outcome, elapsed }` to the completion
 queue. The control lane drains completions at the top of each pass and
 applies them; a result whose generation is stale is discarded.
@@ -323,10 +386,14 @@ this shape. v2 makes it the only path and extends it to reads.
   non-critical submit (a refresh) and never blocks the submitter. Critical
   writes (receipts, stage stamps, lifecycle relays) are never dropped; their
   queue is unbounded but its age is a watchdog metric.
-- **One writer.** The store worker owns the only write connection to
-  `cas.db` from the daemon. SQLite busy waits and flock waits (GH #1165,
-  6,207 busy deferrals and 2,264 "database is locked" mirror failures on
-  2026-10-15) then happen on that thread, never on io or control.
+- **Readers and one writer.** Reads keep the dedicated read connection of
+  today's `factory-refresh-reader` thread (DR:36–48), so snapshots and
+  revalidation reads never queue behind writes. Writes go through the store
+  worker, the daemon's only write connection to `cas.db`. A GH #1165-style
+  flock or busy wedge then holds up writes only, and the watchdog names it as
+  a job wedge (§6). SQLite busy waits and flock waits (6,207 busy deferrals
+  and 2,264 "database is locked" mirror failures on 2026-10-15) happen on
+  those threads, never on io or control.
 
 ### 4.3 What moves where
 
@@ -336,13 +403,14 @@ this shape. v2 makes it the only path and extends it to reads.
 | Supervisor-stall evaluation (`supervisor stall` step) | input to `DirectorSnapshot` | Needs lane CI state (cas-207e cache) and task state; both arrive in the snapshot. |
 | Stall confirmation: agent-store open, `/proc` cmdline/environ scan (`wedged.rs:1441`), child walk, transcript tail (cas-7156) | `WorkerHealthProbe(worker)` | Single-flight per worker, cas-7156's backoff kept; the result feeds the detector. |
 | Reminders: time reminders (store), external wake probes (git, gh) | `ReminderScan`, `GitFetch(remote, branch)`, `CiStatus(sha)` | cas-a222 already moved the external probe; the expiry write (6,207 busy deferrals) moves to the store worker too. |
-| Prompt-queue pass: selection, stage stamps, receipts, claims | `QueueSelect`, `QueueStamp` | Control decides wake and gate from pane snapshots; io executes `InjectPrompt`; receipts are written by jobs. spec-6194 semantics are unchanged. |
+| Prompt-queue pass: selection, stage stamps, receipts, claims | `QueueSelect` (claims rows atomically), `QueueStamp` | Control decides wake and gate from pane snapshots and tracks in-flight rows (§4.5); io executes `InjectPrompt`; receipts are written by jobs. spec-6194 semantics are unchanged. |
 | Merge-request revalidation (`prompt_revalidation.rs:962`, cas-874e) | `RefTip(ref)` | Ref reads are local and fast but still a `git` subprocess; they become a job. A bounded fetch is never allowed on control. |
 | CI watch, Violet activity, cloud relay, Commander mirror writes | `CiWatch`, `VioletPoll`, `CloudRelay`, `MirrorWrite` | Network and store. |
 | Relays (auth failure, permission, usage limit) | built from pane snapshots on control; their store writes are `QueueStamp` jobs | Today 50–282 ms each on 10-15. |
 | Merge freshness `git fetch` in delivery revalidation, inbox retraction and the inject loop (§2.2 steps 13, 17, 18) | `GitFetch(remote, branch)` then `RefTip` | Never under a lock; the inbox prune decides from the last fetched tip. |
-| `prompt_is_still_deliverable` full DirectorData load (APP:1540) and the fallback load at LC:3124 | none: read the latest applied `DirectorSnapshot` | Revalidation uses the snapshot; staleness is bounded by the snapshot's age (≤ 2 s). |
-| Teams inbox writes and prunes under `fs2::lock_exclusive` (teams.rs:170, 1409–1460) | `InboxWrite(recipient)`, `InboxPrune(recipient)` | Single-flight per recipient file; the flock is taken only on the jobs lane. |
+| `prompt_is_still_deliverable` full DirectorData load (APP:1540) and the fallback load at LC:3124 | `RevalidateFresh(row)` | Stays a **fresh read**, run as a job on the read connection. app/mod.rs:1541–1547 states "Never remove a legitimate notification based on cached data", so neither delivery revalidation nor retraction may decide from the cached `DirectorSnapshot`. |
+| Teams inbox writes and prunes under `fs2::lock_exclusive` (teams.rs:170, 1409–1460) | `InboxWrite(recipient)`, `InboxPrune(recipient)` | Single-flight per recipient file; the flock is taken only on the jobs lane. Retraction (the prune decision) is a fresh read inside the job, never the cached snapshot. |
+| Inject loop's task-store read and assignment enqueue write (LC:3394–3397) | `RevalidateFresh(row)` read, `QueueStamp` write | |
 | `idle_worker_liveness` (`Config::load`, `/proc` scan, transcript) and wake-gate transcript reads (QE:3617–3800, 5485) | `WorkerHealthProbe(worker)` | One cached result per worker, refreshed on backoff; the wake gate reads the cache plus the io lane's pane snapshot. Whole-file transcript reads become seek-to-tail. |
 | `Config::load` per pass (QE:2929, 5715, 5767) | none: config cached, reloaded on file change | |
 | Per-pass and per-row `open_*_store` + `init()` (§2.3) | none on control: the store worker keeps open handles | Schema init runs once per daemon. |
@@ -360,15 +428,46 @@ is in §2.
 | `QueueSelect` / `QueueStamp` | 100 ms | retry next tick; receipts never dropped |
 | `WorkerHealthProbe` | 100 ms | 5 → 60 s (cas-7156) |
 | `ReminderScan` | 100 ms | next tick |
+| `RevalidateFresh` | 250 ms | none; the row stays pending |
 | `GitFetch` / `RefTip` | 5 s / 500 ms | per ref, exponential (cas-a222) |
 | `CiWatch` / `CiStatus` | 10 s | exponential |
 | `VioletPoll` / `CloudRelay` / `MirrorWrite` | 2 s | exponential |
 
+### 4.5 Prompt delivery: in-flight rows and crash safety
+
+Delivery crosses three lanes: `QueueSelect` (jobs) → `InjectPrompt` (io) →
+`InjectOutcome` (io → control) → `QueueStamp` (jobs). Without a guard, the
+next `QueueSelect` 100 ms later could pick the same row before its stamp
+lands and inject it twice. The rules:
+
+1. **Claim at selection.** `QueueSelect` takes the per-recipient transport
+   claim atomically in the same transaction that selects the row, as
+   `claim_recipient_transport` does today. A claimed row is not selectable
+   again.
+2. **In-flight set on control.** Control records `(row, recipient,
+   generation)` in an in-flight set when it sends `InjectPrompt`, and skips
+   any selected row already in the set. The entry clears when the
+   `QueueStamp` for that generation completes.
+3. **Outcome timeout.** If no `InjectOutcome` arrives within 10 s, control
+   submits a `QueueStamp` that releases the claim (today's
+   `release_recipient_transport`), and the row is retried on its normal
+   cadence.
+4. **Idempotent stamps.** Stage stamps are already monotonic
+   (`atomic_stage_stamp_in_tx`); a repeated stamp for the same generation is
+   a no-op.
+5. **Crash between inject and stamp.** After a daemon restart, a row that is
+   claimed but not stamped is treated as today: it stays eligible for the
+   recipient's hook and tool-boundary surfacing (cas-b5ad, cas-7bfa), Teams
+   re-offers are content-deduped, and the daemon re-offers it by PTY only
+   after the claim is older than the outcome timeout. A crash can therefore
+   cause at most one duplicate PTY injection of that row; normal operation
+   never injects twice.
+
 ## 5. Render scheduler (io lane)
 
 GH #1210 measured ~30 output-driven frames/s × ~16 ms each in Konsole for a
-factory with codex workers; cost is per frame, not per byte. v2 renders from
-damage, at a capped rate, and only what is visible.
+factory with codex workers; cost is per frame, not per byte. v2 caps how
+often output produces a frame and skips panes that aren't visible.
 
 ### 5.1 Frame causes and priority
 
@@ -383,11 +482,12 @@ damage, at a capped rate, and only what is visible.
 Input frames always go first: an echo frame due at the same time as an output
 frame is sent first, and the output frame is merged into the next slot.
 
-### 5.2 Damage tracking
+### 5.2 No separate damage tracking
 
-Each pane's emulator marks damaged rows. A frame contains only the damaged
-cells of visible panes, plus chrome that changed. A frame with no damage is
-not sent.
+ratatui already diffs the previous buffer against the new one and emits only
+the changed cells, so v2 adds no damage tracking of its own. The frame cap
+(§5.1) and the visibility rule are what cut the frame count. A frame whose
+diff is empty is not sent.
 
 ### 5.3 Config and metrics
 
@@ -432,41 +532,75 @@ in the TUI. v2 extends these pieces rather than replacing them.
 ## 7. Named latency tests
 
 Prefix `flv2_`, so `cargo nextest run -E 'test(/flv2_/)'` selects them all.
-The load harness is cas-b8a9's (cas-98b24): 16 concurrent agents, codex-heavy
-PTY output (≥ 3 panes at 38–236 writes/s, from GH #1210).
 
-| Test | Budget | Level | Owner child |
+Wall-clock p99 budgets flake on a shared CI host with four builders, so tests
+come in two kinds:
+
+- **Gate** tests decide merges. They use a fake clock (or `tokio::time::pause`)
+  and synthetic stalls, or wall-clock margins wide enough that load cannot
+  flip them (a 2 s stall against a 50 ms budget).
+- **Receipt** tests measure the real p99 budgets with the load harness
+  (cas-b8a9's, cas-98b24) on a reference host, and are attached to the
+  child's close as a receipt. They do not gate CI.
+
+The load harness drives 16 agents plus **synthetic PTY writers** that
+reproduce GH #1210's rates (38, 63 and 236 writes/s), not real codex agents,
+so runs are repeatable.
+
+| Test | Budget | Kind | Owner |
 |---|---|---|---|
-| `flv2_key_to_echo_p99_under_50ms_under_load` | p99 key → echo < 50 ms, 16 agents, codex-heavy load | load harness | C4 io lane |
-| `flv2_echo_unaffected_by_stalled_control_lane` | inject a 2 s sleep into a control step; echo p99 still < 50 ms | integration | C4 |
-| `flv2_echo_unaffected_by_held_store_lock` | hold `task-sync-intents.lock` 3 s (GH #1165); echo p99 < 50 ms | integration | C4 |
-| `flv2_control_pass_p99_under_100ms_with_16_agents` | control pass p99 < 100 ms | load harness | C2 + C3 |
-| `flv2_no_blocking_call_on_lanes` | the §6.6 assertion trips on any store open, `Command`, `/proc` or transcript read on io or control | unit + load harness | C1 (report), C6 (enforce) |
-| `flv2_director_snapshot_off_lane` | a 2 s `DirectorSnapshot` job leaves control p99 < 100 ms | integration | C2 |
-| `flv2_worker_health_probe_single_flight` | N passes over a stuck worker run one probe per backoff step | unit | C2 |
-| `flv2_queue_stamps_on_store_worker` | queue selection and stamps run as jobs; spec-6194 `ct2_` tests still pass | integration | C3 |
-| `flv2_output_frames_capped` | a pane at 236 writes/s yields ≤ `render_max_fps` + 1 output frames/s | unit | C5 render |
-| `flv2_unfocused_frames_capped` | unfocused visible pane ≤ `render_unfocused_fps` + 1 | unit | C5 |
-| `flv2_invisible_pane_output_sends_no_frame` | output from a pane off screen sends 0 frames | unit | C5 |
-| `flv2_input_frame_precedes_output_frame` | echo frame is flushed within one io iteration and before a pending output frame | unit | C5 |
-| `flv2_watchdog_names_slow_step` | a stub step over budget appears in the ring, the log and the status line with its lane and step | unit | C1 watchdog |
-| `flv2_wedge_reports_step_and_duration` | a lane blocked 1.5 s is reported as wedged with its step | integration | C1 |
-| `flv2_external_reminders_never_on_lane` | regression for GH #1208 with ≥ 5 external reminders | integration | C2 (verify cas-a222) |
+| `flv2_job_single_flight_and_generations` | a second submit for an in-flight key coalesces; a stale generation's result is dropped | gate (fake clock) | C0 |
+| `flv2_job_queue_never_blocks_submitter` | a full non-critical queue drops the oldest refresh; the submitter returns at once | gate | C0 |
+| `flv2_watchdog_names_slow_step` | a stub step over budget appears in the ring, the log and the status line with lane and step | gate (fake clock) | C1 |
+| `flv2_wedge_reports_step_and_duration` | a lane blocked 1.5 s is reported as wedged with its step | gate | C1 |
+| `flv2_no_blocking_call_on_lanes` | the §6.6 assertion trips on any store open, `Command`, `/proc` or transcript read on io or control | gate (report in C1, enforce in C6) | C1, C6 |
+| `flv2_director_snapshot_off_lane` | a 2 s `DirectorSnapshot` job leaves every control pass < 100 ms | gate (2 s vs 100 ms margin) | C2 |
+| `flv2_worker_health_probe_single_flight` | N passes over a stuck worker run one probe per backoff step | gate (fake clock) | C2 |
+| `flv2_retraction_reads_fresh` | a retraction decision issues a fresh read; a stale cached snapshot that would retract a legitimate row does not | gate | C2, C3 |
+| `flv2_external_reminders_never_on_lane` | regression for GH #1208 with ≥ 5 external reminders | gate (exists: loop_latency_tests.rs:372) | C2 |
+| `flv2_queue_stamps_on_writer` | queue selection and stamps run as jobs; spec-6194 `ct2_` tests still pass | gate | C3 |
+| `flv2_no_double_inject` | a row selected twice before its stamp lands is injected once; an outcome timeout releases the claim | gate (fake clock) | C3 |
+| `flv2_inject_is_a_command` | an urgent inject with a 1.2 s settle leaves every control pass < 100 ms | gate (1.2 s vs 100 ms margin) | C4a |
+| `flv2_pty_write_never_blocks_lane` | a pane whose PTY buffer is full stops taking input; other panes' echo is unaffected | gate | C4a |
+| `flv2_echo_unaffected_by_stalled_control_lane` | a 2 s control stall leaves key → echo < 50 ms | gate (2 s vs 50 ms margin) | C4b |
+| `flv2_echo_unaffected_by_held_store_lock` | `task-sync-intents.lock` held 3 s (GH #1165); echo < 50 ms | gate | C4b |
+| `flv2_output_frames_capped` | a pane at 236 writes/s yields ≤ `render_max_fps` + 1 output frames/s | gate (fake clock) | C5 |
+| `flv2_unfocused_frames_capped` | unfocused visible pane ≤ `render_unfocused_fps` + 1 | gate (fake clock) | C5 |
+| `flv2_invisible_pane_output_sends_no_frame` | output from a pane off screen sends 0 frames | gate | C5 |
+| `flv2_input_frame_precedes_output_frame` | the echo frame is flushed before a pending output frame | gate | C5 |
+| `flv2_control_pass_p99_under_100ms_with_16_agents` | control pass p99 < 100 ms | receipt | C2 + C3 |
+| `flv2_key_to_echo_p99_under_50ms_under_load` | p99 key → echo < 50 ms with 16 agents and synthetic writers | receipt | C6 (and C4b if built) |
 
 ## 8. Migration order and shared files
 
 | Child | Scope | Main files | Depends on |
 |---|---|---|---|
-| C1 watchdog | step markers, budgets, ring, TUI status, wedge thread, `ON_LANE` assertion in report mode, `loop.json` fields | `lifecycle.rs` (loop), `director_refresh.rs` (profile), loop.json writer | none; lands first so every later child is measured |
-| C2 off-lane director | `DirectorSnapshot`, `WorkerHealthProbe`, `ReminderScan`, CI/Violet/cloud jobs | `director_refresh.rs`, `director/events.rs`, `wedged.rs`, `store_worker.rs`, `ci_watch.rs` | C1 |
-| C3 off-lane queue | `QueueSelect`, `QueueStamp`, `RefTip`; control keeps decisions | `queue_and_events.rs`, `delivery.rs`, `prompt_revalidation.rs`, `prompt_queue_store.rs` | C1; parallel with C2 |
-| C4 io lane | io thread, command and snapshot channels, input/echo fast path | `lifecycle.rs`, `cas-mux` pane/PTY, `delivery.rs` (injection becomes a command) | C2, C3 (the control lane must already be I/O-free) |
-| C5 render scheduler | damage, caps, visibility, config knobs, frame metrics; absorbs cas-77f39 (GH #1210) | render path, config | C4 |
-| C6 enforcement | load-harness receipts for §7, `ON_LANE` enforce mode | tests, CI | C2–C5 |
+| C0 job framework | `Job`/`JobResult`, completion queue, single-flight, generations, bounded queues, reader vs writer routing, per-kind budgets | `store_worker.rs`, a new `jobs.rs` | none |
+| C1 watchdog | step markers (including prompt-queue sub-steps), budgets, ring, TUI status, 250 ms heartbeat and 1 s wedge, job-age metrics, `ON_LANE` in report mode, `loop.json` fields | `loop_watchdog.rs`, `factory_daemon_health.rs`, `lifecycle.rs` (markers only), app `director_refresh.rs` (`timed()`), status line | none; with C0 lands first so every later child is measured |
+| C2 off-lane director | `DirectorSnapshot`, `WorkerHealthProbe`, `ReminderScan`, `RevalidateFresh`, merge-freshness `GitFetch`/`RefTip`, CI/Violet/cloud jobs | app `director_refresh.rs`, app/mod.rs, `events.rs`, `prompts.rs`, `wedged.rs`, `worker_liveness.rs`, `git_evidence`, `ci_watch.rs`, `worktree_ops.rs`, `queue_and_events.rs` (reminders at QE:9203, relays at QE:2609–2804) | C0, C1 |
+| C3 off-lane queue | `QueueSelect` with claim, `QueueStamp`, in-flight set (§4.5), cached probes and `Config`, `InboxWrite`/`InboxPrune`, `RefTip`, mirror and sweep jobs; control keeps decisions | `queue_and_events.rs` (`process_prompt_queue`, probes, sweep, prunes), `delivery.rs`, `teams.rs`, `prompt_revalidation.rs`, `commander_mirror.rs`, `prompt_queue_store.rs` (APIs only) | C0, C1; parallel with C2 |
+| C4a input and inject on the current loop | input routing table (§3.3), non-blocking PTY writes with per-pane buffers, urgent/context-reset inject as a per-pane state machine (no inline await), keystrokes wake the loop | `client_input.rs`, `cas-pty` write path, `cas-mux` `mux.rs`/pane, `delivery.rs` | C3 (shares `delivery.rs`) |
+| C5 render scheduler | frame causes and caps (§5.1), visibility rule, config keys, frame metrics; absorbs cas-77f39 (GH #1210) | `lifecycle.rs` draw/flush, app render, config meta/seed | C1; can land before C4b |
+| C4b io thread (conditional) | the io lane on its own thread: panes move out of `FactoryApp`, `ViewModel`, channels, other clients (§3.2–3.5) | `lifecycle.rs` split, `terminal_exchange.rs`, `output.rs`, app render split, GUI/WS clients | C2, C3, C4a, C5 — **and evidence** |
+| C6 enforcement and receipts | `ON_LANE` enforce mode; harness with synthetic writers; receipts for the §7 p99 budgets | tests, harness, CI | C2–C5 (and C4b if built) |
 
-Shared hotspots: `lifecycle.rs` (C1, C4), `queue_and_events.rs` (C3, C4),
-`director_refresh.rs` (C1, C2). Children on a hotspot land in the order above
-and rebase on each other's merged tips.
+**C4b is conditional (rule-176: remove before adding).** Measured input, PTY
+and render cost is 0–3 ms (§1.1). If, after C2, C3, C4a and C5, the control
+pass p99 stays under 100 ms in the C6 receipt, key → echo already meets its
+budget and C4b waits for evidence that it is needed. C4b is cut only if the
+receipt misses the echo budget.
+
+Order: C0 and C1 → C2 ∥ C3 → C4a and C5 → C6 → C4b only if needed.
+
+Shared hotspots, landed in the order above with rebases on merged tips:
+
+| File | Children |
+|---|---|
+| `lifecycle.rs` | C1, C5, C4b |
+| `queue_and_events.rs` | C2 (reminders, relays), C3 |
+| app `director_refresh.rs` | C1, C2 |
+| `delivery.rs` | C3, C4a |
+| `store_worker.rs` | C0 (C2 and C3 only use its API) |
 
 cas-77f39 (GH #1210) can still ship its point fix (an output-frame cap in the
 current loop) before C5; C5 then replaces it.
@@ -476,16 +610,17 @@ current loop) before C5; C5 then replaces it.
 1. **Thread or async for the io lane.** This spec asks for a dedicated OS
    thread with its own epoll set, so it never shares a tokio worker with
    jobs. A separate single-threaded tokio runtime would also satisfy §3;
-   C4 should choose and record why.
-2. **Snapshot staleness for revalidation.** Using the last `DirectorSnapshot`
-   (≤ 2 s old) instead of a fresh load in `prompt_is_still_deliverable` is a
-   semantic change. A row whose premise expires inside that window is
-   delivered once; spec-6194 P1.7 still withdraws it at the next pass.
+   C4b, if built, chooses and records why.
+2. **Revalidation cost.** Revalidation and retraction stay fresh reads
+   (§4.3, app/mod.rs:1541–1547), now as `RevalidateFresh` jobs. A row waits
+   for its job (≤ 250 ms budget) before injection; confirm that delay is
+   acceptable for urgent rows.
 3. **Urgent-inject readiness.** Today's 1.2 s settle plus up to 4 s polling
    exists for cas-eacc (operator drafts). As an io-lane state machine it
    blocks only that pane; confirm no caller relies on the loop pausing.
-4. **Load harness.** cas-98b24's harness drives 16 agents; §7 also needs
-   ≥ 3 codex-heavy panes at GH #1210's write rates. C6 extends it.
+4. **Load harness.** cas-98b24's harness drives 16 agents; C6 adds the
+   synthetic PTY writers at GH #1210's rates and records receipts on a
+   reference host.
 
 ## 10. Out of scope
 

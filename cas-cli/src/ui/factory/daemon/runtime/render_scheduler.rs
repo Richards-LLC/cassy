@@ -168,7 +168,8 @@ impl RenderScheduler {
     }
 
     /// Whether any cause is waiting for a frame.
-    pub(crate) fn pending(&self) -> bool {
+    #[cfg(test)]
+    fn pending(&self) -> bool {
         self.input || self.layout || self.focused || self.unfocused
     }
 

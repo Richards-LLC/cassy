@@ -1665,6 +1665,7 @@ mod tests {
             queued[0].prompt
         );
         assert!(
+            // pin: the queued assignment wake must carry the start command the worker runs
             queued[0].prompt.contains("action=start"),
             "the queued wake-up must tell the worker how to pick the task up: {}",
             queued[0].prompt

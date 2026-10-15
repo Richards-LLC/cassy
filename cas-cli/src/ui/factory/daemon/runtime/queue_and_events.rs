@@ -9902,6 +9902,7 @@ mod tests {
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "new-supervisor");
+        // pin: the fired reminder prompt names the external condition the recipient acts on
         assert!(prompts[0].prompt.contains("external condition satisfied"));
 
         // A stale pre-restart snapshot cannot create a second delivery: the
@@ -10523,7 +10524,9 @@ mod tests {
             .peek_all(10)
             .unwrap();
         let prompt = &queued[0].prompt;
+        // pin: the assignment brief's cited-issue header is the worker-facing contract
         assert!(prompt.contains("Cited GitHub issues"), "{prompt}");
+        // pin: the brief must name the cited issue the worker reads from disk
         assert!(prompt.contains("acme/widgets#77"), "{prompt}");
         assert!(
             prompt.contains(
@@ -10848,7 +10851,9 @@ mod tests {
             .expect("stale quarantine notifies the supervisor sender");
         assert_eq!(notice.target, "supervisor");
         assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+        // pin: the stale-item notice names the message and recipient it retires
         assert!(notice.prompt.contains(&format!("Message {ancient} to wise-raven-21")));
+        // pin: the notice's reason phrase tells the sender why the item ended
         assert!(notice.prompt.contains("stale queue item"));
     }
 
@@ -13734,6 +13739,7 @@ mod tests {
             prompts[0].summary.as_deref(),
             Some("Worker spawn cancelled: clock-fixer")
         );
+        // pin: the spawn-failure notice names the missing pane for the supervisor
         assert!(prompts[0].prompt.contains("No worker pane was registered"));
         assert!(
             prompts[0]
@@ -13889,6 +13895,7 @@ mod tests {
             Some("Worker spawn failed at register: short-lived-worker")
         );
         assert!(prompts[0].prompt.contains("request 407"));
+        // pin: the spawn notice names the request id the supervisor resets
         assert!(prompts[0].prompt.contains("stage=register"));
     }
 
@@ -14361,11 +14368,13 @@ mod tests {
             prompts[0].prompt
         );
         assert!(
+            // pin: the park relay names the lifecycle state the supervisor acts on
             prompts[0].prompt.contains("awaiting_merge lifecycle"),
             "the brief must carry the task title: {}",
             prompts[0].prompt
         );
         assert!(
+            // pin: the assignment wake must carry the start command the worker runs
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
@@ -14399,6 +14408,7 @@ mod tests {
             .expect("demo task brief")
             .prompt;
         assert!(
+            // pin: the brief carries the task's demo statement verbatim to the worker
             prompt.contains("Demo statement: As a reader, I open the page and see the result."),
             "worker brief must carry the stored demo statement: {prompt}"
         );
@@ -14430,7 +14440,9 @@ mod tests {
             .expect("spawn brief")
             .prompt;
         assert!(
+            // pin: the brief must give the worker the exact show command
             prompt.contains("mcp__cs__task action=show")
+                // pin: the brief must give the worker the exact start command
                 && prompt.contains("mcp__cs__task action=start"),
             "Codex spawn briefs must use the worker's mcp__cs__ namespace: {prompt}"
         );
@@ -14525,6 +14537,7 @@ mod tests {
         ))
         .join("cas-stale-path");
         assert!(
+            // pin: the workspace-contract warning is the phrase the worker reacts to
             stale_prompt.prompt.contains("Workspace-contract warning"),
             "out-of-contract path must be surfaced before work begins: {}",
             stale_prompt.prompt
@@ -14537,11 +14550,13 @@ mod tests {
             stale_prompt.prompt
         );
         assert!(
+            // pin: a clean worktree must not receive the workspace-contract warning
             !clean_prompt.prompt.contains("Workspace-contract warning"),
             "in-worktree paths must not produce a stale-path warning: {}",
             clean_prompt.prompt
         );
         assert!(
+            // pin: a mention alone must not trigger the workspace-contract warning
             !mentioned_prompt.prompt.contains("Workspace-contract warning"),
             "paths mentioned as context must not become output warnings: {}",
             mentioned_prompt.prompt
@@ -14592,10 +14607,12 @@ mod tests {
             .unwrap()
             .prompt;
         assert!(
+            // pin: the npm ci prerequisite is an instruction the worker must follow
             prompt.contains("Before running any JS/TS test or build command, run `npm ci`"),
             "the task brief must name the lockfile-safe setup command before work begins: {prompt}"
         );
         assert!(
+            // pin: the brief explains why node_modules is not shared across worktrees
             prompt.contains("does not share node_modules across worktrees"),
             "the brief must explain why a shared dependency symlink is unsafe: {prompt}"
         );

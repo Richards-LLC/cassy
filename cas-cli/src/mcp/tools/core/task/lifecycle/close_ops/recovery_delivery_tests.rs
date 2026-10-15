@@ -596,7 +596,13 @@ async fn backend_renderer_log_only_close_parks_and_dispatches_qa_cas_2de9() {
 #[tokio::test]
 async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
     let mut env = TestEnvGuard::temp_home();
-    for surface in ["src/cli/status.rs", "src/tui/status.rs", "src/doctor.rs"] {
+    for surface in [
+        "src/cli/status.rs", "src/tui/status.rs", "src/doctor.rs",
+        "crates/cas-mux/src/render.rs",
+        "crates/ghostty_vt/src/lib.rs",
+        "crates/ghostty_vt_sys/src/lib.rs",
+        "crates/cas-diffs/src/widget.rs",
+    ] {
         let f = fixture_with_surface(&mut env, surface, true);
         let task_dir = fresh_ledger(&f);
         let output = close_output(&f).await;

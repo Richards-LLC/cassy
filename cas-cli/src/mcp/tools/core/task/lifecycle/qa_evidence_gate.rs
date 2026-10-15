@@ -413,6 +413,12 @@ mod tests {
                 "src/doctor.rs",
                 "src/doctor/output.rs",
                 "src/terminal/report.py",
+                "crates/cas-mux/src/render.rs",
+                "crates/cas-mux/src/pane/style.rs",
+                "crates/ghostty_vt/src/lib.rs",
+                "crates/ghostty_vt_sys/src/lib.rs",
+                "crates/cas-diffs/src/widget.rs",
+                "crates/cas-diffs/src/highlight.rs",
             ] {
                 assert!(requires_terminal_qa(&[path.into()], &qa), "{path}: {qa:?}");
             }

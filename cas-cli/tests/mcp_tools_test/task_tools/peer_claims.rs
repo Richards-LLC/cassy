@@ -42,6 +42,7 @@ struct FakeState {
     statuses: HashMap<String, String>,
     replace_on_release: Option<String>,
     revive_on_lock: Option<String>,
+    renew_after_lock_reads: Option<usize>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -191,7 +192,12 @@ impl FakeCloud {
                 if let Some(holder) = state.revive_on_lock.take() {
                     state.statuses.insert(holder, "active".into());
                 }
-                (200, serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))}))
+                let response = serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))});
+                let reads = state.requests.iter().filter(|r| r.ends_with("/lock")).count();
+                if state.renew_after_lock_reads == Some(reads)
+                    && let Some(lock) = state.locks.get_mut(&key)
+                { lock.renewed_at = now; lock.epoch += 1; }
+                (200, response)
             },
             _ => (404, serde_json::json!({"error": "not found"})),
         }
@@ -904,6 +910,7 @@ async fn cas_50713_ended_or_stale_holder_is_taken_over_without_claim_lost() {
                     Utc::now() - Duration::seconds(301);
             }
         }
+        if !ended { cloud.stop_renewing("cas-stale"); }
         let taken = start(&new.core, "cas-stale", false)
             .await
             .expect("dead holder must not refuse");
@@ -1042,3 +1049,54 @@ async fn cas_50713_successor_focus_recognizes_an_unregistered_local_predecessor(
 }
 
 
+
+
+#[tokio::test]
+async fn cas_50713_late_presence_with_fresh_renewal_refuses_and_reports_claim_lost() {
+    for status in ["active", "stale"] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "renewing-peer");
+        let new = machine(&cloud.url, PROJECT, "contender");
+        for m in [&old, &new] { m.put_task("cas-busy", TaskType::Task); }
+        new.put_task("cas-lost", TaskType::Task);
+        start(&new.core, "cas-lost", false).await.unwrap();
+        cloud.live(&old, "renewing-peer");
+        start(&old.core, "cas-busy", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state.statuses.insert(old.agent_id.clone(), status.into());
+            state.agents.get_mut(&old.agent_id).unwrap().2 = Utc::now() - Duration::seconds(301);
+        }
+        assert!(start(&new.core, "cas-busy", false).await.is_err());
+        assert_eq!(cloud.active_lock("cas-busy").unwrap().1.agent_id, old.agent_id);
+        cloud.give_to("cas-lost", &old.agent_id, None);
+        let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
+        assert_eq!(report.conflicts.len(), 1, "{report:?}");
+        assert!(cas::store::open_prompt_queue_store(&new.cas_dir).unwrap().peek_all(100).unwrap()
+            .iter()
+            // pin: live competing claims must retain this alarm class even when presence is late.
+            .any(|row| row.prompt.contains("PEER CLAIM LOST")));
+    }
+}
+
+#[tokio::test]
+async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "ended-peer");
+    let new = machine(&cloud.url, PROJECT, "contender");
+    for m in [&old, &new] { m.put_task("cas-race", TaskType::Task); }
+    cloud.live(&old, "ended-peer");
+    start(&old.core, "cas-race", false).await.unwrap();
+    {
+        let mut state = cloud.state.lock().unwrap();
+        state.statuses.insert(old.agent_id.clone(), "shutdown".into());
+        state.renew_after_lock_reads = Some(1);
+    }
+    let _ = start(&new.core, "cas-race", false).await;
+    assert_eq!(cloud.active_lock("cas-race").unwrap().1.agent_id, old.agent_id);
+    assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")));
+}

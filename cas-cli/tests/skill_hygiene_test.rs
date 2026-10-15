@@ -20,6 +20,56 @@ fn source(flavor: &str, relative: &str) -> &'static str {
 }
 
 #[test]
+fn ct2_p1_skill_one_message_per_event() {
+    let skill = source("", "skills/cas-worker/SKILL.md");
+    for flavor in ["codex", "grok"] {
+        assert_eq!(
+            source(flavor, "skills/cas-worker/SKILL.md"),
+            skill,
+            "{flavor} worker skill mirror must match"
+        );
+    }
+    for phrase in [
+        "One event gets one message.",
+        "A close is the lifecycle report; never send a post-close",
+        "send one `merge_request=true` message",
+        "do not send a separate prose summary or ACK before",
+        "wait for the supervisor's",
+    ] {
+        assert!(
+            skill.contains(phrase),
+            "cas-worker missing contract phrase: {phrase}"
+        );
+    }
+}
+
+#[test]
+fn ct2_p3_worker_lane_documented() {
+    let skill = source("", "skills/cas-worker/SKILL.md");
+    for phrase in [
+        "Worker peer lane",
+        "same factory session",
+        "sends a copy",
+        "kind=status",
+        "kind=ready",
+        "typed action wake",
+    ] {
+        assert!(
+            skill.contains(phrase),
+            "cas-worker missing peer-lane phrase: {phrase}"
+        );
+    }
+
+    let guide = include_str!("../../docs/guides/peer-supervisors.md");
+    assert!(
+        !guide.contains("Peer workers are never addressable"),
+        "the peer guide must describe the worker lane instead of denying it"
+    );
+    assert!(guide.contains("Worker peer lane"));
+    assert!(guide.contains("copied to the session supervisor"));
+}
+
+#[test]
 // pin: Cross-check init registration against the release skill and rubric; an omitted registration is invisible to catalog lookup.
 fn release_notes_are_generic_procedure_and_rubric_driven() {
     let init = include_str!("../src/cli/init/docs_and_skill.rs");

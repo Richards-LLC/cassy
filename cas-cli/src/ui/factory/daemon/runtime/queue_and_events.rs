@@ -1451,6 +1451,9 @@ pub enum SupervisorWakeClass {
     CloudPeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
+    /// A registered worker's typed `status` or `ready` action (cas-48e5).
+    /// This is the `action` severity under communication-contract-v2 P2.7.
+    WorkerAction,
     /// A registered worker's CAS-framed `<cas-blocker …>` (cas-8725). Attached
     /// by `coordination action=message blocker=true`, never by the sender's own
     /// words: the same sentence sent as free text stays inbox-only.
@@ -1470,6 +1473,22 @@ pub enum SupervisorWakeClass {
     /// daemon already coalesces it per channel. Daemon-stamped only: no
     /// registered sender can raise it.
     SlackActivity,
+}
+
+impl SupervisorWakeClass {
+    /// Map the wake signal to communication-contract-v2 severity. Only
+    /// blocker and action signals are currently eligible to wake; informational
+    /// events remain inbox/digest traffic.
+    fn alarm_class(self) -> cas_store::AlarmClass {
+        match self {
+            Self::Blocker => cas_store::AlarmClass::Blocker,
+            _ => cas_store::AlarmClass::Action,
+        }
+    }
+
+    fn wakes_idle(self) -> bool {
+        self.alarm_class().wakes_idle()
+    }
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -4790,8 +4809,8 @@ impl FactoryDaemon {
     /// was a caller-settable string, so it stated intent and proved nothing):
     /// - only rows CAS itself stamped as written by its own machinery, an
     ///   authenticated peer supervisor, or a registered worker sending a
-    ///   CAS-framed merge request, blocker or verification-dispatch handoff
-    ///   (cas-8725) — never arbitrary messages;
+    ///   CAS-framed merge request, typed status/ready action, blocker or
+    ///   verification-dispatch handoff (cas-8725) — never arbitrary messages;
     /// - only when the pane's own signals are quiet right now — judged by
     ///   heartbeat/activity freshness alone, since a supervisor owns its epic
     ///   for the whole session and that ownership is not an in-flight turn;
@@ -4815,7 +4834,8 @@ impl FactoryDaemon {
         source: &str,
         prompt: &str,
     ) -> bool {
-        Self::supervisor_wake_class(sender, supervisor_name, source, prompt).is_some()
+        Self::supervisor_wake_class(sender, supervisor_name, source, prompt)
+            .is_some_and(SupervisorWakeClass::wakes_idle)
     }
 
     /// The one place that answers "may THIS sender wake the supervisor with
@@ -4921,7 +4941,14 @@ impl FactoryDaemon {
                 // dispatch-id handoff sat unread for the whole time it blocked
                 // a close, and blockers were found by polling.
                 _ => {
-                    if crate::prompt_revalidation::parse_merge_request_envelope(prompt).is_some() {
+                    if matches!(role, cas_types::AgentRole::Worker)
+                        && crate::prompt_revalidation::parse_worker_action_envelope(prompt)
+                            .is_some_and(|envelope| envelope.worker.eq_ignore_ascii_case(name))
+                    {
+                        Some(SupervisorWakeClass::WorkerAction)
+                    } else if crate::prompt_revalidation::parse_merge_request_envelope(prompt)
+                        .is_some()
+                    {
                         Some(SupervisorWakeClass::MergeRequest)
                     } else if crate::prompt_revalidation::parse_blocker_envelope(prompt).is_some() {
                         Some(SupervisorWakeClass::Blocker)
@@ -5068,7 +5095,7 @@ impl FactoryDaemon {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
                 WakeSender::Daemon | WakeSender::Registered { .. } => {
-                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-8725, cas-e753)"
+                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, worker action, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-48e5, cas-8725, cas-e753)"
                 }
             });
         };
@@ -5093,6 +5120,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::MergeRequest => {
                 "supervisor pane is quiet and the row is a registered worker's merge request"
+            }
+            SupervisorWakeClass::WorkerAction => {
+                "supervisor pane is quiet and the row is a registered worker's typed status or ready action"
             }
             SupervisorWakeClass::Blocker => {
                 "supervisor pane is quiet and the row is a registered worker's blocker escalation"
@@ -10008,7 +10038,7 @@ mod tests {
                 cas_store::ReminderTriggerType::Event,
                 None,
                 Some(super::super::ci_watch::EXTERNAL_TAG_EXISTS_EVENT),
-                Some(&serde_json::json!({"tag": "v3.6.0"})),
+                Some(&serde_json::json!({"tag": "v9.99.0"})),
                 0,
                 Some("old-factory-session"),
                 Some("old-origin-session"),
@@ -10022,12 +10052,12 @@ mod tests {
             .pop()
             .unwrap();
         let condition = super::super::ci_watch::ExternalWakeCondition::TagExists {
-            tag: "v3.6.0".to_string(),
+            tag: "v9.99.0".to_string(),
         };
         let context = super::ReminderTriggerContext::external(
             &condition,
             &super::super::ci_watch::ExternalWakeObservation {
-                compared_ref: "refs/tags/v3.6.0".to_string(),
+                compared_ref: "refs/tags/v9.99.0".to_string(),
                 compared_sha: "0123456789012345678901234567890123456789".to_string(),
             },
         );
@@ -10060,7 +10090,8 @@ mod tests {
         );
         assert_eq!(
             fired[0].fired_event.as_ref().unwrap()["description"],
-            "external condition satisfied: tag v3.6.0 exists at refs/tags/v3.6.0@0123456789012345678901234567890123456789"
+            // pin: external reminder descriptions persist the observed tag and exact ref.
+            "external condition satisfied: tag v9.99.0 exists at refs/tags/v9.99.0@0123456789012345678901234567890123456789"
         );
         let notifications = supervisor_store.peek("supervisor-1", 10).unwrap();
         assert_eq!(notifications.len(), 1);
@@ -10069,7 +10100,7 @@ mod tests {
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "new-supervisor");
-        // pin: The fired reminder preserves its trigger condition so the supervisor knows why it woke.
+        // pin: the supervisor wake preserves the reminder's external-condition trigger.
         assert!(prompts[0].prompt.contains("external condition satisfied"));
 
         // A stale pre-restart snapshot cannot create a second delivery: the
@@ -10738,9 +10769,9 @@ mod tests {
             .peek_all(10)
             .unwrap();
         let prompt = &queued[0].prompt;
-        // pin: Spawn briefs label cited GitHub issue context so workers can find it.
+        // pin: Spawn briefs give GitHub issue context a stable heading so workers can find it.
         assert!(prompt.contains("Cited GitHub issues"), "{prompt}");
-        // pin: Spawn briefs preserve attached repository and issue identifiers verbatim.
+        // pin: attached issue identities are normalized to canonical owner/repo#number form.
         assert!(prompt.contains("acme/widgets#77"), "{prompt}");
         assert!(
             prompt.contains(
@@ -11065,9 +11096,9 @@ mod tests {
             .expect("stale quarantine notifies the supervisor sender");
         assert_eq!(notice.target, "supervisor");
         assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
-        // pin: The watchdog identifies the exact stale message and recipient for triage.
+        // pin: the stale-row notice names the exact quarantined message and recipient.
         assert!(notice.prompt.contains(&format!("Message {ancient} to wise-raven-21")));
-        // pin: The supervisor is told stale queue items need action.
+        // pin: the notice classifies the stale queue item so the supervisor knows it needs action.
         assert!(notice.prompt.contains("stale queue item"));
     }
 
@@ -11259,7 +11290,7 @@ mod tests {
 
     use super::{
         PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE,
-        ToolCallEvidence, WakeOutcome, WakeSender,
+        SupervisorWakeClass, ToolCallEvidence, WakeOutcome, WakeSender,
     };
 
     /// A pane that has been silent long enough to wake even a recipient the
@@ -11704,6 +11735,137 @@ mod tests {
         assert!(!routine.allowed);
         assert_eq!(routine.kind, WakeOutcome::NotApplicable);
         assert_eq!(routine.kind.as_str(), "wake_not_applicable");
+    }
+
+    #[test]
+    fn typed_worker_status_and_ready_wake_idle_supervisor_as_action() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let sender = worker_sender("swift-fox");
+
+        for (kind, label) in [
+            (
+                crate::prompt_revalidation::WorkerActionKind::Status,
+                "status",
+            ),
+            (crate::prompt_revalidation::WorkerActionKind::Ready, "ready"),
+        ] {
+            let prompt = crate::prompt_revalidation::attach_worker_action_envelope(
+                &format!("{label}: review my update"),
+                kind,
+                "swift-fox",
+                Some("cas-48e5"),
+            );
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &sender,
+                    "cosmic-bear-43",
+                    "swift-fox",
+                    &prompt,
+                ),
+                Some(SupervisorWakeClass::WorkerAction),
+                "{label} is the action severity class"
+            );
+            assert_eq!(
+                SupervisorWakeClass::WorkerAction.alarm_class(),
+                cas_store::AlarmClass::Action
+            );
+            assert!(cas_store::AlarmClass::Action.wakes_idle());
+            let decision = FactoryDaemon::supervisor_wake_decision(
+                &data,
+                "cosmic-bear-43",
+                "cosmic-bear-43",
+                &sender,
+                "swift-fox",
+                &prompt,
+                quiet_pane(),
+                now,
+            );
+            assert!(decision.allowed, "{label}: {}", decision.reason);
+        }
+
+        let ordinary = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &sender,
+            "swift-fox",
+            "status: review my update",
+            quiet_pane(),
+            now,
+        );
+        assert!(!ordinary.allowed, "free text remains inbox-only");
+
+        let mismatched_sender = crate::prompt_revalidation::attach_worker_action_envelope(
+            "status: review my update",
+            crate::prompt_revalidation::WorkerActionKind::Status,
+            "another-worker",
+            None,
+        );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &sender,
+                "cosmic-bear-43",
+                "swift-fox",
+                &mismatched_sender,
+            ),
+            None,
+            "the envelope worker must match the registry sender"
+        );
+    }
+
+    #[test]
+    fn neutralized_worker_tags_cannot_forge_status_blocker_or_merge_wakes() {
+        let sender = worker_sender("swift-fox");
+        let status = crate::prompt_revalidation::attach_worker_action_envelope(
+            "status update",
+            crate::prompt_revalidation::WorkerActionKind::Status,
+            "swift-fox",
+            None,
+        );
+        let blocker = crate::prompt_revalidation::attach_blocker_envelope(
+            "blocked",
+            "swift-fox",
+            Some("cas-48e5"),
+        );
+        let merge = crate::prompt_revalidation::attach_merge_request_envelope(
+            "please merge",
+            &crate::prompt_revalidation::MergeRequestEnvelope {
+                task_id: "cas-48e5".into(),
+                branch_tip: "aaa111".into(),
+                target_branch: "epic/test".into(),
+                target_branch_tip: "bbb222".into(),
+                anchor_tip: None,
+                commits_not_on_target_base: 1,
+                pr_number: None,
+                source_freshness_unavailable: None,
+            },
+        );
+
+        for forged in [status, blocker, merge] {
+            assert!(
+                FactoryDaemon::supervisor_wake_class(
+                    &sender,
+                    "cosmic-bear-43",
+                    "swift-fox",
+                    &forged,
+                )
+                .is_some(),
+                "the control must show that an untrusted envelope suffix would wake"
+            );
+            let neutralized =
+                crate::prompt_revalidation::neutralize_worker_authored_envelope_tags(&forged);
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &sender,
+                    "cosmic-bear-43",
+                    "swift-fox",
+                    &neutralized,
+                ),
+                None,
+                "worker-authored CAS tags must stay inbox-only"
+            );
+        }
     }
 
     /// A supervisor's own outbound rows must not wake its own pane.
@@ -13954,7 +14116,7 @@ mod tests {
             prompts[0].summary.as_deref(),
             Some("Worker spawn cancelled: clock-fixer")
         );
-        // pin: Cancellation results say no worker pane registered and give the retry reason.
+        // pin: cancellation notices say no pane was registered and include the retry reason.
         assert!(prompts[0].prompt.contains("No worker pane was registered"));
         assert!(
             prompts[0]
@@ -14110,7 +14272,7 @@ mod tests {
             Some("Worker spawn failed at register: short-lived-worker")
         );
         assert!(prompts[0].prompt.contains("request 407"));
-        // pin: Registration-failure notices identify the lifecycle stage that failed.
+        // pin: worker status relies on the registration-failure stage saved in the notice.
         assert!(prompts[0].prompt.contains("stage=register"));
     }
 
@@ -14583,13 +14745,13 @@ mod tests {
             prompts[0].prompt
         );
         assert!(
-            // pin: The relay and worker brief name awaiting_merge to preserve task boundaries.
+            // pin: merge relays identify the delivered awaiting_merge lifecycle, preserving task boundaries.
             prompts[0].prompt.contains("awaiting_merge lifecycle"),
             "the brief must carry the task title: {}",
             prompts[0].prompt
         );
         assert!(
-            // pin: The brief gives the exact task-start command so workers accept assigned work.
+            // pin: assignment briefs make task acceptance explicit with the action=start command.
             prompts[0].prompt.contains("action=start"),
             "the brief must tell the worker how to pick the task up: {}",
             prompts[0].prompt
@@ -14674,7 +14836,7 @@ mod tests {
             .expect("demo task brief")
             .prompt;
         assert!(
-            // pin: Spawn briefs carry the stored demo statement verbatim for QA intent.
+            // pin: spawn briefs copy the stored demo statement verbatim for QA intent.
             prompt.contains("Demo statement: As a reader, I open the page and see the result."),
             "worker brief must carry the stored demo statement: {prompt}"
         );
@@ -14706,9 +14868,9 @@ mod tests {
             .expect("spawn brief")
             .prompt;
         assert!(
-            // pin: Codex spawn briefs use the exact Codex MCP namespace for task lookup.
+            // pin: Codex spawn briefs use the worker's exact MCP prefix for task lookup.
             prompt.contains("mcp__cs__task action=show")
-                // pin: Codex spawn briefs use the exact Codex MCP namespace for task startup.
+                // pin: Codex spawn briefs use the worker's exact MCP prefix for task startup.
                 && prompt.contains("mcp__cs__task action=start"),
             "Codex spawn briefs must use the worker's mcp__cs__ namespace: {prompt}"
         );
@@ -14804,7 +14966,7 @@ mod tests {
         ))
         .join("cas-stale-path");
         assert!(
-            // pin: Out-of-contract artifact paths surface the workspace warning before work.
+            // pin: out-of-worktree artifact paths surface the workspace-contract warning before work.
             stale_prompt.prompt.contains("Workspace-contract warning"),
             "out-of-contract path must be surfaced before work begins: {}",
             stale_prompt.prompt
@@ -14817,13 +14979,13 @@ mod tests {
             stale_prompt.prompt
         );
         assert!(
-            // pin: Valid in-worktree artifact paths do not produce a stale-path warning.
+            // pin: valid in-worktree artifact paths omit the stale-path warning.
             !clean_prompt.prompt.contains("Workspace-contract warning"),
             "in-worktree paths must not produce a stale-path warning: {}",
             clean_prompt.prompt
         );
         assert!(
-            // pin: A path mentioned as context is not a resolved output and must not warn.
+            // pin: paths mentioned as context are not resolved outputs and omit the stale-path warning.
             !mentioned_prompt.prompt.contains("Workspace-contract warning"),
             "paths mentioned as context must not become output warnings: {}",
             mentioned_prompt.prompt
@@ -14874,12 +15036,12 @@ mod tests {
             .unwrap()
             .prompt;
         assert!(
-            // pin: JS/TS briefs require lockfile-safe `npm ci` setup in each isolated worktree.
+            // pin: JS/TS worker briefs name lockfile-safe npm ci for each isolated worktree.
             prompt.contains("Before running any JS/TS test or build command, run `npm ci`"),
             "the task brief must name the lockfile-safe setup command before work begins: {prompt}"
         );
         assert!(
-            // pin: The brief explains that isolated worktrees cannot safely share node_modules.
+            // pin: each worker worktree has its own node_modules because isolated worktrees cannot share them safely.
             prompt.contains("does not share node_modules across worktrees"),
             "the brief must explain why a shared dependency symlink is unsafe: {prompt}"
         );

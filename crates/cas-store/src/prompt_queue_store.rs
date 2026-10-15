@@ -1826,6 +1826,22 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue>;
 
+    /// Atomically enqueue a worker's typed status/ready action and supersede
+    /// older pending action rows from that registered worker. This bounds an
+    /// idle supervisor to one pending action wake per worker.
+    fn enqueue_worker_action_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        worker_name: &str,
+        factory_session: &str,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        origin: &QueueOrigin,
+    ) -> Result<EnqueueOutcome>;
+
     /// Record a complete operator turn and its immutable local outbox event in
     /// one transaction. Display labels never establish a cloud audience.
     fn record_operator_turn(&self, turn: &OperatorTurn<'_>) -> Result<EnqueueOutcome>;
@@ -3987,6 +4003,145 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             None,
             origin,
         )
+    }
+
+    fn enqueue_worker_action_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        worker_name: &str,
+        factory_session: &str,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        origin: &QueueOrigin,
+    ) -> Result<EnqueueOutcome> {
+        require_operator_session(target, Some(factory_session))?;
+        if target.trim().eq_ignore_ascii_case("operator") {
+            return Err(StoreError::Other(
+                "worker action cannot be sent to the operator".into(),
+            ));
+        }
+        let QueueOrigin::RegisteredAgent { agent_id } = origin else {
+            return Err(StoreError::Other(
+                "worker action requires a registered-agent origin".into(),
+            ));
+        };
+        let origin_agent_id = agent_id.as_str();
+
+        let outcome = crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now();
+            let now_text = now.to_rfc3339();
+            let duplicate_cutoff =
+                (now - chrono::Duration::seconds(PROMPT_DUPLICATE_WINDOW_SECS)).to_rfc3339();
+            let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
+            let urgent_flag: i64 = i64::from(urgent);
+
+            // Keep the ordinary exact-resend suppression contract for action
+            // messages too. A new body is the event that supersedes pending
+            // action rows; a delivery already acknowledged by this fast path
+            // is not a newer event.
+            if !urgent && source != "supervisor" {
+                let delivered_duplicate = tx
+                    .query_row(
+                        "SELECT id FROM prompt_queue
+                         WHERE source = ? AND target = ? AND prompt = ?
+                           AND factory_session IS ? AND urgent = 0
+                           AND transport_delivered_at IS NOT NULL AND acked_at IS NULL
+                           AND highest_stage IS NOT 'confirmed'
+                           AND transport_delivered_at >= ?
+                         ORDER BY transport_delivered_at DESC, id DESC LIMIT 1",
+                        params![source, target, prompt, factory_session, duplicate_cutoff],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                if let Some(existing_id) = delivered_duplicate {
+                    tx.commit()?;
+                    return Ok(EnqueueOutcome::SuppressedDuplicate(existing_id));
+                }
+            }
+
+            // Read only undelivered rows stamped with this worker's registry
+            // id and factory session. A worker has one action wake across its
+            // same-session supervisors; newer status or ready supersedes
+            // either kind, but never a transported action or another worker's.
+            let mut stmt = tx.prepare_cached(
+                "SELECT id, prompt FROM prompt_queue
+                 WHERE factory_session = ? AND origin_agent_id = ?
+                   AND processed_at IS NULL AND transport_delivered_at IS NULL
+                   AND COALESCE(highest_stage, 'enqueued')
+                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
+            )?;
+            let pending = stmt
+                .query_map(params![factory_session, origin_agent_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            let escaped_worker: String = worker_name
+                .chars()
+                .filter(|ch| !matches!(ch, '"' | '<' | '>' | '\n' | '\r'))
+                .collect();
+            let superseded = pending
+                .into_iter()
+                .filter(|(_, old_prompt)| {
+                    old_prompt.ends_with("</cas-worker-action>")
+                        && ["status", "ready"].iter().any(|kind| {
+                            old_prompt.contains(&format!(
+                                "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
+                            ))
+                        })
+                })
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>();
+
+            let origin_kind = origin.kind_str();
+            tx.execute(
+                "INSERT INTO prompt_queue
+                    (source, target, prompt, created_at, factory_session, summary,
+                     priority, urgent, origin_agent_id, origin_kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    source,
+                    target,
+                    prompt,
+                    now_text,
+                    factory_session,
+                    summary,
+                    prio,
+                    urgent_flag,
+                    origin_agent_id,
+                    origin_kind
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            let detail = format!("newer worker action message {id} superseded this pending wake");
+            for superseded_id in superseded {
+                Self::atomic_stage_stamp_in_tx(
+                    &tx,
+                    superseded_id,
+                    DeliveryStage::Suppressed,
+                    AtomicStampOpts {
+                        reason: Some(PendingReason::SupersededStale),
+                        detail: Some(&detail),
+                        set_processed: true,
+                        broadcast_attempted: None,
+                        broadcast_succeeded: None,
+                        broadcast_failed: None,
+                    },
+                )?;
+            }
+            let _ = capture_message_event(&tx, source, target);
+            tx.commit()?;
+            Ok(EnqueueOutcome::Created(id))
+        })?;
+        if matches!(outcome, EnqueueOutcome::Created(_)) {
+            self.signal_inbox(target);
+        }
+        Ok(outcome)
     }
 
     fn enqueue_worker_peer_with_supervisor_copy(
@@ -7483,6 +7638,64 @@ mod tests {
         (temp, store)
     }
 
+    #[test]
+    fn worker_action_burst_keeps_only_the_newest_pending_wake() {
+        let (_temp, store) = create_test_store();
+        let origin = QueueOrigin::RegisteredAgent {
+            agent_id: "worker-agent-id".into(),
+        };
+
+        for sequence in 1..=5 {
+            let prompt = format!(
+                "status {sequence}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
+            );
+            assert!(matches!(
+                store
+                    .enqueue_worker_action_with_outcome(
+                        "swift-fox",
+                        "cosmic-bear-43",
+                        &prompt,
+                        "swift-fox",
+                        "session-1",
+                        Some("status update"),
+                        None,
+                        false,
+                        &origin,
+                    )
+                    .unwrap(),
+                EnqueueOutcome::Created(_)
+            ));
+        }
+
+        let conn = store.conn.lock().unwrap();
+        let pending_wakes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue
+                 WHERE target = 'cosmic-bear-43' AND factory_session = 'session-1'
+                   AND origin_agent_id = 'worker-agent-id'
+                   AND prompt LIKE '%<cas-worker-action kind=\"status\"%'
+                   AND processed_at IS NULL AND transport_delivered_at IS NULL
+                   AND COALESCE(highest_stage, 'enqueued')
+                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let superseded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue
+                 WHERE target = 'cosmic-bear-43' AND factory_session = 'session-1'
+                   AND origin_agent_id = 'worker-agent-id'
+                   AND last_pending_reason = 'superseded_stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(pending_wakes, 1, "five statuses leave one pending wake");
+        assert_eq!(superseded, 4, "each older status records its replacement");
+    }
+
     /// GH #1163: recipient-activity evidence compares instants, not text, so
     /// a legacy `datetime('now')` row counts the same as an RFC 3339 one.
     #[test]
@@ -8318,11 +8531,16 @@ mod tests {
             .unwrap();
         assert_eq!(history.len(), 4, "{history:#?}");
         assert!(history.iter().all(|row| row.factory_session.as_deref() == Some("factory-7")));
+        // pin: these fixture messages distinguish the session-filter cases.
         assert!(history.iter().any(|row| row.prompt == "typed at terminal"));
+        // pin: this fixture checks the persisted operator-authored row.
         assert!(history.iter().any(|row| row.prompt == "operator message"));
         assert!(history.iter().any(|row| row.target == "operator"));
+        // pin: the second sender is deliberately isolated by device identity.
         assert!(history.iter().any(|row| row.prompt == "other device message"));
+        // pin: old-session contents must stay out of the current thread.
         assert!(!history.iter().any(|row| row.prompt.contains("older project session")));
+        // pin: sessionless rows must stay out of a scoped conversation.
         assert!(!history.iter().any(|row| row.prompt.contains("sessionless reply")));
         assert!(
             history.windows(2).all(|pair| pair[0].id > pair[1].id),
@@ -8629,6 +8847,7 @@ mod tests {
         let rows = store.peek_all(10).unwrap();
         let lifecycle = rows
             .iter()
+            // pin: the daemon outbox discriminator is part of this receipt test.
             .find(|r| r.source == "lifecycle-wake:9")
             .expect("lifecycle row");
         assert_eq!(lifecycle.origin, Some(QueueOrigin::Daemon));
@@ -8763,8 +8982,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .unwrap();
+        // pin: message_status must retain the authenticated Commander source.
         assert_eq!(source, "commander:Pippenz@Pippenz phone");
         assert_eq!(target, "worker-1");
+        // pin: this is the body whose durable attribution is under test.
         assert_eq!(prompt, "Please checkpoint now");
         assert_eq!(session, "factory-1");
         assert_eq!(urgent, 0);
@@ -10034,6 +10255,7 @@ mod tests {
         let prompts = store.poll_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "swift-fox");
+        // pin: this test verifies the exact body returned by the queue poll.
         assert_eq!(prompts[0].prompt, "Hello worker!");
 
         // Polling again should return empty (already processed)
@@ -10421,6 +10643,7 @@ mod tests {
             "peek and count must agree"
         );
         assert_eq!(peeked.len(), 2, "own row + broadcast, never worker-b's");
+        // pin: the reminder stays scoped to the recipient's unseen inbox.
         assert!(peeked[0].prompt.starts_with("Reminder #44:"));
         assert_eq!(peeked[1].target, "all_workers");
 
@@ -11866,10 +12089,13 @@ mod tests {
         let prompts = store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 3);
         // Critical (0) should come first, then High (1), then Normal (2)
+        // pin: priority order is asserted through each stored prompt body.
         assert_eq!(prompts[0].prompt, "Critical blocker");
         assert_eq!(prompts[0].priority, NotificationPriority::Critical);
+        // pin: the high-priority row is the middle item in this ordered queue.
         assert_eq!(prompts[1].prompt, "High priority");
         assert_eq!(prompts[1].priority, NotificationPriority::High);
+        // pin: the normal-priority row is the final item in this ordered queue.
         assert_eq!(prompts[2].prompt, "Normal update");
         assert_eq!(prompts[2].priority, NotificationPriority::Normal);
     }
@@ -11917,7 +12143,9 @@ mod tests {
             .unwrap();
         assert_eq!(prompts.len(), 2);
         // High priority should come first
+        // pin: the selected blocker body and order are this test's contract.
         assert_eq!(prompts[0].prompt, "BLOCKED: need help");
+        // pin: the lower-priority follow-up stays second.
         assert_eq!(prompts[1].prompt, "Status update");
     }
 
@@ -12522,6 +12750,7 @@ mod tests {
 
         let prompts = store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
+        // pin: urgent metadata must survive a store round trip.
         assert!(prompts[0].urgent, "urgent flag must round-trip as true");
         assert_eq!(prompts[0].priority, NotificationPriority::Critical);
 
@@ -13990,6 +14219,7 @@ mod tests {
 
         let pending = store.peek_all(10).unwrap();
         assert_eq!(pending.len(), 1);
+        // pin: the legacy table upgrade must preserve its original prompt.
         assert_eq!(pending[0].prompt, "hello legacy");
 
         // Idempotent enqueue works on upgraded schema.
@@ -14891,6 +15121,7 @@ mod tests {
             vec![id],
             "a post-drain message must reach the worker's next turn"
         );
+        // pin: the surfaced body is the durable next-turn contract.
         assert_eq!(surfaced[0].prompt, "start cas-7a01");
     }
 

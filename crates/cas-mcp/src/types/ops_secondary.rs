@@ -1007,8 +1007,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
-    /// Typed Commander turn kind for supervisor messages to `target=operator`.
-    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    /// Typed Commander turn kind for `target=operator`, or a worker action sent
+    /// to its same-session supervisor.
+    #[schemars(
+        description = "message: target=operator Commander kind: answer, status, receipt, ask, or blocker. Worker to same-session supervisor: kind=status or kind=ready requests a typed action wake."
+    )]
     #[serde(default)]
     pub kind: Option<String>,
 

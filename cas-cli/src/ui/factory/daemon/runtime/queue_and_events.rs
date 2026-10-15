@@ -14390,6 +14390,55 @@ mod tests {
         );
     }
 
+    // pin: this rendered spawn envelope is the required test-authorization contract across harnesses.
+    #[test]
+    fn spawn_assignment_brief_authorizes_targeted_tests_for_every_harness() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let harnesses = [
+            cas_mux::SupervisorCli::Claude,
+            cas_mux::SupervisorCli::Codex,
+            cas_mux::SupervisorCli::Grok,
+            cas_mux::SupervisorCli::OpenCode,
+        ];
+
+        for (index, worker_cli) in harnesses.into_iter().enumerate() {
+            let worker = format!("worker-{index}");
+            let task_id = format!("cas-test-{index}");
+            deliver_worker_task_brief(
+                &cas_dir,
+                "factory-session",
+                &worker,
+                &task_id,
+                "add targeted regression coverage",
+                worker_cli,
+            )
+            .unwrap();
+        }
+
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(prompts.len(), harnesses.len());
+        for prompt in prompts {
+            for required in [
+                "authorizes and requires adding or updating tests for the change",
+                "running its affected targeted tests",
+                "Factory workers run the targeted tests for their change themselves.",
+                "The merge queue runs the full suite once; never run it locally.",
+                "Workers close their own tasks; never ask the supervisor to close your task on their behalf.",
+            ] {
+                assert!(
+                    prompt.prompt.contains(required),
+                    "{}: {}",
+                    required,
+                    prompt.prompt
+                );
+            }
+        }
+    }
+
     #[test]
     fn registration_preassignment_brief_includes_demo_statement() {
         let temp = tempfile::TempDir::new().unwrap();

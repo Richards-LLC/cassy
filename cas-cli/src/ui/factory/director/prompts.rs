@@ -2179,6 +2179,7 @@ mod tests {
         SupervisorCli::Claude
     }
 
+    // pin: this rendered TaskAssigned prompt is the policy contract across all worker harnesses.
     #[test]
     fn assignment_acceptance_and_wake_policy_use_receiving_harness_tools() {
         let event = DirectorEvent::TaskAssigned {
@@ -2219,6 +2220,11 @@ mod tests {
                 "authoritative assignment acceptance",
                 "no prose ACK is required",
                 "execution plan is optional",
+                "authorizes and requires adding or updating tests for the change",
+                "running its affected targeted tests",
+                "Factory workers run the targeted tests for their change themselves.",
+                "The merge queue runs the full suite once; never run it locally.",
+                "Workers close their own tasks; never ask the supervisor to close your task on their behalf.",
                 "inbox on the next turn",
                 "only authenticated typed",
                 "blocker=true",

@@ -3309,6 +3309,7 @@ mod related_recall_response_tests {
         assert!(invalid_target_task.deliverables.work_target.is_none());
     }
 
+    // pin: this queued assignment must carry the authorized test and worker-owned close policy.
     #[tokio::test]
     async fn gh1123_create_with_live_assignee_queues_dispatch() {
         let temp = TempDir::new().unwrap();
@@ -3327,6 +3328,15 @@ mod related_recall_response_tests {
         assert_eq!(rows[0].target, worker.name);
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
         assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
+        assert!(
+            rows[0]
+                .prompt
+                .contains("authorizes and requires adding or updating tests for the change")
+        );
+        assert!(rows[0].prompt.contains("running its affected targeted tests"));
+        assert!(rows[0].prompt.contains(
+            "Workers close their own tasks; never ask the supervisor to close your task on their behalf."
+        ));
         assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
         // A later director tick shares the producer; it cannot duplicate this dispatch.
         crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();

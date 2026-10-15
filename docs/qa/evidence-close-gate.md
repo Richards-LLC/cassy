@@ -74,10 +74,11 @@ merely because its filename contains `render`, `output`, `theme` or `progress`.
 The two historical default lists containing those broad filename guesses are
 interpreted as the current terminal-context defaults. Custom configured paths
 still declare terminal surfaces, and an empty list disables terminal receipts.
-Matching CLI command paths and cas-mux pane rendering (`src/render.rs` and
-`src/pane/**`) always require terminal-qa while output checks are enabled, even
-if an interaction glob also matches or a stored configuration retains older
-output globs. Mux input and PTY plumbing retain the interaction ledger exemption. Other projects
+Matching CLI command paths and dedicated cas-mux drawing (`src/render.rs`,
+`src/pane/style.rs` and `src/pane/snapshot.rs`) always require terminal-qa while
+output checks are enabled, even if an interaction glob also matches or a stored
+configuration retains older output globs. Mux input, PTY plumbing and the mixed
+input/resize module `src/pane/mod.rs` retain the interaction ledger exemption. Other projects
 can configure interaction globs for their TUI modules; an empty list restores
 terminal-qa for all output matches. The ledger's freshness and real-build PASS
 checks still apply, and web/journey bundles and skip-marker gates are unchanged.

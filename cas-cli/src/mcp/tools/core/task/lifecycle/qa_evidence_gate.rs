@@ -127,7 +127,8 @@ fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool 
     let required_output = [
         "**/cli/**".to_string(),
         "**/cas-mux/src/render.rs".to_string(),
-        "**/cas-mux/src/pane/**".to_string(),
+        "**/cas-mux/src/pane/style.rs".to_string(),
+        "**/cas-mux/src/pane/snapshot.rs".to_string(),
     ];
     paths
         .iter()
@@ -136,7 +137,9 @@ fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool 
             let one = std::slice::from_ref(path);
             // Existing config files can retain the older default output globs,
             // without **/cli/**. A blanket cas-mux interaction glob likewise
-            // must not hide pane drawing/styles behind an input exemption.
+            // must not hide dedicated drawing/styles behind an input exemption.
+            // pane/mod.rs is mixed input/geometry code: its live interaction
+            // still needs the real-build ledger rather than a stdout capture.
             first_user_facing_path(one, &required_output).is_some()
                 || (first_user_facing_path(one, &render_paths).is_some()
                     && first_user_facing_path(one, &qa.terminal_interaction_paths).is_none())
@@ -420,6 +423,7 @@ mod tests {
                 "src/terminal/report.py",
                 "crates/cas-mux/src/render.rs",
                 "crates/cas-mux/src/pane/style.rs",
+                "crates/cas-mux/src/pane/snapshot.rs",
                 "crates/ghostty_vt/src/lib.rs",
                 "crates/ghostty_vt_sys/src/lib.rs",
                 "crates/cas-diffs/src/widget.rs",

@@ -324,28 +324,41 @@ fn envelope_ids(prompt: &str) -> Vec<i64> {
     ids
 }
 
-/// cas-7ce4: messages this turn's prompt repeats that a hook already put in
-/// front of this agent in an earlier turn. After cas-b5ad a busy Claude worker
-/// sees a claimed message at a tool boundary, and Claude Code later renders
-/// the teams copy it held; the harness copy cannot be withdrawn (the teams
-/// layer drains its inbox file at once), so the turn says it is a repeat.
+/// cas-7ce4: messages this turn's prompt names that were already put in front
+/// of this agent before this turn: by a hook (turn start or tool boundary) or
+/// by its own `inbox_poll`. The prompt names a message by its `[cas #N …]`
+/// envelope or by a `CAS wake: message N` pointer.
+///
+/// cas-1f0c: since a Claude Teams inbox carries only a pointer, the teammate
+/// block Claude Code renders after the body was shown holds no second body;
+/// this note tells the agent the pointer is to something it already has.
 fn already_surfaced_envelopes(
     queue: &dyn cas_store::PromptQueueStore,
     prompt: &str,
     aliases: &[String],
 ) -> Vec<i64> {
-    envelope_ids(prompt)
-        .into_iter()
+    let mut ids = envelope_ids(prompt);
+    for id in wake_named_ids(prompt) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.into_iter()
         .filter(|id| {
             queue
                 .message_delivery_report(*id)
                 .ok()
                 .flatten()
                 .is_some_and(|report| {
-                    report.recipient_receipt == Some(cas_store::SurfacingSource::HookSurfaced)
-                        && aliases
-                            .iter()
-                            .any(|alias| alias.eq_ignore_ascii_case(&report.target))
+                    matches!(
+                        report.recipient_receipt,
+                        Some(
+                            cas_store::SurfacingSource::HookSurfaced
+                                | cas_store::SurfacingSource::InboxPoll
+                        )
+                    ) && aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(&report.target))
                 })
         })
         .collect()
@@ -361,9 +374,9 @@ fn already_shown_note(ids: &[i64]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!(
-        "[already shown] Message {named} in this turn's prompt was already shown to you in an \
-         earlier turn, at a tool call. This is the harness's held copy of the same message, not a \
-         new one: act on it only if you have not already."
+        "[already shown] Message {named} named in this turn's prompt was already shown to you \
+         before this turn, by CAS or your own inbox_poll. This is a pointer or the harness's held \
+         copy of the same message, not a new one: act on it only if you have not already."
     ))
 }
 

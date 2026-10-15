@@ -6148,12 +6148,19 @@ impl FactoryDaemon {
                     wake_retry_due_to_turn_end(Some(attempt), completed_at).then_some(())
                 })
                 .is_some();
+            // cas-1f0c: probe for the pointer this daemon actually wrote to
+            // the Claude Teams inbox, not the body the hook shows.
+            let teams_inbox_text = super::delivery::claude_teams_inbox_text(
+                &prompt_with_instructions,
+                &inbox_source,
+                queued.id,
+            );
             match self.deferred_inbox_outcome_for(
                 queue.as_ref(),
                 queued.id,
                 target,
                 &inbox_source,
-                &prompt_with_instructions,
+                &teams_inbox_text,
             ) {
                 DeferredInboxOutcome::HarnessConsumed => {
                     self.forget_row_delivery_state(queued.id);
@@ -6775,15 +6782,12 @@ impl FactoryDaemon {
                         // different harness, so resolve per-worker inside the loop.
                         // color=None: peer/supervisor senders; team manager resolves
                         // configured color from the sender's team record.
-                        self.deliver_to_worker(
+                        self.deliver_queued_to_worker(
                             name,
                             &inbox_source,
                             &prompt_with_instructions,
                             queued.summary.as_deref(),
-                            None,
-                            None,
-                            None,
-                            None,
+                            queued.id,
                         )
                         .await
                     };

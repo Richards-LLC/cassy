@@ -251,9 +251,11 @@ async fn test_handshake_with_50ms_rtt() {
         elapsed >= Duration::from_millis(40),
         "Should observe latency: {elapsed:?}"
     );
+    // cas-1518: a hang guard only (10x the RTT). A tight upper bound measured
+    // runner load, not the injected latency, and failed a loaded lane at 367 ms.
     assert!(
-        elapsed < Duration::from_millis(200),
-        "Should complete reasonably: {elapsed:?}"
+        elapsed < Duration::from_millis(500),
+        "Should not hang: {elapsed:?}"
     );
 
     server.shutdown().await;
@@ -274,9 +276,11 @@ async fn test_handshake_with_100ms_rtt() {
         elapsed >= Duration::from_millis(80),
         "Should observe latency: {elapsed:?}"
     );
+    // cas-1518: a hang guard only (10x the RTT). A tight upper bound measured
+    // runner load, not the injected latency, and failed a loaded lane at 367 ms.
     assert!(
-        elapsed < Duration::from_millis(300),
-        "Should complete reasonably: {elapsed:?}"
+        elapsed < Duration::from_millis(1000),
+        "Should not hang: {elapsed:?}"
     );
 
     server.shutdown().await;
@@ -297,9 +301,11 @@ async fn test_handshake_with_200ms_rtt() {
         elapsed >= Duration::from_millis(150),
         "Should observe latency: {elapsed:?}"
     );
+    // cas-1518: a hang guard only (10x the RTT). A tight upper bound measured
+    // runner load, not the injected latency, and failed a loaded lane at 367 ms.
     assert!(
-        elapsed < Duration::from_millis(500),
-        "Should complete reasonably: {elapsed:?}"
+        elapsed < Duration::from_millis(2000),
+        "Should not hang: {elapsed:?}"
     );
 
     server.shutdown().await;
@@ -341,9 +347,11 @@ async fn test_ping_pong_under_latency() {
         elapsed >= Duration::from_millis(80),
         "Should observe latency: {elapsed:?}"
     );
+    // cas-1518: a hang guard only (10x the RTT). A tight upper bound measured
+    // runner load, not the injected latency, and failed a loaded lane at 367 ms.
     assert!(
-        elapsed < Duration::from_millis(300),
-        "Should complete reasonably: {elapsed:?}"
+        elapsed < Duration::from_millis(1000),
+        "Should not hang: {elapsed:?}"
     );
 
     server.shutdown().await;

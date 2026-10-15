@@ -29,6 +29,7 @@ pub use events::{
 // idle, not just between turns" heuristic has one definition.
 pub(crate) use events::{
     blocker_note_after_park, effective_stall_threshold_secs, hold_decision_after_park,
+    merge_target_for_task,
     supervisor_actionable_state_with_classifiers, task_delivery_ref, DeliveryHold,
     FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
 };

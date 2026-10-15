@@ -174,7 +174,7 @@ impl SupervisorActionableState {
 
 /// Resolve the branch a child task delivers into. A task-level WorkTarget
 /// wins; otherwise the parent epic's branch is the legacy target.
-fn merge_target_for_task(data: &DirectorData, task: &TaskSummary) -> Option<String> {
+pub(crate) fn merge_target_for_task(data: &DirectorData, task: &TaskSummary) -> Option<String> {
     task.branch.clone().or_else(|| {
         task.epic.as_ref().and_then(|epic_id| {
             data.epic_tasks
@@ -318,6 +318,9 @@ pub enum DeliveryHold {
     /// A decision note recorded after the delivery last parked holds its
     /// merge (cas-58d3), e.g. "the merge is held until after the cut".
     SupervisorDecision,
+    /// cas-207e: the delivery's lane CI is still running. A code merge on
+    /// pending CI is refused (cas-6c13), so it is not a ready merge yet.
+    LaneCiPending,
 }
 
 /// Marker the close gate writes each time a delivery parks for merge.

@@ -923,6 +923,9 @@ pub struct FactoryApp {
     cas_dir: PathBuf,
     /// Cached store handles (avoid re-opening on every 2s refresh)
     director_stores: Option<DirectorStores>,
+    /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
+    /// result is final for its tip; a pending one is re-read after a minute.
+    lane_ci_pending: std::sync::Mutex<HashMap<(String, String), (std::time::Instant, bool)>>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1638,6 +1641,8 @@ impl FactoryApp {
     fn classify_delivery_hold(
         &self,
         task: &crate::ui::factory::director::TaskSummary,
+        worker: &str,
+        repo_root: &Path,
     ) -> Option<DeliveryHold> {
         if let Some(stores) = self.director_stores.as_ref()
             && let Ok(parked) = stores.task_store.get(&task.id)
@@ -1651,11 +1656,46 @@ impl FactoryApp {
             }
         }
         let now = Utc::now();
-        cas_store::list_qa_passes(&self.cas_dir, &task.id)
+        if cas_store::list_qa_passes(&self.cas_dir, &task.id)
             .ok()?
             .into_iter()
             .any(|pass| pass.state.is_active() && pass.deadline_at > now)
-            .then_some(DeliveryHold::QaPassOpen)
+        {
+            return Some(DeliveryHold::QaPassOpen);
+        }
+        self.delivery_ci_pending(task, worker, repo_root)
+            .then_some(DeliveryHold::LaneCiPending)
+    }
+
+    /// cas-207e: a parked delivery whose lane CI is still running is not a
+    /// ready merge. Read through a cache so the stall check stays cheap.
+    fn delivery_ci_pending(
+        &self,
+        task: &crate::ui::factory::director::TaskSummary,
+        worker: &str,
+        repo_root: &Path,
+    ) -> bool {
+        let (branch, Some(tip)) = self.resolve_task_delivery(task, worker, repo_root) else {
+            return false;
+        };
+        let key = (branch, tip);
+        let Ok(mut cache) = self.lane_ci_pending.lock() else {
+            return false;
+        };
+        if let Some((at, pending)) = cache.get(&key)
+            && (!pending || at.elapsed() < std::time::Duration::from_secs(60))
+        {
+            return *pending;
+        }
+        let target = crate::ui::factory::director::merge_target_for_task(
+            &self.unfiltered_director_data,
+            task,
+        )
+        .unwrap_or_else(|| "main".to_string());
+        let pending =
+            crate::mcp::tools::core::workflow::delivery_ci_pending(&key.0, &target, repo_root);
+        cache.insert(key, (std::time::Instant::now(), pending));
+        pending
     }
 
     /// Refresh Cassy data from stores and detect state changes
@@ -1704,7 +1744,7 @@ impl FactoryApp {
                     &repo_root,
                 )
             },
-            |task, _worker| self.classify_delivery_hold(task),
+            |task, worker| self.classify_delivery_hold(task, worker, &repo_root),
         );
         let supervisor_ids = self
             .unfiltered_director_data
@@ -1791,7 +1831,7 @@ impl FactoryApp {
                     &repo_root,
                 )
             },
-            |task, _worker| self.classify_delivery_hold(task),
+            |task, worker| self.classify_delivery_hold(task, worker, &repo_root),
         )
         .as_ref()
             == Some(next_step)

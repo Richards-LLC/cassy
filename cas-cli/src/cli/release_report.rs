@@ -2775,9 +2775,9 @@ mod tests {
 
     #[test]
     fn changelog_summarized_356_headings_count_changed_and_fixed_entries() {
-        // These entries use the actual 3.56.0 CHANGELOG heading form.
-        let fixture = "# Changelog\n\n## [3.56.0] - 2026-10-15\n\n### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)\n- External reminder probes run off the daemon loop.\n\n### Changed — coordination and tools (#1188, #1197, #1207)\n- Verification accepts structured issues and artifact uploads support video/webm.\n\n## [9.99.1] - 2026-10-15\n";
-        let changelog = parse_changelog_section(fixture, "3.56.0").expect("section");
+        // These entries use the actual 3.56-style CHANGELOG summary headings.
+        let fixture = "# Changelog\n\n## [9.99.1] - 2026-10-15\n\n### Fixed — the factory daemon loop no longer stalls on reminder probes (#1208, cas-a222)\n- External reminder probes (`branch_contained_in`, `tag_exists`, `ci_completed`) run off the daemon loop.\n\n### Changed — coordination and tools (#1188, #1197, #1207, cas-6853, cas-fa1c, cas-48e5, cas-b58a)\n- One `remind` refusal lists every missing requirement with an example.\n\n## [9.99.2] - 2026-10-15\n";
+        let changelog = parse_changelog_section(fixture, "9.99.1").expect("section");
         assert_eq!(changelog.entries[0].category, "Fixed");
         assert_eq!(changelog.entries[1].category, "Changed");
 
@@ -2797,7 +2797,7 @@ mod tests {
             warnings: Vec::new(),
             retrieved_at: "2026-10-15T00:00:00Z".to_string(),
         };
-        let report = assemble_markdown(Path::new("."), "3.56.0", "v3.56.0", &sources);
+        let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
         assert!(report.contains("| Fix entries | 1 |"), "{report}");
         assert!(report.contains("| Changed entries | 1 |"), "{report}");
     }

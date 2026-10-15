@@ -123,13 +123,23 @@ pub(crate) enum Submitted {
     Queued,
     /// A refresh job whose key was already queued or running. The newest such
     /// closure runs once more after the current job finishes (dirty flag), so
-    /// a newer generation is never lost.
-    Coalesced,
+    /// a newer generation is never lost. `replaced_generation` names an
+    /// earlier waiting rerun this one replaced, which will never run
+    /// (cas-4272 review M1).
+    Coalesced { replaced_generation: Option<u64> },
     /// A critical job whose key was already queued or running. It runs after
     /// that job, in submission order; it is never dropped.
     QueuedBehindKey,
     /// Queued; to make room, the oldest refresh job on the lane was dropped.
-    QueuedDroppedOldest { dropped_key: String },
+    /// `dropped_generation` is that job's own generation; `key_still_queued`
+    /// is true when work waiting on the same key (a coalesced rerun or a
+    /// critical follow-up) was requeued in its place and will still run
+    /// (cas-4272 review M1).
+    QueuedDroppedOldest {
+        dropped_key: String,
+        dropped_generation: u64,
+        key_still_queued: bool,
+    },
     /// The lane was full of critical work and this refresh job was dropped.
     DroppedRefresh,
     /// Refused: the runtime is closed ([`JobRuntime::close`]) or the lane's
@@ -561,8 +571,11 @@ impl<T: Send + 'static> JobRuntime<T> {
                         Submitted::QueuedBehindKey
                     }
                     Criticality::Refresh => {
-                        followups.rerun = Some(queued);
-                        Submitted::Coalesced
+                        let replaced_generation = followups
+                            .rerun
+                            .replace(queued)
+                            .map(|replaced| replaced.spec.generation);
+                        Submitted::Coalesced { replaced_generation }
                     }
                 };
             }
@@ -580,11 +593,15 @@ impl<T: Send + 'static> JobRuntime<T> {
                 Some(index) => {
                     let dropped = state.queue.remove(index).expect("index from position");
                     state.dropped_refresh += 1;
-                    if let Some(next) = self.shared.release_key(&dropped.spec.key) {
+                    let next = self.shared.release_key(&dropped.spec.key);
+                    let key_still_queued = next.is_some();
+                    if let Some(next) = next {
                         state.queue.push_back(next);
                     }
                     outcome = Submitted::QueuedDroppedOldest {
                         dropped_key: dropped.spec.key,
+                        dropped_generation: dropped.spec.generation,
+                        key_still_queued,
                     };
                 }
                 None => {
@@ -980,7 +997,9 @@ mod tests {
                         generation
                     }
                 ),
-                Submitted::Coalesced,
+                Submitted::Coalesced {
+                    replaced_generation: (generation > 2).then(|| generation - 1)
+                },
                 "a busy key is not run twice at once"
             );
         }
@@ -1087,7 +1106,9 @@ mod tests {
                 || "c"
             ),
             Submitted::QueuedDroppedOldest {
-                dropped_key: "refresh-a".to_string()
+                dropped_key: "refresh-a".to_string(),
+                dropped_generation: 1,
+                key_still_queued: false,
             }
         );
         for i in 0..5 {

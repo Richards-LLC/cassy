@@ -666,7 +666,7 @@ fn an_exhausted_stamp_is_deferred_not_dropped() {
     let writer = TestWriter::start(false);
     let mut jobs = jobs_on(&writer);
     // Every retry on the job lane fails; the stamp must still land.
-    INJECTED_STAMP_FAILURES.store(4, Ordering::Release);
+    inject_stamp_failures(&cas_dir, 4);
     jobs.stamp(
         &cas_dir,
         row_id,
@@ -679,7 +679,10 @@ fn an_exhausted_stamp_is_deferred_not_dropped() {
         assert!(Instant::now() < deadline, "the exhausted release never landed");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(INJECTED_STAMP_FAILURES.load(Ordering::Acquire), 0, "all four retries failed");
+    assert!(
+        !take_injected_stamp_failure(&cas_dir),
+        "all four injected failures were consumed by the stamp's retries"
+    );
     settle(&mut jobs, |_| writer.ran().len() == 1);
     assert_eq!(writer.ran()[0].0, "QueueStamp", "the job ran once on the lane; the StoreWorker landed it");
 }
@@ -711,11 +714,15 @@ fn a_dropped_job_is_reported_to_its_owner() {
     // Hold the blocking lane busy so the next jobs queue.
     let (release, held) = mpsc::channel::<()>();
     let held = Mutex::new(held);
+    let (started_tx, started) = mpsc::channel::<()>();
+    let started_tx = Mutex::new(started_tx);
     jobs.submit_external(refresh_spec("Busy", "busy", Lane::Blocking, 1), move || {
+        let _ = started_tx.lock().unwrap().send(());
         let _ = held.lock().unwrap().recv();
         Box::new(())
     });
-    std::thread::sleep(Duration::from_millis(50));
+    // Barrier: the busy job is running, so later submits queue behind it.
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
     jobs.submit_external(
         refresh_spec("WorkerHealthProbe", "WorkerHealthProbe:worker-a", Lane::Blocking, 2),
         || Box::new(()),
@@ -744,11 +751,15 @@ fn a_dropped_job_is_reported_to_its_owner() {
     // the next retraction is not refused forever.
     let (release, held) = mpsc::channel::<()>();
     let held = Mutex::new(held);
+    let (started_tx, started) = mpsc::channel::<()>();
+    let started_tx = Mutex::new(started_tx);
     jobs.submit_external_read(refresh_spec("Busy", "busy-read", Lane::Read, 4), move |_| {
+        let _ = started_tx.lock().unwrap().send(());
         let _ = held.lock().unwrap().recv();
         Box::new(())
     });
-    std::thread::sleep(Duration::from_millis(50));
+    // Barrier: the busy job is running, so later submits queue behind it.
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
     let inboxes = tempfile::tempdir().unwrap();
     jobs.submit_inbox_retraction(
         "supervisor",
@@ -783,11 +794,15 @@ fn a_dropped_key_with_a_requeued_rerun_reports_only_its_rerun() {
     );
     let (release, held) = mpsc::channel::<()>();
     let held = Mutex::new(held);
+    let (started_tx, started) = mpsc::channel::<()>();
+    let started_tx = Mutex::new(started_tx);
     jobs.submit_external(refresh_spec("Busy", "busy", Lane::Blocking, 1), move || {
+        let _ = started_tx.lock().unwrap().send(());
         let _ = held.lock().unwrap().recv();
         Box::new(())
     });
-    std::thread::sleep(Duration::from_millis(50));
+    // Barrier: the busy job is running, so later submits queue behind it.
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
     let probe = "WorkerHealthProbe:worker-a";
     jobs.submit_external(refresh_spec("WorkerHealthProbe", probe, Lane::Blocking, 10), || {
         Box::new(10_u64)
@@ -823,16 +838,52 @@ fn a_dropped_key_with_a_requeued_rerun_reports_only_its_rerun() {
 /// in flight) never overwrites the newer scan's slot.
 #[test]
 fn a_stale_mirror_result_is_ignored() {
-    let mut jobs = QueueJobs::inline();
-    jobs.mirror_failed(0);
-    jobs.submit_mirror_scan(|_| {});
-    // Inline: the scan already ran; its result waits for apply.
-    let current = jobs.mirror_generation;
-    jobs.apply_completions();
+    // A gated writer holds the scans, so a stale result can arrive while a
+    // newer scan is in flight.
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    let (stale_ran_tx, stale_ran) = mpsc::channel::<()>();
+    let stale_ran_tx = Mutex::new(stale_ran_tx);
+    jobs.submit_mirror_scan(move |_| {
+        let _ = stale_ran_tx.lock().unwrap().send(());
+    });
+    let stale = jobs.mirror_generation;
+    // Its drop is reported (as a full lane would): the slot frees and a
+    // newer scan takes it, coalesced behind the stale one on the same key.
+    jobs.mirror_failed(stale);
     assert!(!jobs.mirror_in_flight);
-    // A drop report for an older scan changes nothing.
-    jobs.mirror_failed(current.saturating_sub(1));
-    assert!(jobs.mirror_state.is_some());
+    let (release_current, current_held) = mpsc::channel::<()>();
+    let current_held = Mutex::new(current_held);
+    jobs.submit_mirror_scan(move |_| {
+        let _ = current_held.lock().unwrap().recv();
+    });
+    let current = jobs.mirror_generation;
+    assert!(current > stale && jobs.mirror_in_flight);
+    // A stale drop report changes nothing either.
+    jobs.mirror_failed(stale);
+    assert!(jobs.mirror_in_flight, "a stale drop report must not free the newer scan's slot");
+    writer.open();
+    // The stale scan finishes; its result is posted before the current scan
+    // starts (jobs.rs posts, then the lane takes the requeued rerun).
+    stale_ran.recv_timeout(Duration::from_secs(10)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let running = match &jobs.exec {
+            Exec::Lanes(runtime) => runtime.lane_stats(Lane::Write).running,
+            Exec::Inline(_) => unreachable!(),
+        };
+        if running.is_some_and(|job| job.kind == "MirrorWrite") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the current scan never started");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    jobs.apply_completions();
+    assert!(jobs.mirror_in_flight, "the stale result must not end the newer scan");
+    assert!(jobs.mirror_state.is_none(), "the newer scan still holds the cursors");
+    release_current.send(()).unwrap();
+    settle(&mut jobs, |jobs| !jobs.mirror_in_flight);
+    assert!(jobs.mirror_state.is_some(), "the current scan handed its cursors back");
 }
 
 /// cas-4272: a terminal stamp now lands on the writer, so until it does the
@@ -867,4 +918,92 @@ fn a_row_with_a_terminal_stamp_in_flight_is_held_out_of_delivery() {
         !jobs.row_settling(other, Instant::now() + SETTLING_DEFERRED_HOLD),
         "the hold ends after the deferred write had time to land"
     );
+}
+
+/// cas-4272 review M1: a job that finished but whose result is not collected
+/// yet stays outstanding; when its requeued rerun is then dropped, the drop
+/// is attributed to the rerun's own generation, and nothing is lost.
+#[test]
+fn a_drop_after_a_finished_uncollected_job_is_attributed_by_generation() {
+    let writer = TestWriter::start(false);
+    let mut jobs = QueueJobs::start_with_capacity(
+        LaneWiring {
+            reader: None,
+            writer: Arc::new(SharedWriter(Arc::clone(&writer))),
+        },
+        1,
+    );
+    let probe = "WorkerHealthProbe:worker-a";
+    // g10 runs and blocks; g11 coalesces as its rerun.
+    let (release, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    let (started_tx, started) = mpsc::channel::<()>();
+    let started_tx = Mutex::new(started_tx);
+    jobs.submit_external(refresh_spec("WorkerHealthProbe", probe, Lane::Blocking, 10), move || {
+        let _ = started_tx.lock().unwrap().send(());
+        let _ = held.lock().unwrap().recv();
+        Box::new(10_u64)
+    });
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    // g11 is the rerun; it blocks too, so it is still queued when dropped.
+    let (release_rerun, rerun_held) = mpsc::channel::<()>();
+    let rerun_held = Mutex::new(rerun_held);
+    assert_eq!(
+        jobs.submit_external(refresh_spec("WorkerHealthProbe", probe, Lane::Blocking, 11), move || {
+            let _ = rerun_held.lock().unwrap().recv();
+            Box::new(11_u64)
+        }),
+        super::super::jobs::Submitted::Coalesced { replaced_generation: None }
+    );
+    // A second busy job queues behind, so g11 requeues behind it when g10
+    // finishes; then g10's result is NOT collected (no apply yet).
+    let (release_busy, busy_held) = mpsc::channel::<()>();
+    let busy_held = Mutex::new(busy_held);
+    jobs.submit_external(refresh_spec("Busy", "busy", Lane::Blocking, 20), move || {
+        let _ = busy_held.lock().unwrap().recv();
+        Box::new(())
+    });
+    release.send(()).unwrap();
+    // Wait until g10 finished and released its key (g11 requeued): the lane
+    // is now running "busy" or holding it, with g11 queued.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let stats = match &jobs.exec {
+            Exec::Lanes(runtime) => runtime.lane_stats(Lane::Blocking),
+            Exec::Inline(_) => unreachable!(),
+        };
+        if stats.running.as_ref().is_some_and(|running| running.key == "busy") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "busy never started: {stats:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // A full-lane submit now drops the queued g11 (no rerun left behind it).
+    let dropped = jobs.submit_external(refresh_spec("ReminderScan", "ReminderScan", Lane::Blocking, 30), || {
+        Box::new(())
+    });
+    assert!(
+        matches!(
+            &dropped,
+            super::super::jobs::Submitted::QueuedDroppedOldest { dropped_key, dropped_generation: 11, key_still_queued: false }
+                if dropped_key == probe
+        ),
+        "{dropped:?}"
+    );
+    release_busy.send(()).unwrap();
+    drop(release_rerun);
+    let mut done = Vec::new();
+    settle(&mut jobs, |jobs| {
+        done.extend(jobs.take_external_completions());
+        done.iter().any(|result| result.key == "ReminderScan")
+            && done.iter().filter(|result| result.key == probe).count() == 2
+    });
+    let probe_results: Vec<(u64, bool)> = done
+        .iter()
+        .filter(|result| result.key == probe)
+        .map(|result| (result.generation, matches!(result.outcome, Ok(ExternalOutcome::Dropped))))
+        .collect();
+    assert!(probe_results.contains(&(10, false)), "g10's Done is delivered: {probe_results:?}");
+    assert!(probe_results.contains(&(11, true)), "g11's drop is reported as g11: {probe_results:?}");
+    assert!(jobs.job_owners.get(probe).is_none(), "nothing is left outstanding for the key");
 }

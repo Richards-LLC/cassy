@@ -1505,7 +1505,7 @@ fn load_machine_credentials_with_installer(
 
 /// cas-e753: the machine credentials a long-running process may need after
 /// startup, returned as values rather than installed into its environment.
-/// Names already set in the environment are omitted, as for startup loading.
+/// Usable exports and explicit resource denials are preserved, as at startup.
 #[cfg(feature = "mcp-proxy")]
 pub(crate) fn machine_credential_values() -> Result<std::collections::BTreeMap<String, String>> {
     let mut values = std::collections::BTreeMap::new();
@@ -3356,7 +3356,7 @@ mod tests {
         assert!(raw.contains("export VIOLET_SLACK_TOKEN_LAPTOP="));
         assert!(raw.contains("export VIOLET_VERCEL_BYPASS="));
         assert!(
-            fs::read_to_string(home.join(".bash_profile"))
+            fs::read_to_string(home.join(".profile"))
                 .unwrap()
                 .contains(&profile_source_line(&credentials))
         );

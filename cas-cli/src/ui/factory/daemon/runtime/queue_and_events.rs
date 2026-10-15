@@ -17499,6 +17499,21 @@ mod stall_nudge_rework_tests {
     }
 
     #[tokio::test]
+    async fn stalled_nudge_busy_closed_or_reassigned_task_withdraws_before_hold() {
+        for update in ["status='closed'", "assignee='another-worker'"] {
+            let (_root, cas_dir, _worker, id) = fixture(false);
+            let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute(&format!("UPDATE tasks SET {update} WHERE id='cas-stall'"), []).unwrap();
+            daemon.process_prompt_queue().await.unwrap();
+            let queue = open_prompt_queue_store(&cas_dir).unwrap();
+            assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some(),
+                "a busy pane must not retain an obsolete task alarm: {update}");
+            assert_eq!(queue.wake_gate_state(id).unwrap().0, 0);
+        }
+    }
+
+    #[tokio::test]
     async fn stalled_nudge_process_queue_holds_agent_id_assignee_instead_of_dropping() {
         let (_root, cas_dir, _worker, id) = fixture(true);
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);

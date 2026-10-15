@@ -233,6 +233,8 @@ fn coord_req(action: &str) -> CoordinationRequest {
         in_reply_to: None,
         kind: None,
         attachment: None,
+        supersede_key: None,
+        sticky: None,
         target: None,
         message: None,
         summary: None,

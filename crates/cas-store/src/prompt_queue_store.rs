@@ -1226,6 +1226,89 @@ pub enum SurfacingSource {
 pub(crate) const SURFACED_RECEIPT_SOURCES_SQL: &str =
     "('hook_surfaced', 'inbox_poll', 'observed_wake')";
 
+/// A SQL string literal for `value`, quotes doubled. Used only to name the
+/// draining recipient inside [`broadcast_audience_sql`], so the shared drain
+/// predicates keep their positional parameter lists unchanged.
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Whether the `agents` table exists on this connection. Prompt-queue tests
+/// and some legacy databases open the queue without it.
+fn agents_table_exists(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// The audience of an `all_workers` broadcast, for one draining `recipient`
+/// (cas-6853; communication contract v2, P1.5, P2.4, P3.7). Direct rows pass
+/// through untouched. A broadcast reaches the recipient only when all of these
+/// hold:
+/// - it is not the recipient's own broadcast: the sender is not the
+///   recipient, and not this session's supervisor when the recipient is that
+///   supervisor under either alias. Other senders' broadcasts, such as the
+///   director's, still reach supervisors;
+/// - no newer, still-deliverable broadcast with the same `supersede_key`
+///   exists;
+/// - the recipient's current registration predates it, unless it is `sticky`
+///   standing policy. A worker spawned 13 h later no longer inherits the
+///   backlog, and a pre-registration broadcast can no longer gate its task
+///   start.
+fn broadcast_audience_sql(recipient: &str, agents_table: bool) -> String {
+    let r = sql_literal(recipient);
+    // Own-broadcast test (P1.5): the sender is the recipient itself, or both
+    // are this session's supervisor (its pane name or the `supervisor` alias).
+    // Broadcasts from anyone else, such as the director, still reach every
+    // supervisor alias (cas-6853 review, CI run 38776375537).
+    let (recipient_is_supervisor, source_is_supervisor) = if agents_table {
+        (
+            format!(
+                "({r} = 'supervisor' OR EXISTS (SELECT 1 FROM agents sup
+                     WHERE sup.name = {r} AND sup.role = 'supervisor'
+                       AND (q.factory_session IS NULL
+                            OR sup.factory_session = q.factory_session)))"
+            ),
+            "(q.source = 'supervisor' OR EXISTS (SELECT 1 FROM agents sender
+                 WHERE sender.name = q.source AND sender.role = 'supervisor'
+                   AND (q.factory_session IS NULL
+                        OR sender.factory_session = q.factory_session)))"
+                .to_string(),
+        )
+    } else {
+        (format!("({r} = 'supervisor')"), "(q.source = 'supervisor')".to_string())
+    };
+    let late_clause = if agents_table {
+        format!(
+            "AND (q.sticky = 1 OR NOT EXISTS (
+                   SELECT 1 FROM agents late
+                    WHERE late.name = {r}
+                      AND (q.factory_session IS NULL
+                           OR late.factory_session = q.factory_session)
+                    GROUP BY late.name
+                   HAVING julianday(MAX(late.registered_at)) > julianday(q.created_at)))"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "AND (q.target <> 'all_workers' OR (
+               q.source <> {r}
+               AND NOT ({recipient_is_supervisor} AND {source_is_supervisor})
+               {late_clause}
+               AND (q.supersede_key IS NULL OR NOT EXISTS (
+                     SELECT 1 FROM prompt_queue newer
+                      WHERE newer.target = 'all_workers'
+                        AND newer.supersede_key = q.supersede_key
+                        AND newer.id > q.id
+                        AND COALESCE(newer.factory_session, '') = COALESCE(q.factory_session, '')
+                        AND (newer.highest_stage IS NULL
+                             OR newer.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})))))"
+    )
+}
+
 impl SurfacingSource {
     /// Whether this receipt proves the body entered the recipient's turn
     /// (cas-f7b0; communication contract v2, P1.2).
@@ -1592,6 +1675,19 @@ ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_at TEXT;
 "#;
 const PROMPT_QUEUE_DEFERRED_INBOX_BYTES_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_bytes INTEGER;
+"#;
+
+/// cas-6853 (communication contract v2, P2.4/P3.7): broadcast audience
+/// policy. A newer `all_workers` row with the same `supersede_key` replaces an
+/// older one for every recipient that has not read it. `sticky` marks
+/// standing policy that a worker registered after the broadcast still
+/// receives; every other broadcast reaches only workers already registered
+/// when it was sent.
+const PROMPT_QUEUE_SUPERSEDE_KEY_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN supersede_key TEXT;
+"#;
+const PROMPT_QUEUE_STICKY_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN sticky INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// cas-7a01 (GH #155): which surfacing path wrote a receipt. NULL on rows
@@ -2249,6 +2345,23 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Stamp the additive protocol-v2 fields after the queue row has received
     /// its durable id and recipient routing.
+    /// Stamp an `all_workers` broadcast's audience policy (cas-6853;
+    /// communication contract v2, P2.4/P3.7).
+    ///
+    /// `supersede_key` makes this broadcast replace every older broadcast of
+    /// the same session with the same key. Older rows still waiting for
+    /// transport are withdrawn as `superseded_stale`. Older rows already
+    /// delivered stay in the record, but recipients that have not read them
+    /// are no longer given them. `sticky` marks standing policy that reaches
+    /// workers registered after the broadcast. Refuses a non-broadcast row.
+    /// Returns the ids withdrawn.
+    fn stamp_broadcast_policy(
+        &self,
+        prompt_id: i64,
+        supersede_key: Option<&str>,
+        sticky: bool,
+    ) -> Result<Vec<i64>>;
+
     fn stamp_operator_reply(
         &self,
         prompt_id: i64,
@@ -3478,7 +3591,9 @@ impl SqlitePromptQueueStore {
     fn unseen_for_recipient_predicate(
         recipient: &str,
         factory_session: Option<&str>,
+        agents_table: bool,
     ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let audience_sql = broadcast_audience_sql(recipient, agents_table);
         let stale_cutoff =
             (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
         let deliverable_sql = format!(
@@ -3500,6 +3615,7 @@ impl SqlitePromptQueueStore {
                {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                {deliverable_sql}
                AND (q.target = ? OR q.target = 'all_workers')
+               {audience_sql}
                {session_sql}"
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
@@ -3522,7 +3638,11 @@ impl SqlitePromptQueueStore {
             return Ok((0, None));
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let (predicate, params) = Self::unseen_for_recipient_predicate(recipient, factory_session);
+        let (predicate, params) = Self::unseen_for_recipient_predicate(
+            recipient,
+            factory_session,
+            agents_table_exists(&conn)?,
+        );
         let sql = format!("SELECT COUNT(*), MIN(q.created_at) {predicate}");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let (count, oldest): (i64, Option<String>) =
@@ -3619,6 +3739,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("first_attempt_at", PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION),
                 ("acked_via", PROMPT_QUEUE_ACKED_VIA_MIGRATION),
                 ("assumed_seen_at", PROMPT_QUEUE_ASSUMED_SEEN_AT_MIGRATION),
+                ("supersede_key", PROMPT_QUEUE_SUPERSEDE_KEY_MIGRATION),
+                ("sticky", PROMPT_QUEUE_STICKY_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
                 ("wake_attempt", PROMPT_QUEUE_WAKE_ATTEMPT_MIGRATION),
                 ("wake_attempt_at", PROMPT_QUEUE_WAKE_ATTEMPT_AT_MIGRATION),
@@ -4826,8 +4948,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             return Ok(Vec::new());
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let (predicate, mut params) =
-            Self::unseen_for_recipient_predicate(recipient, factory_session);
+        let (predicate, mut params) = Self::unseen_for_recipient_predicate(
+            recipient,
+            factory_session,
+            agents_table_exists(&conn)?,
+        );
         let sql = format!(
             "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary, q.priority, q.acked_at, q.urgent, q.factory_session, q.origin_agent_id, q.origin_kind
              {predicate}
@@ -5780,6 +5905,57 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 )));
             }
             Ok(())
+        })
+    }
+
+    fn stamp_broadcast_policy(
+        &self,
+        prompt_id: i64,
+        supersede_key: Option<&str>,
+        sticky: bool,
+    ) -> Result<Vec<i64>> {
+        let supersede_key = supersede_key.map(str::trim).filter(|key| !key.is_empty());
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let changed = tx.execute(
+                "UPDATE prompt_queue SET supersede_key = ?, sticky = ?
+                  WHERE id = ? AND target = 'all_workers'",
+                params![supersede_key, sticky as i64, prompt_id],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::Other(format!(
+                    "prompt_queue id={prompt_id} is not an all_workers broadcast"
+                )));
+            }
+            let mut withdrawn = Vec::new();
+            if let Some(key) = supersede_key {
+                let older: Vec<i64> = tx
+                    .prepare(
+                        "SELECT older.id FROM prompt_queue older
+                           JOIN prompt_queue current ON current.id = ?1
+                          WHERE older.target = 'all_workers'
+                            AND older.supersede_key = ?2
+                            AND older.id < current.id
+                            AND older.processed_at IS NULL
+                            AND COALESCE(older.factory_session, '') = COALESCE(current.factory_session, '')
+                          ORDER BY older.id",
+                    )?
+                    .query_map(params![prompt_id, key], |row| row.get(0))?
+                    .collect::<std::result::Result<_, _>>()?;
+                let detail = format!("superseded by broadcast {prompt_id} (supersede_key={key})");
+                for id in older {
+                    Self::atomic_stage_stamp_in_tx(
+                        &tx,
+                        id,
+                        DeliveryStage::Suppressed,
+                        AtomicStampOpts::reason(PendingReason::SupersededStale, Some(&detail)),
+                    )?;
+                    withdrawn.push(id);
+                }
+            }
+            tx.commit()?;
+            Ok(withdrawn)
         })
     }
 
@@ -7030,6 +7206,8 @@ impl SqlitePromptQueueStore {
                  AND (q.highest_stage IS NULL
                       OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
             );
+            // cas-6853: a broadcast reaches only its real audience.
+            let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&tx)?);
             let receipt_sql = match transport {
                 TransportEligibility::Any => UNCLAIMED_RECIPIENT_RECEIPT_SQL,
                 TransportEligibility::NoneRecorded => UNSEEN_RECIPIENT_RECEIPT_SQL,
@@ -7109,6 +7287,7 @@ impl SqlitePromptQueueStore {
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
+                           {audience_sql}
                            {source_sql}
                            {ids_sql}
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
@@ -7154,6 +7333,7 @@ impl SqlitePromptQueueStore {
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
+                           {audience_sql}
                            {source_sql}
                            {ids_sql}
                            AND q.factory_session IS NULL
@@ -10904,6 +11084,167 @@ mod tests {
         );
         assert_eq!(notices_to(&store, "lead-sup"), 1, "one notice, for the unread row only");
         assert_eq!(notices_to(&store, "other-sender"), 1);
+    }
+
+    fn register_agent_at(
+        store: &SqlitePromptQueueStore,
+        name: &str,
+        role: &str,
+        registered_secs_ago: i64,
+    ) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(crate::AGENT_SCHEMA).unwrap();
+        let at = (Utc::now() - chrono::Duration::seconds(registered_secs_ago)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO agents (id, name, role, factory_session, registered_at, last_heartbeat)
+             VALUES (?, ?, ?, 'factory-a', ?, ?)",
+            params![format!("id-{name}"), name, role, at, at],
+        )
+        .unwrap();
+    }
+
+    fn polled_ids(store: &SqlitePromptQueueStore, recipient: &str) -> Vec<i64> {
+        store
+            .poll_unseen_for_recipient(recipient, Some("factory-a"), 50)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    /// Communication contract v2, P1.5 (cas-6853): `all_workers` addresses
+    /// workers. The supervisor that sent a broadcast, under its name or the
+    /// `supervisor` alias, never drains it back.
+    #[test]
+    fn ct2_p1_sender_never_gets_own_broadcast() {
+        let (_temp, store) = create_test_store();
+        register_agent_at(&store, "lead-sup", "supervisor", 7200);
+        register_agent_at(&store, "worker-a", "worker", 7200);
+        let by_name = store
+            .enqueue_with_session("lead-sup", "all_workers", "rebase onto the epic", "factory-a")
+            .unwrap();
+        let by_alias = store
+            .enqueue_with_session("supervisor", "all_workers", "hold merges", "factory-a")
+            .unwrap();
+
+        assert!(polled_ids(&store, "lead-sup").is_empty(), "no echo to the sender's name");
+        assert!(polled_ids(&store, "supervisor").is_empty(), "no echo to the alias");
+        assert_eq!(polled_ids(&store, "worker-a"), vec![by_name, by_alias]);
+        assert_eq!(
+            store
+                .unseen_for_recipient_summary("lead-sup", Some("factory-a"))
+                .unwrap()
+                .0,
+            0,
+            "status counts agree with the drain"
+        );
+    }
+
+    /// Communication contract v2, P1.5 (cas-6853 review): only the sender's
+    /// OWN broadcast is withheld. A director broadcast still reaches the
+    /// supervisor under its pane name and under the `supervisor` alias, while
+    /// the supervisor's own broadcast reaches neither alias.
+    #[test]
+    fn ct2_p1_own_broadcast_withheld_but_director_broadcast_reaches_supervisor() {
+        let (_temp, store) = create_test_store();
+        register_agent_at(&store, "lead-sup", "supervisor", 7200);
+        let own = store
+            .enqueue_with_session("lead-sup", "all_workers", "own policy", "factory-a")
+            .unwrap();
+        let director = store
+            .enqueue_with_session("director", "all_workers", "all hands", "factory-a")
+            .unwrap();
+
+        assert_eq!(polled_ids(&store, "lead-sup"), vec![director]);
+        assert_eq!(polled_ids(&store, "supervisor"), vec![director]);
+        assert!(!polled_ids(&store, "supervisor").contains(&own));
+    }
+
+    /// Communication contract v2, P2.4 (cas-6853): a newer broadcast with the
+    /// same supersede key replaces the older one. A pending older row is
+    /// withdrawn as superseded_stale. An already-delivered one is no longer
+    /// handed to a worker that has not read it.
+    #[test]
+    fn ct2_p2_superseded_broadcast_not_surfaced() {
+        let (_temp, store) = create_test_store();
+        register_agent_at(&store, "worker-a", "worker", 7200);
+        let pending_old = store
+            .enqueue_with_session("lead-sup", "all_workers", "epic tip is abc", "factory-a")
+            .unwrap();
+        assert!(store
+            .stamp_broadcast_policy(pending_old, Some("epic-tip"), false)
+            .unwrap()
+            .is_empty());
+        let delivered_old = store
+            .enqueue_with_session("lead-sup", "all_workers", "base is main", "factory-a")
+            .unwrap();
+        store.stamp_broadcast_policy(delivered_old, Some("base"), false).unwrap();
+        store.mark_broadcast_outcome(delivered_old, 1, 1, 0, None).unwrap();
+        let unrelated = store
+            .enqueue_with_session("lead-sup", "all_workers", "unkeyed note", "factory-a")
+            .unwrap();
+
+        let new_tip = store
+            .enqueue_with_session("lead-sup", "all_workers", "epic tip is def", "factory-a")
+            .unwrap();
+        assert_eq!(
+            store.stamp_broadcast_policy(new_tip, Some("epic-tip"), false).unwrap(),
+            vec![pending_old]
+        );
+        let new_base = store
+            .enqueue_with_session("lead-sup", "all_workers", "base is the epic", "factory-a")
+            .unwrap();
+        assert!(store
+            .stamp_broadcast_policy(new_base, Some("base"), false)
+            .unwrap()
+            .is_empty());
+
+        let withdrawn = store.message_delivery_report(pending_old).unwrap().unwrap();
+        assert_eq!(withdrawn.stage, DeliveryStage::Suppressed);
+        assert_eq!(withdrawn.pending_reason, Some(PendingReason::SupersededStale));
+        assert_eq!(polled_ids(&store, "worker-a"), vec![unrelated, new_tip, new_base]);
+        assert!(
+            store.stamp_broadcast_policy(unrelated + 1000, Some("x"), false).is_err(),
+            "only broadcast rows take a policy"
+        );
+    }
+
+    /// Communication contract v2, P3.7 (cas-6853): a worker registered after a
+    /// broadcast never inherits it, unless it is sticky standing policy. A
+    /// worker registered before still gets both. The task-start gate drains
+    /// through the same predicate, so old broadcasts can no longer defer a
+    /// late worker's start.
+    #[test]
+    fn ct2_p3_late_worker_skips_old_broadcasts() {
+        let (_temp, store) = create_test_store();
+        register_agent_at(&store, "early-worker", "worker", 7200);
+        let ordinary = store
+            .enqueue_with_session("lead-sup", "all_workers", "merge before you park", "factory-a")
+            .unwrap();
+        let policy = store
+            .enqueue_with_session("lead-sup", "all_workers", "never merge newer epic tips", "factory-a")
+            .unwrap();
+        store.stamp_broadcast_policy(policy, None, true).unwrap();
+        for id in [ordinary, policy] {
+            backdate(&store, id, 3600);
+        }
+        register_agent_at(&store, "late-worker", "worker", 0);
+        register_agent_at(&store, "late-starter", "worker", 0);
+
+        let gate = store
+            .surface_unseen_from_sources_for_recipient(
+                "late-starter",
+                Some("factory-a"),
+                &["lead-sup"],
+                50,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(gate, vec![policy], "only standing policy can gate a late worker's start");
+        assert_eq!(polled_ids(&store, "late-worker"), vec![policy]);
+        assert_eq!(polled_ids(&store, "early-worker"), vec![ordinary, policy]);
     }
 
     /// Communication contract v2, P3.1/P3.3 (cas-d88c): the roster sweep owns

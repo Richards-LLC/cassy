@@ -708,6 +708,25 @@ impl CasService {
 
         let mut req = req;
 
+        // cas-6853: broadcast audience policy applies to all_workers only.
+        let broadcast_supersede_key = req
+            .supersede_key
+            .take()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty());
+        let broadcast_sticky = req.sticky.take().unwrap_or(false);
+        if (broadcast_supersede_key.is_some() || broadcast_sticky)
+            && !req
+                .target
+                .as_deref()
+                .is_some_and(|target| target.trim().eq_ignore_ascii_case("all_workers"))
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "supersede_key and sticky apply only to target='all_workers' broadcasts",
+            ));
+        }
+
         let target = req.target.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -2402,6 +2421,25 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        // cas-6853 (communication contract v2, P2.4/P3.7): a broadcast's
+        // audience policy. Stamped on the committed row; older same-key
+        // broadcasts still awaiting transport are withdrawn.
+        if broadcast_supersede_key.is_some() || broadcast_sticky {
+            queue
+                .stamp_broadcast_policy(
+                    message_id,
+                    broadcast_supersede_key.as_deref(),
+                    broadcast_sticky,
+                )
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Broadcast {message_id} queued but its supersede_key/sticky policy failed: {error}"
+                        ),
+                    )
+                })?;
+        }
         if let Some(notification_id) = explicit_reply_to {
             queue.ack(notification_id).map_err(|error| {
                 Self::error(

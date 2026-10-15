@@ -8,10 +8,13 @@
 //!
 //! Guarantees:
 //! - **Lanes.** [`Lane::Read`] runs on its own thread so reads never queue
-//!   behind writes. In the daemon, that thread holds the refresh reader's
-//!   dedicated connection. [`Lane::Write`] is the single writer.
-//!   [`Lane::Blocking`] runs everything else: git, gh, `/proc`, transcripts,
-//!   network.
+//!   behind writes. It opens one dedicated context on first use (in the
+//!   daemon, its own SQLite connection, see [`LaneWiring::daemon`]) and passes
+//!   it to every [`JobRuntime::submit_read`] job. [`Lane::Write`] jobs run on
+//!   the daemon's single writer, [`super::store_worker::StoreWorker`]; the
+//!   framework adds no second writer. [`Lane::Blocking`] runs local blocking
+//!   work (`/proc`, transcripts, files) and [`Lane::External`] runs slow
+//!   external calls (git, gh, HTTP), so a slow fetch never stalls a probe.
 //! - **Single-flight.** A second submit for a key whose job is queued or
 //!   running is coalesced. The caller learns this and the work is not run
 //!   twice.
@@ -123,7 +126,8 @@ pub(crate) enum Submitted {
     QueuedDroppedOldest { dropped_key: String },
     /// The lane was full of critical work and this refresh job was dropped.
     DroppedRefresh,
-    /// The runtime has shut down.
+    /// Refused: the runtime is closed ([`JobRuntime::close`]) or the lane's
+    /// thread could not start. The work was not queued.
     Closed,
 }
 
@@ -248,10 +252,11 @@ pub(crate) trait WriteExecutor: Send + Sync + 'static {
     fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool;
 }
 
-/// Opens the read lane's dedicated context (in the daemon, the refresh
-/// reader's own SQLite connection) once, on the read thread, on first use.
+/// Opens the read lane's dedicated context (in the daemon, its own SQLite
+/// connection) once, on the read thread, on first use. The context never
+/// leaves that thread, so it need not be `Send`.
 pub(crate) type ReadContextFactory =
-    Box<dyn FnOnce() -> Option<Box<dyn std::any::Any + Send>> + Send + 'static>;
+    Box<dyn FnOnce() -> Option<Box<dyn std::any::Any>> + Send + 'static>;
 
 /// How the lanes reach the stores.
 pub(crate) struct LaneWiring {
@@ -264,6 +269,28 @@ impl LaneWiring {
     pub(crate) fn daemon_writer() -> Self {
         Self {
             reader: None,
+            writer: Arc::new(GlobalStoreWorker),
+        }
+    }
+
+    /// The daemon's wiring: writes go through its StoreWorker, and the read
+    /// lane opens its own [`crate::ui::factory::director::DirectorStores`]
+    /// connection, as the refresh reader does, so reads hold no in-process
+    /// connection mutex the loop or the writer needs. Read jobs take
+    /// `Option<&DirectorStores>`; `None` when the connection could not open.
+    pub(crate) fn daemon(cas_dir: std::path::PathBuf, project_id: Option<String>) -> Self {
+        Self {
+            reader: Some(Box::new(move || {
+                match crate::ui::factory::director::DirectorStores::open_dedicated(&cas_dir) {
+                    Ok(stores) => {
+                        Some(Box::new(stores.with_project_id(project_id)) as Box<dyn std::any::Any>)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "factory read lane could not open its own connection");
+                        None
+                    }
+                }
+            })),
             writer: Arc::new(GlobalStoreWorker),
         }
     }
@@ -286,15 +313,18 @@ enum Work<T> {
 
 /// Work waiting for a key that is queued or running.
 struct KeyFollowUps<T> {
+    /// The lane the key's work runs on; follow-ups are queued there.
+    lane: Lane,
     /// Critical submits for the key, run in order after it.
     critical: VecDeque<Queued<T>>,
     /// The newest refresh submitted while the key was busy (dirty flag).
     rerun: Option<Queued<T>>,
 }
 
-impl<T> Default for KeyFollowUps<T> {
-    fn default() -> Self {
+impl<T> KeyFollowUps<T> {
+    fn new(lane: Lane) -> Self {
         Self {
+            lane,
             critical: VecDeque::new(),
             rerun: None,
         }
@@ -471,6 +501,11 @@ impl<T: Send + 'static> JobRuntime<T> {
         {
             let mut in_flight = lock(&self.shared.in_flight);
             if let Some(followups) = in_flight.get_mut(&queued.spec.key) {
+                debug_assert_eq!(
+                    followups.lane, queued.spec.lane,
+                    "all jobs for key {} must use one lane",
+                    queued.spec.key
+                );
                 return match queued.spec.criticality {
                     Criticality::Critical => {
                         followups.critical.push_back(queued);
@@ -482,7 +517,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                     }
                 };
             }
-            in_flight.insert(queued.spec.key.clone(), KeyFollowUps::default());
+            in_flight.insert(queued.spec.key.clone(), KeyFollowUps::new(queued.spec.lane));
         }
         let mut outcome = Submitted::Queued;
         if state.queue.len() >= self.shared.capacity
@@ -576,7 +611,11 @@ impl<T: Send + 'static> JobRuntime<T> {
 }
 
 impl<T: Send + 'static> JobRuntime<T> {
-    fn close(&self) {
+    /// Stop taking work: later submits return [`Submitted::Closed`]. Lanes
+    /// still run every queued and waiting critical job and skip queued
+    /// refresh work. Daemon shutdown calls this when the loop stops, then
+    /// [`JobRuntime::drain`].
+    pub(crate) fn close(&self) {
         for slot in self.shared.lanes.values() {
             lock(&slot.state).closed = true;
             slot.ready.notify_all();
@@ -625,7 +664,7 @@ fn run_work<T: Send + 'static>(
     work: Work<T>,
     label: &'static str,
     reader: &mut Option<ReadContextFactory>,
-    context: &mut Option<Box<dyn std::any::Any + Send>>,
+    context: &mut Option<Box<dyn std::any::Any>>,
     writer: Option<&Arc<dyn WriteExecutor>>,
 ) -> Result<T, JobPanicked> {
     let caught = |panic: Box<dyn std::any::Any + Send>| JobPanicked {
@@ -636,7 +675,7 @@ fn run_work<T: Send + 'static>(
             if let Some(open) = reader.take() {
                 *context = open();
             }
-            let ctx = context.as_deref().map(|ctx| ctx as &dyn std::any::Any);
+            let ctx = context.as_deref();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(ctx))).map_err(caught)
         }
         Work::Plain(work) => match writer {
@@ -674,7 +713,7 @@ fn run_lane<T: Send + 'static>(
     mut reader: Option<ReadContextFactory>,
     writer: Option<Arc<dyn WriteExecutor>>,
 ) {
-    let mut context: Option<Box<dyn std::any::Any + Send>> = None;
+    let mut context: Option<Box<dyn std::any::Any>> = None;
     let slot = &shared.lanes[&lane];
     loop {
         let next = {
@@ -1042,14 +1081,6 @@ mod tests {
         assert_eq!(wait_for(&runtime, 1)[0].key, "git-fetch");
     }
 
-    struct ThreadNameWriter(super::super::store_worker::StoreWorker);
-
-    impl WriteExecutor for ThreadNameWriter {
-        fn execute(&self, label: &'static str, job: Box<dyn FnOnce() + Send + 'static>) -> bool {
-            self.0.execute(label, job)
-        }
-    }
-
     /// Review round 1, item 3: write-lane jobs run on the single store
     /// writer's thread, not a second writer; read jobs share one dedicated
     /// context, opened once on the read thread.
@@ -1059,15 +1090,13 @@ mod tests {
         let counted = Arc::clone(&opens);
         let reader: ReadContextFactory = Box::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
-            Some(Box::new(41_u32) as Box<dyn std::any::Any + Send>)
+            Some(Box::new(41_u32) as Box<dyn std::any::Any>)
         });
         let runtime: JobRuntime<String> = JobRuntime::start_with(
             4,
             LaneWiring {
                 reader: Some(reader),
-                writer: Arc::new(ThreadNameWriter(
-                    super::super::store_worker::StoreWorker::start(),
-                )),
+                writer: Arc::new(super::super::store_worker::StoreWorker::start()),
             },
         );
         runtime.submit(spec("stamp", Lane::Write, Criticality::Critical, 1), || {
@@ -1168,5 +1197,68 @@ mod tests {
             !ran.contains(&"snapshot"),
             "refresh work is skipped at shutdown: {ran:?}"
         );
+    }
+
+    /// Review round 1, items 2 and 10: dropping the runtime (no drain) still
+    /// runs the queued critical backlog, including critical work waiting on a
+    /// busy key; queued refresh work is skipped.
+    #[test]
+    fn flv2_job_drop_runs_queued_critical_work() {
+        let runtime: JobRuntime<()> = JobRuntime::start(4);
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (s, r, log) = (Arc::clone(&started), Arc::clone(&release), Arc::clone(&ran));
+        runtime.submit(
+            spec("blocker", Lane::Blocking, Criticality::Critical, 1),
+            move || {
+                s.wait();
+                r.wait();
+                log.lock().unwrap().push("blocker");
+            },
+        );
+        started.wait();
+        for (key, criticality) in [
+            ("blocker", Criticality::Critical),
+            ("receipt", Criticality::Critical),
+            ("probe", Criticality::Refresh),
+        ] {
+            let log = Arc::clone(&ran);
+            runtime.submit(spec(key, Lane::Blocking, criticality, 2), move || {
+                log.lock().unwrap().push(key);
+            });
+        }
+        drop(runtime);
+        release.wait();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ran.lock().unwrap().len() < 3 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Give a wrongly-run refresh job time to show up before asserting.
+        std::thread::sleep(Duration::from_millis(20));
+        let ran = ran.lock().unwrap().clone();
+        assert_eq!(
+            ran.iter().filter(|k| **k == "blocker").count(),
+            2,
+            "{ran:?}"
+        );
+        assert!(ran.contains(&"receipt"), "{ran:?}");
+        assert!(!ran.contains(&"probe"), "refresh work is skipped: {ran:?}");
+    }
+
+    /// Review round 1, items 7 and 11: a closed runtime refuses work with
+    /// `Closed` instead of queuing it where nothing will run it.
+    #[test]
+    fn flv2_job_closed_runtime_refuses_work() {
+        let runtime: JobRuntime<u8> = JobRuntime::start(4);
+        runtime.close();
+        for lane in Lane::ALL {
+            assert_eq!(
+                runtime.submit(spec("late", lane, Criticality::Critical, 1), || 1),
+                Submitted::Closed,
+                "{lane:?}"
+            );
+        }
+        assert!(runtime.drain(Duration::from_secs(5)));
     }
 }

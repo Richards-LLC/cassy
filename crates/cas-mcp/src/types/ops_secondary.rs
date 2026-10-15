@@ -1148,9 +1148,9 @@ pub struct CoordinationRequest {
     pub session_id: Option<String>,
 
     /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
-    /// worker briefs must be sent with coordination message after registration.
+    /// a worker brief goes in spawn_brief with task_id (cas-ee68).
     #[schemars(
-        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration."
+        description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; pass a worker brief as spawn_brief with task_id."
     )]
     #[serde(default)]
     pub prompt: Option<String>,

@@ -922,10 +922,8 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.set("factory.commander_mirror_enabled", "false").unwrap();
         config.save(&root).unwrap();
-        let disabled_config = std::fs::read_to_string(root.join("config.toml")).unwrap();
         // CLI saving false must record the floor without a daemon poll.
         assert!(root.join("commander-mirror/policy.disabled").exists(), "disable boundary must be durable");
-        let _ = disabled_config;
         let path = temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         let now = Utc::now();
@@ -945,6 +943,76 @@ mod tests {
         let replies = operator_replies(&queue);
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].message, "Public reply");
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_excludes_workers_and_other_sessions() {
+        for (role, status, session) in [
+            (AgentRole::Worker, cas_types::AgentStatus::Idle, "factory-1"),
+            (AgentRole::Worker, cas_types::AgentStatus::Shutdown, "factory-1"),
+            (AgentRole::Supervisor, cas_types::AgentStatus::Active, "factory-other"),
+        ] {
+            let (temp, root, queue) = terminal_session(codex_turn_at(
+                "foreign", "[cas #77 agent-authored] update", "Foreign reply.", Utc::now(),
+            ));
+            let store = SqliteAgentStore::open(&root).unwrap();
+            let mut agent = store.get("supervisor-id").unwrap();
+            agent.role = role;
+            agent.status = status;
+            agent.factory_session = Some(session.into());
+            store.update(&agent).unwrap();
+            let mut state = MirrorScanState::default();
+            scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), &mut state);
+            assert_eq!(state.transcript_reads, 0);
+            assert!(operator_replies(&queue).is_empty(), "excluded {role:?}/{status}/{session}");
+        }
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_defaults_on_when_unset() {
+        let config: crate::config::Config = toml::from_str("[factory]\n").unwrap();
+        assert_eq!(config.get("factory.commander_mirror_enabled").as_deref(), Some("true"));
+        assert!(crate::config::Config::default().factory().commander_mirror_enabled);
+    }
+
+    #[test]
+    fn ct2_p3_operator_mirror_cursor_invalidates_on_source_and_file_changes() {
+        let (temp, root, queue) = terminal_session(codex_turn_at(
+            "status", "[cas #77 agent-authored] update", "Ready.",
+            Utc::now() - chrono::Duration::seconds(10),
+        ));
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let mut state = MirrorScanState::default();
+        let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+            &root, temp.path(), "factory-1", &queue, &store.list(None).unwrap(), state,
+        );
+        scan(&mut state);
+        let first = temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        let second = temp.path().join("account2/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::copy(&first, &second).unwrap();
+        let mut agent = store.get("supervisor-id").unwrap();
+        agent.metadata.insert("supervisor_account_dir".into(), temp.path().join("account2").to_string_lossy().into());
+        store.update(&agent).unwrap();
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 2, "account/path change must invalidate");
+        agent.cc_session_id = Some("new-harness-session".into());
+        store.update(&agent).unwrap();
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 3, "harness session change must invalidate");
+        // Same length, changed mtime: edits/replacements are not only appends.
+        std::fs::File::open(&second).unwrap().set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 4, "mtime change must invalidate");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&second).unwrap();
+        for value in codex_turn_at("new-status", "[cas #78 agent-authored] update", "New reply.", Utc::now()) {
+            writeln!(file, "{value}").unwrap();
+        }
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 5, "length change must invalidate");
+        scan(&mut state);
+        assert_eq!(state.transcript_reads, 5);
+        assert_eq!(operator_replies(&queue).len(), 2);
     }
 
     #[test]

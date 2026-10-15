@@ -3044,6 +3044,8 @@ Dev reply
         let dev = was_now_sections(&sources, false);
         assert!(!user.contains("### Reply (Was → Now)"), "{user}");
         assert!(!dev.contains("### Reply (Was → Now)"), "{dev}");
+        assert!(!user.contains("### Top-level"), "{user}");
+        assert!(!dev.contains("### Top-level"), "{dev}");
         assert!(user.contains("### Release changes"), "{user}");
         assert!(dev.contains("### Release changes"), "{dev}");
     }

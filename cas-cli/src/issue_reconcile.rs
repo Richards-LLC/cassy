@@ -29,9 +29,6 @@ use cas_types::{Task, TaskStatus};
 use crate::bounded_process::{Deadline, run_command};
 use crate::github_issue_attach::{GH_BIN_ENV, IssueRef, parse_issue_refs, task_brief_text};
 
-/// Red-first stub (cas-dd56): reconciliation not wired yet.
-const RED_STUB: bool = true;
-
 /// Total time one reconciliation may spend in `gh`.
 pub const GH_BUDGET: Duration = Duration::from_secs(6);
 /// Most repositories one reconciliation lists.
@@ -137,9 +134,6 @@ pub fn external_ref_hint(
     external_ref: Option<&str>,
     default_repo: Option<&str>,
 ) -> ExternalRefHint {
-    if RED_STUB {
-        return ExternalRefHint::None;
-    }
     if external_ref.is_some_and(|value| !value.trim().is_empty()) {
         return ExternalRefHint::None;
     }
@@ -208,9 +202,6 @@ pub fn epic_open_issue_warning(
     default_repo: Option<&str>,
     states: &dyn IssueStates,
 ) -> Option<String> {
-    if RED_STUB {
-        return None;
-    }
     let mut referenced: Vec<(IssueRef, Vec<String>)> = Vec::new();
     for child in children {
         for issue in task_issue_refs(child, default_repo) {
@@ -323,9 +314,6 @@ pub fn shipped_open_issues(
     states: &dyn IssueStates,
     tag_containing: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<ShippedOpenIssue>, String> {
-    if RED_STUB {
-        return Ok(Vec::new());
-    }
     let mut referenced: Vec<(IssueRef, Vec<&Task>)> = Vec::new();
     for task in tasks {
         if task.status == TaskStatus::Cancelled {

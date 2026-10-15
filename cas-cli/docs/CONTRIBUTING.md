@@ -1371,6 +1371,10 @@ reason before parking; `merged_into` does not override the declared work target.
 A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
+A read-only no-code task also closes on portable PR or artifact evidence when
+its allocated task branch contains only foreign commits. An earlier false park
+on those commits is retired; allocating a branch does not establish ownership.
+Named task commits and unclaimed unmerged changes still require delivery proof.
 
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`

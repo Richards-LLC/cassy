@@ -758,3 +758,87 @@ async fn unresolved_delivery_without_promotion_receipt_does_not_park_gh1202() {
     assert!(!rejected.deliverables.merge_conflicted, "{response}");
     assert!(!response.contains("merge-tree"), "{response}");
 }
+
+/// Starting read-only verification can allocate a task branch from a reused
+/// lane. That branch still contains only another task's commits.
+#[tokio::test]
+async fn no_code_qa_on_foreign_task_branch_closes_on_portable_proof_gh1177() {
+    for (target, reference, parked) in [
+        ("main", PR, false),
+        ("staging", "art-3ddfce77", false),
+        ("staging", PR, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, target);
+        let id = "cas-f177";
+        let branch = format!("{LANE}-{id}");
+        git(f.dir.path(), &["branch", &branch, LANE]);
+        git(f.dir.path(), &["push", "-q", "origin", &branch]);
+        let mut task = assigned(id, TaskType::Task, target);
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some(reference.into());
+        if parked {
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.parked_branch = Some(branch);
+            task.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
+            task.deliverables.merge_conflicted = true;
+        }
+        f.put(&task);
+        claim(&f, id);
+        let response = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Read-only functional verification passed",
+        })).await;
+        assert_closed_without_lane(&f, id, &response);
+        let closed = f.task(id);
+        assert_eq!(closed.external_ref.as_deref(), Some(reference), "{response}");
+        assert!(!closed.deliverables.merge_conflicted, "{response}");
+    }
+}
+
+#[tokio::test]
+async fn no_code_qa_evidence_on_foreign_task_branch_measures_no_code_paths_gh1177() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "staging");
+    let id = "cas-f178";
+    let branch = format!("{LANE}-{id}");
+    git(f.dir.path(), &["branch", &branch, LANE]);
+    let mut task = assigned(id, TaskType::Task, "staging");
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PR.into());
+    f.put(&task);
+    let proof = f.artifact(id);
+    let response = call(&f.supervisor, serde_json::json!({
+        "action": "close", "id": id, "reason": "Read-only diagnosis retained as an artifact",
+        "evidence_only": true, "evidence_only_artifact_path": proof,
+        "evidence_only_reference": PR,
+    })).await;
+    assert_closed_without_lane(&f, id, &response);
+    let evidence = f.task(id).deliverables.evidence_only.expect("evidence recorded");
+    assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
+}
+
+#[tokio::test]
+async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
+    for subject in ["fix(cas-f179): own delivery", "unnamed worker change"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let id = "cas-f179";
+        let branch = format!("{LANE}-{id}");
+        git(f.dir.path(), &["checkout", "-q", "-b", &branch, LANE]);
+        std::fs::write(f.dir.path().join("own.rs"), "pub fn own() {}\n").unwrap();
+        git(f.dir.path(), &["add", "own.rs"]);
+        git(f.dir.path(), &["commit", "-q", "-m", subject]);
+        git(f.dir.path(), &["push", "-q", "origin", &branch]);
+        git(f.dir.path(), &["checkout", "-q", "main"]);
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some(PR.into());
+        f.put(&task);
+        claim(&f, id);
+        let response = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Claims read-only verification",
+        })).await;
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}: {response}");
+        assert!(response.contains("MERGE REQUIRED"), "{subject}: {response}");
+    }
+}

@@ -7532,6 +7532,16 @@ impl CasCore {
         let parked_head = if close_disposition.requires_delivery_gates()
             && !supervisor_closing_merged_anchor
             && req.commit_receipt.is_none()
+            // GH #1177: a false park on another task's work must not become
+            // an implicit receipt that reintroduces that code during review.
+            // The ownership check retains real, unclaimed, and unreadable
+            // delivery anchors; explicit caller receipts also remain binding.
+            && !no_code_task_without_own_commits(
+                worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                &task,
+                &resolved_parent_branch,
+                req.commit_receipt.as_deref(),
+            )
         {
             let parked_repo = worker_worktree_path
                 .as_deref()
@@ -13565,10 +13575,11 @@ pub(crate) fn resolve_close_delivery_branch(
 /// delivery branch for it. The worker's lane may end in another task's
 /// delivery, and an anchor recorded for that delivery by an earlier park is
 /// not this task's either. Own commits are explicit: a commit receipt, a
-/// per-task branch, a recorded code delivery, an anchor not claimed by another
+/// recorded code delivery, an anchor not claimed by another
 /// task, a commit on the lane naming this task, or an unmerged lane commit
 /// that does not claim another task (unnamed work may be this task's, see
-/// cas-2387). Any of those keeps every ordinary delivery gate.
+/// cas-2387). Any of those keeps every ordinary delivery gate. An allocated
+/// per-task branch is judged by the same history rules as the worker's lane.
 ///
 /// GH #1167: once a supervisor has cleared a no-code task's work target
 /// (proof_scope_fix target_repo=""), nothing can be merged on its behalf, so
@@ -13644,10 +13655,13 @@ pub(crate) fn task_without_own_commits_judged(
     let Some(assignee) = task.assignee.as_deref() else {
         return true;
     };
-    if worker_task_branch_ref(repo_path, assignee, &task.id).is_some() {
-        return false;
-    }
-    let lanes = std::iter::once(format!("factory/{assignee}"))
+    // GH #1177: allocating a per-task branch does not create a delivery.
+    // It may still contain only inherited foreign work, including the commit
+    // an earlier false park recorded as this no-code task's anchor. Judge its
+    // history by the same ownership rules as the plain and handoff lanes.
+    let lanes = worker_task_branch_ref(repo_path, assignee, &task.id)
+        .into_iter()
+        .chain(std::iter::once(format!("factory/{assignee}")))
         .chain(delivery.parked_branch.clone())
         .chain(delivery.handoff_branches.iter().cloned());
     for lane in lanes {

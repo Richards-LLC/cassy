@@ -2083,6 +2083,20 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.factory_spawn_workers_in_with_provisioner_build(
+            ctx,
+            req,
+            option_env!("CAS_GIT_HASH").unwrap_or("unknown"),
+        )
+        .await
+    }
+
+    async fn factory_spawn_workers_in_with_provisioner_build(
+        &self,
+        ctx: &crate::ops::fleet::FleetContext,
+        req: FactoryRequest,
+        _provisioner_build: &str,
+    ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
@@ -11452,6 +11466,63 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn older_factory_daemon_build_is_reported_before_spawn_is_queued_gh_1174() {
+        use cas_store::SpawnQueueStore;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().expect("temp project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
+        let session = "older-daemon-1174";
+        let metadata = crate::ui::factory::create_metadata(
+            session,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some(cas_root.to_string_lossy().as_ref()),
+            None,
+        );
+        let mut metadata = serde_json::to_value(metadata).expect("serialize metadata");
+        metadata["daemon_build_hash"] = serde_json::json!("older-daemon-build");
+        let sessions = crate::ui::factory::SessionManager::new();
+        sessions.ensure_dir().expect("create session directory");
+        std::fs::write(
+            crate::ui::factory::metadata_path(session),
+            serde_json::to_vec(&metadata).expect("encode metadata"),
+        )
+        .expect("write old daemon identity");
+
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers",
+            "count": 1
+        }))
+        .expect("valid spawn request");
+
+        let error = service
+            .factory_spawn_workers_in_with_provisioner_build(
+                &crate::ops::fleet::FleetContext::operator(session),
+                req,
+                "newer-provisioner-build",
+            )
+            .await
+            .expect_err("stale daemon must be rejected before queueing a worker");
+        let message = error.to_string();
+        assert!(message.contains("provision_build_mismatch"), "{message}");
+        assert!(message.contains("older-daemon-build"), "{message}");
+        assert!(message.contains("newer-provisioner-build"), "{message}");
+        assert!(message.contains("cas factory kill"), "{message}");
+        assert!(message.contains(session), "{message}");
+
+        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
+        assert!(queue.peek(10).expect("read spawn queue").is_empty());
+    }
 
     #[test]
     fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {

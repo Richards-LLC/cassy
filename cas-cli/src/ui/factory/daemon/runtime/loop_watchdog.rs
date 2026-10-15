@@ -39,9 +39,6 @@ use crate::factory_daemon_health::{
     write_status,
 };
 
-/// Red-first stub (cas-6931): the behavior under test is not wired yet.
-const RED_STUB: bool = true;
-
 /// A helper must have run at least this long before a restart may kill it.
 const HELPER_MIN_AGE_SECS: u64 = 30;
 /// Helper commands the daemon runs in-line that can block a pass.
@@ -602,9 +599,6 @@ impl LoopProgress {
     }
 
     fn record_slow(&self, step: Step, elapsed_ms: u64, budget_ms: u64, now: Instant) {
-        if RED_STUB {
-            return;
-        }
         let event = SlowStepEvent {
             lane: step.lane.name().to_string(),
             step: step.name.to_string(),
@@ -663,9 +657,6 @@ impl LoopProgress {
     /// pending past both that and its kind's budget wedges the jobs lane.
     /// The watchdog calls this every [`LANE_HEARTBEAT_MS`].
     pub(crate) fn check_wedge(&self) -> Option<WedgeCheck> {
-        if RED_STUB {
-            return None;
-        }
         let now = self.clock.now();
         let wedge_after = Duration::from_millis(LANE_WEDGE_MS);
         let pass = self

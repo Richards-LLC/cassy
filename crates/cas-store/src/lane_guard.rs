@@ -29,9 +29,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// instead of being reported. C6 of factory loop v2 flips this.
 pub const ENFORCE_ON_LANE: bool = false;
 
-/// Red-first stub (cas-6931): reporting is not wired yet.
-const RED_STUB: bool = true;
-
 /// Most distinct call sites the process-wide report keeps.
 const SITES_KEPT: usize = 64;
 
@@ -166,9 +163,6 @@ pub fn note_blocking_call(kind: BlockingKind, what: &'static str) {
     let Some(lane) = current_lane() else {
         return;
     };
-    if RED_STUB {
-        return;
-    }
     let caller = Location::caller();
     THREAD_VIOLATIONS.with(|count| count.set(count.get() + 1));
     LAST_THREAD_VIOLATION.with(|last| last.set(Some((lane, kind, what))));

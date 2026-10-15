@@ -1376,6 +1376,13 @@ its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
 Named task commits and unclaimed unmerged changes still require delivery proof.
 
+Typed merge requests refresh the published source before deciding it already
+landed. If that bounded fetch fails, the typed request is still queued with a
+short freshness-unavailable note. Its uncertainty survives daemon and inbox
+revalidation, so cached source refs cannot suppress it as already landed.
+Unsafe source refnames still refuse. Local-merge tasks and repositories without
+origin retain their local source authority.
+
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`
 to clear it, or supply a valid replacement methodology. Switching to `no-code`

@@ -157,7 +157,8 @@ fn first_task_id_token(text: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MergeRequestEnvelope {
     pub task_id: String,
-    /// The tip the request is about, resolved LIVE at compose time.
+    /// The tip the request is about, resolved LIVE at compose time unless
+    /// source_freshness_unavailable marks it as unverified cached evidence.
     pub branch_tip: String,
     pub target_branch: String,
     pub target_branch_tip: String,
@@ -177,6 +178,10 @@ pub(crate) struct MergeRequestEnvelope {
     /// Pull request number when the worker or daemon already knows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_number: Option<u64>,
+    /// A failed compose-time source refresh must remain deliverable across
+    /// daemon and inbox revalidation; cached tips cannot authorize suppression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_freshness_unavailable: Option<String>,
 }
 
 /// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
@@ -281,6 +286,14 @@ pub(crate) fn merge_request_delivery_decision(
     envelope: &MergeRequestEnvelope,
     git: &MergeRequestDecision,
 ) -> MergeRequestDelivery {
+    if envelope.source_freshness_unavailable.is_some() {
+        return match task {
+            Some(task) if task.is_terminal() => MergeRequestDelivery::SuppressResolved {
+                status: task.status,
+            },
+            _ => MergeRequestDelivery::Deliver,
+        };
+    }
     if let Some(task) = task {
         if task.status != TaskStatus::AwaitingMerge {
             if task
@@ -983,6 +996,37 @@ pub(crate) fn resolve_live_branch_tip(
     }
 }
 
+/// Refresh the published source before a typed request can be suppressed.
+/// A cached remote-tracking ref is not live origin evidence (GH #1179).
+/// Local delivery keeps its local authority. `Ok(false)` means freshness is
+/// unavailable: queue the request without an already-landed check. Only an
+/// unsafe refname refuses the request.
+pub(crate) fn refresh_merge_request_source(
+    repo_path: &Path,
+    branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> Result<bool, String> {
+    use crate::git_evidence::{BoundedFetch, git_text, is_safe_git_refname, run_bounded_git_fetch};
+
+    let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+    if !is_safe_git_refname(branch) {
+        return Err("Merge request source freshness unavailable: unsafe source branch. No merge request was queued.".into());
+    }
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge
+        || git_text(repo_path, &["remote", "get-url", "origin"]).is_none()
+    {
+        return Ok(true);
+    }
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    match run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "origin", &refspec]) {
+        BoundedFetch::Succeeded => Ok(true),
+        outcome => {
+            tracing::warn!(branch, ?outcome, "merge request source freshness unavailable; delivering without suppression");
+            Ok(false)
+        }
+    }
+}
+
 /// Resolve the integration branch tip a merge request is judged against
 /// (GH #986).
 ///
@@ -1032,6 +1076,9 @@ pub(crate) fn queued_merge_request_decision(
     task: Option<&Task>,
     envelope: &MergeRequestEnvelope,
 ) -> MergeRequestDecision {
+    if envelope.source_freshness_unavailable.is_some() {
+        return MergeRequestDecision::Unverifiable;
+    }
     let live_branch_tip = merge_request_branch(task, Some(repo_root)).and_then(|branch| {
         resolve_live_branch_tip(repo_root, &branch, Some(envelope.branch_tip.as_str()))
     });
@@ -2056,6 +2103,7 @@ mod tests {
             anchor_tip: None,
             commits_not_on_target_base: 1,
             pr_number: None,
+            source_freshness_unavailable: None,
         };
         (repo, task, envelope)
     }
@@ -2268,6 +2316,7 @@ mod tests {
             anchor_tip: None,
             commits_not_on_target_base: 0,
             pr_number: None,
+            source_freshness_unavailable: None,
         };
         assert_eq!(
             parse_merge_request_envelope(&attach_merge_request_envelope("please merge", &envelope)),
@@ -2410,6 +2459,7 @@ mod tests {
                 anchor_tip: None,
                 commits_not_on_target_base: 0,
                 pr_number: None,
+                source_freshness_unavailable: None,
             },
         );
 
@@ -2441,6 +2491,7 @@ mod tests {
                 anchor_tip: None,
                 commits_not_on_target_base: 0,
                 pr_number: None,
+                source_freshness_unavailable: None,
             })
         );
     }
@@ -2499,6 +2550,7 @@ mod tests {
             anchor_tip: None,
             commits_not_on_target_base: 0,
             pr_number: None,
+            source_freshness_unavailable: None,
         }
     }
 
@@ -2655,6 +2707,7 @@ mod tests {
             anchor_tip: Some("anchor-tip".to_string()),
             commits_not_on_target_base: 0,
             pr_number: None,
+            source_freshness_unavailable: None,
         };
 
         assert_eq!(

@@ -3381,6 +3381,7 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
   await persistPendingSends();
   await flushingHeldSends.run(key, async () => {
     if (!heldSends.get(key)?.length) return;
+    let waiting = false;
     try {
       const history = conversationHistory(key);
       // The lease lapsed while the machine was away; the hub refuses a message
@@ -3400,7 +3401,8 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
         if (!accepted || scopeKey(deliveryScope(accepted, session)) !== scopeKey(deliveryScope(machine, session))) break;
         const result = await sendJournal.dispatch(deliveryScope(machine, session), held.clientRef, credentialFence(accepted),
           () => !conversationPersistenceBlocked.has(machine.id) && !!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo)));
-        if (result === "waiting" || result === "not-saved") break;
+        if (result === "waiting") { waiting = true; break; }
+        if (result === "not-saved") break;
         queue.shift();
         clearTimeout(held.expiry);
         history.release(held.clientRef);
@@ -3418,6 +3420,11 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
       settleHeldComposerStatus(machine.id, session);
       updateConversationViews(); renderConversationList();
     }
+    // cas-5dbc: the session is up but its socket could not take the write yet
+    // (a definite no-write). Try again shortly rather than wait for a live
+    // callback that already came: the held message used to sit "Waiting for
+    // the connection" under a header that said Live.
+    return waiting && sessionIsUp(machine.id, session) ? "waiting" : undefined;
   });
 }
 

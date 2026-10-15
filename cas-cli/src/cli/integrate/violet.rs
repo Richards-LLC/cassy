@@ -3382,7 +3382,7 @@ mod tests {
         #[cfg(unix)]
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir_all(home.join(".claude")).unwrap();
-        fs::write(home.join(".claude/.claude.json"), r#"{"mcpServers":{"violet":{"headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE}"}}}}"#).unwrap();
+        fs::write(home.join(".claude.json"), r#"{"mcpServers":{"violet":{"headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_LAUNCH_FIXTURE}"}}}}"#).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         fs::write(
             home.join(".codex/config.toml"),

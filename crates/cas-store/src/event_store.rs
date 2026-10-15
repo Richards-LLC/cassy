@@ -29,9 +29,6 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS idx_events_session_created ON events(session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_events_worker_push_activity ON events(entity_id, created_at DESC)
-    WHERE event_type = 'worker_push_blocked';
 "#;
 
 /// Upper bound on rows removed by one retention delete transaction (cas-e193).

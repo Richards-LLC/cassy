@@ -19,6 +19,7 @@ use cas_types::{
 use crate::changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
 
 /// Record observed activity for the director's per-worker liveness read.
+/// This is the cas-d5ab integration seam; it currently has no production caller.
 /// Call only for real work (e.g. a tool-call or pane-busy wake-gate decline),
 /// never for a periodic heartbeat or a delivery attempt alone.
 pub fn record_worker_activity(

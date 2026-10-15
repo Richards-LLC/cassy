@@ -1459,8 +1459,9 @@ impl DirectorEventDetector {
     /// are activity even when the transcript is cold; retain that evidence
     /// through the following closed-call ticks.
     ///
-    /// An unset cas_root keeps the checkpoint-only test seam. In production,
-    /// unresolved workers or transcripts cannot positively confirm a stall.
+    /// Called only for stale checkpoint/activity candidates. An unset cas_root
+    /// or failed worker resolution retains the checkpoint fallback; a resolved
+    /// worker without transcript telemetry does not confirm a stall.
     fn transcript_confirms_stall(
         &mut self,
         worker_name: &str,
@@ -1488,7 +1489,7 @@ impl DirectorEventDetector {
             };
             let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, worker_name)
             else {
-                return false;
+                return true;
             };
             let Some(path) = resolved.transcript_path.as_deref() else {
                 return false;
@@ -1854,8 +1855,6 @@ impl DirectorEventDetector {
                     .unwrap_or(false);
                 let effective_threshold =
                     effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
-                let transcript_stalled =
-                    self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold);
                 let activity_baseline = task
                     .updated_at
                     .map(|assigned_at| {
@@ -1877,7 +1876,8 @@ impl DirectorEventDetector {
                     },
                 );
 
-                if has_fresh_heartbeat && elapsed.is_some() && transcript_stalled {
+                if has_fresh_heartbeat && elapsed.is_some()
+                    && self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold) {
                     if !self.stall_escalated.contains(&agent.id)
                         && self.admit_stall_alarm(
                             &resolved_name,
@@ -1970,10 +1970,6 @@ impl DirectorEventDetector {
 
                 let effective_threshold =
                     effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
-                // Sample on every working tick, including before the threshold:
-                // otherwise open/closed poll boundaries can hide ongoing work.
-                let transcript_stalled =
-                    self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold);
                 // Baseline = whichever is MORE RECENT — real activity or
                 // task-start. Once a task has genuinely run past the
                 // threshold with zero activity since start, the grace
@@ -2015,7 +2011,7 @@ impl DirectorEventDetector {
                         // alerts for a worker that's confirmed alive —
                         // it never re-enters the `stalled_elapsed_secs`
                         // branch while its transcript stays fresh.
-                        if !transcript_stalled {
+                        if !self.transcript_confirms_stall(&resolved_name, now_utc, effective_threshold) {
                             self.stall_nudged.remove(&agent.id);
                             self.stall_escalated.remove(&agent.id);
                         } else if !self.stall_nudged.contains(&agent.id)

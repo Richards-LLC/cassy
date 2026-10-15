@@ -1879,6 +1879,59 @@ pub(super) fn claude_turn_aware_retry_with_evidence(
 
 /// Persist a declined worker wake only when the recipient is not inside an
 /// observed tool call. Pausing leaves both the count and cadence clock intact.
+/// Apply the same busy hold and premise recheck at the final nudge boundary.
+/// Returns true when this row was held or withdrawn, false when transport may proceed.
+fn process_worker_stall_nudge(
+    cas_dir: &std::path::Path,
+    queue: &dyn cas_store::PromptQueueStore,
+    row: &cas_store::QueuedPrompt,
+    agents: &[cas_types::Agent],
+    busy_reason: Option<&str>,
+) -> anyhow::Result<bool> {
+    use cas_store::EventStore;
+    if row.kind.as_deref() != Some("worker_stall_nudge")
+        || row.origin != Some(cas_store::QueueOrigin::Daemon) {
+        return Ok(false);
+    }
+    let Some(task_id) = row.summary.as_deref().and_then(|s| s.strip_prefix("Worker stall nudge: ")) else {
+        return Ok(false);
+    };
+    let worker = agents.iter().filter(|agent| agent.name == row.target)
+        .max_by_key(|agent| (agent.status == cas_types::AgentStatus::Active, agent.registered_at));
+    let task = crate::store::open_task_store_local(cas_dir)?.get(task_id);
+    let stale_task = match task {
+        Ok(task) => task.status != cas_types::TaskStatus::InProgress
+            || !(task.assignee.as_deref() == Some(row.target.as_str())
+                || worker.is_some_and(|agent| task.assignee.as_deref() == Some(agent.id.as_str()))),
+        Err(cas_store::StoreError::TaskNotFound(_)) => true,
+        Err(error) => return Err(error.into()),
+    };
+    if stale_task {
+        queue.mark_superseded(row.id, "worker no longer holds the stalled task")?;
+        return Ok(true);
+    }
+    if let Some(reason) = busy_reason {
+        queue.record_pending_reason(row.id, cas_store::PendingReason::GatedNotReady, Some(reason))?;
+        return Ok(true);
+    }
+    // A held alarm's premise may have resolved while the pane was busy.
+    // Read the subject's own history; fleet traffic cannot hide its progress.
+    let event_activity = if let Some(worker) = worker {
+        cas_store::SqliteEventStore::open(cas_dir)?.latest_worker_activity(&worker.id, &worker.name)?
+            .is_some_and(|event| event.created_at > row.created_at)
+    } else { false };
+    let transcript_activity = crate::cli::factory::wedged::resolve_worker(cas_dir, &row.target).ok()
+        .and_then(|worker| worker.transcript_path)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .is_some_and(|modified| chrono::DateTime::<chrono::Utc>::from(modified) > row.created_at);
+    if event_activity || transcript_activity {
+        queue.mark_superseded(row.id, "worker activity resumed while the stall nudge was held")?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
     id: i64,
@@ -6291,27 +6344,9 @@ impl FactoryDaemon {
             if queued.kind.as_deref() == Some("worker_stall_nudge")
                 && queued.origin == Some(cas_store::QueueOrigin::Daemon)
             {
-                let task_id = queued
-                    .summary
-                    .as_deref()
-                    .and_then(|s| s.strip_prefix("Worker stall nudge: "));
-                if let Some(task_id) = task_id
-                    && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
-                    && let Ok(task) = store.get(task_id)
-                    && (task.status != cas_types::TaskStatus::InProgress
-                        || task.assignee.as_deref() != Some(queued.target.as_str()))
-                {
-                    let _ =
-                        queue.mark_superseded(queued.id, "worker no longer holds the stalled task");
-                    continue;
-                }
-                let pane = self.pane_wake_state(&queued.target);
-                if let Some(reason) = pane.veto_for_active_looking_recipient() {
-                    let _ = queue.record_pending_reason(
-                        queued.id,
-                        cas_store::PendingReason::GatedNotReady,
-                        Some(reason),
-                    );
+                let reason = self.pane_wake_state(&queued.target).veto_for_active_looking_recipient();
+                if process_worker_stall_nudge(self.app.cas_dir(), queue.as_ref(), &queued,
+                    &current_agents, reason)? {
                     continue;
                 }
             }
@@ -17389,5 +17424,54 @@ mod injection_storm_regressions_cas_366b {
             injection_event_status(false, true, false, WakeAttempt::Failed),
             "reoffered"
         );
+    }
+}
+
+#[cfg(test)]
+mod stall_nudge_rework_tests {
+    use super::*;
+
+    fn fixture(id_assignee: bool) -> (tempfile::TempDir, std::path::PathBuf, cas_types::Agent, i64) {
+        let root = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-a".into(), cas_types::AgentRole::Worker);
+        worker.factory_session = Some("provision-test".into());
+        open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+        let mut task = cas_types::Task::new("cas-stall".into(), "stalled".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some(if id_assignee { worker.id.clone() } else { worker.name.clone() });
+        crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
+        let id = super::super::delivery::enqueue_worker_stall_nudge(&cas_dir, "provision-test", &worker.name, &task.id, "quiet", chrono::Utc::now() - chrono::Duration::seconds(900)).unwrap();
+        (root, cas_dir, worker, id)
+    }
+
+    #[tokio::test]
+    async fn stalled_nudge_process_queue_holds_agent_id_assignee_instead_of_dropping() {
+        let (_root, cas_dir, _worker, id) = fixture(true);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        daemon.process_prompt_queue().await.unwrap();
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue.queued_prompt(id).unwrap().unwrap();
+        assert!(row.processed_at.is_none(), "an agent-id assignee must remain on the busy hold");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let reason: Option<String> = conn.query_row("SELECT last_pending_reason FROM prompt_queue WHERE id = ?", [id], |r| r.get(0)).unwrap();
+        assert_eq!(reason.as_deref(), Some("gated_not_ready"), "exercise the real process_queue busy path");
+    }
+
+    #[tokio::test]
+    async fn stalled_nudge_busy_hold_rechecks_real_worker_activity_before_release() {
+        let (_root, cas_dir, worker, id) = fixture(false);
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        daemon.process_prompt_queue().await.unwrap();
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue.queued_prompt(id).unwrap().unwrap();
+        assert!(row.processed_at.is_none());
+        let mut event = cas_types::Event::new(cas_types::EventType::TaskNoteAdded,
+            cas_types::EventEntityType::Task, "cas-stall", "progress after nudge").with_session(&worker.id);
+        event.created_at = row.created_at + chrono::Duration::milliseconds(1);
+        use cas_store::EventStore;
+        cas_store::SqliteEventStore::open(&cas_dir).unwrap().record(&event).unwrap();
+        assert!(process_worker_stall_nudge(&cas_dir, queue.as_ref(), &row, &[worker], None).unwrap(), "the release boundary must withdraw resumed work");
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some());
     }
 }

@@ -894,6 +894,82 @@ fn report_spawn_warnings(
     }
 }
 
+/// cas-00d5: close out a shutdown request. The row gets a terminal
+/// `stopped` or `failed` state (deferred to the store worker when this pass's
+/// store budget is spent, never dropped), and a failure is queued to the
+/// supervisor, who otherwise only saw "Queued shutdown request".
+fn record_shutdown_outcome(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    supervisor_name: &str,
+    request_id: Option<i64>,
+    workers: &[String],
+    outcome: Result<(), String>,
+) {
+    let target = if workers.is_empty() {
+        "no live workers".to_string()
+    } else {
+        workers.join(", ")
+    };
+    let (audit_outcome, state, detail) = match &outcome {
+        Ok(()) => (
+            "completed",
+            cas_store::SpawnLifecycleState::Stopped,
+            format!("Stopped {target}."),
+        ),
+        Err(error) => (
+            "failed",
+            cas_store::SpawnLifecycleState::Failed,
+            format!("Shutdown of {target} failed: {error}"),
+        ),
+    };
+    append_spawn_audit(
+        cas_dir,
+        factory_session,
+        request_id,
+        None,
+        "shutdown",
+        audit_outcome,
+        &detail,
+    );
+    if let Some(id) = request_id {
+        let state_dir = cas_dir.to_path_buf();
+        let state_detail = detail.clone();
+        super::store_worker::persist_or_defer("record shutdown outcome", move || {
+            crate::store::open_spawn_queue_store(&state_dir)
+                .map_err(|error| error.to_string())?
+                .record_spawn_state(id, state, None, Some(&state_detail))
+                .map_err(|error| error.to_string())
+        });
+    }
+    if outcome.is_err() {
+        let request = request_id
+            .map(|id| format!("request {id}"))
+            .unwrap_or_else(|| "direct request".to_string());
+        let message = format!(
+            "Factory shutdown {request} did not complete. {detail} Workers that failed may still be running; retry shutdown_workers or check worker_status."
+        );
+        let summary = format!("Worker shutdown failed: {target}");
+        let enqueued = open_prompt_queue_store(cas_dir).and_then(|queue| {
+            queue
+                .enqueue_with_summary(
+                    "director",
+                    supervisor_name,
+                    &message,
+                    Some(factory_session),
+                    Some(&summary),
+                )
+                .map_err(Into::into)
+        });
+        match enqueued {
+            Ok(_) => super::delivery::wake_daemon_after_enqueue(cas_dir),
+            Err(error) => {
+                tracing::warn!(%error, "failed to tell the supervisor a shutdown failed")
+            }
+        }
+    }
+}
+
 fn enqueue_spawn_outcome_notice(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
@@ -8761,7 +8837,19 @@ impl FactoryDaemon {
                         name,
                     );
                 }
-                if let Err(e) = self.app.shutdown_workers(count, &names, force).await {
+                let outcome = self.app.shutdown_workers(count, &names, force).await;
+                // cas-00d5: the queue row was marked processed at dequeue; it
+                // must end in a terminal state, and a failure must reach the
+                // supervisor, not only the TUI error line.
+                record_shutdown_outcome(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    self.app.supervisor_name(),
+                    shutdown_request_id,
+                    &workers_to_stop,
+                    outcome.as_ref().map(|_| ()).map_err(ToString::to_string),
+                );
+                if let Err(e) = outcome {
                     let target = if !names.is_empty() {
                         names.join(", ")
                     } else if let Some(c) = count {

@@ -1784,6 +1784,25 @@ pub(crate) fn release_preassign_if_bound(
     }
 }
 
+/// Retire a stopped worker's identity on the daemon's store worker, which
+/// retries without the loop's wait budget (cas-00d5). `graceful_shutdown` is
+/// idempotent, so a retry after a partial failure is safe.
+fn defer_worker_retirement(cas_dir: &std::path::Path, agent_id: &str, first_error: &str) {
+    let cas_dir = cas_dir.to_path_buf();
+    let agent_id = agent_id.to_string();
+    crate::ui::factory::daemon::runtime::store_worker::defer(
+        "retire shut-down worker",
+        first_error,
+        move || {
+            open_agent_store(&cas_dir)
+                .map_err(|error| error.to_string())?
+                .graceful_shutdown(&agent_id)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    );
+}
+
 fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
     if !names.is_empty() {
         "named"
@@ -2450,6 +2469,13 @@ impl FactoryApp {
         force: bool,
         preserve_worktree: bool,
     ) -> anyhow::Result<()> {
+        // cas-00d5 (GH #1190, #1195): the daemon runs this inside a loop pass
+        // whose store-wait budget earlier work has often spent. Every store
+        // call below then failed fast, retirement bailed, and the worker kept
+        // running. The shutdown gets its own bounded budget instead.
+        let _store_budget = cas_store::wait_budget::grant_waits_for(
+            crate::ui::factory::daemon::runtime::store_worker::SHUTDOWN_STORE_WAIT_BUDGET,
+        );
         // Crash/recycle handling can remove the pane before shutdown arrives.
         // A dead registration in our session is still a valid cleanup target.
         if !self.worker_names.contains(&name.to_string()) {
@@ -2531,13 +2557,19 @@ impl FactoryApp {
                         Err(mark_error) => format!("failed: {mark_error}"),
                     }
                 ));
+                // cas-00d5: a busy store must never keep the worker alive.
+                // The process is stopped below; its retirement lands on the
+                // store worker, which waits out the contention.
+                defer_worker_retirement(&cas_dir, &matching.id, &error.to_string());
             }
         }
         if !retirement_failures.is_empty() {
-            anyhow::bail!(
-                "Failed to retire all Cassy identities for worker '{name}': {}",
+            let detail = format!(
+                "Worker '{name}' is being stopped, but retiring its Cassy identity is deferred until the store frees up: {}",
                 retirement_failures.join("; ")
             );
+            tracing::warn!(worker = name, "{detail}");
+            self.set_error(detail);
         }
 
         // Kill the worker's PTY process tree and remove from mux (cas-8c5a).

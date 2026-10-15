@@ -376,6 +376,7 @@ fn cas_07ee_unsurfaced_merge_envelope_still_alarms() {
     assert!(
         f.scan()
             .iter()
+            // pin: machine-readable worker-attention kind routes the unread alarm.
             .any(|row| row.prompt.contains("kind=\"supervisor_unread\"")),
         "an envelope without a confirmed wake still needs attention"
     );
@@ -443,6 +444,7 @@ fn cas_07ee_never_surfaced_supervisor_message_still_alerts_once() {
     assert_eq!(
         first
             .iter()
+            // pin: count this typed alarm kind to prove one durable episode.
             .filter(|row| row.prompt.contains("kind=\"supervisor_unread\""))
             .count(),
         1
@@ -450,6 +452,7 @@ fn cas_07ee_never_surfaced_supervisor_message_still_alerts_once() {
     assert!(
         first
             .iter()
+            // pin: the diagnostic must identify the exact unread row for investigation.
             .any(|row| row.prompt.contains(&format!("message {id}")))
     );
     let again = f.scan();

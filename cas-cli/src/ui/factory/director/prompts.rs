@@ -3479,7 +3479,7 @@ mod tests {
         };
         let mut data = make_data(0);
         data.in_progress_tasks = vec![summary("main")];
-        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
+        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
         assert!(
             text.contains("protected: pull requests through the merge queue only"),
             "{text}"
@@ -3495,7 +3495,7 @@ mod tests {
         );
 
         data.in_progress_tasks = vec![summary("epic/some-epic-cas-1234")];
-        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
+        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
         assert!(
             epic.contains("git merge --no-ff factory/wise-badger-5"),
             "{epic}"

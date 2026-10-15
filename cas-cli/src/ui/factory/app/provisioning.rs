@@ -65,38 +65,40 @@ fn provisioner_executable() -> anyhow::Result<PathBuf> {
 /// launch. A factory daemon can outlive an atomic binary update, so its own
 /// compile-time hash is not sufficient on platforms where the executable path
 /// now resolves to the replacement binary.
+fn probe_build_hash_from_executable(executable: &Path) -> anyhow::Result<String> {
+    let output = Command::new(executable)
+        .arg("--internal-factory-build-id")
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect the factory provisioner executable at {}",
+                executable.display()
+            )
+        })?;
+    anyhow::ensure!(
+        output.status.success(),
+        "installed CAS executable did not return its factory build ID (status {})",
+        output.status
+    );
+    let hash = String::from_utf8(output.stdout)
+        .context("installed CAS executable returned a non-UTF-8 factory build ID")?
+        .trim()
+        .to_string();
+    anyhow::ensure!(
+        !hash.is_empty(),
+        "installed CAS executable returned an empty factory build ID"
+    );
+    Ok(hash)
+}
+
 pub(crate) fn installed_provisioner_build_hash() -> anyhow::Result<String> {
     #[cfg(test)]
     {
-        return Ok(build_hash().to_string());
+        Ok(build_hash().to_string())
     }
-
     #[cfg(not(test))]
     {
-        let executable = provisioner_executable()?;
-        let output = Command::new(&executable)
-            .arg("--internal-factory-build-id")
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to inspect the factory provisioner executable at {}",
-                    executable.display()
-                )
-            })?;
-        anyhow::ensure!(
-            output.status.success(),
-            "installed CAS executable did not return its factory build ID (status {})",
-            output.status
-        );
-        let hash = String::from_utf8(output.stdout)
-            .context("installed CAS executable returned a non-UTF-8 factory build ID")?
-            .trim()
-            .to_string();
-        anyhow::ensure!(
-            !hash.is_empty(),
-            "installed CAS executable returned an empty factory build ID"
-        );
-        Ok(hash)
+        probe_build_hash_from_executable(&provisioner_executable()?)
     }
 }
 
@@ -587,6 +589,25 @@ pub(crate) fn launch_stalled_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn build_id_probe_reads_the_internal_factory_build_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("cas-probe");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n[ \"$1\" = \"--internal-factory-build-id\" ] || exit 64\nprintf '%s\\n' newer-provisioner-build\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            probe_build_hash_from_executable(&executable).unwrap(),
+            "newer-provisioner-build"
+        );
+    }
 
     #[test]
     fn provisioner_build_mismatch_precedes_context_decode() {

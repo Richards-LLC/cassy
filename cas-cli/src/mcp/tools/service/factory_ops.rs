@@ -11548,6 +11548,8 @@ mod tests {
         let mut metadata = serde_json::to_value(metadata).expect("serialize metadata");
         assert!(metadata["daemon_build_hash"].is_string());
         metadata["daemon_build_hash"] = serde_json::json!("older-daemon-build");
+        let provisioner_build = crate::ui::factory::installed_provisioner_build_hash()
+            .expect("read the provisioner build id");
         let sessions = crate::ui::factory::SessionManager::new();
         sessions.ensure_dir().expect("create session directory");
         std::fs::write(
@@ -11569,17 +11571,13 @@ mod tests {
         .expect("valid spawn request");
 
         let error = service
-            .factory_spawn_workers_in_with_provisioner_build(
-                &crate::ops::fleet::FleetContext::operator(session),
-                req,
-                "newer-provisioner-build",
-            )
+            .factory_spawn_workers_in(&crate::ops::fleet::FleetContext::operator(session), req)
             .await
             .expect_err("stale daemon must be rejected before queueing a worker");
         let message = error.to_string();
         assert!(message.contains("provision_build_mismatch"), "{message}");
         assert!(message.contains("older-daemon-build"), "{message}");
-        assert!(message.contains("newer-provisioner-build"), "{message}");
+        assert!(message.contains(&provisioner_build), "{message}");
         assert!(message.contains("cas factory kill"), "{message}");
         assert!(message.contains(session), "{message}");
 

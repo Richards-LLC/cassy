@@ -63,13 +63,22 @@ This gate adds one refinement, because the bundle is a Playwright artifact:
 | Journey, or `user_facing_paths` match (a web surface) | The cas-c3b8 bundle (§2) |
 | `demo_statement` only, with no web surface in the diff (for example a CLI change) | `<task>/LEDGER.md`: non-empty, fresher than the delivered head, with ≥1 row whose verdict is `PASS` and label is `real-build`. The contract says CLI-only cells produce no Playwright bundle (§2 of the contract). |
 | …and the diff touches `qa.terminal_render_paths` outside interactive surfaces | Also a cas-cli-craft terminal-qa receipt: a `report.md` under `<task>/terminal-qa/` whose first line starts `terminal-qa: PASS` and which is fresher than the delivered head. |
-| Interactive surfaces in `qa.terminal_interaction_paths` | The fresh real-build PASS ledger exercises the live TUI/PTY interaction; a command stdout capture is not required. Defaults cover factory UI, cas-pty and cas-mux. |
+| Interactive surfaces in `qa.terminal_interaction_paths` | The fresh real-build PASS ledger exercises the live TUI/PTY interaction; a command stdout capture is not required. Defaults cover factory UI, cas-pty and cas-mux input/PTY plumbing; mux pane rendering still requires a terminal receipt. |
 
 Every changed surface path is classified independently. A factory input or
 geometry change cannot exempt another CLI/output path in the same delivery.
-The default output globs include `**/cli/**`; matching CLI command paths always
-require terminal-qa while output checks are enabled, even if an interaction
-glob also matches or a stored configuration retains older output globs. Other projects
+The default output globs identify CLI, UI/TUI, terminal and doctor modules,
+plus the cas-mux, ghostty_vt, ghostty_vt_sys and cas-diffs terminal crates;
+a backend PDF/HTML renderer or a server debug-log edit is not terminal output
+merely because its filename contains `render`, `output`, `theme` or `progress`.
+The two historical default lists containing those broad filename guesses are
+interpreted as the current terminal-context defaults. Custom configured paths
+still declare terminal surfaces, and an empty list disables terminal receipts.
+Matching CLI command paths and dedicated cas-mux drawing (`src/render.rs`,
+`src/pane/style.rs` and `src/pane/snapshot.rs`) always require terminal-qa while
+output checks are enabled, even if an interaction glob also matches or a stored
+configuration retains older output globs. Mux input, PTY plumbing and the mixed
+input/resize module `src/pane/mod.rs` retain the interaction ledger exemption. Other projects
 can configure interaction globs for their TUI modules; an empty list restores
 terminal-qa for all output matches. The ledger's freshness and real-build PASS
 checks still apply, and web/journey bundles and skip-marker gates are unchanged.

@@ -849,9 +849,12 @@ fn redact_dynamic_values(s: &str) -> String {
 
     // The verdict line (cas-4df0) ends `· <canonical id> · <version>`. Temp
     // fixtures have a generated folder id, so normalize that value
-    // independently of the cloud bucket row.
+    // independently of the cloud bucket row. An info count (cas-dd56's
+    // shipped-issues row reports Info when no GitHub repo resolves) sits
+    // between the ok count and the id.
     let project_re =
-        regex::Regex::new(r"(?m)^(\[(?:OK|WARN|ERROR)\] [^·\n]+ · \d+ ok) · [^·\n]+ ·").unwrap();
+        regex::Regex::new(r"(?m)^(\[(?:OK|WARN|ERROR)\] [^·\n]+ · \d+ ok(?: · \d+ info)?) · [^·\n]+ ·")
+            .unwrap();
     result = project_re
         .replace_all(&result, "$1 · [PROJECT] ·")
         .to_string();

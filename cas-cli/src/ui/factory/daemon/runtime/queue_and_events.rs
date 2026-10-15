@@ -6194,12 +6194,6 @@ impl FactoryDaemon {
         if self.queue_jobs.select_in_flight() {
             return None;
         }
-        // cas-4272 review L3: a stamp released behind its key goes to the
-        // back of the write lane, so a selection submitted now could read a
-        // row before that stamp lands. Select only once every stamp has.
-        if self.queue_jobs.stamps_pending(Instant::now()) {
-            return None;
-        }
         let request = super::prompt_queue_jobs::QueueSelectRequest {
             cas_dir,
             session_name: self.session_name.clone(),
@@ -6234,6 +6228,7 @@ impl FactoryDaemon {
         let queue = self.queue_jobs.store(self.app.cas_dir())?;
         let super::prompt_queue_jobs::QueueSelection {
             generation,
+            submitted_at: selection_submitted_at,
             registered_agents,
             retargeted_rows,
             shut_down_recipients,
@@ -6414,6 +6409,8 @@ impl FactoryDaemon {
             // is settled already, even if the re-read still shows it pending.
             if self.queue_jobs.in_flight().holds_row(queued.id)
                 || self.queue_jobs.row_settling(queued.id, Instant::now())
+                || selection_submitted_at
+                    .is_some_and(|since| self.queue_jobs.stamped_since(queued.id, since))
             {
                 tracing::debug!(
                     target: "cas::coordination",

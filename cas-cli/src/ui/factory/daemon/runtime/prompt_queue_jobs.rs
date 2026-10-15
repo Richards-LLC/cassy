@@ -189,6 +189,8 @@ pub(crate) struct QueueSelectRequest {
 #[derive(Debug, Default)]
 pub(crate) struct QueueSelection {
     pub(crate) generation: u64,
+    /// When control submitted the selecting job (set when it is taken).
+    pub(crate) submitted_at: Option<Instant>,
     /// Every registered agent, read in the selecting job.
     pub(crate) registered_agents: Vec<cas_types::Agent>,
     /// Rows whose QA-rejection target moved; control forgets their state.
@@ -671,6 +673,11 @@ pub(crate) struct QueueJobs {
     settling_rows: HashMap<i64, (usize, Option<Instant>)>,
     /// When a stamp last landed or was deferred.
     last_stamp_progress: Instant,
+    /// When each row's latest stamp landed or was deferred, for skipping
+    /// rows a selection may have read before their stamp.
+    stamp_landed_at: HashMap<i64, Instant>,
+    /// When the current or last QueueSelect was submitted.
+    select_submitted_at: Instant,
     /// Mirror results collected, current or stale (tests).
     #[cfg(test)]
     mirror_results_seen: usize,
@@ -728,6 +735,8 @@ impl QueueJobs {
             prunes_done: 0,
             settling_rows: HashMap::new(),
             last_stamp_progress: Instant::now(),
+            stamp_landed_at: HashMap::new(),
+            select_submitted_at: Instant::now(),
             #[cfg(test)]
             mirror_results_seen: 0,
         }
@@ -774,6 +783,22 @@ impl QueueJobs {
         if self.select_in_flight {
             return;
         }
+        // cas-4272 review L3: a stamp released behind its key goes to the back
+        // of the write lane, so a selection submitted now could read a row
+        // before that stamp lands. Select only once every stamp has.
+        let now = Instant::now();
+        if self.stamps_pending(now) {
+            return;
+        }
+        if self.stamps_outstanding() {
+            tracing::warn!(
+                target: "cas::coordination",
+                stage = "stamp_gate_valve",
+                stalled_ms = now.saturating_duration_since(self.last_stamp_progress).as_millis() as u64,
+                "factory loop v2: stamps made no progress; selecting anyway, and rows whose stamps are still pending are held out of delivery"
+            );
+        }
+        self.select_submitted_at = now;
         let generation = self.generation();
         let ready = Arc::clone(&self.ready);
         let spec = JobSpec {
@@ -826,7 +851,11 @@ impl QueueJobs {
         let cas_dir = cas_dir.to_path_buf();
         let recipient = recipient.to_string();
         let spec = JobSpec {
-            kind: "QueueStamp",
+            // A settle writes nothing and raised no hold; its own kind keeps a
+            // panicked settle from lowering a count it never raised (review
+            // round 2, item 2). Same key, so it still lands after the row's
+            // earlier stamps.
+            kind: if stamp == QueueStamp::Settled { "QueueSettle" } else { "QueueStamp" },
             key: format!("QueueStamp:{row}:{recipient}"),
             lane: Lane::Write,
             criticality: Criticality::Critical,
@@ -841,6 +870,10 @@ impl QueueJobs {
         let refused = (stamp != QueueStamp::Settled)
             .then(|| (cas_dir.clone(), recipient.clone(), stamp.clone()));
         let submitted = self.submit_job(spec, false, move || {
+            #[cfg(test)]
+            if stamp != QueueStamp::Settled && take_injected_stamp_panic(&cas_dir) {
+                panic!("injected stamp job panic");
+            }
             let error = if stamp == QueueStamp::Settled {
                 None
             } else {
@@ -1107,6 +1140,16 @@ impl QueueJobs {
                                 }
                             }
                         }
+                        "QueueSettle" => {
+                            if let Some((row, recipient)) = result
+                                .key
+                                .strip_prefix("QueueStamp:")
+                                .and_then(|rest| rest.split_once(':'))
+                                && let Ok(row) = row.parse::<i64>()
+                            {
+                                self.forget_generation(row, recipient, result.generation);
+                            }
+                        }
                         "InboxPrune" => {}
                         _ => self.external.push(JobResult {
                             kind: result.kind,
@@ -1232,6 +1275,8 @@ impl QueueJobs {
         let now = Instant::now();
         self.settling_rows
             .retain(|_, (count, until)| *count > 0 || until.is_some_and(|until| until > now));
+        self.stamp_landed_at
+            .retain(|_, landed| now.saturating_duration_since(*landed) < Duration::from_secs(60));
         // A selection not yet delivered keeps the loop's fast path armed.
         self.ready.store(self.selection.is_some(), Ordering::Release);
     }
@@ -1471,6 +1516,7 @@ impl QueueJobs {
             return;
         }
         self.last_stamp_progress = Instant::now();
+        self.stamp_landed_at.insert(done.row, self.last_stamp_progress);
         if done.error.is_some() {
             // Handed to the StoreWorker: hold the row while it lands.
             self.stamp_deferred(done.row);
@@ -1489,6 +1535,7 @@ impl QueueJobs {
     /// count it as done and hold the row while the deferred write lands.
     fn stamp_deferred(&mut self, row: i64) {
         self.last_stamp_progress = Instant::now();
+        self.stamp_landed_at.insert(row, self.last_stamp_progress);
         let entry = self.settling_rows.entry(row).or_insert((0, None));
         entry.0 = entry.0.saturating_sub(1);
         entry.1 = Some(Instant::now() + SETTLING_DEFERRED_HOLD);
@@ -1505,7 +1552,21 @@ impl QueueJobs {
 
     /// The finished selection, once.
     pub(crate) fn take_selection(&mut self) -> Option<QueueSelection> {
-        self.selection.take()
+        let mut selection = self.selection.take()?;
+        selection.submitted_at = Some(self.select_submitted_at);
+        Some(selection)
+    }
+
+    /// Whether any stamp has been submitted and not landed or deferred.
+    fn stamps_outstanding(&self) -> bool {
+        self.settling_rows.values().any(|(count, _)| *count > 0)
+    }
+
+    /// Whether a stamp for `row` landed after `since` (a selection's submit
+    /// time): the selection may have read the row before it, so delivery
+    /// skips the row this pass (review round 2, item 3).
+    pub(crate) fn stamped_since(&self, row: i64, since: Instant) -> bool {
+        self.stamp_landed_at.get(&row).is_some_and(|landed| *landed > since)
     }
 }
 
@@ -1612,6 +1673,33 @@ pub(crate) fn inject_stamp_failures(cas_dir: &Path, count: usize) {
         .unwrap()
         .get_or_insert_with(HashMap::new)
         .insert(cas_dir.to_path_buf(), count);
+}
+
+#[cfg(test)]
+static INJECTED_STAMP_PANICS: std::sync::Mutex<Option<HashMap<PathBuf, usize>>> =
+    std::sync::Mutex::new(None);
+
+/// Tests: make the next `count` stamp jobs for `cas_dir` panic outside the
+/// write's own catch, as a broken job would.
+#[cfg(test)]
+pub(crate) fn inject_stamp_panics(cas_dir: &Path, count: usize) {
+    INJECTED_STAMP_PANICS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(cas_dir.to_path_buf(), count);
+}
+
+#[cfg(test)]
+fn take_injected_stamp_panic(cas_dir: &Path) -> bool {
+    let mut injected = INJECTED_STAMP_PANICS.lock().unwrap();
+    match injected.as_mut().and_then(|map| map.get_mut(cas_dir)) {
+        Some(left) if *left > 0 => {
+            *left -= 1;
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

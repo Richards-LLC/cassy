@@ -997,3 +997,65 @@ fn a_drop_after_a_finished_uncollected_job_is_attributed_by_generation() {
     assert!(probe_results.contains(&(11, true)), "g11's drop is reported as g11: {probe_results:?}");
     assert!(jobs.job_owners.get(probe).is_none(), "nothing is left outstanding for the key");
 }
+
+/// cas-4272 review L3: a Retry stamp holds its row and blocks QueueSelect
+/// until it lands; a selection then skips rows stamped after it was
+/// submitted.
+#[test]
+fn a_retry_stamp_holds_its_row_and_gates_selection_until_it_lands() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "retry later");
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    jobs.stamp(
+        &cas_dir,
+        row_id,
+        "worker-a",
+        QueueStamp::Retry { reason: cas_store::PendingReason::GatedNotReady, detail: None },
+    );
+    assert!(jobs.row_settling(row_id, Instant::now()), "the row is held while its Retry is queued");
+    jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    assert!(!jobs.select_in_flight(), "no QueueSelect while a stamp is outstanding");
+
+    writer.open();
+    settle(&mut jobs, |jobs| !jobs.row_settling(row_id, Instant::now()));
+    jobs.submit_select(request(&cas_dir), super::super::queue_and_events::run_queue_select);
+    assert!(jobs.select_in_flight(), "selection resumes once every stamp landed");
+    settle(&mut jobs, |jobs| !jobs.select_in_flight());
+    let selection = jobs.take_selection().unwrap();
+    let since = selection.submitted_at.unwrap();
+    assert!(!jobs.stamped_since(row_id, since), "the Retry landed before this selection");
+}
+
+/// cas-4272 review L2: a stamp job that panics releases the selection gate
+/// and holds its row only for the deferral window; a panicked settle never
+/// lowers a hold it did not raise.
+#[test]
+fn a_panicked_stamp_job_releases_the_gate_and_holds_its_row_briefly() {
+    let (_root, cas_dir) = project();
+    let row_id = enqueue(&cas_dir, "worker-a", "panics");
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    inject_stamp_panics(&cas_dir, 1);
+    jobs.stamp(&cas_dir, row_id, "worker-a", QueueStamp::Dropped { detail: None });
+    settle(&mut jobs, |jobs| !jobs.stamps_pending(Instant::now()));
+    let now = Instant::now();
+    assert!(jobs.row_settling(row_id, now), "held while a deferred write could still land");
+    assert!(!jobs.row_settling(row_id, now + SETTLING_DEFERRED_HOLD), "the hold expires");
+
+    // A second stamp on the same row raises the count; a panicked settle on
+    // that key must not lower it.
+    let other = enqueue(&cas_dir, "worker-a", "settle panics");
+    let cas = cas_dir.clone();
+    let generation = match jobs
+        .admit(other, "worker-a", Instant::now(), move || store_claim(&cas, other, "worker-a"))
+        .unwrap()
+    {
+        Admission::Inject { generation } => generation,
+        admission => panic!("{admission:?}"),
+    };
+    jobs.record_outcome(other, "worker-a", generation);
+    jobs.settle_injects(&cas_dir);
+    settle(&mut jobs, |jobs| !jobs.in_flight().holds_row(other));
+    assert!(!jobs.row_settling(other, Instant::now()), "a settle raised no hold and lowers none");
+}

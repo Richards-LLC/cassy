@@ -132,9 +132,9 @@ pub(crate) enum Submitted {
     QueuedBehindKey,
     /// Queued; to make room, the oldest refresh job on the lane was dropped.
     /// `dropped_generation` is that job's own generation; `key_still_queued`
-    /// is true when work waiting on the same key (a coalesced rerun or a
-    /// critical follow-up) was requeued in its place and will still run
-    /// (cas-4272 review M1).
+    /// is true when work waiting on the same key was requeued in its place
+    /// and will still run (cas-4272 review M1). That work may be a coalesced
+    /// rerun or only a critical follow-up; either way the key reports again.
     QueuedDroppedOldest {
         dropped_key: String,
         dropped_generation: u64,

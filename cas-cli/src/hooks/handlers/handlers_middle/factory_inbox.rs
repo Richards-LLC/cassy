@@ -346,11 +346,19 @@ fn surface_factory_inbox_with_transport_delivery(
 /// turn, and that turn fires no UserPromptSubmit hook, so nothing ever
 /// stamped those rows. They stayed `gated` behind later delivered rows and
 /// raised false "delivery stalled — recipient unread" notices. At the turn's
-/// first tool boundary, each `[cas #N …]` envelope in the prompt that is
-/// addressed to this agent takes over the transport claim and is stamped
-/// `hook_surfaced`, which marks it delivered. Nothing is rendered: the body is
-/// already the turn's prompt. Returns the rows recorded, in id order, so a
-/// caller can build on them (cas-1f0c renders pointer-only copies).
+/// first tool boundary, each row this turn's prompt really carries takes over
+/// the transport claim and is stamped `hook_surfaced`, which marks it
+/// delivered. Nothing is rendered: the body is already the turn's prompt.
+///
+/// "Really carries" means all three hold: the prompt names the row's
+/// `[cas #N …]` envelope, the row's own body text appears in the prompt, and
+/// the row is addressed to this agent and already holds a transport receipt
+/// (`transport_claimed` or `transport_delivered`). An envelope quoted inside
+/// another message, or one naming a row no transport ever handed over,
+/// therefore never confirms an undelivered row (cas-7bfa review).
+///
+/// Returns the rows recorded, in id order, so a caller can build on them
+/// (cas-1f0c renders pointer-only copies).
 pub(crate) fn record_turn_prompt_envelopes(
     cas_root: &Path,
     input: &HookInput,
@@ -363,16 +371,60 @@ pub(crate) fn record_turn_prompt_envelopes(
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_root) else {
         return Vec::new();
     };
+    let aliases = recipient_aliases(input);
+    let carried: Vec<i64> = ids
+        .into_iter()
+        .filter(|id| turn_prompt_carries_row(&*queue, prompt, &aliases, *id))
+        .collect();
+    if carried.is_empty() {
+        return Vec::new();
+    }
     let session = factory_session();
     let mut recorded: Vec<QueuedPrompt> = Vec::new();
-    for alias in recipient_aliases(input) {
-        if let Ok(rows) = queue.surface_wake_named_for_recipient(&alias, session.as_deref(), &ids) {
+    for alias in &aliases {
+        if let Ok(rows) =
+            queue.surface_wake_named_for_recipient(alias, session.as_deref(), &carried)
+        {
             recorded.extend(rows);
         }
     }
     recorded.sort_by_key(|row| row.id);
     recorded.dedup_by_key(|row| row.id);
     recorded
+}
+
+/// Whether the turn `prompt` delivered queue row `id` to one of `aliases`:
+/// a direct row addressed to them, with a transport receipt, whose body text
+/// is in the prompt (cas-7bfa).
+fn turn_prompt_carries_row(
+    queue: &dyn cas_store::PromptQueueStore,
+    prompt: &str,
+    aliases: &[String],
+    id: i64,
+) -> bool {
+    let Ok(Some(row)) = queue.queued_prompt(id) else {
+        return false;
+    };
+    let body = row.prompt.trim();
+    if body.is_empty()
+        || !prompt.contains(body)
+        || !aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&row.target))
+    {
+        return false;
+    }
+    queue
+        .message_delivery_report(id)
+        .ok()
+        .flatten()
+        .is_some_and(|report| {
+            matches!(
+                report.recipient_receipt,
+                Some(
+                    cas_store::SurfacingSource::TransportClaimed
+                        | cas_store::SurfacingSource::TransportDelivered
+                )
+            )
+        })
 }
 
 /// cas-7ce4: the `[cas #N …]` message ids in a submitted prompt. The daemon

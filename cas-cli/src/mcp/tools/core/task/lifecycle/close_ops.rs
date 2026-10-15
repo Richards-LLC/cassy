@@ -13565,10 +13565,11 @@ pub(crate) fn resolve_close_delivery_branch(
 /// delivery branch for it. The worker's lane may end in another task's
 /// delivery, and an anchor recorded for that delivery by an earlier park is
 /// not this task's either. Own commits are explicit: a commit receipt, a
-/// per-task branch, a recorded code delivery, an anchor not claimed by another
+/// recorded code delivery, an anchor not claimed by another
 /// task, a commit on the lane naming this task, or an unmerged lane commit
 /// that does not claim another task (unnamed work may be this task's, see
-/// cas-2387). Any of those keeps every ordinary delivery gate.
+/// cas-2387). Any of those keeps every ordinary delivery gate. An allocated
+/// per-task branch is judged by the same history rules as the worker's lane.
 ///
 /// GH #1167: once a supervisor has cleared a no-code task's work target
 /// (proof_scope_fix target_repo=""), nothing can be merged on its behalf, so

@@ -2832,6 +2832,80 @@ fn test_7e85_in_flight_tool_call_suppresses_stall_alert() {
     );
 }
 
+/// cas-9bf6: a worker whose transcript is cold but whom `worker_status`
+/// reports `executing` (turn evidence, or a CPU-busy harness building) is
+/// not stalled — the director's quiet notice fired all night for exactly
+/// these workers. Neither is a worker whose clone just took a commit (a
+/// Codex worker records no commit checkpoint).
+#[test]
+fn test_9bf6_worker_status_evidence_suppresses_false_stall() {
+    for (evidence, why) in [
+        ((true, None), "worker_status reports executing"),
+        ((false, Some(std::time::Duration::from_secs(60))), "a commit landed a minute ago"),
+    ] {
+        let base_utc = chrono::Utc::now();
+        let t0 = std::time::Instant::now();
+        let mut detector =
+            DirectorEventDetector::new(vec!["busy-codex".to_string()], "supervisor".to_string());
+        detector.set_stall_threshold_secs(300);
+        detector.set_transcript_age_override(HashMap::from([(
+            "busy-codex".to_string(),
+            Some(std::time::Duration::from_secs(600)),
+        )]));
+        detector.set_transcript_in_flight_override(HashMap::from([("busy-codex".to_string(), false)]));
+        detector.set_worker_evidence_override(HashMap::from([("busy-codex".to_string(), evidence)]));
+        let data = stalled_data_for(make_agent_working_stalled(
+            "agent-1",
+            "busy-codex",
+            "cas-9bf6",
+            5,
+            Some(610),
+            base_utc,
+        ));
+        detector.initialize(&data);
+        let events = detector.detect_changes_at(&data, None, t0, base_utc);
+        assert!(
+            !events.iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })),
+            "{why}: no quiet notice expected, got {events:?}"
+        );
+    }
+}
+
+/// cas-9bf6 safety property: a worker with a cold transcript, no in-flight
+/// call, an idle harness (worker_status not `executing`) and only an old
+/// commit is genuinely wedged and is still flagged.
+#[test]
+fn test_9bf6_genuinely_wedged_worker_still_flagged() {
+    let base_utc = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+    let mut detector =
+        DirectorEventDetector::new(vec!["wedged-codex".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.set_transcript_age_override(HashMap::from([(
+        "wedged-codex".to_string(),
+        Some(std::time::Duration::from_secs(600)),
+    )]));
+    detector.set_transcript_in_flight_override(HashMap::from([("wedged-codex".to_string(), false)]));
+    detector.set_worker_evidence_override(HashMap::from([(
+        "wedged-codex".to_string(),
+        (false, Some(std::time::Duration::from_secs(3_600))),
+    )]));
+    let data = stalled_data_for(make_agent_working_stalled(
+        "agent-1",
+        "wedged-codex",
+        "cas-9bf6",
+        5,
+        Some(610),
+        base_utc,
+    ));
+    detector.initialize(&data);
+    let events = detector.detect_changes_at(&data, None, t0, base_utc);
+    assert!(
+        events.iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })),
+        "a genuinely wedged worker must still get its quiet notice: {events:?}"
+    );
+}
+
 /// cas-7e85 AC2 (safety property): the in-flight-tool-call check is an
 /// ADDITIONAL suppression path, not a replacement for the existing one — a
 /// worker with NO in-flight call and a genuinely cold transcript must still

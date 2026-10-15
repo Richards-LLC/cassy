@@ -3147,10 +3147,6 @@ impl FactoryDaemon {
                     && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(
                         &queued.source,
                     )
-                    && !crate::prompt_revalidation::is_supervisor_wake_envelope(&queued.prompt)
-                    && crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt).is_none()
-                    && crate::prompt_revalidation::parse_blocker_envelope(&queued.prompt).is_none()
-                    && crate::prompt_revalidation::parse_verification_dispatch_envelope(&queued.prompt).is_none()
             })
             .collect();
         if let Some(oldest) = unread_for_supervisor.iter().min_by_key(|queued| queued.id) {
@@ -3543,31 +3539,6 @@ impl FactoryDaemon {
                     );
                 }
                 NormalDeliveryProbeAction::FlagSupervisor => {
-                    match queue.queued_prompt(row_id) {
-                        Ok(Some(row)) => match self.message_attention_decisions(queue, &[row]).get(&row_id) {
-                            Some(MessageAttention::Satisfied) => {
-                                self.normal_delivery_probes.remove(&row_id);
-                                continue;
-                            }
-                            Some(MessageAttention::Needed) => {}
-                            _ => {
-                                if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
-                                    probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
-                                }
-                                continue;
-                            }
-                        },
-                        Ok(None) => {
-                            self.normal_delivery_probes.remove(&row_id);
-                            continue;
-                        }
-                        Err(_) => {
-                            if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
-                                probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
-                            }
-                            continue;
-                        }
-                    }
                     // A supervisor pane is not a worker-health incident. The
                     // probe was created via an alias, so guard both the pane
                     // and addressed target before emitting worker wording.

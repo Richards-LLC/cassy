@@ -6,34 +6,6 @@ use super::*;
 pub(super) enum MessageAttention {
     Needed,
     Satisfied,
-    Unknown,
-}
-
-fn informational_approval(row: &cas_store::QueuedPrompt) -> bool {
-    let text = row.prompt.trim().to_ascii_lowercase();
-    // These are supervisor progress receipts, not instructions to re-close now.
-    (text.starts_with("review pass") || text.starts_with("approved"))
-        && (text.contains("holding")
-            || text.contains("i will merge")
-            || text.contains("i'll merge")
-            || text.contains("i merge")
-            || text.contains("awaiting ci"))
-        && ![
-            "re-close now",
-            "reclose now",
-            "action=close",
-            "action=start",
-            "please ",
-            "rebase ",
-            "run ",
-            "fix ",
-            "implement ",
-            "resume ",
-            "stop ",
-            "start ",
-        ]
-        .iter()
-        .any(|instruction| text.contains(instruction))
 }
 
 fn close_instruction_tasks(prompt: &str) -> Vec<String> {
@@ -48,8 +20,8 @@ fn close_instruction_tasks(prompt: &str) -> Vec<String> {
 }
 
 impl FactoryDaemon {
-    /// One store snapshot per scan, one transcript read per recipient, and one
-    /// local Git decision per distinct merge request. Never fetch on the loop.
+    /// Snapshot stores once and resolve each recipient transcript once per scan.
+    /// All action evidence is bound to the row. Never fetch on the loop.
     pub(super) fn message_attention_decisions(
         &self,
         queue: &dyn cas_store::PromptQueueStore,
@@ -58,48 +30,38 @@ impl FactoryDaemon {
         if rows.is_empty() {
             return HashMap::new();
         }
-        let agents = match open_agent_store(self.app.cas_dir())
+        let agents = open_agent_store(self.app.cas_dir())
             .and_then(|store| store.list(None).map_err(crate::error::CasError::from))
-        {
-            Ok(agents) => agents,
-            Err(error) => {
-                tracing::debug!(%error, "message attention registry unavailable; defer alarms");
-                return HashMap::new();
-            }
-        };
-        let events = crate::store::open_event_store(self.app.cas_dir()).ok();
+            .unwrap_or_default();
+        // A bounded snapshot may miss evidence, which conservatively leaves the
+        // alarm eligible; missing/unreadable evidence must never silence it.
+        let notes = crate::store::open_event_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| {
+                store
+                    .list_since(rows.iter().map(|r| r.created_at).min()?, 2000)
+                    .ok()
+            })
+            .unwrap_or_default();
         let tasks = crate::store::open_task_store_local(self.app.cas_dir()).ok();
         let mut task_cache = HashMap::<String, Option<cas_types::Task>>::new();
-        let mut turn_cache = HashMap::<String, Option<chrono::DateTime<chrono::Utc>>>::new();
+        let mut transcript_cache = HashMap::new();
         let mut merge_cache = HashMap::<String, bool>::new();
         let mut decisions = HashMap::new();
         for row in rows {
-            if self.dead_workers.contains(&row.target) {
-                decisions.insert(row.id, MessageAttention::Satisfied);
-                continue;
-            }
-            let recipient = agents
-                .iter()
-                .filter(|agent| {
-                    agent.factory_session.as_deref() == Some(self.session_name.as_str())
-                        && (agent.name.eq_ignore_ascii_case(&row.target)
-                            || (row.target == "supervisor"
-                                && agent.role == cas_types::AgentRole::Supervisor))
-                })
-                .max_by_key(|agent| agent.registered_at);
-            let Some(recipient) = recipient else {
-                // Missing registry state is not proof of either shutdown or read.
-                decisions.insert(row.id, MessageAttention::Unknown);
-                continue;
-            };
-            if recipient.status == cas_types::AgentStatus::Shutdown {
+            if worker_recipient_shut_down(
+                &row.target,
+                &self.dead_workers,
+                self.app.worker_names(),
+                &agents,
+            ) {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
             let report = match queue.message_delivery_report(row.id) {
                 Ok(Some(report)) => report,
                 _ => {
-                    decisions.insert(row.id, MessageAttention::Unknown);
+                    decisions.insert(row.id, MessageAttention::Needed);
                     continue;
                 }
             };
@@ -117,69 +79,73 @@ impl FactoryDaemon {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
-            let aliases = crate::harness_policy::inbox_aliases(
-                &recipient.name,
-                recipient.role == cas_types::AgentRole::Supervisor,
-            );
-            let mut activity = RecipientActivity::Absent;
-            for alias in aliases {
-                match queue.has_message_from_since(&alias, &self.session_name, row.created_at) {
-                    Ok(true) => {
-                        activity = RecipientActivity::Found;
-                        break;
-                    }
-                    Ok(false) => {}
-                    Err(_) => activity = RecipientActivity::Unknown,
-                }
-            }
-            if let Some(events) = events.as_ref() {
-                match events.has_event_since(
-                    cas_types::EventType::TaskNoteAdded,
-                    &recipient.id,
-                    row.created_at,
-                ) {
-                    Ok(true) => activity = RecipientActivity::Found,
-                    Ok(false) => {}
-                    Err(_) if activity != RecipientActivity::Found => {
-                        activity = RecipientActivity::Unknown
-                    }
-                    Err(_) => {}
-                }
-            } else if activity != RecipientActivity::Found {
-                activity = RecipientActivity::Unknown;
-            }
-            if activity == RecipientActivity::Found {
+            let recipient = agents
+                .iter()
+                .filter(|agent| {
+                    agent.factory_session.as_deref() == Some(self.session_name.as_str())
+                        && (agent.name.eq_ignore_ascii_case(&row.target)
+                            || (row.target == "supervisor"
+                                && agent.role == cas_types::AgentRole::Supervisor))
+                })
+                .max_by_key(|agent| agent.registered_at);
+            let Some(recipient) = recipient else {
+                // Missing registry state is not proof of shutdown or read.
+                decisions.insert(row.id, MessageAttention::Needed);
+                continue;
+            };
+            if recipient.status == cas_types::AgentStatus::Shutdown {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
-            let last_turn = turn_cache.entry(recipient.id.clone()).or_insert_with(|| {
-                let mut recipient = recipient.clone();
-                if recipient.role == cas_types::AgentRole::Supervisor
-                    && let Some(cli) = recipient.metadata.get("supervisor_cli").cloned()
-                {
-                    recipient.metadata.insert("worker_cli".into(), cli);
-                }
-                let cli =
-                    crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&recipient);
-                let path =
-                    crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-                        self.app.cas_dir(),
-                        &recipient,
-                    )?;
-                let observed =
-                    crate::mcp::tools::service::harness_observation::latest_turn_observations(
-                        &path, cli,
-                    );
-                observed
-                    .wake
-                    .into_iter()
-                    .chain(observed.completion)
-                    .map(|observation| observation.at)
-                    .max()
+            let cited_note = notes.iter().any(|event| {
+                event.event_type == cas_types::EventType::TaskNoteAdded
+                    && event.session_id.as_deref() == Some(recipient.id.as_str())
+                    && event.created_at > row.created_at
+                    && (crate::mcp::tools::core::task::note_notification_ids(&event.summary)
+                        .contains(&row.id)
+                        || event
+                            .metadata
+                            .as_ref()
+                            .and_then(|meta| meta.get("notification_ids"))
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|ids| ids.iter().any(|id| id.as_i64() == Some(row.id))))
             });
-            if last_turn.is_some_and(|at| at > row.created_at) {
+            if cited_note {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
+            }
+            let transcript = transcript_cache
+                .entry(recipient.id.clone())
+                .or_insert_with(|| {
+                    let mut recipient = recipient.clone();
+                    if recipient.role == cas_types::AgentRole::Supervisor
+                        && let Some(cli) = recipient.metadata.get("supervisor_cli").cloned()
+                    {
+                        recipient.metadata.insert("worker_cli".into(), cli);
+                    }
+                    let cli =
+                        crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&recipient);
+                    let path =
+                        crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+                            self.app.cas_dir(),
+                            &recipient,
+                        )?;
+                    Some((path, cli))
+                });
+            if let Some((path, cli)) = transcript.as_ref() {
+                // Grok completion alone cannot correlate a message with a turn.
+                if matches!(
+                    cli,
+                    cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex
+                ) {
+                    let observed = crate::mcp::tools::service::harness_observation::observations_after_delivery(
+                        path, *cli, row.created_at, &row.prompt,
+                    );
+                    if observed.wake.is_some() || observed.reaction.is_some() {
+                        decisions.insert(row.id, MessageAttention::Satisfied);
+                        continue;
+                    }
+                }
             }
             let envelope = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt);
             let mut task_ids = close_instruction_tasks(&row.prompt);
@@ -197,10 +163,11 @@ impl FactoryDaemon {
                         .or_insert_with(|| tasks.as_ref()?.get(id).ok())
                         .as_ref()
                         .is_some_and(|task| {
-                            matches!(
-                                task.status,
-                                cas_types::TaskStatus::Closed | cas_types::TaskStatus::Cancelled
-                            )
+                            task.status == cas_types::TaskStatus::Closed
+                                && task.closed_at.is_some_and(|at| at > row.created_at)
+                                && (task.deliverables.merge_commit.is_some()
+                                    || task.deliverables.delivery_pr_merge_commit.is_some()
+                                    || task.deliverables.delivery_pr_merged_at.is_some())
                         })
                 });
             if terminal {
@@ -231,26 +198,10 @@ impl FactoryDaemon {
                     continue;
                 }
             }
-            let from_supervisor = agents.iter().any(|agent| {
-                agent.factory_session.as_deref() == Some(self.session_name.as_str())
-                    && agent.role == cas_types::AgentRole::Supervisor
-                    && (agent.name == row.source || row.source == "supervisor")
-            });
-            if from_supervisor
-                && recipient.role == cas_types::AgentRole::Worker
-                && informational_approval(row)
-            {
-                decisions.insert(row.id, MessageAttention::Satisfied);
-                continue;
-            }
-            decisions.insert(
-                row.id,
-                if activity == RecipientActivity::Unknown {
-                    MessageAttention::Unknown
-                } else {
-                    MessageAttention::Needed
-                },
-            );
+            // Explicit replies are acknowledged by message_send at commit.
+            // There is no typed informational signal for supervisor→worker
+            // sends yet; approval-like prose must remain eligible for alarms.
+            decisions.insert(row.id, MessageAttention::Needed);
         }
         decisions
     }

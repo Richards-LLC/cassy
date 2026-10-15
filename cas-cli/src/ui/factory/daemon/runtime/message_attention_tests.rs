@@ -76,6 +76,42 @@ impl Fixture {
         id
     }
 
+    fn codex_turn(&self, text: &str) {
+        let account = self.root.path().join("codex");
+        let sessions = account.join("sessions/2026/10/15");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session_id = "019f84af-3121-7950-ba14-b01db2da1153";
+        let path = sessions.join(format!("rollout-2026-10-15T12-00-00-{session_id}.jsonl"));
+        let now = chrono::Utc::now() - chrono::Duration::seconds(400);
+        let lines = [
+            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":session_id,"session_id":session_id,"cwd":self.root.path(),"originator":"codex-tui","source":"cli","thread_source":"user"}}),
+            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"acted"}}),
+            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}],"internal_chat_message_metadata_passthrough":{"turn_id":"acted"}}}),
+            serde_json::json!({"timestamp":(now+chrono::Duration::seconds(1)).to_rfc3339(),"type":"event_msg","payload":{"type":"task_complete","turn_id":"acted"}}),
+        ];
+        std::fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let store = open_agent_store(&self.cas_dir).unwrap();
+        let mut worker = store.get("worker-id").unwrap();
+        worker.cc_session_id = Some(session_id.into());
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert(
+            "worker_account_dir".into(),
+            account.to_string_lossy().into(),
+        );
+        worker.metadata.insert(
+            "clone_path".into(),
+            self.root.path().to_string_lossy().into(),
+        );
+        store.register(&worker).unwrap();
+    }
+
     fn scan(&mut self) -> Vec<cas_store::QueuedPrompt> {
         self.daemon
             .pane_silent_since
@@ -131,6 +167,8 @@ fn cas_07ee_closed_task_no_longer_needs_attention() {
     let mut task = Task::new("cas-07ee".into(), "delivery".into());
     task.assignee = Some("worker".into());
     task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    task.deliverables.merge_commit = Some("merged-delivery".into());
     crate::store::open_task_store_local(&f.cas_dir)
         .unwrap()
         .add(&task)
@@ -266,43 +304,24 @@ fn cas_07ee_same_recipient_unrelated_codex_turn_still_alarms() {
     let mut f = Fixture::new();
     let id = f.aged("supervisor", "worker", "Please apply the scope boundary");
     assert!(f.queue.claim_recipient_transport(id, "worker").unwrap());
-    let account = f.root.path().join("codex");
-    let sessions = account.join("sessions/2026/10/15");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let session_id = "019f84af-3121-7950-ba14-b01db2da1153";
-    let path = sessions.join(format!("rollout-2026-10-15T12-00-00-{session_id}.jsonl"));
-    let now = chrono::Utc::now() - chrono::Duration::seconds(400);
-    let lines = [
-        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":session_id,"session_id":session_id,"cwd":f.root.path(),"originator":"codex-tui","source":"cli","thread_source":"user"}}),
-        serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"acted"}}),
-        serde_json::json!({"timestamp":(now+chrono::Duration::seconds(1)).to_rfc3339(),"type":"event_msg","payload":{"type":"task_complete","turn_id":"acted"}}),
-    ];
-    std::fs::write(
-        &path,
-        lines
-            .iter()
-            .map(|line| format!("{line}\n"))
-            .collect::<String>(),
-    )
-    .unwrap();
-    let store = open_agent_store(&f.cas_dir).unwrap();
-    let mut worker = store.get("worker-id").unwrap();
-    worker.cc_session_id = Some(session_id.into());
-    worker.metadata.insert("worker_cli".into(), "codex".into());
-    worker.metadata.insert(
-        "worker_account_dir".into(),
-        account.to_string_lossy().into(),
-    );
-    worker
-        .metadata
-        .insert("clone_path".into(), f.root.path().to_string_lossy().into());
-    store.register(&worker).unwrap();
+    f.codex_turn("A separate task that never carried this queued body");
     let created = f.queue.queued_prompt(id).unwrap().unwrap().created_at;
     assert!(
         f.daemon
             .recipient_turn_completion_after("worker", created)
             .is_some(),
         "fixture must resolve the real Codex turn"
+    );
+    f.daemon
+        .pane_silent_since
+        .insert("worker".into(), Instant::now() - Duration::from_secs(900));
+    f.daemon.relay_idle_unacked_messages(f.queue.as_ref());
+    assert!(
+        f.queue.peek_all(100).unwrap().iter().any(|row| row
+            .summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with("Unread on idle worker"))),
+        "a completed unrelated turn followed by idle must still raise idle-unread"
     );
     assert!(
         !f.scan().is_empty(),
@@ -567,5 +586,131 @@ fn cas_07ee_closed_before_a_new_instruction_still_alarms() {
     assert!(
         !f.scan().is_empty(),
         "closure before the instruction cannot satisfy it"
+    );
+}
+
+#[test]
+fn cas_07ee_exact_body_in_codex_turn_satisfies_only_that_row() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let body = "Please apply the scope boundary";
+    let id = f.aged("supervisor", "worker", body);
+    let other = f.aged("supervisor", "worker", "A separate course correction");
+    f.codex_turn(body);
+    let rows = [
+        f.queue.queued_prompt(id).unwrap().unwrap(),
+        f.queue.queued_prompt(other).unwrap().unwrap(),
+    ];
+    let got = f
+        .daemon
+        .message_attention_decisions(f.queue.as_ref(), &rows);
+    assert_eq!(got.get(&id), Some(&MessageAttention::Satisfied));
+    assert_eq!(got.get(&other), Some(&MessageAttention::Needed));
+    assert!(
+        f.queue
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .confirmed_at
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn cas_07ee_explicit_reply_confirms_the_referenced_row() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "Please perform request 2574");
+    let core = crate::mcp::CasCore::with_daemon(f.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing("worker-id".into());
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::CasService::new(core);
+    let request = serde_json::from_value(serde_json::json!({
+        "action":"message", "target":"supervisor", "in_reply_to":id,
+        "summary":"request complete", "message":"Your request 2574 is complete"
+    }))
+    .unwrap();
+    service
+        .coordination(rmcp::handler::server::wrapper::Parameters(request))
+        .await
+        .unwrap();
+    assert!(
+        f.queue
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .confirmed_at
+            .is_some()
+    );
+    assert!(f.scan().is_empty());
+}
+
+#[tokio::test]
+async fn cas_07ee_note_reference_is_row_bound_even_after_summary_truncation() {
+    let _env = env();
+    for spelling in ["#", "notification_id="] {
+        let mut f = Fixture::new();
+        let id = f.aged(
+            "supervisor",
+            "worker",
+            "Please implement the narrow drift rule",
+        );
+        crate::store::open_task_store_local(&f.cas_dir)
+            .unwrap()
+            .add(&Task::new("cas-other".into(), "implementation".into()))
+            .unwrap();
+        let core = crate::mcp::CasCore::with_daemon(f.cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("worker-id".into());
+        let request = serde_json::from_value(serde_json::json!({
+            "id":"cas-other", "note_type":"progress",
+            "note":format!("{} Applied the instruction in {spelling}{id}.", "implementation detail ".repeat(8))
+        })).unwrap();
+        core.cas_task_notes(rmcp::handler::server::wrapper::Parameters(request))
+            .await
+            .unwrap();
+        let events = crate::store::open_event_store(&f.cas_dir)
+            .unwrap()
+            .list_by_type(EventType::TaskNoteAdded, 10)
+            .unwrap();
+        assert!(
+            !events[0].summary.contains(&format!("{spelling}{id}")),
+            "exercise summary truncation"
+        );
+        assert!(
+            f.scan().is_empty(),
+            "the attributed full note cites exactly this row"
+        );
+        assert!(
+            f.queue
+                .message_delivery_report(id)
+                .unwrap()
+                .unwrap()
+                .confirmed_at
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn cas_07ee_note_reference_prefix_does_not_satisfy_another_row() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "Please fix the red CI");
+    let event = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        "cas-other",
+        format!("Applied #{id}0 and notification_id={id}1"),
+    )
+    .with_session("worker-id");
+    crate::store::open_event_store(&f.cas_dir)
+        .unwrap()
+        .record(&event)
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "numeric prefixes are not exact row references"
     );
 }

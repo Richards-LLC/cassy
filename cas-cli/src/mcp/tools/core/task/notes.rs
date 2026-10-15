@@ -1,5 +1,18 @@
 use crate::mcp::tools::core::imports::*;
 
+/// Exact numeric notification references, without prefix collisions (#12 != #123).
+pub(crate) fn note_notification_ids(text: &str) -> Vec<i64> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '#' && c != '=')
+        .filter_map(|token| {
+            token
+                .strip_prefix('#')
+                .or_else(|| token.strip_prefix("notification_id="))
+        })
+        .filter_map(|id| id.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+        .collect()
+}
+
 impl CasCore {
     pub async fn cas_task_notes_read(
         &self,
@@ -81,11 +94,13 @@ impl CasCore {
 
         let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, req.note);
 
-        task_store.append_note(&req.id, &formatted_note).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to append task note: {e}")),
-            data: None,
-        })?;
+        task_store
+            .append_note(&req.id, &formatted_note)
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to append task note: {e}")),
+                data: None,
+            })?;
 
         crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
         if let Err(e) = self.record_task_note_activity(
@@ -120,11 +135,8 @@ impl CasCore {
             .get_agent_id()
             .map_err(|e| anyhow::anyhow!(e.message.to_string()))?;
         let event_store = crate::store::open_event_store(&self.cas_root)?;
-        let summary = format!(
-            "Task note added ({note_type}): {}",
-            truncate_str(note, 120)
-        );
-        let metadata = match supervisor_override_reason {
+        let summary = format!("Task note added ({note_type}): {}", truncate_str(note, 120));
+        let mut metadata = match supervisor_override_reason {
             Some(reason) => serde_json::json!({
                 "note_type": note_type,
                 "supervisor_override": true,
@@ -134,6 +146,7 @@ impl CasCore {
                 "note_type": note_type,
             }),
         };
+        metadata["notification_ids"] = serde_json::json!(note_notification_ids(note));
         let event = Event::new(
             EventType::TaskNoteAdded,
             EventEntityType::Task,

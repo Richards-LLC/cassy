@@ -266,7 +266,7 @@ impl CheckGroup {
             | "sync target"
             | "models"
             | "sessionstart budget" => Self::Config,
-            "issue repositories" => Self::Config,
+            "issue repositories" | "shipped issues" => Self::Config,
             "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,

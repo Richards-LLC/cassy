@@ -122,12 +122,30 @@ pub(crate) enum Submitted {
     Closed,
 }
 
-/// Lane occupancy, for the watchdog and `loop.json`.
+/// The job a lane is running right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunningJob {
+    pub(crate) lane: Lane,
+    pub(crate) kind: &'static str,
+    pub(crate) key: String,
+    pub(crate) age: Duration,
+    pub(crate) budget: Duration,
+}
+
+impl RunningJob {
+    pub(crate) fn over_budget(&self) -> bool {
+        self.age > self.budget
+    }
+}
+
+/// Lane occupancy, for the watchdog and `loop.json`. `running` makes a job
+/// that is wedged mid-run visible (review round 1, item 6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LaneStats {
     pub(crate) queued: usize,
     pub(crate) oldest_queued_age: Option<Duration>,
     pub(crate) dropped_refresh: u64,
+    pub(crate) running: Option<RunningJob>,
 }
 
 /// Drops results computed for state the caller has already moved past.
@@ -146,6 +164,28 @@ impl GenerationGate {
         }
         *applied = result.generation;
         true
+    }
+
+    /// Record that the caller applied `generation` for `key` itself, without
+    /// a job, so older in-flight results are dropped when they arrive.
+    pub(crate) fn advance(&mut self, key: &str, generation: u64) {
+        let applied = self.applied.entry(key.to_string()).or_insert(0);
+        *applied = (*applied).max(generation);
+    }
+
+    /// Forget a key whose subject is gone (a delivered row, a retired
+    /// worker), so per-row keys stay bounded (review round 1, item 8).
+    pub(crate) fn forget(&mut self, key: &str) {
+        self.applied.remove(key);
+    }
+
+    /// Keep only the keys `keep` accepts.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.applied.retain(|key, _| keep(key));
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.applied.len()
     }
 }
 
@@ -178,6 +218,8 @@ struct LaneState<T> {
     queue: VecDeque<Queued<T>>,
     closed: bool,
     dropped_refresh: u64,
+    /// `(kind, key, started_at, budget)` of the job running now.
+    running: Option<(&'static str, String, Instant, Duration)>,
 }
 
 struct LaneSlot<T> {
@@ -239,6 +281,7 @@ impl<T: Send + 'static> JobRuntime<T> {
                             queue: VecDeque::new(),
                             closed: false,
                             dropped_refresh: 0,
+                            running: None,
                         }),
                         ready: Condvar::new(),
                     },
@@ -367,7 +410,40 @@ impl<T: Send + 'static> JobRuntime<T> {
                 .front()
                 .map(|queued| queued.enqueued_at.elapsed()),
             dropped_refresh: state.dropped_refresh,
+            running: state
+                .running
+                .as_ref()
+                .map(|(kind, key, started, budget)| RunningJob {
+                    lane,
+                    kind: *kind,
+                    key: key.clone(),
+                    age: started.elapsed(),
+                    budget: *budget,
+                }),
         }
+    }
+
+    /// Jobs still running past their budget, logged at WARN on
+    /// `cas::loop_watchdog`. The watchdog (C1) calls this on its own cadence,
+    /// so a wedged job is reported while it is stuck, not only when it ends.
+    pub(crate) fn over_budget_running(&self) -> Vec<RunningJob> {
+        let stuck: Vec<RunningJob> = Lane::ALL
+            .into_iter()
+            .filter_map(|lane| self.lane_stats(lane).running)
+            .filter(RunningJob::over_budget)
+            .collect();
+        for job in &stuck {
+            tracing::warn!(
+                target: "cas::loop_watchdog",
+                lane = ?job.lane,
+                kind = job.kind,
+                key = %job.key,
+                elapsed_ms = job.age.as_millis() as u64,
+                budget_ms = job.budget.as_millis() as u64,
+                "factory job still running past its budget"
+            );
+        }
+        stuck
     }
 }
 
@@ -436,6 +512,12 @@ fn run_lane<T: Send + 'static>(
                         }
                         continue;
                     }
+                    state.running = Some((
+                        queued.spec.kind,
+                        queued.spec.key.clone(),
+                        Instant::now(),
+                        queued.spec.budget,
+                    ));
                     break Some(queued);
                 }
                 if state.closed {
@@ -476,8 +558,12 @@ fn run_lane<T: Send + 'static>(
         // Release the key before posting, so a caller that drains this result
         // can submit the key again at once. Work waiting on the key is queued
         // now, critical first.
-        if let Some(follow_up) = shared.release_key(&spec.key) {
-            lock(&slot.state).queue.push_back(follow_up);
+        {
+            let mut state = lock(&slot.state);
+            state.running = None;
+            if let Some(follow_up) = shared.release_key(&spec.key) {
+                state.queue.push_back(follow_up);
+            }
         }
         // A closed receiver (the runtime was dropped) must not stop the lane:
         // queued critical work still runs.
@@ -691,6 +777,52 @@ mod tests {
         assert!(!keys.contains(&"refresh-a"), "{keys:?}");
         assert_eq!(keys.iter().filter(|k| k.starts_with("receipt-")).count(), 5);
         assert!(keys.contains(&"refresh-b") && keys.contains(&"refresh-c"));
+    }
+
+    /// Review round 1, items 6 and 8: a wedged running job is visible in the
+    /// lane stats and reported while still over budget; the gate can advance
+    /// without a job and forget keys.
+    #[test]
+    fn flv2_job_running_job_visible_and_gate_bounded() {
+        let runtime: JobRuntime<()> = JobRuntime::start(4);
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let (s, r) = (Arc::clone(&started), Arc::clone(&release));
+        let mut slow = spec("fetch", Lane::Blocking, Criticality::Refresh, 1);
+        slow.budget = Duration::from_millis(1);
+        runtime.submit(slow, move || {
+            s.wait();
+            r.wait();
+        });
+        started.wait();
+        std::thread::sleep(Duration::from_millis(5));
+        let stats = runtime.lane_stats(Lane::Blocking);
+        let running = stats.running.expect("the wedged job is visible");
+        assert_eq!((running.kind, running.key.as_str()), ("TestJob", "fetch"));
+        assert!(running.over_budget());
+        assert_eq!(runtime.over_budget_running().len(), 1);
+        release.wait();
+        wait_for(&runtime, 1);
+        assert!(runtime.lane_stats(Lane::Blocking).running.is_none());
+
+        let mut gate = GenerationGate::default();
+        gate.advance("row-1", 5);
+        let stale = JobResult {
+            kind: "TestJob",
+            key: "row-1".to_string(),
+            generation: 4,
+            outcome: Ok(()),
+            elapsed: Duration::ZERO,
+            over_budget: false,
+        };
+        assert!(
+            !gate.accept(&stale),
+            "advance drops older in-flight results"
+        );
+        gate.advance("row-2", 1);
+        gate.forget("row-1");
+        gate.retain(|key| key != "row-2");
+        assert_eq!(gate.len(), 0, "keys stay bounded");
     }
 
     /// Review round 1, item 4: a panicking job posts a result and frees its key.

@@ -329,10 +329,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
 
     // 2. Required files.
     let files = &manifest.files;
-    let singles: [(&str, &Option<String>); 9] = [
+    let singles: [(&str, &Option<String>); 8] = [
         ("trace", &files.trace),
         ("trace_actions", &files.trace_actions),
-        ("receipt", &files.receipt),
         ("aria_yaml", &files.aria_yaml),
         ("aria_json", &files.aria_json),
         ("visual_qa", &files.visual_qa),
@@ -349,6 +348,19 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             key.to_string(),
             resolve_bundle_file(&bundle_dir, key, relative)?,
         ));
+    }
+    // Use the same visual classification as the media-mode captures below.
+    // Optional recordings still undergo containment, content and freshness checks.
+    match files.receipt.as_deref().filter(|value| !value.trim().is_empty()) {
+        Some(relative) => listed.push((
+            "receipt".to_string(),
+            resolve_bundle_file(&bundle_dir, "receipt", relative)?,
+        )),
+        None if manifest.visual_change => return Err(EvidenceRefusal::new(
+            "incomplete: bundle.json lists no files.receipt for a visual change (visual_change is true)",
+            producing_command("receipt", &bundle_dir),
+        )),
+        None => {}
     }
     if files.cells.is_empty() {
         return Err(missing_key("cells"));

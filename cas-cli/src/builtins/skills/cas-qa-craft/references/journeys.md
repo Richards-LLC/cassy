@@ -50,7 +50,7 @@ The files are:
 |---|---|
 | `trace.zip` | The trace, with DOM, aria and screen snapshots |
 | `trace-actions.txt` | The trace's action list |
-| `receipt.webm` | A screencast with one chapter per stage |
+| `receipt.webm` | For `visual_change: true`, a screencast with one chapter per stage |
 | `J01.png`, `J02.png`, … | The screen at the end of each stage |
 | `final.aria.yml`, `final.aria.json` | Aria snapshots of the final screen |
 | `result.json` | The stage titles and timings |

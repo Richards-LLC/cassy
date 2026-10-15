@@ -2359,6 +2359,7 @@ fn visual_bundle_requires_screencast_cas_7e91() {
     let refusal = fx.validate(&fx.notes()).expect_err("a visual bundle needs its screencast");
     assert!(refusal.problem.contains("files.receipt"), "{refusal:?}");
     assert!(refusal.command.contains("receipt"), "{refusal:?}");
+    assert!(refusal.problem.contains("visual_change is true"), "{refusal:?}");
 }
 
 #[test]

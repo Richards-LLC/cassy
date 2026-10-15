@@ -18,7 +18,7 @@ journey uses `journeys/<journey-id>/`, each with the same shape and its own
 | --- | --- | --- |
 | `trace` | `trace.zip` | always |
 | `trace_actions` | `trace-actions.txt` (`npx playwright trace actions`, ≥1 `Expect` row) | always |
-| `receipt` | `receipt.webm` (screencast with action annotations and one chapter per cell) | always |
+| `receipt` | `receipt.webm` (screencast with action annotations and one chapter per cell) | `visual_change: true` |
 | `aria_yaml`, `aria_json` | `final.aria.yml`, `final.aria.json` (final state) | always |
 | `cells` | `M01.png`, `M02.png`, … one per run cell, named by ledger id | always |
 | `polish_screenshots` | `visual-qa/<slug>-{light,dark}-{desktop,phone}.png` | always |
@@ -26,6 +26,12 @@ journey uses `journeys/<journey-id>/`, each with the same shape and its own
 | `visual_qa_baseline_json` | `visual-qa-baseline/visual-qa.json` (the same strict run against a local build of the base commit) | `visual_qa_status: "scoped"` |
 | `critique` | `critique.md` (the cas-ui-craft rubric table) | always |
 | `a11y` | `a11y-forced-colors.png`, `a11y-reduced-motion.png`, `a11y-contrast-more.png` | visual change |
+
+Use the existing `visual_change` flag for changes to rendered appearance:
+layout, colour, typography, imagery or motion. For `visual_change: false`, omit
+`files.receipt`, screencast/chapter calls and media-mode captures. Keep the
+trace, assertions, ARIA, cell captures, polish and affected journey receipts/logs.
+A recording listed voluntarily still needs to be valid and fresh.
 
 Polish evidence is required for every web bundle, not only for visual changes.
 An unpolished delivery is a defect, the same as a bug. The one exception is a
@@ -169,7 +175,8 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 ## Worked example
 
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
-ledger cells M01 and M02, with one chapter per cell.
+ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
+`visual_change`: only visual changes record chapters and media-mode captures.
 
 ```ts
 // tests/qa-evidence.spec.ts
@@ -177,23 +184,30 @@ import { test, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 
 const QA = process.env.QA_ARTIFACTS!;
+const visualChange = true; // match bundle.json visual_change for this delivery
 
 test('cas-1234 demo: filter to no matches', async ({ page }) => {
-  await page.screencast.start({ path: `${QA}/receipt.webm`, size: page.viewportSize()! });
-  await page.screencast.showActions({ position: 'top-right' });
+  if (visualChange) {
+    await page.screencast.start({ path: `${QA}/receipt.webm`, size: page.viewportSize()! });
+    await page.screencast.showActions({ position: 'top-right' });
+  }
   await page.goto('/');
 
-  await page.screencast.showChapter('M01 submit a task filter', {
-    description: 'expect: matching rows update', duration: 1000,
-  });
+  if (visualChange) {
+    await page.screencast.showChapter('M01 submit a task filter', {
+      description: 'expect: matching rows update', duration: 1000,
+    });
+  }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('fix');
   await page.getByRole('button', { name: 'Apply' }).click();
   await expect(page.getByRole('status')).toHaveText('1 task');
   await page.screenshot({ path: `${QA}/M01.png` });
 
-  await page.screencast.showChapter('M02 query with no matches', {
-    description: 'expect: clear no-results copy', duration: 1000,
-  });
+  if (visualChange) {
+    await page.screencast.showChapter('M02 query with no matches', {
+      description: 'expect: clear no-results copy', duration: 1000,
+    });
+  }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('zzz');
   await page.getByRole('button', { name: 'Apply' }).click();
   await expect(page.getByRole('main')).toMatchAriaSnapshot(`
@@ -207,18 +221,20 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   await writeFile(`${QA}/final.aria.json`,
     JSON.stringify(await page.getByRole('main').ariaSnapshotJSON(), null, 2));
 
-  // Visual change only. emulateMedia keeps omitted features: reset, then prove.
-  for (const [name, query, media] of [
-    ['forced-colors', '(forced-colors: active)', { forcedColors: 'active' }],
-    ['reduced-motion', '(prefers-reduced-motion: reduce)', { reducedMotion: 'reduce' }],
-    ['contrast-more', '(prefers-contrast: more)', { contrast: 'more' }],
-  ] as const) {
-    await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
-    expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-    await expect(page.getByRole('status')).toHaveText('No tasks match');
-    await page.screenshot({ path: `${QA}/a11y-${name}.png` });
+  if (visualChange) {
+    // Visual change only. emulateMedia keeps omitted features: reset, then prove.
+    for (const [name, query, media] of [
+      ['forced-colors', '(forced-colors: active)', { forcedColors: 'active' }],
+      ['reduced-motion', '(prefers-reduced-motion: reduce)', { reducedMotion: 'reduce' }],
+      ['contrast-more', '(prefers-contrast: more)', { contrast: 'more' }],
+    ] as const) {
+      await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
+      expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
+      await expect(page.getByRole('status')).toHaveText('No tasks match');
+      await page.screenshot({ path: `${QA}/a11y-${name}.png` });
+    }
+    await page.screencast.stop();
   }
-  await page.screencast.stop();
 });
 ```
 
@@ -267,9 +283,9 @@ and repeat that path in the close reason.
    - `npx playwright trace action <N>` shows its log and source line.
    - `npx playwright trace snapshot <N> --phase after` prints the aria tree at that moment.
    - Run `npx playwright trace close` when done.
-4. Watch `receipt.webm`. Every chapter title names a ledger cell, and the
-   action captions show what was clicked or typed. Then skim the four polish
-   renders and `visual-qa/visual-qa.md`.
+4. For `visual_change: true`, watch `receipt.webm`: every chapter names a
+   ledger cell and the action captions show the interaction. For either kind
+   of change, skim the four polish renders and `visual-qa/visual-qa.md`.
 
 `cas-playwright-debug` owns diagnosis when a step fails.
 

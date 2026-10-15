@@ -60,15 +60,18 @@ instead of the procedure below.
    `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md). It holds:
    - a trace recorded with `snapshots: { dom: true, aria: true, screen: true }`
-   - a `page.screencast` receipt with `showActions` and a `showChapter` for
-     each cell
+   - for `visual_change: true`, a `page.screencast` receipt with `showActions`
+     and a `showChapter` for each cell
    - a `toMatchAriaSnapshot`-asserted final state
    - `forcedColors`/`reducedMotion`/`contrast` captures when the change is
      visual
    - polish evidence: desktop and phone renders in light and dark,
      `<skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict` output, and a cas-ui-craft critique
      score
-   Cite its `bundle.json` in a `platform_proof` note and in the close reason.
+   For `visual_change: false`, omit screencast, chapters and media-mode
+   captures; keep the trace, assertions, ARIA, cell captures, polish and affected
+   journey receipts/logs. Cite `bundle.json` in a `platform_proof` note and
+   in the close reason.
 6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
    `THRESHOLD`, `GRACE`, `DEBOUNCE`, and `RETRY`; record whether each constant is
    predictable from the user's visible contract. For terminal states, dump all

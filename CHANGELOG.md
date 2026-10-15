@@ -24,6 +24,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   still sets them loads with a one-line note; the keys are dropped on the next
   save.
 
+### Removed — release checks no longer re-run at close, merge and push (cas-38e7)
+
+- A worker parks and closes a task without a fast-rows receipt, a journey
+  receipt or a lane-compile receipt. Lane CI runs the fast checks once, and the
+  merge queue runs the Rust suite and the Commander journeys once. Verification
+  verdicts, merge evidence and QA for user-facing work still gate the close.
+- `worktree_merge` no longer runs the lane fast rows, and the Git merge helper
+  no longer requires a lane-compile receipt before it moves an epic branch.
+- Worker browser and JS suites are no longer rewritten through
+  `scripts/worker-memory.py`.
+- The worker pre-push guard still refuses pushes to another worker's branch,
+  but it no longer runs `scripts/fast-rows-pre-push.sh`. Guards installed by
+  earlier builds are refreshed in place.
+- Sixteen unused close-gate functions are gone from the binary.
+
 ## [3.53.0] - 2026-10-14
 
 ### Changed — the merge queue skips the Commander journeys when only the CI workflow changes (cas-c846)

@@ -2261,121 +2261,6 @@ fn epic_close_tip(task: &Task, commit_receipt: Option<&str>, repo: &std::path::P
         .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}^{{commit}}")))
 }
 
-/// cas-e6038: what an epic's full-suite journey receipt must bind to.
-#[derive(Debug, PartialEq, Eq)]
-enum EpicJourneyBinding {
-    /// Unmerged epic: a receipt at exactly this tip, in the epic's own
-    /// artifact directory.
-    ExactTip(String),
-    /// The epic's delivery is already in `trunk`: any trunk commit that
-    /// contains every `contained` commit may carry the receipt.
-    Trunk {
-        trunk: String,
-        trunk_tip: String,
-        contained: Vec<String>,
-        basis: String,
-    },
-}
-
-/// cas-e6038: the trunk ref merged-epic containment is measured against.
-/// With an `origin` remote only `origin/<default>` counts, so a local trunk
-/// ref cannot masquerade as landed; otherwise the local default branch.
-fn epic_trunk_ref(repo: &std::path::Path) -> Option<(String, String)> {
-    let default = resolve_close_gate_default_branch(repo).ok()?;
-    let trunk = if origin_remote_configured(repo) {
-        format!("origin/{default}")
-    } else {
-        default
-    };
-    let tip = resolve_branch_sha(repo, &format!("{trunk}^{{commit}}"))?;
-    Some((trunk, tip))
-}
-
-/// cas-e6038: the delivery anchor of a terminal child that `trunk` contains:
-/// the first of its PR merge commit, merge commit, factory anchor or
-/// auto-commit that resolves and is an ancestor of `trunk`.
-fn child_trunk_anchor(repo: &std::path::Path, child: &Task, trunk: &str) -> Option<String> {
-    let deliverables = &child.deliverables;
-    [
-        deliverables.delivery_pr_merge_commit.as_deref(),
-        deliverables.merge_commit.as_deref(),
-        deliverables.factory_branch_anchor.as_deref(),
-        deliverables.commit_hash.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .filter(|anchor| !anchor.is_empty() && is_safe_git_refname(anchor))
-    .filter_map(|anchor| resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")))
-    .find(|sha| git_commit_is_ancestor(repo, sha, trunk))
-}
-
-/// cas-e6038: decide how an epic's journey receipt binds.
-///
-/// - A readable epic tip not yet in trunk keeps the exact-tip rule.
-/// - A readable epic tip already in trunk binds to trunk commits containing it.
-/// - No readable tip and no explicit commit receipt (branchless epic, or a
-///   lane deleted after release): with every child terminal, bind to trunk
-///   commits containing each child's trunk-contained delivery anchor; with
-///   no such anchor, trunk membership alone binds.
-fn epic_journey_binding(
-    task: &Task,
-    commit_receipt: Option<&str>,
-    repo: &std::path::Path,
-    children: impl FnOnce() -> Result<Vec<Task>, String>,
-) -> Result<EpicJourneyBinding, String> {
-    let tip = epic_close_tip(task, commit_receipt, repo);
-    let trunk = epic_trunk_ref(repo);
-    if let Some(tip) = tip {
-        return Ok(match trunk {
-            Some((trunk, trunk_tip)) if git_commit_is_ancestor(repo, &tip, &trunk) => {
-                let basis = format!("epic tip {tip} is contained in {trunk}");
-                EpicJourneyBinding::Trunk { trunk, trunk_tip, contained: vec![tip], basis }
-            }
-            _ => EpicJourneyBinding::ExactTip(tip),
-        });
-    }
-    if commit_receipt.is_some() {
-        return Err("epic journey tip is unreadable".into());
-    }
-    let Some((trunk, trunk_tip)) = trunk else {
-        return Err("epic journey tip is unreadable and no trunk ref resolves".into());
-    };
-    let children = children().map_err(|e| format!("epic journey tip is unreadable and its children could not be read: {e}"))?;
-    if let Some(open) = children.iter().find(|child| !child.is_terminal()) {
-        return Err(format!(
-            "epic journey tip is unreadable and child {} is not terminal",
-            open.id
-        ));
-    }
-    let mut contained = Vec::new();
-    let mut unanchored = Vec::new();
-    for child in &children {
-        match child_trunk_anchor(repo, child, &trunk) {
-            Some(anchor) if !contained.contains(&anchor) => contained.push(anchor),
-            Some(_) => {}
-            None => unanchored.push(child.id.as_str()),
-        }
-    }
-    let label = if task.branch.is_some() { "epic lane is unreadable" } else { "branchless epic" };
-    let mut basis = if contained.is_empty() {
-        format!(
-            "{label} with {} terminal child(ren); no child delivery anchor is contained in {trunk}, so a full receipt on any {trunk} commit stands in",
-            children.len()
-        )
-    } else {
-        format!(
-            "{label} with {} terminal child(ren); receipt must contain {} child delivery anchor(s) in {trunk}",
-            children.len(),
-            contained.len()
-        )
-    };
-    if !unanchored.is_empty() {
-        basis.push_str(&format!("; children without a trunk-contained anchor: {}", unanchored.join(", ")));
-    }
-    Ok(EpicJourneyBinding::Trunk { trunk, trunk_tip, contained, basis })
-}
-
 /// cas-74cb: why an epic's own close may defer its build proof to assembly,
 /// or `None` when it must still carry the scoped proof. Either the epic's
 /// latest passing ASSEMBLY_PROOF head contains the epic tip, or the tip is
@@ -2557,6 +2442,7 @@ fn close_build_proofs(
     }
 }
 
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 fn validate_risk_close_proofs(
     task: &Task,
     changed_paths: &[String],
@@ -2575,6 +2461,7 @@ fn validate_risk_close_proofs(
     )
 }
 
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 fn validate_risk_close_proofs_with_base(
     task: &Task,
     changed_paths: &[String],
@@ -2590,6 +2477,7 @@ fn validate_risk_close_proofs_with_base(
     )
 }
 
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 fn validate_risk_close_proofs_with_base_and_head(
     task: &Task,
     changed_paths: &[String],
@@ -7692,60 +7580,8 @@ impl CasCore {
         // so an unevidenced user-facing delivery never parks and never gets an
         // independent reviewer spawned (cas-619f). A live supervisor's
         // override (already validated above) waives it with a logged reason.
-        if close_disposition.requires_delivery_gates()
-            && task.task_type == TaskType::Epic
-            && close_repo_verified
-            && close_project_root.join("hub-web/src").is_dir()
-            && close_project_root.join("docs/qa/journeys.md").is_file()
-        {
-            // cas-e6038: an epic already contained in trunk binds its receipt
-            // to any trunk commit containing its delivery; an unmerged epic
-            // keeps the exact-tip rule.
-            let binding = match epic_journey_binding(
-                &task,
-                req.commit_receipt.as_deref(),
-                &close_project_root,
-                || task_store.get_subtasks(&task.id).map_err(|e| e.to_string()),
-            ) {
-                Ok(binding) => binding,
-                Err(problem) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {problem}"))),
-            };
-            let assembly_config = self.load_config();
-            let paths = crate::config::resolved_factory_artifact_paths(&self.cas_root, assembly_config.factory().artifacts_root.as_deref());
-            let artifacts = paths.task_dirs(&task.id)[0].clone();
-            match binding {
-                EpicJourneyBinding::ExactTip(head) => {
-                    let ctx = crate::qa_evidence::EvidenceContext {
-                        task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
-                        delivered_head: &head, notes: &task.notes, deployed_origins: &[],
-                    };
-                    match crate::qa_evidence::journeys::check_epic_journeys(&ctx) {
-                        Ok(receipt) => append_close_decision_note(task_store.as_ref(), &mut task,
-                            &format!("Epic full-suite journey receipt accepted: {} (head {head})", receipt.display())),
-                        Err(refusal) => return Ok(Self::tool_error(format!("EPIC ASSEMBLY REJECTED: {}. Next: {}", refusal.problem, refusal.command))),
-                    }
-                }
-                EpicJourneyBinding::Trunk { trunk, trunk_tip, contained, basis } => {
-                    let ctx = crate::qa_evidence::EvidenceContext {
-                        task_id: &task.id, task_artifacts_dir: &artifacts, repo: &close_project_root,
-                        delivered_head: &trunk_tip, notes: &task.notes, deployed_origins: &[],
-                    };
-                    let trunk_binding = crate::qa_evidence::journeys::TrunkBinding {
-                        trunk: &trunk, contained: &contained, artifacts_root: &paths.project_root,
-                    };
-                    match crate::qa_evidence::journeys::check_merged_epic_journeys(&ctx, &trunk_binding) {
-                        Ok(accepted) => append_close_decision_note(task_store.as_ref(), &mut task, &format!(
-                            "✅ DECISION merged-epic full-suite journey receipt accepted: {} (receipt head {}). \
-                             Basis: {basis}. Containment proof: {}.",
-                            accepted.receipt.display(), accepted.head, accepted.proof
-                        )),
-                        Err(refusal) => return Ok(Self::tool_error(format!(
-                            "EPIC ASSEMBLY REJECTED: {} ({basis}). Next: {}", refusal.problem, refusal.command
-                        ))),
-                    }
-                }
-            }
-        }
+        // cas-38e7: epics no longer need a full-suite journey receipt; the
+        // merge queue runs the journeys once.
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()
@@ -7793,17 +7629,13 @@ impl CasCore {
                     qa_receipt,
                 )
             });
-            let journey_base = commit_receipt_window.as_ref().and_then(|window| {
-                task_attribution::delivery_base(&evidence_repo, &resolved_parent_branch, window, qa_receipt)
-            });
-            match super::qa_evidence_gate::qa_evidence_close_gate_for_delivery(
+            match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
                 qa_receipt,
                 attributed_paths.as_deref(),
-                journey_base.as_deref(),
             ) {
                 Ok(notes) => {
                     for note in notes {
@@ -7915,22 +7747,6 @@ impl CasCore {
                             &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee)),
                         )
                     });
-                    // cas-12ab: in a repository that ships the fast release
-                    // rows, a delivery parks only after they passed on this
-                    // exact tip (a miss costs a CI round instead of a minute).
-                    let parking_new_tip = task.status != TaskStatus::AwaitingMerge
-                        || task.deliverables.factory_branch_anchor.as_deref() != anchor.as_deref();
-                    if parking_new_tip
-                        && let Some(tip) = anchor.as_deref()
-                        && let Some(refusal) = fast_rows_receipt_refusal(
-                            &close_project_root,
-                            tip,
-                            &resolved_parent_branch,
-                            &task.id,
-                        )
-                    {
-                        return Ok(Self::tool_error(refusal));
-                    }
                     // cas-d6eb: the blast-radius module check, made while the
                     // worker can still widen proof_targets (parking locks the
                     // scope; after verification only a supervisor fix could).
@@ -11341,38 +11157,6 @@ impl CasCore {
         )))
     }
 
-    /// Emit a `DaemonEvent::WorkerActivity { event_type = "audit_trail_gap" }` to
-    /// the supervisor TUI, fire-and-forget.
-    ///
-    /// Uses `get_agent_id()` to identify the sender; falls back to the sentinel
-    /// `"unknown-session"` when the agent ID is unavailable (e.g., no SessionStart
-    /// hook ran, `CAS_SESSION_ID` unset in CI). This ensures the gap event always
-    /// reaches the TUI even when agent metadata is missing — losing fidelity on the
-    /// sender is better than silently dropping the event.
-    ///
-    /// cas-eeab (Item 4+5): extracted from the two duplicated inline blocks in the
-    /// `match verification_store.generate_id()` arm.
-    fn emit_audit_gap_event(&self, task_id: &str, description: String) {
-        let session_id = self
-            .get_agent_id()
-            .unwrap_or_else(|_| "unknown-session".to_string());
-        let gap_event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-            session_id,
-            event_type: "audit_trail_gap".to_string(),
-            description,
-            entity_id: Some(task_id.to_string()),
-        };
-        if let Err(e) = crate::mcp::socket::send_event(&self.cas_root, &gap_event) {
-            // Fire-and-forget, but log the failure so that a double-silent failure
-            // (store write fails AND socket send fails) leaves at least a trace.
-            // cas-eeab: safe_auto autofix for silently discarded send_event result.
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "failed to emit audit_trail_gap event to daemon socket"
-            );
-        }
-    }
 }
 
 /// Audit text recorded on a `depth=light` task at close time, stating exactly
@@ -11697,6 +11481,7 @@ pub(crate) struct UncommittedEntry {
 ///   * If the worker *did* intend to commit them, they would have run
 ///     `git add` first, which promotes them to the `A ` status and the
 ///     gate catches them.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<UncommittedEntry> {
     clean_tree_receipt(project_root).tracked_dirty
 }
@@ -11734,6 +11519,7 @@ pub(crate) struct CleanTreeReceipt {
 impl CleanTreeReceipt {
     /// True only when git actually answered and reported no tracked changes.
     /// An unavailable receipt is NOT clean — it is unknown.
+    #[cfg(test)] // cas-38e7: test-only delegate to the live gate
     pub(crate) fn is_clean(&self) -> bool {
         self.unavailable.is_none() && self.tracked_dirty.is_empty()
     }
@@ -11747,6 +11533,7 @@ impl CleanTreeReceipt {
     /// This is the "everything the old code passed over in silence" path:
     /// an unavailable check, stray untracked files, and a HEAD that is not
     /// the commit the worker claims to have delivered.
+    #[cfg(test)] // cas-38e7: test-only delegate to the live gate
     pub(crate) fn discrepancy_note(&self, claimed_commit: Option<&str>) -> Option<String> {
         self.discrepancy_note_with_provenance(claimed_commit, &ReceiptProvenance::Unknown)
     }
@@ -13333,6 +13120,7 @@ fn delivery_content_anchor_at_close<'a>(
 /// ref when it exists; local_merge deliberately uses the checked-out target
 /// branch as its authority. Missing or unresolvable Git state fails closed
 /// because a delivery transition must never be based on a cached anchor alone.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn validate_current_factory_branch_tip_ancestry(
     repo_path: &std::path::Path,
     factory_branch: &str,
@@ -13881,83 +13669,6 @@ pub(crate) fn task_without_own_commits_judged(
         }
     }
     true
-}
-
-/// cas-12ab: the delivered tree ships the fast release rows (cas-src's
-/// `scripts/release-integration-gates.py`).
-const FAST_ROWS_GATE_MARKER: &str = "scripts/release-integration-gates.py";
-
-/// cas-12ab: refusal for a park whose tip has no `release-gate.sh --fast-rows`
-/// PASS receipt. The gate writes `$GIT_COMMON_DIR/cas/fast-rows/<sha>.pass`
-/// for a committed tree, so every worktree of the clone sees it. Repositories
-/// without the fast rows are never gated.
-pub(crate) fn fast_rows_receipt_refusal(
-    repo: &std::path::Path,
-    head: &str,
-    target: &str,
-    task_id: &str,
-) -> Option<String> {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-    };
-    git(&["cat-file", "-e", &format!("{head}:{FAST_ROWS_GATE_MARKER}")])?;
-    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .map(|out| std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))?;
-    let receipt = common.join("cas").join("fast-rows").join(format!("{head}.pass"));
-    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
-    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
-        return None;
-    }
-    let target = target.strip_prefix("origin/").unwrap_or(target);
-    // cas-7bce: a failed run on this exact tip names its rows and fixes; quote
-    // them so the refusal says what to change, not only what to rerun.
-    if let Some(header) = text
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix(&format!("fast-rows: FAIL {head} ")))
-    {
-        let rows = header
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("rows="))
-            .unwrap_or("unknown");
-        let fixes: Vec<&str> = text
-            .lines()
-            .skip(1)
-            .filter(|line| line.starts_with("FIX "))
-            .take(20)
-            .collect();
-        let fixes = if fixes.is_empty() {
-            "- read the failed row logs in the gate output".to_string()
-        } else {
-            fixes
-                .iter()
-                .map(|line| format!("- {line}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        return Some(format!(
-            "⚠️ FAST ROWS FAILED before {task_id} parks: `release-gate.sh --fast-rows` failed on the \
-             delivered tip {} (rows: {rows}).\n\nFix:\n{fixes}\n\nCommit the fix, rerun \
-             `./scripts/release-gate.sh --fast-rows --base origin/{target}` until it passes, then \
-             push and close again (cas-7bce).",
-            &head[..head.len().min(12)],
-        ));
-    }
-    Some(format!(
-        "⚠️ FAST ROWS REQUIRED before {task_id} parks: no `release-gate.sh --fast-rows` PASS \
-         receipt covers the delivered tip {}.\n\nIn your worktree, with everything committed, run \
-         `./scripts/release-gate.sh --fast-rows --base origin/{target}`. A PASS writes the receipt \
-         for this exact tip ({}); then push and close again. The fast rows (version literals, test \
-         shape, Markdown, script tests and more) take about a minute here, and a miss costs a CI \
-         round after the park (cas-12ab).",
-        &head[..head.len().min(12)],
-        receipt.display(),
-    ))
 }
 
 /// MERGE REQUIRED text for a close whose receipt is newer than a parked
@@ -15353,6 +15064,7 @@ pub(crate) enum MergeRealityOutcome {
 /// - `execution_note != "additive-only"` — no commit expected
 /// - `!bypass_close_gates` — delivered closes retain the merge-state guard
 /// - `effective_has_reviewable` — zero-diff tasks don't need commits
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn check_factory_branch_merge_reality(
     repo_path: &std::path::Path,
     assignee: &str,
@@ -17839,6 +17551,7 @@ pub(crate) struct EpicStatusOptions {
 }
 
 impl EpicStatusOptions {
+    #[cfg(test)] // cas-38e7: test-only delegate to the live gate
     pub(crate) const fn full_unbounded() -> Self {
         Self {
             offset: 0,
@@ -18301,6 +18014,7 @@ fn reanchored_delivery_content_in_parent(
 /// `blocks_epic_close()` so a valid anchor still blocks when its content proof
 /// reports a real drop or an unknown result even if the live branch count is
 /// zero.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn collect_epic_branch_statuses(
     subtasks: &[Task],
     parent_branch: &str,
@@ -18924,6 +18638,7 @@ fn memoized_branch_content_direction(
 /// Render the per-child branch statuses as a Markdown report for the
 /// supervisor-facing `factory_epic_status` action. Stable shape; the
 /// snapshot test in `epic_status_gate_tests` pins the exact layout.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn render_epic_status_report(
     epic_id: &str,
     parent_branch: &str,
@@ -18938,6 +18653,7 @@ pub(crate) fn render_epic_status_report(
 /// `stacked_on` is trunk-first, so the landing order is that list followed by
 /// this epic's own branch. An empty slice renders exactly the pre-existing
 /// report, which is why the plain [`render_epic_status_report`] delegates here.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn render_epic_status_report_with_stack(
     epic_id: &str,
     parent_branch: &str,
@@ -21897,180 +21613,6 @@ fn reverse_delivery_patch_applies_to_tree(
         .map_err(|error| format!("failed to verify delivery patch for `{path}`: {error}"))
 }
 
-/// Checks whether every added zero-context hunk from a delivery still occurs
-/// verbatim in the target file. Reverse-applying a normal-context patch is a
-/// stronger proof, but it spuriously fails when sibling lanes edit nearby
-/// context while leaving the delivery's own lines intact. Generated shared
-/// files can also reorder otherwise byte-identical delivery blocks while
-/// producing a strict superset, so after the contiguous-hunk proof fails we
-/// accept a multiset containment proof for every non-blank added line. A
-/// conflict-resolution union can also insert symbols into one added line, so
-/// the final fallback proves each added line's lexical tokens survive in
-/// order somewhere in the target file (GH #597).
-fn delivery_added_hunks_survive_on_tree(
-    repo_path: &std::path::Path,
-    delivery_parent: &str,
-    delivery_commit: &str,
-    target_tree: &str,
-    path: &str,
-) -> Result<bool, String> {
-    use std::process::Command;
-
-    let patch = Command::new("git")
-        .args([
-            "diff",
-            "--unified=0",
-            "--no-renames",
-            delivery_parent,
-            delivery_commit,
-            "--",
-            path,
-        ])
-        .current_dir(repo_path)
-        .measurement_output()
-        .map_err(|error| {
-            format!("failed to render zero-context delivery patch for `{path}`: {error}")
-        })?;
-    if !patch.status.success() {
-        return Err(format!(
-            "Git could not render the zero-context delivery patch for `{path}` (exit {})",
-            patch.status
-        ));
-    }
-    let patch = String::from_utf8_lossy(&patch.stdout);
-    let mut hunks = Vec::<Vec<&str>>::new();
-    let mut current = None;
-    for line in patch.lines() {
-        if line.starts_with("@@") {
-            hunks.push(Vec::new());
-            current = Some(hunks.len() - 1);
-        } else if let Some(index) = current {
-            if let Some(line) = line.strip_prefix('+') {
-                if !line.starts_with("+++") {
-                    hunks[index].push(line);
-                }
-            }
-        }
-    }
-    hunks.retain(|hunk| !hunk.is_empty());
-    if hunks.is_empty() {
-        return Ok(false);
-    }
-
-    let target = Command::new("git")
-        .args(["show", &format!("{target_tree}:{path}")])
-        .current_dir(repo_path)
-        .measurement_output()
-        .map_err(|error| format!("failed to read `{path}` from target `{target_tree}`: {error}"))?;
-    if !target.status.success() {
-        return Ok(false);
-    }
-    let target = String::from_utf8_lossy(&target.stdout);
-    let target_lines = target.lines().collect::<Vec<_>>();
-    if hunks.iter().all(|hunk| {
-        target_lines
-            .windows(hunk.len())
-            .any(|candidate| candidate == hunk.as_slice())
-    }) {
-        return Ok(true);
-    }
-
-    // GH #495: a DB-first schema regeneration may insert another lane's
-    // generated block between blocks from this delivery. The result is a
-    // strict superset even though the original multi-block hunk is no longer
-    // contiguous. Count duplicate lines so repeated field declarations still
-    // need to be present as many times as the delivery added them.
-    let mut target_line_counts = std::collections::HashMap::<&str, u32>::new();
-    for line in &target_lines {
-        *target_line_counts.entry(*line).or_default() += 1;
-    }
-    let multiset_survives = hunks
-        .iter()
-        .flatten()
-        .copied()
-        .filter(|line| !line.trim().is_empty())
-        .all(|line| {
-            let Some(count) = target_line_counts.get_mut(line) else {
-                return false;
-            };
-            if *count == 0 {
-                return false;
-            }
-            *count -= 1;
-            true
-        });
-    if multiset_survives {
-        return Ok(true);
-    }
-    let target_tokens = target_lines
-        .iter()
-        .flat_map(|target_line| {
-            target_line
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .filter(|token| !token.is_empty())
-        })
-        .collect::<Vec<_>>();
-    if hunks
-        .iter()
-        .flatten()
-        .filter(|line| !line.trim().is_empty())
-        .all(|line| {
-            let added_tokens = line
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .filter(|token| !token.is_empty())
-                .collect::<Vec<_>>();
-            if added_tokens.is_empty() {
-                return true;
-            }
-            target_tokens
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| **candidate == added_tokens[0])
-                .any(|(start, _)| {
-                    let mut cursor = start + 1;
-                    added_tokens[1..].iter().all(|token| {
-                        let Some(offset) = target_tokens[cursor..]
-                            .iter()
-                            .position(|candidate| candidate == token)
-                        else {
-                            return false;
-                        };
-                        cursor += offset + 1;
-                        true
-                    })
-                })
-        })
-    {
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn delivery_path_effect_survives_on_tree(
-    repo_path: &std::path::Path,
-    delivery_parent: &str,
-    delivery_commit: &str,
-    target_tree: &str,
-    path: &str,
-) -> Result<bool, String> {
-    if reverse_delivery_path_applies_to_tree(
-        repo_path,
-        delivery_parent,
-        delivery_commit,
-        target_tree,
-        path,
-    )? {
-        return Ok(true);
-    }
-    delivery_added_hunks_survive_on_tree(
-        repo_path,
-        delivery_parent,
-        delivery_commit,
-        target_tree,
-        path,
-    )
-}
-
 fn commit_changes_path(
     repo_path: &std::path::Path,
     commit: &str,
@@ -22436,6 +21978,7 @@ fn git_branch_name(repo_path: &std::path::Path) -> Option<String> {
 /// Prefer [`run_lightweight_structural_lint_with_scope`] for isolated factory
 /// workers (cas-dc5d) so lint evaluates the committed task range inside the
 /// worker worktree rather than shared main-checkout WIP.
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn run_lightweight_structural_lint(
     project_root: &std::path::Path,
 ) -> LightweightLintOutcome {
@@ -22466,6 +22009,7 @@ pub(crate) fn run_lightweight_structural_lint(
 /// - `committed_range_parent = None` — legacy working-tree `git diff HEAD`
 ///   (then `--cached`) in `project_root`, for non-isolated closes. Empty
 ///   diff still Passes (graceful degradation).
+#[cfg(test)] // cas-38e7: test-only delegate to the live gate
 pub(crate) fn run_lightweight_structural_lint_with_scope(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,
@@ -26770,136 +26314,6 @@ mod merge_state_gate_tests {
         git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge worker"]);
         git(p, &["push", "-q", "origin", "main"]);
         git(p, &["checkout", "-q", "factory/worker"]);
-    }
-
-    /// cas-e6038 fixture: origin/main holds the merged lane `epic/shipped`
-    /// plus a later trunk commit; `epic/open` is unmerged. Returns the repo,
-    /// its bare origin, the shipped tip and the open tip.
-    fn epic_journey_binding_repo_cas_e6038() -> (TempDir, TempDir, String, String) {
-        let (dir, bare) = handoff_repo();
-        let p = dir.path();
-        let commit_file = |name: &str| {
-            std::fs::write(p.join(name), format!("// {name}\n")).unwrap();
-            git(p, &["add", name]);
-            git(p, &["commit", "-q", "-m", name]);
-            rev_parse_local(p, "HEAD")
-        };
-        git(p, &["checkout", "-q", "-b", "epic/shipped", "main"]);
-        let shipped = commit_file("shipped.rs");
-        git(p, &["checkout", "-q", "main"]);
-        git(p, &["merge", "-q", "--no-ff", "epic/shipped", "-m", "merge shipped epic"]);
-        commit_file("later.rs");
-        git(p, &["push", "-q", "origin", "main"]);
-        git(p, &["checkout", "-q", "-b", "epic/open", "main"]);
-        let open = commit_file("open.rs");
-        git(p, &["checkout", "-q", "main"]);
-        (dir, bare, shipped, open)
-    }
-
-    fn epic_cas_e6038(branch: Option<&str>) -> Task {
-        Task {
-            id: "cas-e6038-epic".to_string(),
-            task_type: TaskType::Epic,
-            status: TaskStatus::Open,
-            branch: branch.map(str::to_string),
-            ..Default::default()
-        }
-    }
-
-    fn child_cas_e6038(id: &str, status: TaskStatus, anchor: &str) -> Task {
-        let mut child = Task {
-            id: id.to_string(),
-            status,
-            ..Default::default()
-        };
-        child.deliverables.factory_branch_anchor = Some(anchor.to_string());
-        child
-    }
-
-    fn unread_children_cas_e6038() -> Result<Vec<Task>, String> {
-        panic!("a readable epic tip must not read children")
-    }
-
-    /// cas-e6038: an epic tip contained in origin/main binds to trunk; an
-    /// unmerged tip keeps the exact-tip rule, and a merge only in the local
-    /// trunk does not count while origin is configured.
-    #[test]
-    fn merged_epic_binds_to_trunk_and_unmerged_keeps_exact_tip_cas_e6038() {
-        let (dir, _bare, shipped, open) = epic_journey_binding_repo_cas_e6038();
-        let p = dir.path();
-        let origin_main = rev_parse_local(p, "origin/main");
-        match epic_journey_binding(&epic_cas_e6038(Some("epic/shipped")), None, p, unread_children_cas_e6038) {
-            Ok(EpicJourneyBinding::Trunk { trunk, trunk_tip, contained, basis }) => {
-                assert_eq!(trunk, "origin/main");
-                assert_eq!(trunk_tip, origin_main);
-                assert_eq!(contained, vec![shipped.clone()]);
-                assert!(basis.contains(&shipped), "{basis}");
-            }
-            other => panic!("a merged epic binds to trunk: {other:?}"),
-        }
-        // An explicit commit receipt is the tip it answers for.
-        assert!(matches!(
-            epic_journey_binding(&epic_cas_e6038(None), Some(&shipped), p, unread_children_cas_e6038),
-            Ok(EpicJourneyBinding::Trunk { .. })
-        ));
-        assert_eq!(
-            epic_journey_binding(&epic_cas_e6038(Some("epic/open")), None, p, unread_children_cas_e6038),
-            Ok(EpicJourneyBinding::ExactTip(open.clone()))
-        );
-        git(p, &["merge", "-q", "--no-ff", "epic/open", "-m", "local-only merge"]);
-        assert_eq!(
-            epic_journey_binding(&epic_cas_e6038(Some("epic/open")), None, p, unread_children_cas_e6038),
-            Ok(EpicJourneyBinding::ExactTip(open)),
-            "a local trunk merge must not masquerade as landed"
-        );
-        assert_eq!(
-            epic_journey_binding(&epic_cas_e6038(None), Some("f".repeat(40).as_str()), p, unread_children_cas_e6038),
-            Err("epic journey tip is unreadable".to_string())
-        );
-    }
-
-    /// cas-e6038: a branchless epic (or one whose lane was deleted) with
-    /// terminal children binds to trunk commits containing every child
-    /// anchor that trunk holds; with none, trunk membership alone binds.
-    #[test]
-    fn branchless_epic_binds_to_child_anchors_in_trunk_cas_e6038() {
-        let (dir, _bare, shipped, open) = epic_journey_binding_repo_cas_e6038();
-        let p = dir.path();
-        let children = || {
-            Ok(vec![
-                child_cas_e6038("cas-e6038-a", TaskStatus::Closed, &shipped),
-                child_cas_e6038("cas-e6038-b", TaskStatus::Cancelled, &open),
-                child_cas_e6038("cas-e6038-c", TaskStatus::Closed, &"f".repeat(40)),
-            ])
-        };
-        match epic_journey_binding(&epic_cas_e6038(None), None, p, children) {
-            Ok(EpicJourneyBinding::Trunk { trunk, contained, basis, .. }) => {
-                assert_eq!(trunk, "origin/main");
-                assert_eq!(contained, vec![shipped.clone()]);
-                assert!(basis.starts_with("branchless epic with 3 terminal"), "{basis}");
-                assert!(basis.contains("cas-e6038-b, cas-e6038-c"), "{basis}");
-            }
-            other => panic!("a branchless epic binds to its children's trunk anchors: {other:?}"),
-        }
-        // A deleted lane with only off-trunk anchors: any trunk commit binds.
-        match epic_journey_binding(&epic_cas_e6038(Some("epic/deleted")), None, p, || {
-            Ok(vec![child_cas_e6038("cas-e6038-b", TaskStatus::Closed, &open)])
-        }) {
-            Ok(EpicJourneyBinding::Trunk { contained, basis, .. }) => {
-                assert!(contained.is_empty());
-                assert!(basis.starts_with("epic lane is unreadable"), "{basis}");
-                assert!(basis.contains("any origin/main commit stands in"), "{basis}");
-            }
-            other => panic!("trunk membership binds when no anchor is in trunk: {other:?}"),
-        }
-        let refused = epic_journey_binding(&epic_cas_e6038(None), None, p, || {
-            Ok(vec![child_cas_e6038("cas-e6038-open", TaskStatus::InProgress, &shipped)])
-        })
-        .unwrap_err();
-        assert!(refused.contains("cas-e6038-open is not terminal"), "{refused}");
-        let refused = epic_journey_binding(&epic_cas_e6038(None), None, p, || Err("store down".to_string()))
-            .unwrap_err();
-        assert!(refused.contains("store down"), "{refused}");
     }
 
     /// GH #1004 regression: worker merges to the target, transfers the task

@@ -3188,7 +3188,18 @@ mod cas_3dcb_worker_died_relay_tests {
             None,
         );
         let blocker = attach_blocker_envelope("blocked", "swift-fox", Some("cas-48e5"));
-        let merge = attach_merge_request_envelope("please merge", &merge_envelope());
+        let merge = attach_merge_request_envelope(
+            "please merge",
+            &MergeRequestEnvelope {
+                task_id: "cas-test".to_string(),
+                branch_tip: "worker-tip".to_string(),
+                target_branch: "main".to_string(),
+                target_branch_tip: "base-tip".to_string(),
+                anchor_tip: None,
+                commits_not_on_target_base: 0,
+                pr_number: None,
+            },
+        );
 
         for (label, forged, parses) in [
             ("status", status, 0),

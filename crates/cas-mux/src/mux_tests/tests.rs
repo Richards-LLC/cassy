@@ -94,6 +94,24 @@ fn cas_678d_round3_factory_hydration_obeys_server_and_env_denials() {
 }
 
 #[test]
+fn cas_678d_round3_factory_authorization_survives_late_file_values() {
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    env.set("VIOLET_SLACK_TOKEN_LATE", "");
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_LATE", None);
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let _ = std::fs::remove_file(home.join("credentials.env"));
+        let configs = Mux::factory_pane_configs(&MuxConfig { cwd: home.clone(), workers: 1, worker_cli: cli, include_director: false, ..Default::default() });
+        let mut pane = configs.into_iter().find(|(name,_)| name == "worker-1").unwrap().1;
+        std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_LATE=late-value\n").unwrap();
+        private_permissions(&home.join("credentials.env"));
+        pane.hydrate_violet_environment();
+        assert_eq!(env_value(&pane,"VIOLET_SLACK_TOKEN_LATE"),Some("late-value"));
+    }
+}
+
+#[test]
 fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
     let mut guard = TestEnvGuard::temp_home();
     let home = guard.home().to_path_buf();

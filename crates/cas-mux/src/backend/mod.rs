@@ -127,11 +127,6 @@ pub(super) fn finish_worker_config(
     };
     let project_grants = project_proxy_credential_names(cas_root, &policy);
     let proxy_environment = proxy_credential_environment(cas_root, &policy, config);
-    for (name, _) in &proxy_environment {
-        if cas_pty::violet_env::canonical_credential(name) {
-            config.grant_worker_credential(name);
-        }
-    }
     config
         .env
         .extend(proxy_environment.into_iter().filter(|(name, _)| {
@@ -351,7 +346,7 @@ fn user_proxy_config_document() -> Option<toml::Value> {
 fn proxy_credential_environment(
     cas_root: Option<&PathBuf>,
     policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy,
-    config: &PtyConfig,
+    config: &mut PtyConfig,
 ) -> Vec<(String, String)> {
     let mut names: BTreeSet<String> = policy
         .worker_credential_env
@@ -386,19 +381,21 @@ fn proxy_credential_environment(
     // Canonical Violet values must match the direct harness/probe resolver;
     // a later shell-profile assignment must not replace the private-file value.
     let violet = cas_pty::violet_env::resolved_environment(&config.env, &config.env_remove);
-    let registered = if policy.denies_server("violet") {
-        BTreeSet::new()
-    } else {
-        cas_pty::violet_env::registration_references(config.effective_command(), &violet).1
-    };
-    // The shared proxy collector is also the authorization boundary for native
-    // harness refs. Never pre-inject another account's canonical Violet token.
-    names.retain(|name| {
-        !cas_pty::violet_env::canonical_credential(name) || registered.contains(name)
-    });
-    names.extend(registered.into_iter().filter(|name| {
-        cas_pty::violet_env::canonical_credential(name) && !policy.denies_env(name)
-    }));
+    if matches!(config.effective_command(), "claude" | "codex") {
+        let registered = if policy.denies_server("violet") {
+            BTreeSet::new()
+        } else {
+            cas_pty::violet_env::registration_references(config.effective_command(), &violet).1
+        };
+        // Apply the existing role policy before native registration refs can
+        // grant credentials. Never pre-inject another account's Violet token.
+        names.retain(|name| !cas_pty::violet_env::canonical_credential(name) || registered.contains(name));
+        for name in registered.into_iter().filter(|name| cas_pty::violet_env::canonical_credential(name) && !policy.denies_env(name)) {
+            // Authorization does not depend on whether today's file has a value.
+            config.grant_worker_credential(&name);
+            names.insert(name);
+        }
+    }
     names
         .into_iter()
         .filter_map(|name| {

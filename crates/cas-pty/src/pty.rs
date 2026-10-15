@@ -1070,7 +1070,7 @@ impl PtyConfig {
             .find_map(|(k, v)| (k == "CAS_FACTORY_MODE").then_some(v.as_str()))
             == Some("1");
         if role == Some("worker") || (factory && role != Some("supervisor")) {
-            let grants: std::collections::BTreeSet<String> = self
+            let mut grants: std::collections::BTreeSet<String> = self
                 .env
                 .iter()
                 .filter_map(|(k, v)| {
@@ -1092,7 +1092,9 @@ impl PtyConfig {
                     .filter(|k| crate::violet_env::canonical_credential(k)),
             );
             let resolved = crate::violet_env::resolved_environment(&self.env, &self.env_remove);
-            names.extend(crate::violet_env::registration_references(&harness, &resolved).1);
+            let registered = crate::violet_env::registration_references(&harness, &resolved).1;
+            grants.retain(|name| registered.contains(name));
+            names.extend(registered);
             for name in names {
                 if crate::violet_env::canonical_credential(&name) && !grants.contains(&name) {
                     self.env.retain(|(k, _)| k != &name);

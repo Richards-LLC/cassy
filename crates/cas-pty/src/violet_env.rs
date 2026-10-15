@@ -371,17 +371,28 @@ mod tests {
         guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
         guard.set("VIOLET_SLACK_TOKEN_FIXTURE", "");
         for harness in ["claude", "codex"] {
-            for value in ["first-fixture", "second-fixture"] {
+            for (value, worker, granted) in [
+                ("first-fixture", false, false),
+                ("second-fixture", false, false),
+                ("allowed-worker", true, true),
+                ("denied-worker", true, false),
+            ] {
                 private_file(
                     &home.join("credentials.env"),
                     &format!("export VIOLET_SLACK_TOKEN_FIXTURE='{value}'\n"),
                 );
-                let config = crate::PtyConfig {
+                let mut config = crate::PtyConfig {
                     command: harness.into(),
                     cwd: Some(home.clone()),
                     env: vec![("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()))],
                     ..Default::default()
                 };
+                if worker {
+                    config.env.push(("CAS_AGENT_ROLE".into(), "worker".into()));
+                }
+                if granted {
+                    config.grant_worker_credential("VIOLET_SLACK_TOKEN_FIXTURE");
+                }
                 let mut pty = crate::Pty::spawn("violet-launch-fixture", config).unwrap();
                 let mut output = Vec::new();
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -395,7 +406,11 @@ mod tests {
                 })
                 .await
                 .unwrap();
-                assert!(String::from_utf8_lossy(&output).contains(value));
+                assert_eq!(
+                    String::from_utf8_lossy(&output).contains(value),
+                    !worker || granted,
+                    "{harness} value={value}"
+                );
             }
         }
     }

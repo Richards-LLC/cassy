@@ -112,6 +112,38 @@ fn cas_678d_round3_factory_authorization_survives_late_file_values() {
 }
 
 #[test]
+fn cas_678d_round4_proxy_and_explicit_grants_survive_native_scope() {
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    env.set("VIOLET_SLACK_TOKEN_PROXY_FIXTURE", "");
+    env.set("VIOLET_SLACK_TOKEN_SELECTED", "");
+    std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_PROXY_FIXTURE=proxy-value\nVIOLET_SLACK_TOKEN_SELECTED=selected-value\n").unwrap();
+    private_permissions(&home.join("credentials.env"));
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_SELECTED", None);
+    let root = home.join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    let user = home.join(".config/code-mode-mcp/config.toml");
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    let proxy = "[servers.violet]\ntransport='http'\nauth='env:VIOLET_SLACK_TOKEN_PROXY_FIXTURE'\n";
+    for source in ["project", "user", "explicit"] {
+        std::fs::write(root.join("proxy.toml"), if source == "project" {proxy} else {""}).unwrap();
+        std::fs::write(&user, if source == "user" {proxy} else {""}).unwrap();
+        for (denial, allowed) in [("", true), ("supervisor_only_mcp=['violet']", false), ("supervisor_only_env=['VIOLET_SLACK_TOKEN_PROXY_FIXTURE']",false)] {
+            std::fs::write(root.join("config.toml"), format!("[factory]\n{denial}\n{}", if source == "explicit" { "worker_credential_env=['VIOLET_SLACK_TOKEN_PROXY_FIXTURE']\n" } else { "" })).unwrap();
+            for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+                let configs = Mux::factory_pane_configs(&MuxConfig { cwd: home.join("project"), cas_root: Some(root.clone()), workers:1, worker_cli: cli, include_director:false, ..Default::default() });
+                let mut pane = configs.into_iter().find(|(name,_)| name == "worker-1").unwrap().1;
+                pane.hydrate_violet_environment();
+                assert_eq!(env_value(&pane,"VIOLET_SLACK_TOKEN_PROXY_FIXTURE"), if allowed {Some("proxy-value")} else {None}, "{source} {denial} {cli:?}");
+                if !allowed { assert!(pane.env_remove.contains(&"VIOLET_SLACK_TOKEN_PROXY_FIXTURE".into())); }
+            }
+        }
+    }
+}
+
+#[test]
 fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
     let mut guard = TestEnvGuard::temp_home();
     let home = guard.home().to_path_buf();

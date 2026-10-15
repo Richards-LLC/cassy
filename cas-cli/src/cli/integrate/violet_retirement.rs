@@ -1063,6 +1063,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cas_678d_round4_other_managed_account_is_never_rebound() {
+        let (env, probe) = update_fixture();
+        let path = Scope::User.config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = format!("# managed\n[servers.violet]\ntransport='http'\nurl='{}'\nauth='env:VIOLET_SLACK_TOKEN_OTHER_ACCOUNT'\n", violet_hub_url());
+        std::fs::write(&path,&original).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),original);
+        assert!(report.authenticated.is_empty());
+        assert!(probe.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn cas_678d_round4_update_names_refused_credentials_path_and_fix() {
+        use std::os::unix::fs::PermissionsExt;
+        let (env, probe) = update_fixture();
+        let path = env.home().join("credentials.env");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(report.warnings.iter().any(|(p,w)| p == &path && w.contains("chmod 600") && w.contains("owner")));
+        assert!(probe.calls.borrow().is_empty());
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777,0o644);
+    }
+
     fn update_fixture() -> (crate::test_support::TestEnvGuard, UpdateProbe) {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         // Do not inherit the runner's real credentials, even as fallback candidates.

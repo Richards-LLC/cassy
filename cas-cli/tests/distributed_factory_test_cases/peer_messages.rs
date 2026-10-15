@@ -563,6 +563,15 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert_eq!(replies.len(), 1);
     assert!(replies[0].prompt.ends_with("yes"));
     assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
+    for (kind, blocker, wakes) in [(Some("blocker"), false, true), (None, true, true), (Some("status"), false, false)] {
+        let body = format!("peer intent {kind:?} blocker={blocker}");
+        coordinate(&service_a, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"peer intent", "message":body, "kind":kind, "blocker":blocker})).await.unwrap();
+        let bb = b.clone();
+        let rows = tokio::task::spawn_blocking(move || { tick(&bb, "b"); inbox(&bb) }).await.unwrap();
+        let row = rows.iter().find(|row| row.prompt.ends_with(&body)).unwrap();
+        let envelope = parse_envelope(&row.prompt).unwrap();
+        assert_eq!(envelope.wakes_idle(), wakes, "{envelope:?}");
+    }
 }
 
 fn public_outbox_status(root: &Path, id: &str) -> String {

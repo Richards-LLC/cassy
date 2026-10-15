@@ -905,6 +905,8 @@ impl CasService {
                     &message,
                     req.in_reply_to,
                     req.urgent.unwrap_or(false),
+                    req.kind.as_deref(),
+                    req.blocker.unwrap_or(false),
                 )
                 .await?
         {

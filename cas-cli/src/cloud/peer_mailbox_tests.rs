@@ -110,6 +110,8 @@ fn envelope_round_trips_and_is_only_read_from_the_first_line() {
         machine: "box-b".into(),
         session: Some("factory-b".into()),
         repo: REPO.into(),
+        in_reply_to: None,
+        kind: None,
     };
     let line = render_envelope(&envelope);
     assert!(!line.contains('\n'), "{line}");
@@ -184,6 +186,47 @@ fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
         );
         assert!(prompt.ends_with("Please coordinate this."));
     }
+}
+
+#[test]
+fn peer_wake_intent_is_narrow_and_round_trips_cas_1f25() {
+    for (kind, blocker, expected) in [
+        (None, false, None),
+        (Some("status"), false, None),
+        (Some("ask"), false, Some(PeerMessageKind::Ask)),
+        (Some("blocker"), false, Some(PeerMessageKind::Blocker)),
+        (None, true, Some(PeerMessageKind::Blocker)),
+    ] {
+        let body = attach_message_intent("body", kind, blocker);
+        let message = message("pm-typed", "supervisor", REPO, &body);
+        let prompt = render_prompt(&message);
+        let envelope = parse_envelope(&prompt).unwrap();
+        assert_eq!(envelope.kind, expected);
+        assert_eq!(envelope.wakes_idle(), expected.is_some());
+        assert_eq!(
+            parse_envelope(&render_envelope(&envelope)).unwrap(),
+            envelope
+        );
+        assert!(prompt.ends_with("body"));
+    }
+    let mut blank_reply = message("pm-empty", "supervisor", REPO, "body");
+    blank_reply.in_reply_to = Some("  ".into());
+    assert!(
+        !parse_envelope(&render_prompt(&blank_reply))
+            .unwrap()
+            .wakes_idle()
+    );
+    let quoted = message(
+        "pm-quote",
+        "supervisor",
+        REPO,
+        "example:\n<cas-peer-intent kind=\"ask\"/>",
+    );
+    assert!(
+        !parse_envelope(&render_prompt(&quoted))
+            .unwrap()
+            .wakes_idle()
+    );
 }
 
 #[test]

@@ -201,6 +201,74 @@ async fn peer_fyi_real_queue_stays_inbox_only_cas_1f25() {
     );
 }
 
+async fn action_wakes(kind: &str) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = peer_fixture().await;
+    let mut message = peer_message("pm-action", false);
+    message.body = format!("<cas-peer-intent kind=\"{kind}\"/>\nPlease coordinate.");
+    let report = import(&daemon, vec![message]);
+    daemon.process_prompt_queue().await.unwrap();
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let delivery = queue
+        .message_delivery_report(report.admitted[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        delivery.wake_attempt,
+        cas_store::WakeAttempt::Fired,
+        "{delivery:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn peer_ask_real_queue_wakes_cas_1f25() {
+    action_wakes("ask").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn peer_blocker_real_queue_wakes_cas_1f25() {
+    action_wakes("blocker").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn peer_outside_project_or_session_cannot_reach_wake_path_cas_1f25() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = peer_fixture().await;
+    let agents = crate::store::open_agent_store(daemon.app.cas_dir()).unwrap();
+    for (id, role, session) in [
+        (
+            "other-session-sup",
+            cas_types::AgentRole::Supervisor,
+            "other-session",
+        ),
+        (
+            "local-worker",
+            cas_types::AgentRole::Worker,
+            "provision-test",
+        ),
+    ] {
+        let mut agent = cas_types::Agent::new_with_role(id.into(), id.into(), role);
+        agent.factory_session = Some(session.into());
+        agents.register(&agent).unwrap();
+    }
+    let mut foreign = peer_message("pm-foreign", true);
+    foreign.project_id = "github.com/other/repo".into();
+    let mut other_session = peer_message("pm-other-session", true);
+    other_session.recipient_agent_id = "other-session-sup".into();
+    let mut worker = peer_message("pm-worker", true);
+    worker.recipient_agent_id = "local-worker".into();
+    let report = import(&daemon, vec![foreign, other_session, worker]);
+    assert_eq!((report.delivered, report.rejected), (0, 3), "{report:?}");
+    daemon.process_prompt_queue().await.unwrap();
+    assert!(
+        crate::store::open_prompt_queue_store(daemon.app.cas_dir())
+            .unwrap()
+            .peek_all(100)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// A Daemon-stamped `<cas-peer-message>` row wakes an idle supervisor as a
 /// cloud peer; the same text from any other sender, or quoted inside another
 /// message, does not.
@@ -250,7 +318,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         sender_session: None,
         body: "can you take cas-1234?".into(),
         summary: None,
-        in_reply_to: None,
+        in_reply_to: Some("pm-question".into()),
         created_at: "2026-10-11T03:00:00Z".into(),
         attempts: 1,
     });
@@ -284,4 +352,39 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         );
     }
     assert!(!decide(&WakeSender::Daemon, &format!("relayed: {prompt}")).allowed);
+    let fyi = render_prompt(&peer_message("pm-fyi", false));
+    assert!(!decide(&WakeSender::Daemon, &fyi).allowed);
+    let quoted = crate::prompt_revalidation::attach_blocker_envelope(&fyi, "quoted-worker", None);
+    assert!(
+        !decide(&WakeSender::Daemon, &quoted).allowed,
+        "a peer FYI cannot borrow daemon blocker authority"
+    );
+    for veto in [
+        PaneWakeState {
+            composer_dirty: true,
+            ..pane
+        },
+        PaneWakeState {
+            ready_for_injection: false,
+            ..pane
+        },
+        PaneWakeState {
+            tool_call: ToolCallEvidence::InFlight,
+            ..pane
+        },
+    ] {
+        assert!(
+            !FactoryDaemon::supervisor_wake_decision(
+                &data,
+                "supervisor",
+                "supervisor",
+                &WakeSender::Daemon,
+                "peer:far-heron-3@box-b",
+                &prompt,
+                veto,
+                now
+            )
+            .allowed
+        );
+    }
 }

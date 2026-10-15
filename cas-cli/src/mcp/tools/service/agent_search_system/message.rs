@@ -4611,6 +4611,93 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
+    async fn stale_source_merge_request_gh1179(offline: bool) {
+        let _env = TestEnvGuard::temp_home();
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare"]);
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        std::fs::create_dir(repo.join(".cas")).unwrap();
+        std::fs::write(repo.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"cas-gh1179-message-test\"\n").unwrap();
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(repo, &["add", "base.txt"]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(repo, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        let branch = "factory/worker-a-cas-874e";
+        git(repo, &["checkout", "-qb", branch]);
+        let sha = |reference: &str| crate::git_evidence::resolve_branch_sha(repo, reference).unwrap();
+        let stale_tip = sha("HEAD");
+        git(repo, &["push", "-q", "origin", "main", branch]);
+        std::fs::write(repo.join("delivery.txt"), "unmerged delivery\n").unwrap();
+        git(repo, &["add", "delivery.txt"]);
+        git(repo, &["commit", "-qm", "fix(cas-874e): live published delivery"]);
+        let published_tip = sha("HEAD");
+        git(repo, &["push", "-q", "origin", branch]);
+        git(repo, &["checkout", "-q", "main"]);
+        // Another checkout pushed the continuation; both refs cached here
+        // still name the already-integrated predecessor.
+        git(repo, &["update-ref", &format!("refs/heads/{branch}"), &stale_tip]);
+        git(repo, &["update-ref", &format!("refs/remotes/origin/{branch}"), &stale_tip]);
+        assert!(!crate::git_evidence::git_commit_is_ancestor(repo, &published_tip, "main"));
+        if offline {
+            git(repo, &["remote", "set-url", "origin", project.path().join("missing-origin").to_str().unwrap()]);
+        }
+
+        let cas_root = repo.join(".cas");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        let mut worker = Agent::new("worker-id".into(), "worker-a".into());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).unwrap();
+        let mut supervisor = Agent::new("supervisor-id".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let tasks = core.open_task_store().unwrap();
+        let mut task = Task::new("cas-874e".into(), "live origin source".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some(worker.name);
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-gh1179-message-test".into(), target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let mut request = message_request(true);
+        request.task_id = Some(task.id);
+        let response = response_text(service.message_send(request).await.unwrap());
+        assert!(!response.contains("Merge already landed"), "{response}");
+        if offline {
+            assert!(response.contains("freshness unavailable"), "{response}");
+            assert!(response.contains("No merge request was queued"), "{response}");
+        } else {
+            assert!(response.contains("Message queued"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let envelope = rows.iter().find_map(|row|
+                crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+            ).expect("live source merge request reaches supervisor queue");
+            assert_eq!(envelope.branch_tip, published_tip);
+            assert_eq!(envelope.target_branch_tip, stale_tip);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_request_refreshes_stale_source_before_landed_suppression_gh1179() {
+        stale_source_merge_request_gh1179(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_request_failed_source_refresh_never_claims_landed_gh1179() {
+        stale_source_merge_request_gh1179(true).await;
+    }
+
     /// GH #734: a worker in one factory session must not inherit the newest
     /// supervisor from a sibling session on the same clone. Explicit names
     /// remain valid same-clone recipients, and their rows belong to the named

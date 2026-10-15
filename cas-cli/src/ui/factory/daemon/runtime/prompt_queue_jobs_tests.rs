@@ -558,9 +558,13 @@ fn another_childs_jobs_share_the_runtime_and_come_back_typed() {
     });
     done.sort_by_key(|result| result.kind);
     assert_eq!(done[0].kind, "DirectorSnapshot");
-    let value = done.remove(0).outcome.unwrap();
+    let ExternalOutcome::Done(value) = done.remove(0).outcome.unwrap() else {
+        panic!("the job ran");
+    };
     assert_eq!(value.downcast_ref::<u32>(), Some(&41));
-    let read = done.remove(0).outcome.unwrap();
+    let ExternalOutcome::Done(read) = done.remove(0).outcome.unwrap() else {
+        panic!("the read ran");
+    };
     assert_eq!(read.downcast_ref::<bool>(), Some(&true), "no read context is wired in this test");
     assert!(jobs.take_selection().is_none(), "external results never look like a selection");
 }
@@ -672,4 +676,88 @@ fn an_exhausted_stamp_is_deferred_not_dropped() {
         assert!(Instant::now() < deadline, "the deferred release never landed");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn refresh_spec(kind: &'static str, key: &str, lane: Lane, generation: u64) -> super::super::jobs::JobSpec {
+    super::super::jobs::JobSpec {
+        kind,
+        key: key.to_string(),
+        lane,
+        criticality: super::super::jobs::Criticality::Refresh,
+        generation,
+        budget: Duration::from_secs(5),
+    }
+}
+
+/// C2 review: a full lane that drops a queued refresh job tells that job's
+/// owner, not only the submitter that displaced it, so its in-flight slot
+/// clears.
+#[test]
+fn a_dropped_job_is_reported_to_its_owner() {
+    let writer = TestWriter::start(false);
+    let mut jobs = QueueJobs::start_with_capacity(
+        LaneWiring {
+            reader: None,
+            writer: Arc::new(SharedWriter(Arc::clone(&writer))),
+        },
+        1,
+    );
+    // Hold the blocking lane busy so the next jobs queue.
+    let (release, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    jobs.submit_external(refresh_spec("Busy", "busy", Lane::Blocking, 1), move || {
+        let _ = held.lock().unwrap().recv();
+        Box::new(())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    jobs.submit_external(
+        refresh_spec("WorkerHealthProbe", "WorkerHealthProbe:worker-a", Lane::Blocking, 2),
+        || Box::new(()),
+    );
+    // A third refresh job on the full lane displaces the queued probe.
+    let displaced = jobs.submit_external(
+        refresh_spec("DirectorSnapshot", "DirectorSnapshot", Lane::Blocking, 3),
+        || Box::new(()),
+    );
+    assert_eq!(
+        displaced,
+        super::super::jobs::Submitted::QueuedDroppedOldest {
+            dropped_key: "WorkerHealthProbe:worker-a".into()
+        }
+    );
+    jobs.apply_completions();
+    let dropped = jobs.take_external_completions();
+    assert_eq!(dropped.len(), 1, "exactly the displaced job is reported");
+    assert_eq!(dropped[0].key, "WorkerHealthProbe:worker-a");
+    assert_eq!(dropped[0].kind, "WorkerHealthProbe");
+    assert_eq!(dropped[0].generation, 2);
+    assert!(matches!(dropped[0].outcome, Ok(ExternalOutcome::Dropped)));
+    release.send(()).unwrap();
+
+    // The queue's own owner: a dropped retraction read clears its slot, so
+    // the next retraction is not refused forever.
+    let (release, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    jobs.submit_external_read(refresh_spec("Busy", "busy-read", Lane::Read, 4), move |_| {
+        let _ = held.lock().unwrap().recv();
+        Box::new(())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let inboxes = tempfile::tempdir().unwrap();
+    jobs.submit_inbox_retraction(
+        "supervisor",
+        InboxPruner::for_dir(inboxes.path().to_path_buf()),
+        inboxes.path().to_path_buf(),
+        Box::new(|_| Ok(data(Vec::new()))),
+    );
+    assert!(jobs.retractions.contains_key("supervisor"));
+    jobs.submit_external_read(refresh_spec("ReminderScan", "ReminderScan", Lane::Read, 5), |_| {
+        Box::new(())
+    });
+    jobs.apply_completions();
+    assert!(
+        !jobs.retractions.contains_key("supervisor"),
+        "the dropped retraction no longer holds its slot"
+    );
+    release.send(()).unwrap();
 }

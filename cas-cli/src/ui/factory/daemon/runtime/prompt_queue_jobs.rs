@@ -179,6 +179,28 @@ pub(crate) enum QueueJobOutcome {
     /// Another daemon child's job on the same runtime (factory loop v2 C2):
     /// its own result type, handed back by [`QueueJobs::take_external_completions`].
     External(Box<dyn std::any::Any + Send>),
+    /// The lane dropped this refresh job to make room (or the lane was full
+    /// of critical work). It never ran; its owner must clear its in-flight
+    /// state (C2 review).
+    Dropped,
+}
+
+/// A finished job submitted by another child through
+/// [`QueueJobs::submit_external`]. A job that panicked has `outcome` Err.
+pub(crate) enum ExternalOutcome {
+    /// The job ran and returned this value.
+    Done(Box<dyn std::any::Any + Send>),
+    /// The lane dropped the job before it ran: clear its in-flight slot.
+    Dropped,
+}
+
+/// Who learns a refresh job's result, kept so a drop can be reported to the
+/// job's owner rather than only to whoever's submit displaced it.
+#[derive(Debug, Clone, Copy)]
+struct JobOwner {
+    kind: &'static str,
+    generation: u64,
+    external: bool,
 }
 
 /// Where queue jobs run. `Inline` runs each job on the submitting thread
@@ -567,7 +589,11 @@ pub(crate) struct QueueJobs {
     /// Retractions waiting for their fresh read: recipient -> (pruner, repo).
     retractions: HashMap<String, (InboxPruner, PathBuf)>,
     /// Finished jobs other children submitted to this runtime, until taken.
-    external: Vec<JobResult<Box<dyn std::any::Any + Send>>>,
+    external: Vec<JobResult<ExternalOutcome>>,
+    /// The owner of each refresh key last submitted, by key.
+    job_owners: HashMap<String, JobOwner>,
+    /// Dropped jobs, reported as results on the next apply.
+    dropped: Vec<JobResult<QueueJobOutcome>>,
     mirror_in_flight: bool,
     mirror_state: Option<Box<super::MirrorScanState>>,
     config: ConfigCache,
@@ -594,6 +620,12 @@ impl QueueJobs {
         Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(LANE_CAPACITY, wiring))))
     }
 
+    /// Jobs on explicit wiring with a small lane capacity (tests: drops).
+    #[cfg(test)]
+    pub(crate) fn start_with_capacity(wiring: LaneWiring, capacity: usize) -> Self {
+        Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(capacity, wiring))))
+    }
+
     /// Every job runs on the submitting thread before `submit` returns.
     #[cfg(test)]
     pub(crate) fn inline() -> Self {
@@ -611,6 +643,8 @@ impl QueueJobs {
             submitted_stamps: HashSet::new(),
             retractions: HashMap::new(),
             external: Vec::new(),
+            job_owners: HashMap::new(),
+            dropped: Vec::new(),
             mirror_in_flight: false,
             mirror_state: Some(Box::default()),
             config: ConfigCache::default(),
@@ -671,7 +705,7 @@ impl QueueJobs {
             generation,
             budget: QUEUE_JOB_BUDGET,
         };
-        let submitted = self.exec.submit(spec, move || {
+        let submitted = self.submit_job(spec, false, move || {
             let selection = select(&request, generation);
             ready.store(true, Ordering::Release);
             QueueJobOutcome::Selected(selection)
@@ -722,7 +756,7 @@ impl QueueJobs {
         };
         let refused = (stamp != QueueStamp::Settled)
             .then(|| (cas_dir.clone(), recipient.clone(), stamp.clone()));
-        let submitted = self.exec.submit(spec, move || {
+        let submitted = self.submit_job(spec, false, move || {
             let error = if stamp == QueueStamp::Settled {
                 None
             } else {
@@ -874,7 +908,7 @@ impl QueueJobs {
             generation,
             budget: REVALIDATE_FRESH_BUDGET,
         };
-        let submitted = self.exec.submit_read(spec, move |stores| {
+        let submitted = self.submit_job_read(spec, false, move |stores| {
             let data = fresh(stores);
             QueueJobOutcome::Revalidated {
                 recipient: owned,
@@ -900,7 +934,7 @@ impl QueueJobs {
             generation,
             budget: INBOX_PRUNE_BUDGET,
         };
-        self.exec.submit(spec, move || {
+        self.submit_job(spec, false, move || {
             let report = prune_inbox_from_fresh(&pruner, &recipient, &data, &repo_root);
             QueueJobOutcome::Pruned(report)
         });
@@ -926,7 +960,7 @@ impl QueueJobs {
             generation,
             budget: MIRROR_WRITE_BUDGET,
         };
-        let submitted = self.exec.submit(spec, move || {
+        let submitted = self.submit_job(spec, false, move || {
             scan(&mut state);
             QueueJobOutcome::Mirrored(state)
         });
@@ -943,7 +977,9 @@ impl QueueJobs {
     /// waits for [`Self::take_selection`], a fresh read starts its prune.
     pub(crate) fn apply_completions(&mut self) {
         self.ready.store(false, Ordering::Release);
-        for result in self.exec.drain() {
+        let mut finished = std::mem::take(&mut self.dropped);
+        finished.extend(self.exec.drain());
+        for result in finished {
             let outcome = match result.outcome {
                 Ok(outcome) => outcome,
                 Err(panicked) => {
@@ -1043,11 +1079,48 @@ impl QueueJobs {
                     self.mirror_in_flight = false;
                     self.mirror_state = Some(state);
                 }
+                QueueJobOutcome::Dropped => {
+                    let external = self
+                        .job_owners
+                        .get(&result.key)
+                        .is_some_and(|owner| owner.external);
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        kind = result.kind,
+                        key = %result.key,
+                        "factory loop v2: a full lane dropped a queued refresh job"
+                    );
+                    if external {
+                        self.external.push(JobResult {
+                            kind: result.kind,
+                            key: result.key,
+                            generation: result.generation,
+                            outcome: Ok(ExternalOutcome::Dropped),
+                            elapsed: Duration::ZERO,
+                            writer_wait: Duration::ZERO,
+                            over_budget: false,
+                        });
+                        continue;
+                    }
+                    match result.kind {
+                        "RevalidateFresh" => {
+                            if let Some(recipient) = result.key.strip_prefix("RevalidateFresh:inbox:") {
+                                self.retractions.remove(recipient);
+                            }
+                        }
+                        "MirrorWrite" => {
+                            // Its cursor state went with the dropped job.
+                            self.mirror_in_flight = false;
+                            self.mirror_state = Some(Box::default());
+                        }
+                        _ => {}
+                    }
+                }
                 QueueJobOutcome::External(value) => self.external.push(JobResult {
                     kind: result.kind,
                     key: result.key,
                     generation: result.generation,
-                    outcome: Ok(value),
+                    outcome: Ok(ExternalOutcome::Done(value)),
                     elapsed: result.elapsed,
                     writer_wait: result.writer_wait,
                     over_budget: result.over_budget,
@@ -1056,6 +1129,71 @@ impl QueueJobs {
         }
         // A selection not yet delivered keeps the loop's fast path armed.
         self.ready.store(self.selection.is_some(), Ordering::Release);
+    }
+
+    fn submit_job(
+        &mut self,
+        spec: JobSpec,
+        external: bool,
+        work: impl FnOnce() -> QueueJobOutcome + Send + 'static,
+    ) -> Submitted {
+        let owner = self.owner_of(&spec, external);
+        let submitted = self.exec.submit(spec, work);
+        self.track(owner, &submitted);
+        submitted
+    }
+
+    fn submit_job_read(
+        &mut self,
+        spec: JobSpec,
+        external: bool,
+        work: impl FnOnce(Option<&DirectorStores>) -> QueueJobOutcome + Send + 'static,
+    ) -> Submitted {
+        let owner = self.owner_of(&spec, external);
+        let submitted = self.exec.submit_read(spec, work);
+        self.track(owner, &submitted);
+        submitted
+    }
+
+    fn owner_of(&self, spec: &JobSpec, external: bool) -> Option<(String, JobOwner)> {
+        (spec.criticality == Criticality::Refresh).then(|| {
+            (
+                spec.key.clone(),
+                JobOwner {
+                    kind: spec.kind,
+                    generation: spec.generation,
+                    external,
+                },
+            )
+        })
+    }
+
+    /// Record a refresh job's owner, and report every job a submit dropped
+    /// to that job's owner (C2 review): the displaced one, or the submitted
+    /// one itself when the lane was full of critical work.
+    fn track(&mut self, owner: Option<(String, JobOwner)>, submitted: &Submitted) {
+        let submitted_key = owner.as_ref().map(|(key, _)| key.clone());
+        if let Some((key, owner)) = owner {
+            self.job_owners.insert(key, owner);
+        }
+        let dropped_key = match submitted {
+            Submitted::QueuedDroppedOldest { dropped_key } => Some(dropped_key.clone()),
+            Submitted::DroppedRefresh => submitted_key,
+            _ => None,
+        };
+        if let Some(key) = dropped_key
+            && let Some(owner) = self.job_owners.get(&key).copied()
+        {
+            self.dropped.push(JobResult {
+                kind: owner.kind,
+                key,
+                generation: owner.generation,
+                outcome: Ok(QueueJobOutcome::Dropped),
+                elapsed: Duration::ZERO,
+                writer_wait: Duration::ZERO,
+                over_budget: false,
+            });
+        }
     }
 
     /// Submit another child's job (factory loop v2 C2) to the daemon's one
@@ -1069,7 +1207,7 @@ impl QueueJobs {
         spec: JobSpec,
         work: impl FnOnce() -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
-        self.exec.submit(spec, move || QueueJobOutcome::External(work()))
+        self.submit_job(spec, true, move || QueueJobOutcome::External(work()))
     }
 
     /// [`Self::submit_external`] on the read lane, with its dedicated
@@ -1079,14 +1217,11 @@ impl QueueJobs {
         spec: JobSpec,
         work: impl FnOnce(Option<&DirectorStores>) -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
-        self.exec
-            .submit_read(spec, move |stores| QueueJobOutcome::External(work(stores)))
+        self.submit_job_read(spec, true, move |stores| QueueJobOutcome::External(work(stores)))
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).
-    pub(crate) fn take_external_completions(
-        &mut self,
-    ) -> Vec<JobResult<Box<dyn std::any::Any + Send>>> {
+    pub(crate) fn take_external_completions(&mut self) -> Vec<JobResult<ExternalOutcome>> {
         std::mem::take(&mut self.external)
     }
 

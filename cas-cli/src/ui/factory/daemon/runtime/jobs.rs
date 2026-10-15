@@ -27,6 +27,10 @@
 //! This is the API only. No daemon caller is migrated here; children C2 and
 //! C3 move work onto it.
 
+// cas-1240 lands the API before its first caller (children C2 and C3), so the
+// non-test build sees it as unused until then.
+#![allow(dead_code)]
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;

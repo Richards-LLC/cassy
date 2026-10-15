@@ -10613,12 +10613,16 @@ mod tests {
             .unwrap()
             .remove(0)
             .prompt;
+        // pin: the header tells the worker the brief must be read before it starts.
         assert!(prompt.contains("read it before you start"), "{prompt}");
         assert!(
+            // pin: the supervisor's brief reaches the worker verbatim, blank lines included.
             prompt.contains("Rebase onto the epic.\n\nThen run the named tests."),
             "{prompt}"
         );
+        // pin: only the newest brief is quoted, never an older one.
         assert!(!prompt.contains("Old brief"), "{prompt}");
+        // pin: a note after the brief is not part of it.
         assert!(!prompt.contains("a later note"), "{prompt}");
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }

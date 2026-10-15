@@ -23,6 +23,8 @@ mod provisioning_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod send_dedupe;
+#[cfg(test)]
+mod shutdown_tests;
 pub(super) mod session_summarizer;
 pub(crate) mod store_worker;
 pub(crate) mod teams;

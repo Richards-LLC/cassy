@@ -1059,6 +1059,29 @@ fn record_shutdown_outcome(
     notify_supervisor_or_defer(cas_dir, supervisor_name, factory_session, summary, body);
 }
 
+/// Open, in-progress and blocked tasks still assigned to `worker`: the
+/// bindings a shutdown releases (cas-7a94). AwaitingMerge stays bound.
+fn releasable_task_ids(cas_dir: &std::path::Path, worker: &str) -> Vec<String> {
+    let Ok(store) = crate::store::open_task_store_cached(cas_dir) else {
+        return Vec::new();
+    };
+    store
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| {
+            task.assignee.as_deref() == Some(worker)
+                && matches!(
+                    task.status,
+                    cas_types::TaskStatus::Open
+                        | cas_types::TaskStatus::InProgress
+                        | cas_types::TaskStatus::Blocked
+                )
+        })
+        .map(|task| task.id)
+        .collect()
+}
+
 /// One line per worker for the shutdown receipt (cas-b06f).
 fn shutdown_receipt_lines(
     report: &crate::ui::factory::app::render_and_ops::epic_workers::ShutdownReport,
@@ -9058,6 +9081,12 @@ impl FactoryDaemon {
                 // Track shut-down workers so their queued messages are dropped.
                 // In-flight spawn cancellation is separately generation-scoped
                 // in cancelled_spawns (cas-421c).
+                // cas-b06f: what each target held before anything is released,
+                // so the receipt can name every task this shutdown freed.
+                let held_before: std::collections::HashMap<String, Vec<String>> = workers_to_stop
+                    .iter()
+                    .map(|name| (name.clone(), releasable_task_ids(self.app.cas_dir(), name)))
+                    .collect();
                 for name in &workers_to_stop {
                     self.dead_workers.insert(name.clone());
                     // Also release bindings for workers that never made it into
@@ -9068,7 +9097,16 @@ impl FactoryDaemon {
                         name,
                     );
                 }
-                let report = self.app.shutdown_workers(count, &names, force).await;
+                let mut report = self.app.shutdown_workers(count, &names, force).await;
+                for (name, released) in &mut report.stopped {
+                    let still_held = releasable_task_ids(self.app.cas_dir(), name);
+                    for id in held_before.get(name).into_iter().flatten() {
+                        if !still_held.contains(id) && !released.contains(id) {
+                            released.push(id.clone());
+                        }
+                    }
+                    released.sort();
+                }
                 // cas-00d5: the queue row was marked processed at dequeue; it
                 // must end in a terminal state. cas-b06f: the supervisor gets
                 // one receipt listing every worker's outcome.

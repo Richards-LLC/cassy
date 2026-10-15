@@ -4006,6 +4006,7 @@ mod spawn_base_tests {
         crate::worktree::GitOperations::new(repo.clone())
             .create_worktree(&worker_path, "factory/magic-worker", base_ref.as_deref().or(Some(branch)))
             .expect("worker worktree should use the fetched commit");
+        // pin: fixture file content proves the worktree checked out the fetched epic commit.
         assert_eq!(std::fs::read_to_string(worker_path.join("epic-only.txt")).unwrap(), "remote epic tip");
     }
 

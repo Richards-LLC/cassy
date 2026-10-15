@@ -603,6 +603,14 @@ impl FactoryApp {
         app
     }
 
+    /// Track a live worker pane the way a finished spawn does, for tests that
+    /// drive shutdown against a real PTY process (cas-00d5).
+    #[cfg(test)]
+    pub(crate) fn adopt_worker_pane_for_test(&mut self, pane: cas_mux::Pane) {
+        self.worker_names.push(pane.id().to_string());
+        self.mux.add_pane(pane);
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         use cas_factory::EpicState;

@@ -2375,6 +2375,16 @@ impl FactoryDaemon {
             self.session_name.clone(),
             std::sync::Arc::clone(&self.shutdown),
         );
+        // cas-77f39 (GH #1210, factory loop v2 §5): output frames are capped
+        // and coalesced; input echo is drawn at once. The caps are read once,
+        // before this thread becomes a lane.
+        // What the TUI draws besides pane contents, as of the last pass.
+        let mut last_render_fingerprint = self.app.render_fingerprint();
+        let mut render_scheduler = super::render_scheduler::RenderScheduler::new(
+            super::render_scheduler::RenderCaps::from_config(
+                &crate::config::Config::load(self.app.cas_dir()).unwrap_or_default(),
+            ),
+        );
         // cas-6931 (factory loop v2 §6): this thread is the daemon's io and
         // control lane. Steps marked below and inside the prompt queue and
         // the director apply reach the watchdog, and blocking calls made on
@@ -2422,6 +2432,10 @@ impl FactoryDaemon {
 
             // Read and process input from clients
             let input_activity = self.process_client_input().await?;
+            // cas-77f39: output from the pane that took input is its echo.
+            let input_pane = input_activity
+                .then(|| self.app.mux.focused_id().map(str::to_string))
+                .flatten();
 
             // Read and process input from GUI clients
             let gui_activity = self.process_gui_client_input().await;
@@ -2862,9 +2876,25 @@ impl FactoryDaemon {
             // wedge). It changes at most once a second. This loop cannot show
             // its own wedge: when it gets here, the wedge is over.
             let loop_health_changed = self.app.set_loop_health(loop_progress.status_line());
-            let dirty = had_output
-                || loop_health_changed
-                || input_activity
+            // cas-77f39 (GH #1210): a frame is drawn when the render scheduler
+            // says so. Input and its echo draw now; other changes coalesce
+            // within 16 ms; pane output is capped per focus and never draws
+            // for a pane that is not on screen.
+            let frame_now = std::time::Instant::now();
+            if input_activity {
+                render_scheduler.note_input(input_pane.as_deref(), frame_now);
+            }
+            for pane in self.terminal_exchange.take_output_panes() {
+                let view = if !self.app.pane_on_screen(&pane) {
+                    super::render_scheduler::PaneView::Hidden
+                } else if self.app.mux.focused_id() == Some(pane.as_str()) {
+                    super::render_scheduler::PaneView::Focused
+                } else {
+                    super::render_scheduler::PaneView::Unfocused
+                };
+                render_scheduler.note_output(&pane, view, frame_now);
+            }
+            let layout_changed = loop_health_changed
                 || gui_activity
                 || ws_activity
                 || refreshed
@@ -2874,12 +2904,29 @@ impl FactoryDaemon {
                 || needs_full_redraw
                 || needs_compact_redraw
                 || resize_applied
-                || spawning
-                || error_cleared_by_timeout
-                || self.app.task_dialog_load.is_loading();
+                || error_cleared_by_timeout;
+            // Spawn completion, crash banners and pane-set changes used to
+            // ride on pane output (cas-77f39 review).
+            let render_fingerprint = self.app.render_fingerprint();
+            let state_changed = render_fingerprint != last_render_fingerprint;
+            last_render_fingerprint = render_fingerprint;
+            if layout_changed || state_changed {
+                render_scheduler.note_layout();
+            }
+            // The spawn spinner and a loading dialog animate at <= 10 fps.
+            if spawning || self.app.task_dialog_load.is_loading() {
+                render_scheduler.note_animation();
+            }
+            // A pending resize keeps its causes for the frame after it.
+            let frame = if resize_pending {
+                None
+            } else {
+                render_scheduler.take_frame(frame_now)
+            };
+            let mut frame_bytes = 0usize;
             // GH #1165: drawing must not touch the store.
             let store_free_draw = cas_store::wait_budget::forbid_store_access();
-            if dirty && !resize_pending {
+            if frame.is_some() {
                 // Render full TUI for full-mode clients (and relay clients)
                 let has_full_clients = self
                     .clients
@@ -2892,6 +2939,7 @@ impl FactoryDaemon {
                         terminal.backend_mut().set_cursor_style(state)?;
                     }
                     let output = terminal.backend_mut().take_buffer();
+                    frame_bytes += output.len();
                     if !output.is_empty() {
                         if has_full_clients {
                             self.broadcast_output_to(&output, ClientViewMode::Full);
@@ -2914,11 +2962,18 @@ impl FactoryDaemon {
                             ct.backend_mut().set_cursor_style(state)?;
                         }
                         let output = ct.backend_mut().take_buffer();
+                        frame_bytes += output.len();
                         if !output.is_empty() {
                             self.broadcast_output_to(&output, ClientViewMode::Compact);
                         }
                     }
                 }
+            }
+            // An empty diff sends nothing and is not a frame.
+            if let Some(frame) = frame
+                && frame_bytes > 0
+            {
+                loop_progress.record_frame(frame.cause.name(), frame.coalesced, frame_bytes);
             }
             // Flush any pending client output even if nothing new was rendered
             if !self.clients.is_empty() && self.clients.values().any(|c| !c.output_buf.is_empty()) {

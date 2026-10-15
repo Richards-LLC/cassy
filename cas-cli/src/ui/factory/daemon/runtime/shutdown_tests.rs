@@ -593,7 +593,14 @@ async fn long_transcript_recycle(register_replacement: bool) {
             !detail.contains(OLD.trim()),
             "timeout must exclude the old transcript: {detail}"
         );
-        let notices = receipts(&cas_dir, daemon.app.supervisor_name());
+        let notices: Vec<_> = open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.target == daemon.app.supervisor_name())
+            .map(|row| row.prompt)
+            .collect();
         assert!(
             notices
                 .iter()

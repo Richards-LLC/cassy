@@ -1183,11 +1183,9 @@ fn pending_qa_idle_prompt_text(
 /// signals (cas-c145). Carries task, source factory branch, merge target,
 /// and next action. Explicitly push-based (no polling loop).
 ///
-/// `supervisor_prefix` is used for tools the **supervisor** runs
-/// (epic_status, list awaiting_merge, show). `worker_prefix` is used only
-/// for the worker re-close command the supervisor is told to relay — mixed
-/// factories (e.g. Claude supervisor + Codex/Grok worker) must not leak the
-/// supervisor's MCP alias into worker-facing tool strings (review P1).
+/// `supervisor_prefix` is used for every MCP command in this
+/// supervisor-directed relay, including the re-close command. Mixed factories
+/// must render tool names in the receiving supervisor's harness.
 ///
 /// Wording constraint: must not contain "assign" — the AwaitingMerge idle
 /// path is not "idle needing work" (cas-09d0 / cas-728b).
@@ -1203,7 +1201,6 @@ fn merge_required_idle_prompt_text(
     task: &ActiveLeaseSummary,
     data: &DirectorData,
     supervisor_prefix: &str,
-    worker_prefix: &str,
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = format!("factory/{worker}");
@@ -1237,9 +1234,9 @@ fn merge_required_idle_prompt_text(
     };
     let list_awaiting = format!("`{supervisor_prefix}task action=list status=awaiting_merge`");
     let show = format!("`{supervisor_prefix}task action=show id={}`", task.task_id);
-    // Worker re-close uses the *worker's* harness prefix so the supervisor
-    // relays a callable alias (cas-c145 review P1).
-    let reclose = format!("`{worker_prefix}task action=close id={}`", task.task_id);
+    // This command appears in a supervisor-directed relay, so use the
+    // recipient's prefix even when the worker is from another harness.
+    let reclose = format!("`{supervisor_prefix}task action=close id={}`", task.task_id);
     let rejection = task
         .close_rejected_reason
         .as_deref()
@@ -1657,7 +1654,6 @@ pub fn generate_prompt_at(
                         task,
                         data,
                         supervisor_prefix,
-                        worker_prefix,
                         merge_alert_evidence,
                     )
                 } else {
@@ -3452,7 +3448,7 @@ mod tests {
         };
         let mut data = make_data(0);
         data.in_progress_tasks = vec![summary("main")];
-        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
             text.contains("protected: pull requests through the merge queue only"),
             "{text}"
@@ -3468,7 +3464,7 @@ mod tests {
         );
 
         data.in_progress_tasks = vec![summary("epic/some-epic-cas-1234")];
-        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
         assert!(
             epic.contains("git merge --no-ff factory/wise-badger-5"),
             "{epic}"

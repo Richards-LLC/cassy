@@ -2479,6 +2479,11 @@ pub trait PromptQueueStore: Send + Sync {
     /// Abandon aged, session-scoped rows whose target is no longer a member
     /// of that session. Fresh rows stay pending so pre-registration delivery
     /// retains its grace period.
+    ///
+    /// Operator and `commander:<label>` rows are never touched, whatever
+    /// `targets` holds (cas-d88c; communication contract v2 P3.1). They are
+    /// not roster members: the operator delivery lane owns them, and only
+    /// that lane may give up on them.
     fn abandon_ineligible_session_targets(
         &self,
         targets: &[&str],
@@ -10419,6 +10424,111 @@ mod tests {
         let poison_report = store.message_delivery_report(poison).unwrap().unwrap();
         assert_eq!(poison_report.stage, DeliveryStage::Abandoned);
         assert!(poison_report.delivered_at.is_none());
+    }
+
+    /// Communication contract v2, P3.1/P3.3 (cas-d88c): the roster sweep owns
+    /// roster targets only. Aged operator and `commander:<label>` rows are
+    /// the operator lane's, so they stay pending, stay drainable by the hub,
+    /// and their sender receives no abandonment notice.
+    #[test]
+    fn ct2_p3_operator_row_survives_sweep() {
+        let (_temp, store) = create_test_store();
+        static DAEMON: QueueOrigin = QueueOrigin::Daemon;
+        let status = store
+            .record_operator_turn(&OperatorTurn {
+                source: "lead-sup",
+                target: "operator",
+                prompt: "status: 3 lanes green",
+                factory_session: Some("factory-a"),
+                metadata: OperatorTurnMetadata {
+                    summary: Some("status"),
+                    origin: Some(&DAEMON),
+                    kind: Some("status"),
+                    ..Default::default()
+                },
+            })
+            .unwrap()
+            .id();
+        let mixed_case = store
+            .enqueue_with_session("lead-sup", " Operator ", "answer", "factory-a")
+            .unwrap();
+        let commander = store
+            .enqueue_with_session("lead-sup", "commander:Daniel@phone-7", "answer", "factory-a")
+            .unwrap();
+        let control = store
+            .enqueue_with_session("other-sender", "dead-worker", "old poison", "factory-a")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            for id in [status, mixed_case, commander, control] {
+                conn.execute(
+                    "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                    params![
+                        (Utc::now() - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
+                            .to_rfc3339(),
+                        id
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        assert_eq!(
+            store
+                .abandon_ineligible_session_targets(
+                    &["lead-sup", "supervisor", "all_workers", "live-worker"],
+                    "factory-a",
+                    PROMPT_RETRY_MAX_AGE_SECS,
+                )
+                .unwrap(),
+            1,
+            "only the dead roster target is swept"
+        );
+
+        for id in [status, mixed_case, commander] {
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_ne!(
+                report.stage,
+                DeliveryStage::Abandoned,
+                "operator-lane row {id} must not be swept as an unknown target"
+            );
+        }
+        let drainable = store
+            .peek_operator_replies("factory-a", 10)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert!(drainable.contains(&status), "the hub can still drain {status}");
+        assert!(drainable.contains(&mixed_case));
+        assert_eq!(
+            store.message_delivery_report(control).unwrap().unwrap().stage,
+            DeliveryStage::Abandoned
+        );
+
+        let conn = store.conn.lock().unwrap();
+        let notices_to_operator_sender: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue WHERE target = 'lead-sup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            notices_to_operator_sender, 0,
+            "no abandonment notice is sent for operator-lane rows"
+        );
+        let notices_to_control_sender: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue WHERE target = 'other-sender'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            notices_to_control_sender, 1,
+            "a real roster abandonment still notifies its sender"
+        );
     }
 
     #[test]

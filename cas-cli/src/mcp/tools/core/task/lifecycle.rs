@@ -48,6 +48,7 @@ impl TaskLifecycleGateError {
 }
 
 pub(crate) mod close_ops;
+mod epic_lane;
 #[cfg(test)]
 mod gate_error_tests;
 pub(crate) mod proof_scope;
@@ -1258,11 +1259,33 @@ impl CasCore {
             let _ = search.index_task(&task);
         }
 
-        // Auto-create epic branch for all epic creates (regardless of start flag)
-        // Epics get a branch (not a worktree) - workers get worktrees when spawned
-        let branch_info = if task.task_type == crate::types::TaskType::Epic
-            && task.branch.as_deref().unwrap_or("").is_empty()
-        {
+        // GH #1216 (cas-cf8e0): an explicit `epic/` target_branch is the
+        // epic's lane. Record it as epic.branch, which children and
+        // worktree_merge follow, and create no auto lane.
+        let new_epic_without_branch = task.task_type == crate::types::TaskType::Epic
+            && task.branch.as_deref().unwrap_or("").is_empty();
+        let adopted_lane = new_epic_without_branch
+            .then(|| epic_lane::adopted_epic_lane(target_branch))
+            .flatten()
+            .zip(task.deliverables.work_target.as_ref());
+        let branch_info = if let Some((lane, target)) = adopted_lane {
+            let context = super::repo_context::resolve_repo_context(&self.cas_root, target)
+                .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
+            let receipt = epic_lane::ensure_adopted_lane(&context.repo_root, lane);
+            let task_store = self.open_task_store()?;
+            if let Ok(mut updated_task) = task_store.get(&id) {
+                updated_task.branch = Some(lane.to_string());
+                let _ = task_store.update(&updated_task);
+            }
+            Some(receipt)
+        } else if new_epic_without_branch {
+            // Auto-create epic branch for all other epic creates (regardless of
+            // start flag). Epics get a branch (not a worktree); workers get
+            // worktrees when spawned.
             use crate::worktree::GitOperations;
 
             let declared_context = match task.deliverables.work_target.as_ref() {
@@ -1408,8 +1431,10 @@ impl CasCore {
                                     }
                                 })
                                 .unwrap_or_default();
+                            let explicit_base =
+                                epic_lane::explicit_base_note(target_branch, &branch_name);
                             Some(format!(
-                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.\n   {push_state}{freshness}{divergence}"
+                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.\n   {push_state}{freshness}{divergence}{explicit_base}"
                             ))
                         }
                         Err(e) => {
@@ -3547,6 +3572,185 @@ mod related_recall_response_tests {
             "normalization must be durable and visible: {}",
             child.notes
         );
+    }
+
+    /// A repo with a commit on `main` and a bare `origin`, for epic-lane
+    /// tests. Returns the temp dir (keep it alive) and the repo path.
+    fn epic_lane_repo() -> (TempDir, std::path::PathBuf) {
+        let temp = TempDir::new().expect("temp project");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let origin = temp.path().join("origin.git");
+        epic_lane_git(&repo, &["init", "-q", "-b", "main"]);
+        epic_lane_git(&repo, &["config", "user.email", "test@cas.test"]);
+        epic_lane_git(&repo, &["config", "user.name", "Cassy Test"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").expect("seed");
+        epic_lane_git(&repo, &["add", "seed.txt"]);
+        epic_lane_git(&repo, &["commit", "-q", "-m", "seed"]);
+        epic_lane_git(
+            temp.path(),
+            &["init", "-q", "--bare", origin.to_str().expect("utf-8 origin")],
+        );
+        epic_lane_git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        epic_lane_git(&repo, &["push", "-q", "-u", "origin", "main"]);
+        (temp, repo)
+    }
+
+    /// The project's `.cas` inside the repo, so an epic created without a
+    /// target finds the repository as its project root.
+    fn epic_lane_cas_root(repo: &std::path::Path) -> std::path::PathBuf {
+        let cas_root = repo.join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("cas root");
+        cas_root
+    }
+
+    fn epic_lane_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// GH #1216 (cas-cf8e0): the supervisor pushed `epic/violet-log-hygiene`
+    /// and created the epic with it as target_branch. The epic must deliver
+    /// there: it is epic.branch, a child inherits it, worktree_merge's
+    /// resolution lands on it, and no auto lane is created.
+    #[tokio::test]
+    async fn epic_create_adopts_an_explicit_epic_target_as_its_lane_gh_1216() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("initialize isolated host registry");
+        let (_temp, repo) = epic_lane_repo();
+        // The lane exists on origin only, a commit ahead of main.
+        epic_lane_git(&repo, &["checkout", "-q", "-b", "epic/violet-log-hygiene"]);
+        std::fs::write(repo.join("lane.txt"), "lane\n").expect("lane change");
+        epic_lane_git(&repo, &["add", "lane.txt"]);
+        epic_lane_git(&repo, &["commit", "-q", "-m", "lane start"]);
+        let lane_tip = epic_lane_git(&repo, &["rev-parse", "HEAD"]);
+        epic_lane_git(&repo, &["push", "-q", "origin", "epic/violet-log-hygiene"]);
+        epic_lane_git(&repo, &["checkout", "-q", "main"]);
+        epic_lane_git(&repo, &["branch", "-q", "-D", "epic/violet-log-hygiene"]);
+
+        let core = CasCore::with_daemon(epic_lane_cas_root(&repo), None, None);
+        let created = core
+            .cas_task_create_with_target(
+                epic_request("Violet burn-down log hygiene", "deliver to the pushed lane"),
+                Some(repo.to_str().expect("repo utf8")),
+                Some("epic/violet-log-hygiene"),
+                false,
+            )
+            .await
+            .expect("create epic");
+        let receipt = format!("{created:?}");
+        assert!(receipt.contains("Epic lane adopted: epic/violet-log-hygiene"), "{receipt}");
+        assert!(!receipt.contains("Epic branch created"), "{receipt}");
+        let store = core.open_task_store().expect("task store");
+        let epic = store
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Violet burn-down log hygiene")
+            .expect("created epic");
+        assert_eq!(epic.branch.as_deref(), Some("epic/violet-log-hygiene"));
+        assert_eq!(
+            epic.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some("epic/violet-log-hygiene"),
+            "the displayed Target and the lane are the same branch"
+        );
+        let epic_branches = epic_lane_git(&repo, &["branch", "--list", "epic/*"]);
+        assert_eq!(
+            epic_branches.trim_start_matches(['*', ' ']),
+            "epic/violet-log-hygiene",
+            "no auto lane: {epic_branches}"
+        );
+        assert_eq!(
+            epic_lane_git(&repo, &["rev-parse", "epic/violet-log-hygiene"]),
+            lane_tip,
+            "the local lane starts at the pushed tip"
+        );
+
+        core.cas_task_create_with_target(
+            child_request("Log hygiene child", epic.id.clone()),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("create child");
+        let child = store
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Log hygiene child")
+            .expect("created child");
+        assert_eq!(
+            child
+                .deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str()),
+            Some("epic/violet-log-hygiene"),
+            "the child inherits the adopted lane"
+        );
+        assert_eq!(
+            crate::mcp::tools::core::task::repo_context::inherited_work_target_from_epic(&epic)
+                .map(|target| target.target_branch),
+            Some("epic/violet-log-hygiene"),
+            "spawn and worktree_merge follow epic.branch"
+        );
+    }
+
+    /// GH #1216: an explicit target outside epic/ stays the epic's base
+    /// (cas-3afc), and the receipt says where deliveries land instead.
+    #[tokio::test]
+    async fn epic_create_names_the_lane_when_an_explicit_target_is_its_base_gh_1216() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("initialize isolated host registry");
+        let (_temp, repo) = epic_lane_repo();
+        let core = CasCore::with_daemon(epic_lane_cas_root(&repo), None, None);
+        let created = core
+            .cas_task_create_with_target(
+                epic_request("Main based epic", "cut a lane from main"),
+                Some(repo.to_str().expect("repo utf8")),
+                Some("main"),
+                false,
+            )
+            .await
+            .expect("create epic");
+        let receipt = format!("{created:?}");
+        let epic = core
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Main based epic")
+            .expect("created epic");
+        let lane = epic.branch.expect("an auto lane is still cut from a base target");
+        assert!(lane.starts_with("epic/main-based-epic-"), "{lane}");
+        assert!(receipt.contains("Epic branch created"), "{receipt}");
+        assert!(
+            receipt.contains(&format!("Deliveries land on {lane}; 'main' is its base")),
+            "{receipt}"
+        );
+
+        // No explicit target: unchanged, and no base note.
+        let created = core
+            .cas_task_create(Parameters(epic_request("Implicit epic", "no target")))
+            .await
+            .expect("create epic");
+        let receipt = format!("{created:?}");
+        assert!(receipt.contains("Epic branch created: epic/implicit-epic-"), "{receipt}");
+        assert!(!receipt.contains("Deliveries land on"), "{receipt}");
     }
 
     /// cas-3afc (GH #298): an epic's branch must start at the explicitly

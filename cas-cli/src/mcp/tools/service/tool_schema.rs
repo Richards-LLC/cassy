@@ -79,7 +79,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// tools. Each names only what the parameter does for coordination's own
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
-    ("id", "Agent id (heartbeat, unregister, session_end); defaults to the caller. message_status: a peer message id."),
+    ("id", "Agent id (heartbeat, unregister, session_end; default: caller). message_status: a peer message id."),
     (
         "target",
         "message/interrupt recipient: agent name, 'supervisor', 'all_workers' or \
@@ -93,13 +93,13 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("kind", "Commander turn kind: answer, status, receipt, ask or blocker."),
     ("attachment", "Published artifact id to attach to a Commander turn."),
     // cas-6853: kept terse; the coordination schema has a 3,600 B budget.
-    ("supersede_key", "Broadcast: newest same key wins."),
-    ("sticky", "Broadcast: later workers get it."),
+    ("supersede_key", "Broadcast: newest per key wins."),
+    ("sticky", "Broadcast: late joiners get it."),
     (
         "task_id",
         "message with merge_request=true: the parked task; remind: bind the reminder to this task.",
     ),
-    ("notification_id", "message_ack / message_status: the notification id. inbox_poll: read that message even if its transport still holds it."),
+    ("notification_id", "message_ack / message_status: the notification id. inbox_poll: read it even while its transport holds it."),
     ("limit", "inbox_poll: maximum rows to return."),
     ("name", "register / session_start: agent name."),
     ("agent_type", "register / session_start: primary, sub_agent, worker or ci."),
@@ -107,20 +107,17 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("session_id", "register / session_start / session_end: harness session id."),
     ("remind_message", "remind: the text delivered when it fires (required). message kind=ask: the default taken at the deadline."),
     ("remind_delay_secs", "remind: fire after this many seconds. message kind=ask: the deadline."),
+    // cas-b58a: the coordination schema has a 3,600 B cap. Filter keys are
+    // taught by the remind refusal (GH #1207), which names every missing or
+    // unknown key with a working example, not by this text.
     (
         "remind_event",
-        "remind: fire on task_completed, task_blocked, worker_idle, epic_completed, \
-         branch_contained_in, tag_exists or ci_completed; the last three need cross_session=true.",
+        "remind: fire on task_completed, task_blocked, worker_idle, epic_completed; with \
+         cross_session=true, on branch_contained_in, tag_exists or ci_completed.",
     ),
-    // GH #1207: each external event's required filter keys. The refusal
-    // names anything missing; this text stays within the 3,600 B cap.
-    (
-        "remind_filter",
-        "remind: JSON filter, e.g. {\"task_id\":\"cas-a1b2\"}; branch_contained_in \
-         {commit,target_branch}, tag_exists {tag}, ci_completed {sha,workflow?}.",
-    ),
+    ("remind_filter", "remind: JSON filter for the event; a refusal names missing keys."),
     ("remind_id", "remind_cancel: the reminder id."),
-    ("remind_ttl_secs", "remind: seconds an undelivered reminder lives (default 3600; 604800 for branch_contained_in, tag_exists and ci_completed; 0 = never)."),
+    ("remind_ttl_secs", "remind: TTL seconds (default 3600; external events 7 days; 0 = never)."),
     ("cross_session", "remind: keep the reminder across session end and task close."),
 ];
 

@@ -525,7 +525,8 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
-    /// Mirror completed supervisor text into local operator history. This
+    /// Operator-only automatic supervisor replies in local history. Terminal
+    /// questions and explicit operator messages are recorded separately. This
     /// does not enroll a cloud audience. Set false to opt out; re-enabling
     /// starts a new window without replaying replies from the disabled period.
     #[serde(default = "default_true")]

@@ -6,7 +6,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.commander_mirror_enabled",
         section: "factory",
         name: "Supervisor Reply Mirroring",
-        description: "Record completed supervisor text in local operator history, independent of prior operator messages or supervisor status. False opts out; re-enabling does not replay disabled-period replies. Cloud delivery still requires explicit enrollment.",
+        description: "Operator-only automatic supervisor reply capture in local history, independent of prior messages or supervisor status. False opts out; re-enabling excludes disabled-period replies. Terminal questions and explicit operator messages remain recorded. Cloud requires enrollment.",
         value_type: ConfigType::Bool,
         default: "true",
         constraint: Constraint::None,

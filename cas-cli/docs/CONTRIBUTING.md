@@ -1,13 +1,18 @@
 # Contributing to Cassy
 
-## Factory cloud client (disabled by default)
+## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history
 by default, including before the operator sends a first message and after the
 supervisor becomes idle. This local recording is independent of cloud enrollment.
 To opt out, run `cas config set factory.commander_mirror_enabled false`.
 Setting it back to `true` starts a new capture window; replies from the disabled
-period are not replayed. Existing conversation history is retained.
+period are not replayed, even if the daemon was stopped during the toggle.
+This key is operator-only and defaults to `true`. It controls automatic
+supervisor reply capture; terminal questions and explicit messages addressed
+to the operator continue to be recorded. Existing conversation history is retained.
+
+## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
 (`cas-cli/src/ui/factory/daemon/cloud_client.rs`) that pushes factory state,

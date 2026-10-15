@@ -687,6 +687,27 @@ mod tests {
     }
 
     #[test]
+    fn test_error_renderer_uses_text_error_mark_and_ascii_fallback_under_c_locale() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        env.remove("NO_COLOR");
+        let theme = ActiveTheme::default_light();
+        let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
+            panic!("text_error must use a concrete theme color");
+        };
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut buf, theme);
+            fmt.error("configuration failed").unwrap();
+        }
+
+        let output = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            output,
+            format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+        );
+    }
+
+    #[test]
     fn test_heading_plain() {
         let mut buf = Vec::new();
         {

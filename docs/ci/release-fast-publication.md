@@ -1,214 +1,165 @@
 # Fast release publication
 
-How a pushed tag becomes published, verified artifacts in single-digit minutes,
-and why the pieces are shaped the way they are.
+How a version change becomes a published, installed release with no agent in
+between, and why the pieces are shaped the way they are.
 
 Tracked by GH #449 (fast release publication), GH #603 (the prebuild race),
-and cas-3b7c0.
+cas-3b7c0, cas-28eb and cas-f95b (the release path rebuilt around the merge
+queue).
 
 ## The measured problem
 
-Before this lane existed, every release compiled the shipped artifacts from
-cold at tag time. Measured tag push -> published release, from the GitHub API:
-
-| Release | Tag pushed | Published | Total | Linux build | macOS build | Create Release |
-| --- | --- | --- | --- | --- | --- | --- |
-| v3.1.0 | 2026-08-18 23:06:55Z | 23:20:13Z | 13m18s | 12m30s | 12m54s | 18s |
-| v3.0.0 | 2026-08-18 19:50:29Z | 20:05:24Z | 14m55s | 9m36s | 14m24s | 23s |
-| v3.2.0 | 2026-08-19 17:04:30Z | 17:24:33Z | 20m03s | 13m19s | 14m05s | 15s |
-| v2.72.0 | 2026-08-17 19:48:20Z | 20:14:46Z | 26m26s | 17m32s | 21m03s | 11s |
+Until cas-f95b a release took 3 to 5 hours from code-done to installed
+(3.53.0: 289 minutes). It passed an epic PR, then a local 13-stage train, a
+41-row local gate, a separate release PR with its own merge-queue cycle, a
+local tag push and an agent-driven host update. The release binary was built
+up to four times and three agent hand-offs sat on the green path. The design
+target is 30 minutes from the epic PR opening to `main` and 20 minutes from
+`main` to installed.
 
 Three facts decide the design:
 
-1. The critical path is **always** the two cold platform builds. Actually
-   creating the release never took more than 23 seconds.
-2. **macOS ARM64 is the long pole** at 12-21 minutes, and there is no Mac in
-   the fleet, so no amount of self-hosted Linux speedup can fix it.
-3. The builds only start **after** the tag, which serialises them behind the
-   version-bump PR's merge — even though the tree they build is final the
-   moment that PR lands.
+1. The merge queue already proves the exact tree that lands on `main`. Any
+   later check of that tree re-checks it.
+2. macOS ARM64 is the slowest build (609-1,108 s measured with LTO off), and
+   there is no Mac in the fleet. It has to overlap other work, not follow it.
+3. Every hand-off to an agent cost minutes to tens of minutes.
 
-So the artifacts are built when the release train pushes `release/<version>`,
-before the merge queue lands it, and the tag publishes bytes that already
-exist. The pushed branch carries the exact tree that lands on main: that held
-for 12 of 12 release PRs, 3.45.0 through 3.51.1 (cas-28eb).
+So the version bump rides in the epic PR, the release builds run once on the
+merge-queue tree, and landing on `main` publishes.
 
 ## The architecture
 
 ```text
-release train pushes release/<version>   (and later, the PR merges to main)
+scripts/release.sh on the epic branch
+  bump crates + Cargo.lock, CHANGELOG [Unreleased] -> [x.y.z], draft,
+  commit, push, open the PR, enable auto-merge, watch (re-bump on a race)
         |
         v
-release-prebuild.yml
-  pending-release        cheap gate: is this a release tree?   (~20s, every main push)
-  prebuild-runner-route  pick Linux runner before assignment
-  build                  Linux x86_64  (self-hosted warm, or hosted)
-  build-macos            macOS ARM64   (hosted macos-26, signed here)
-        |
-        |  artifacts: cas-x86_64-unknown-linux-gnu, cas-aarch64-apple-darwin
+merge queue (merge_group)
+  ci.yml                 the required checks
+  release-prebuild.yml   pending-release: did this entry change the version?
+                         build        Linux x86_64 release-fast   (hosted)
+                         build-macos  macOS ARM64, LTO off, signed (hosted)
+        |  the queue lands its tested merge commit as main
         v
-tag vX.Y.Z pushed
+push to main touching cas-cli/Cargo.toml
         |
         v
 release.yml
-  prebuilt-lookup        find the prebuild run for THIS commit
-  release-runner-route   pick verify/build runner before assignment
-  verify                 release-input gate (tag, versions, CHANGELOG, cargo check)
-  build / build-macos    SKIPPED when a prebuild was found; otherwise the old cold path
-  release                adopt -> re-audit -> publish  (hosted, only write-scoped job)
+  detect        version changed against the previous main? tag absent?
+  lookup        the queue run's archives, by commit or tree id (waits <= 30 min)
+  build         FALLBACK ONLY: calls release-prebuild.yml when nothing to adopt
+  audit-linux   ISA audit + operator launch smoke on the packaged archive
+  audit-macos   codesign verify + operator launch smoke on the packaged archive
+  release       annotated tag, GitHub release, install-path proof dispatch
+        |
+        v
+host timer (scripts/install-on-publish.sh, every 60 s)
+  cas update --yes --version x.y.z, then the release timer in the notes
 ```
 
-### Why the gate is where it is
+### Why the version rides in the epic PR
 
-`scripts/detect-pending-release.sh` calls a tree pending exactly when every
-release-train crate carries the same semver, `CHANGELOG.md` has that version's
-heading, and no `v<version>` tag exists on the remote yet. The last condition
-makes it self-disarming: once the tag is pushed, later pushes at that version
-cost one ~20s ubuntu job and stop. Ordinary main pushes never open the
-expensive lanes.
+The branch ruleset requires the merge queue, so a version bump cannot reach
+`main` on its own without a second PR and a second queue cycle. Committing it
+to the epic branch before the PR opens lands it with the code, in the same
+queue run, and that run then builds the tree that ships. The cost is that a
+merge must be declared a release when its PR opens; every factory epic already
+is one.
+
+Two epics racing for the same version: `scripts/release.sh` watches its PR.
+When `main` moves to a new version (or the PR conflicts), it merges `main`,
+resolves the release files itself (version lines, `Cargo.lock`, CHANGELOG and
+a same-path draft), takes the next version, pushes and re-enables auto-merge.
+A conflict in any other file stops it with exit 4, and an ejected PR stops it
+with exit 3: those need a repair, not a re-bump.
+
+### Why the builds run on merge_group
+
+The queue builds one entry at a time (`max_entries_to_build: 1`) and lands the
+merge commit it tested as `main`, so the queue run's head commit is the
+published commit. Starting both builds at enqueue overlaps the macOS build
+with the 15-minute queue run. They are not required checks: a failed build
+never blocks a merge, and the release workflow then builds the same bytes
+itself.
+
+`scripts/detect-pending-release.sh --base-version <v>` gates them: a queue
+entry is a release when its version differs from the base's, every release
+crate agrees, `CHANGELOG.md` has the heading and no `v<version>` tag exists.
+Ordinary entries cost one ~20 s job. On `main`, a changed version that cannot
+publish (reused or lowered) fails the release workflow loudly.
 
 ### Why adoption is fail-safe and publication is fail-closed
 
-`scripts/find-release-prebuild.sh` only matches a **successful** prebuild run
-whose head commit is the commit being published or has exactly its tree, and
-only when both artifacts are present and unexpired. The tree match is what
-adopts the `release/<version>` run. An equal tree also means the same workflow
-file built it, and a different tree is never adopted. The persistent runner
-stays main-only: the `release/**` run builds Linux on a hosted runner. If a
-matching prebuild is queued or in progress, the lookup polls for up to 15 minutes (at 15-second intervals), then
-reports `found=false` with a prominent workflow warning if the run still has
-not produced both assets. Every other degraded input — no run, a partial run,
-expired artifacts, an API outage — also reports `found=false` with the same
-loud cold-build signal. The prebuild is an accelerator; it can never be the
-reason a release cannot ship.
+`scripts/find-release-prebuild.sh` matches only a **successful** Release
+Prebuild run whose head commit is the commit being published or has exactly
+its tree, with both artifacts present and unexpired. The queue may land before
+its non-required builds finish, so the lookup waits up to 30 minutes for a
+matching run in progress. Every degraded input (no run, a partial run, expired
+artifacts, an API outage) reports `found=false` with a loud warning, and the
+workflow builds the archives by calling `release-prebuild.yml`. The prebuild
+is an accelerator; it can never be the reason a release cannot ship.
 
-When you run the lookup by hand without `GITHUB_REPOSITORY`, it takes the
-repository from `gh repo view` (the gh default repository) and then from the
-`origin` remote. It never uses another remote, because `upstream` here is a
-different project, and it names the repository it chose on stderr. If neither
-source names exactly one GitHub repository, the lookup exits 2 with an error and
-prints no `found=` line, so a hand check can't mistake it for a missing
-prebuild. CI always sets `GITHUB_REPOSITORY`, so this never happens there.
+Publication is the opposite. The `release` job runs only when both audit jobs
+passed on the archives about to be uploaded, from exactly one supply path.
+`scripts/release-publish.sh` refuses an existing release object, refuses a tag
+that peels to another commit, and requires both platform archives.
 
-Publication is the opposite. `release` requires exactly one complete supply
-path: either the prebuild was adopted **and both platform builds were skipped**,
-or no prebuild existed **and both platform builds succeeded**. A failed build, a
-half-skipped pair, or a failed lookup publishes nothing.
+### Why the audits run on the packaged assets
 
-### Why the codesign gate did not move
+The ISA audit (3.47.0 shipped AVX-512 instructions, cas-2a16) and the operator
+launch smoke (3.51.0 could not be launched, cas-e719) earn their place only on
+the bytes that ship. They run on the downloaded archives: Linux on
+`ubuntu-latest`, macOS on `macos-26`, where `codesign --verify` also checks the
+signature of the exact executable being published. macOS is compile-checked
+and launch-tested; the suite runs on Linux.
 
-The Darwin signing gate (cas-67c1) travels with whichever job produces the
-Darwin bytes. `strip` invalidates an ad-hoc Mach-O signature, so both the
-prebuild and the fallback re-sign and then `codesign --verify` the exact
-executable they package. Nothing downstream can publish an unsigned or invalid
-binary, because nothing downstream produces Darwin bytes.
+### Why install on publish is a timer
 
-Mach-O signatures cannot be verified from Linux, so the publish job records the
-published digests and the existing `Verify published macOS signature`
-`workflow_dispatch` remains the operator's on-Mac receipt.
-
-The publish job additionally re-runs the x86_64 ISA audit on the exact
-executable it is about to upload. That is seconds of work, and it closes the
-gap that a prebuilt artifact was audited on a different machine at an earlier
-time.
-
-## Self-hosted routing and the trust posture
-
-The cas-6981 posture is unchanged: only same-repository, non-fork **push**
-events can reach the persistent box, and a public fork cannot emit those.
-
-Routing is a two-key system, matching ci.yml's merge-queue route:
-
-- **Before assignment**, a `*-runner-route` job picks the label set. GitHub
-  cannot fall back after assigning an offline self-hosted runner — the job
-  simply stays queued — so the choice has to happen first. The repository
-  variable `CASSY_RELEASE_SELF_HOSTED` is opt-in, and its absent/disabled state
-  selects `ubuntu-latest`, which is the historical release path unchanged.
-- **After assignment**, `scripts/check-release-runner-trust.sh` re-asserts the
-  contract on the machine itself: push event, canonical repository, routing
-  explicitly enabled, ref in `{refs/heads/main, refs/tags/v*}`, Cargo and
-  sccache directories isolated under `/var/lib/cassy-actions/`, the runner's
-  private sccache port, and not running as root. A future edit to a workflow
-  expression therefore cannot silently hand the box untrusted input.
-
-**The publishing job is deliberately never routed to the box.** It holds the
-only `contents: write` token in the release and stays on `ubuntu-latest`.
-
-Enabling and disabling the routing is a repository-variable change:
+A webhook cannot reach the supervisor host, and a watcher inside the `cas`
+daemon would be Rust that only a release could ship, stop with the daemon, and
+replace the binary it runs. A systemd user timer survives reboots, costs one
+authenticated API call a minute, and its journal is the install log. Set it up
+once per host:
 
 ```bash
-gh variable set CASSY_RELEASE_SELF_HOSTED --body enabled    # opt in
-gh variable set CASSY_RELEASE_SELF_HOSTED --body disabled   # before box maintenance
+scripts/install-on-publish.sh --install
+journalctl --user -u cassy-install-on-publish
 ```
 
-Disable it before any maintenance on the runner. Every lane then runs hosted,
-exactly as it did before this work.
+## One timer
 
-One listener serves the `cas-ci-32core` label, so a routed release lane runs
-one job at a time and can queue behind merge-queue validation. Two consequences
-worth knowing before enabling it:
+`release.yml` ends the release notes with the PR number, its opening time and
+the publish time. The first host to install completes the line with the
+install time: **PR opened to installed**, the one latency figure per release.
+It replaces the tag-to-published latency receipt, the stage budgets and the
+request/cut metrics, which measured narrower spans.
 
-- In the fallback path, `verify` and `build` are designed to run in parallel;
-  routed to the box they serialise. Warm, that is still a few minutes against
-  13-26 minutes cold, but it is not free parallelism.
-- A release cut during heavy merge-queue traffic waits for the box. The hosted
-  fail-safe is one variable away if that ever matters more than the warm cache.
+## Self-hosted routing
 
-## Cutting a release on the fast path
+None. Every release lane runs on GitHub-hosted runners; the
+`CASSY_RELEASE_SELF_HOSTED` variable and the release routing jobs are gone, and
+the publishing job is the only one holding a `contents: write` token.
 
-1. The release train pushes `release/<version>`; `Release Prebuild` starts on
-   that push and again when the PR lands on `main`.
-2. Push the tag as soon as the PR lands (`scripts/release.sh --publish-tag`).
-   The script reports whether the prebuild is ready, still running, or missing
-   without waiting for it. The workflow waits up to 15 minutes for a running
-   prebuild of this tree, so a tag is not silently pushed into a cold path.
-3. Run the published-asset receipts once the release is published, then wait
-   for the advisory `Install path proof` workflow to finish green on macOS ARM
-   and clean Linux before calling the release installable. Its transcript and
-   manual consumer-Mac limitation are documented in
-   [Install path proof](install-path-proof.md).
-
-Pushing the tag before the prebuild finishes is safe. The release lookup waits
-up to 15 minutes for the exact run; only a timeout or terminal prebuild failure
-falls back to the old tag-time build, and that fallback is called out as a
-workflow warning.
-
-## Measuring a real release
-
-Two receipts, both gates rather than reports:
+## Dry runs and recovery
 
 ```bash
-scripts/release-published-receipt.sh vX.Y.Z    # what shipped: digests, both assets
-scripts/release-latency-receipt.sh   vX.Y.Z    # how fast: tag push -> published
+gh workflow run release-prebuild.yml --ref <branch>   # build that tree
+gh workflow run release.yml --ref <branch>            # dry_run=true by default
 ```
 
-`release-latency-receipt.sh` measures from the **first** Release workflow run
-created for the tag, so a rerun can never flatter the number, and it exits
-non-zero when the latency exceeds its budget (600s by default). A release that
-cannot produce a passing latency receipt has not demonstrated fast publication.
+The dry run adopts the dispatched build, runs both audits, publishes a
+`dryrun-v<version>-<run>` prerelease with the assets, and deletes it. GitHub's
+latest-release endpoint, which `cas update` and the installer read, never
+returns a prerelease.
 
-Tag to published is only the last few minutes. The same receipt also reports
-the whole wall clock, from the release-train run directory:
+If the release workflow fails after the version lands on `main`, fix the cause
+on `main` and run `gh workflow run release.yml -f dry_run=false`. It never
+replaces an existing release; see
+[Recovering a failed or partial release](../RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release).
 
-- `REQUEST_TO_PUBLISHED_SECS` runs from the release request to publication.
-  Set `CAS_RELEASE_TRAIN_REQUESTED_AT` (epoch seconds or ISO 8601 UTC) on the
-  first `--cut`. Without it, `REQUEST_SOURCE=cut-start` and the clock starts at
-  the first cut.
-- `CUT_TO_PUBLISHED_SECS` runs from the first `--cut` (`cut.start.epoch`,
-  never moved by a resume) to publication.
-- `BLOCKER_COUNT`, `BLOCKER_COSTS` (`stage:secs`, with a trailing `+` when the
-  stage was still blocked at publication) and `BLOCKED_SECS` price each
-  blocked stage from its block to its next completion. `STAGE_SECS` gives each
-  stage's last attempt. The cut writes them as `stage-events.tsv` rows.
-
-The release report shows request to published, cut to published and each
-blocker with its time cost.
-
-## Contract
-
-`scripts/test-ci-test-tiers.sh` pins the properties above — trigger surface,
-the pending-release gate, audit and codesign parity between the prebuild and
-fallback paths, bounded race handling and loud fail-safe lookup, fail-closed
-publication, both routing keys, and the publish job's hosted-only placement.
-`make -C cas-cli test-ci-tiers` runs it along with each new guard's own
-self-test, on the required Fast Validation lane.
+After publication, `scripts/release-published-receipt.sh vX.Y.Z` derives the
+announcement digests from the published bytes, and the advisory
+[Install path proof](install-path-proof.md) checks a clean install on macOS ARM
+and Linux.

@@ -37,33 +37,22 @@ After a release is pushed + tagged, post to **#cas-internal** (`C0B44GUKDK2`). A
 1. **User-perspective post**
 2. **Dev-perspective post**
 
-### Protected-main landing before the tag
+### Protected-main landing publishes the release
 
-`main` is protected by required checks. Prepare the version bump, changelog,
-and release-note draft on a source branch; do not merge or push that commit
-directly to `main`, and do not create the release tag before the PR lands.
+`main` is protected by required checks and the merge queue. The release rides
+in the epic PR (cas-f95b): run `scripts/release.sh` on the epic branch (a
+hotfix branch from `main` uses `scripts/release.sh --hotfix`). It commits the
+version bump, the CHANGELOG section and this release-note draft to the branch,
+opens the PR to `main` and enables auto-merge, so one tree passes one queue
+cycle. Never push the bump to `main` directly, never push a release tag by
+hand, and never open a separate release PR.
 
-When a release follows an epic, carry the version bump, CHANGELOG section, and release-note draft as the epic branch’s final commit and land them through its single integration PR before tagging for one tree, one queue cycle; reserve a standalone `release/vX-prepare` PR for multi-PR batch releases, because the version lives in the tree and the merge queue revalidates every new tree.
-
-1. Push the source branch: `git push -u origin <source-branch>`.
-2. Open the release PR: `PR_URL=$(gh pr create --base main --head <source-branch> --fill)`.
-3. Surface its URL and required checks to the operator/supervisor:
-   `gh pr view "$PR_URL" --json url,number,statusCheckRollup`.
-4. After the required checks are green, merge explicitly:
-   `gh pr merge "$PR_URL" --merge`. Do not use `--auto` or an admin bypass.
-5. The supervisor/operator fetches the landed commit (`git fetch origin main`)
-   and runs `./scripts/release.sh --publish-tag` from an unguarded release
-   worktree at that exact commit. This creates the annotated tag, runs the
-   audit, then pushes the tag to start the normal GitHub publisher. A bare
-   `release.sh` is audit-only and never touches the remote. A factory worker's
-   pre-push guard forbids tag pushes: if a release chore is assigned to a
-   worker, its deliverable is an annotated local tag at the landed SHA and a
-   handoff naming both. The supervisor/operator owns the tag push and all
-   publication receipts. Use the
-   [release chore task template](release-notes/release-chore-task-template.md)
-   for that assignment. In the assigned guarded worktree, a
-   `release.sh --publish-tag` invocation at the landed commit stops before the
-   audit with the local tag and handoff command; it does not publish.
+When the version change lands, `release.yml` adopts the archives the queue
+run built, audits and launch-tests the packaged assets, creates the annotated
+tag and the GitHub release, and dispatches the install-path proof. The
+supervisor host installs within a minute (`scripts/install-on-publish.sh`),
+and the release notes end with the timer from PR opened to installed. Only
+then do the receipt and announcement steps below start.
 
 ### Published assets before announcement
 
@@ -137,11 +126,9 @@ must state the measured time and whether it exceeded the recorded budget.
    Publication completion requires all message, installation, published-asset
    and verified report receipts. A missing receipt keeps completion pending.
 
-`scripts/release.sh --publish-tag --manual-publish
---acknowledge-workflow-conflict` is an emergency failover for a disabled or
-unavailable workflow, not a normal release lane. It deliberately competes
-after its tag push, so disable/cancel the CI workflow first when possible; it
-uses the same receipt command before any announcement digest is posted.
+If the release workflow fails after the version lands, fix the cause on
+`main` and run `gh workflow run release.yml -f dry_run=false`; it refuses to
+replace an existing release. There is no local publisher.
 
 ### Recovering a failed or partial release
 
@@ -169,9 +156,10 @@ uses the same receipt command before any announcement digest is posted.
 
    Do not use `--cleanup-tag`, force-push, or retag: the annotated tag remains
    the source identity for both the retry and its receipt.
-4. If CI cannot publish after that recovery, use the explicitly acknowledged
-   `--publish-tag --manual-publish --acknowledge-workflow-conflict` failover
-   only after the incomplete release is deleted. In every case, run
+4. If CI cannot publish after that recovery, stop and escalate: there is no
+   local publisher (cas-f95b), and
+   [the Actions outage runbook](release-actions-outage-runbook.md) covers a
+   GitHub outage. In every case, run
    `release-published-receipt.sh --write-draft` after publication and before an
    announcement.
 5. If any announcement might already name the release, do not delete or replace

@@ -1,369 +1,411 @@
 #!/usr/bin/env bash
 #
-# Local release audit and tag-push script for CAS.
+# One-command release for CAS (cas-f95b). Run it from the epic branch (or a
+# hotfix branch) once the work is code-done:
 #
-# GitHub's tag-triggered Release workflow is the sole normal publisher. This
-# script builds local audit evidence by default. Only --publish-tag pushes the
-# annotated tag that starts that workflow; its dist/local-audit archives are
-# never the shipped bytes and must never supply an announced digest. Use
-# release-published-receipt.sh only after the workflow has published both assets.
+#   scripts/release.sh                 # next minor version
+#   scripts/release.sh --hotfix        # next patch version
+#   scripts/release.sh --next-version  # print the version it would use; no change
 #
-# A deliberately loud manual failover remains for a disabled or unavailable CI
-# workflow. It deliberately competes with the tag-triggered workflow, so use
-# it only after disabling/cancelling that workflow or when its runners cannot
-# publish. That exceptional path still requires the published-release receipt
-# command before any digest is announced.
+# It commits the release onto the branch itself, so the version reaches main
+# through the same PR and the same merge-queue run as the code:
+#   1. merges the base branch in when the branch is behind it, resolving the
+#      release files (version lines, Cargo.lock, CHANGELOG, draft) itself;
+#   2. computes the next version from the base branch's version;
+#   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
+#      [Unreleased] to a dated [x.y.z] section, and names the release-notes
+#      draft docs/release-notes/<date>-v<x.y.z>-slack.md;
+#   4. commits "release: v<x.y.z>", pushes, opens the PR to the base branch
+#      (or retitles the open one), and enables auto-merge.
+# Then it watches the PR until it merges. When another release lands on the
+# base first, it re-bumps: merges the base, takes the next version, pushes
+# again and re-enables auto-merge. It never waits for a person on that path.
 #
-# Prerequisites:
-#   - Rust toolchain (rustup)
-#   - cargo-zigbuild: cargo install cargo-zigbuild
-#   - gh CLI (only for --manual-publish)
-#   - Environment variables: CAS_POSTHOG_API_KEY, CAS_SENTRY_DSN
+# Landing on main is the release: the merge queue's run builds the archives
+# (release-prebuild.yml) and release.yml publishes them. Nothing here tags,
+# builds or publishes. The local train and gate scripts are not called.
 #
-# Usage:
-#   ./scripts/release.sh                 # local audit only; no remote mutation
-#   ./scripts/release.sh --publish-tag   # push tag and start CI publication
-#   ./scripts/release.sh --publish-tag --manual-publish --acknowledge-workflow-conflict
+# The draft: write the Slack draft before running, at the path printed by
+# --next-version, or anywhere with --notes <file>; `{{VERSION}}` in it becomes
+# the release version. A re-bump renames it and rewrites its version.
 #
-# Pre-warming rule: in a tag worktree, use only the bare ./scripts/release.sh;
-# it is audit-only and remote-safe. Do not pre-warm with a direct cargo build.
+# Exit codes: 0 merged (or prepared with --no-watch); 1 usage or setup error;
+# 3 the merge queue ejected the PR or auto-merge was turned off (repair, then
+# rerun this command); 4 a merge conflict outside the release files.
 
 set -euo pipefail
+# prepare runs in a command substitution; keep errexit there too.
+shopt -s inherit_errexit
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "$REPO_ROOT"
-
-HOST_OS="$(uname -s)"
-TARGETS=("x86_64-unknown-linux-gnu")
-if [[ "$HOST_OS" == "Darwin" ]]; then
-    TARGETS=("aarch64-apple-darwin" "x86_64-unknown-linux-gnu")
-fi
-
-DIST_DIR="$REPO_ROOT/dist/local-audit"
-PUBLISH_TAG=false
-MANUAL_PUBLISH=false
-ACKNOWLEDGED_CONFLICT=false
-
-for arg in "$@"; do
-    case "$arg" in
-        --publish-tag) PUBLISH_TAG=true ;;
-        --manual-publish) MANUAL_PUBLISH=true ;;
-        --acknowledge-workflow-conflict) ACKNOWLEDGED_CONFLICT=true ;;
-        -h|--help)
-            cat <<'EOF'
-Usage: scripts/release.sh [--publish-tag [--manual-publish --acknowledge-workflow-conflict]]
-
-Build local audit archives without touching the remote. Add --publish-tag to
-push the annotated tag; the tag-triggered GitHub Release workflow creates the
-normal published release.
-In a guarded factory worker worktree, --publish-tag creates the local tag and
-exits with a supervisor handoff before building or pushing.
-
-  --publish-tag
-      Explicitly push the annotated tag after a successful local audit. This
-      starts the normal CI publisher.
-  --manual-publish
-      Emergency failover only: create a release from local audit archives
-      after --publish-tag. Use only while the workflow is disabled or
-      unavailable; it deliberately conflicts with the normal CI publisher.
-  --acknowledge-workflow-conflict
-      Required with --manual-publish. Published digests must still come from
-      scripts/release-published-receipt.sh, never from dist/local-audit.
+usage() {
+    sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+Options:
+  --hotfix            bump the patch version instead of the minor version
+  --version <x.y.z>   use this version (must be above the base branch's)
+  --base <branch>     base branch (default main)
+  --notes <file>      release-notes draft to commit (default: the draft this
+                      branch adds under docs/release-notes/)
+  --next-version      print the version and draft path, change nothing
+  --no-watch          stop after enabling auto-merge
+  --dry-run           prepare and commit locally; no push, no PR
 EOF
-            exit 0
-            ;;
-        *)
-            echo "Unknown argument: $arg" >&2
-            exit 1
-            ;;
+}
+
+base="main"
+kind="minor"
+explicit_version=""
+notes_file=""
+print_only=false
+watch=true
+dry_run=false
+while (($#)); do
+    case "$1" in
+        --hotfix) kind="patch"; shift ;;
+        --version) explicit_version="${2:?--version needs x.y.z}"; shift 2 ;;
+        --base) base="${2:?--base needs a branch}"; shift 2 ;;
+        --notes) notes_file="${2:?--notes needs a file}"; shift 2 ;;
+        --next-version) print_only=true; shift ;;
+        --no-watch) watch=false; shift ;;
+        --dry-run) dry_run=true; watch=false; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'error: unknown argument %s\n' "$1" >&2; usage >&2; exit 1 ;;
     esac
 done
 
-if "$MANUAL_PUBLISH" && ! "$ACKNOWLEDGED_CONFLICT"; then
-    echo "error: --manual-publish requires --acknowledge-workflow-conflict" >&2
-    exit 2
-fi
-if "$MANUAL_PUBLISH" && ! "$PUBLISH_TAG"; then
-    echo "error: --manual-publish requires --publish-tag" >&2
-    exit 2
-fi
-if ! "$MANUAL_PUBLISH" && "$ACKNOWLEDGED_CONFLICT"; then
-    echo "error: --acknowledge-workflow-conflict is only valid with --manual-publish" >&2
-    exit 2
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# Progress goes to stderr: prepare's stdout is the version it prepared.
+say() { printf 'release: %s\n' "$*" >&2; }
+
+if [[ -n "$notes_file" ]]; then
+    [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
+    notes_file="$(cd "$(dirname "$notes_file")" && pwd)/$(basename "$notes_file")"
 fi
 
-VERSION="$(grep -m1 '^version = "' cas-cli/Cargo.toml | sed -E 's/^version = "([^"]+)"/\1/')"
-TAG="v$VERSION"
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+script_dir="$repo_root/scripts"
+remote="${RELEASE_REMOTE:-origin}"
+gh_bin="${GH_BIN:-gh}"
+watch_interval="${RELEASE_WATCH_INTERVAL:-60}"
+release_date() { printf '%s\n' "${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"; }
 
-# Factory workers can write a local annotated tag, but their worktree-scoped
-# pre-push hook rejects refs/tags/*. Detect that exact guard before any audit
-# or Rust command, so --publish-tag produces an actionable handoff instead of
-# failing after a multi-minute build. A role env alone is not evidence of the
-# installed hook: the supervisor may inherit those variables in a release run.
-worker_guard_hooks="$(git config --get core.hooksPath || true)"
-if [[ -n "$worker_guard_hooks" ]]; then
-    case "$worker_guard_hooks" in
-        /*) ;;
-        *) worker_guard_hooks="$REPO_ROOT/$worker_guard_hooks" ;;
+release_manifests=(
+    cas-cli/Cargo.toml
+    crates/cas-types/Cargo.toml
+    crates/cas-search/Cargo.toml
+    crates/cas-store/Cargo.toml
+    crates/cas-core/Cargo.toml
+    crates/cas-mcp/Cargo.toml
+)
+release_packages='cas|cas-types|cas-search|cas-store|cas-core|cas-mcp'
+
+[[ -z "$explicit_version" || "$explicit_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "--version must be x.y.z, got $explicit_version"
+
+branch="$(git symbolic-ref --quiet --short HEAD)" || die "detached HEAD; check out the epic or hotfix branch"
+[[ "$branch" != "$base" ]] || die "run this on the epic or hotfix branch, not on $base"
+
+version_at() {
+    git show "$1:cas-cli/Cargo.toml" 2>/dev/null | awk -F'"' '/^version = "/ { print $2; exit }' || true
+}
+
+remote_tag_exists() {
+    git ls-remote --exit-code --tags "$remote" "refs/tags/v$1" >/dev/null 2>&1
+}
+
+bump() {
+    local version="$1" major minor patch
+    IFS=. read -r major minor patch <<<"$version"
+    case "$kind" in
+        patch) printf '%s.%s.%s\n' "$major" "$minor" "$((patch + 1))" ;;
+        *) printf '%s.%s.0\n' "$major" "$((minor + 1))" ;;
     esac
-fi
-if "$PUBLISH_TAG" && [[ -n "$worker_guard_hooks" ]] && \
-    grep -qF 'Cassy factory worker push guard' "$worker_guard_hooks/pre-push" 2>/dev/null; then
-    release_sha="$(git rev-parse HEAD)"
-    if ! remote_main_line="$(git ls-remote --heads origin refs/heads/main)"; then
-        echo "HANDOFF REQUIRED: origin/main unavailable; no tag created." >&2
-        exit 3
-    fi
-    remote_main_sha="${remote_main_line%%$'\t'*}"
-    if [[ "$remote_main_line" != *$'\trefs/heads/main' || "$release_sha" != "$remote_main_sha" ]]; then
-        echo "HANDOFF REQUIRED: HEAD differs from origin/main; no tag created." >&2
-        echo "HEAD: $release_sha" >&2
-        echo "origin/main: ${remote_main_sha:-missing}" >&2
-        echo "Use your guarded worktree at origin/main." >&2
-        echo "Or create the local tag at the verified SHA and hand it off." >&2
-        exit 3
-    fi
-    if git show-ref --verify --quiet "refs/tags/$TAG"; then
-        if [[ "$(git cat-file -t "refs/tags/$TAG")" != tag || \
-              "$(git rev-parse "refs/tags/$TAG^{}")" != "$release_sha" ]]; then
-            echo "HANDOFF REQUIRED: local $TAG is not annotated at HEAD." >&2
-            exit 3
-        fi
+}
+
+version_greater() {
+    [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" == "$1" ]]
+}
+
+# The version this release takes: one step above the base branch, skipping a
+# version whose tag already exists.
+next_version() {
+    local base_version="$1" candidate
+    if [[ -n "$explicit_version" ]]; then
+        version_greater "$explicit_version" "$base_version" \
+            || die "--version $explicit_version is not above $base's $base_version"
+        candidate="$explicit_version"
     else
-        git tag -a "$TAG" -m "$TAG" "$release_sha"
+        candidate="$(bump "$base_version")"
     fi
-    tag_object_sha="$(git rev-parse "refs/tags/$TAG")"
-    echo "HANDOFF REQUIRED: worker push guard blocks release tags." >&2
-    echo "Tag: $TAG @ $release_sha (annotated locally)" >&2
-    echo "Tag object: $tag_object_sha" >&2
-    echo "Supervisor: git push origin refs/tags/$TAG" >&2
-    echo "No audit build or remote push ran." >&2
-    echo "Supervisor: finish publication and verify receipts." >&2
-    exit 3
-fi
-
-# Reject unsupported host/target combinations before bootstrapping toolchains
-# or compiling, rather than failing deep in a native compiler invocation.
-./scripts/check-release-host.sh "$HOST_OS" "${TARGETS[@]}"
-
-if [ -f "$REPO_ROOT/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.env"
-    set +a
-fi
-
-echo "=== CAS Local Release Audit ==="
-echo "Version:  $VERSION"
-echo "Tag:      $TAG"
-echo "Targets:  ${TARGETS[*]}"
-echo "Output:   $DIST_DIR (audit evidence only; not shipped bytes)"
-echo ""
-
-if [ -z "${CAS_POSTHOG_API_KEY:-}" ]; then
-    echo "error: CAS_POSTHOG_API_KEY is not set" >&2
-    exit 1
-fi
-if [ -z "${CAS_SENTRY_DSN:-}" ]; then
-    echo "warning: CAS_SENTRY_DSN is not set — crash reporting will be disabled in this build"
-fi
-if ! command -v cargo-zigbuild &>/dev/null; then
-    echo "error: cargo-zigbuild not found. Install with: cargo install cargo-zigbuild" >&2
-    exit 1
-fi
-if "$MANUAL_PUBLISH" && ! command -v gh &>/dev/null; then
-    echo "error: gh CLI not found. Install with: brew install gh" >&2
-    exit 1
-fi
-
-# Only this invocation's tag is eligible for failed-publication cleanup.
-# Never remove worker handoff tags, an existing tag, a replacement, or a tag
-# whose remote absence cannot be proven. update-ref makes deletion atomic.
-created_release_tag_object=''
-cleanup_failed_release_tag() {
-    local status="$?" remote_tags
-    trap - EXIT
-    if ((status != 0)) && [[ -n "$created_release_tag_object" ]] &&
-        [[ "$(git rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null || true)" == "$created_release_tag_object" ]]; then
-        if remote_tags="$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")" &&
-            [[ -z "$remote_tags" ]]; then
-            if git update-ref -d "refs/tags/$TAG" "$created_release_tag_object"; then
-                echo "Removed failed publish's local-only tag $TAG; resume can recreate it." >&2
-            fi
-        else
-            echo "Retained $TAG: remote tag exists or remote absence is unknown." >&2
-        fi
-    fi
-    exit "$status"
-}
-trap cleanup_failed_release_tag EXIT
-
-ensure_release_tag() {
-    if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-        echo "Creating annotated tag $TAG on HEAD before release audit..."
-        git tag -a "$TAG" -m "$TAG"
-        created_release_tag_object="$(git rev-parse "refs/tags/$TAG")"
-    fi
-    # --local: this runs before the tag is pushed, so the guard must inspect the
-    # local tag object instead of re-fetching one that cannot exist on origin
-    # yet. CI re-runs the same script without --local after the push.
-    ./scripts/check-release-preflight.sh --local "$TAG"
+    while remote_tag_exists "$candidate"; do
+        candidate="$(bump "$candidate")"
+    done
+    printf '%s\n' "$candidate"
 }
 
-# A registered migration changes the doctor/status component snapshots, while
-# scoped release suites do not build that integration test.
-./scripts/check-release-migration-snapshots.sh
+draft_path() { printf 'docs/release-notes/%s-v%s-slack.md\n' "$(release_date)" "$1"; }
 
-# shellcheck source=scripts/release-zig.sh
-source "$REPO_ROOT/scripts/release-zig.sh"
-release_zig_environment "$REPO_ROOT"
-
-if "$PUBLISH_TAG"; then
-    ensure_release_tag
-else
-    echo "Audit-only mode: no tag will be created or pushed."
-fi
-git submodule update --init --recursive
-
-INSTALLED_TARGETS="$(rustup target list --installed)"
-for target in "${TARGETS[@]}"; do
-    if ! grep -q "^${target}$" <<<"$INSTALLED_TARGETS"; then
-        echo "Installing Rust target: $target"
-        rustup target add "$target"
-    fi
-done
-
-rm -rf "$DIST_DIR"
-mkdir -p "$DIST_DIR"
-
-clean_stale_release_package_outputs() {
-    local target="$1"
-    # Keep this package list aligned with check-portable-x86_64-isa.sh and its
-    # duplicate-output audits. Different prewarm environments can leave
-    # incompatible fingerprints even after Cargo's profile clean.
-    rm -rf "target/$target/release/build"/blake3-* \
-        "target/$target/release/.fingerprint"/blake3-*
+fetch_base() {
+    git fetch --quiet "$remote" "+refs/heads/$base:refs/remotes/$remote/$base" \
+        || die "could not fetch $remote/$base"
 }
 
-# One local release build per release tree (cas-c096). The gate's
-# release-binary-isa row already built this tree's x86_64 binary in a warm
-# target, passed the Ghostty, BLAKE3 and packaged-binary ISA audits below, and
-# recorded the archive with its tree, version, target, build identity and
-# digests. Reuse it when every one of those matches; any mismatch rebuilds.
-# --manual-publish ships these local bytes, so it always builds them here.
-reuse_gate_release_binary() {
-    local target="$1" verdict archive staging
-    [[ "$target" == x86_64-unknown-linux-gnu ]] || return 1
-    if "$MANUAL_PUBLISH"; then
-        echo "Release binary: building; --manual-publish ships these local bytes."
-        return 1
-    fi
-    if [[ ! -f scripts/release-binary-artifact.py ]]; then
-        echo "Release binary: building; this tree has no gate artifact helper."
-        return 1
-    fi
-    if ! verdict="$(python3 scripts/release-binary-artifact.py verify "$REPO_ROOT" \
-        --target "$target" --version "$VERSION" 2>&1)"; then
-        printf 'Release binary: building; gate artifact not reusable: %s\n' "$verdict"
-        return 1
-    fi
-    archive="$(sed -n 's/^archive=//p' <<<"$verdict")"
-    staging="$(mktemp -d)"
-    if ! tar -xzf "$archive" -C "$staging" cas LICENSE; then
-        rm -rf "$staging"
-        echo "Release binary: building; gate archive could not be extracted."
-        return 1
-    fi
-    printf '%s\n' "$verdict"
-    # Re-audit the exact executable being reused; this costs seconds. Called
-    # as an `if` condition, errexit is off here, so every failure is explicit.
-    # A refused ISA audit stops the publish exactly as it would after a build.
-    if ! ./scripts/test-check-portable-x86_64-isa.sh "$staging/cas"; then
-        rm -rf "$staging"
-        echo "error: the reused gate release binary failed the ISA audit" >&2
-        exit 1
-    fi
-    rm -rf "$staging"
-    if ! cp "$archive" "$DIST_DIR/cas-$target.tar.gz"; then
-        echo "error: could not copy the reused gate archive into $DIST_DIR" >&2
-        exit 1
-    fi
+# Drafts this branch adds relative to the base branch.
+branch_drafts() {
+    git diff --name-only --diff-filter=A "$remote/$base...HEAD" -- 'docs/release-notes/*-v*-slack.md'
 }
 
-for target in "${TARGETS[@]}"; do
-    echo ""
-    if reuse_gate_release_binary "$target"; then
-        echo "=== Reused gate release binary for $target (no local rebuild) ==="
-        continue
+our_conflict_draft=""
+
+# Merge the base branch in. Conflicts in the release files resolve
+# mechanically; any other conflict aborts the merge and stops (exit 4).
+sync_with_base() {
+    local merge_base merge_base_version file conflicted=() other=() scratch
+    if git merge-base --is-ancestor "$remote/$base" HEAD; then
+        return 0
     fi
-    echo "=== Building $target ==="
-    if [[ "$target" == *"linux"* ]]; then
-        cargo clean --release --target "$target"
-        clean_stale_release_package_outputs "$target"
-        CFLAGS_x86_64_unknown_linux_gnu="-march=x86_64" \
-        CXXFLAGS_x86_64_unknown_linux_gnu="-march=x86_64" \
-            cargo zigbuild -p cas --release --target "$target" --locked
-        ghostty_archive="$(find "target/$target/release/build" -path '*/ghostty_vt_sys-*/out/zig-out/lib/libghostty_vt.a' -print -quit)"
-        if [[ -z "$ghostty_archive" ]]; then
-            echo "error: built Ghostty archive not found for ISA audit" >&2
-            exit 1
-        fi
-        ./scripts/check-portable-x86_64-isa.sh "$ghostty_archive"
-        ./scripts/check-blake3-no-avx512-build.sh "target/$target/release/build"
+    merge_base="$(git merge-base HEAD "$remote/$base")"
+    merge_base_version="$(version_at "$merge_base")"
+    scratch="$(mktemp -d)"
+    git show HEAD:CHANGELOG.md >"$scratch/ours-changelog.md"
+    say "merging $remote/$base into $branch"
+    if git -c core.hooksPath=/dev/null merge --no-edit --no-ff "$remote/$base" >"$scratch/merge.log" 2>&1; then
+        rm -rf "$scratch"
+        return 0
+    fi
+    mapfile -t conflicted < <(git diff --name-only --diff-filter=U)
+    for file in "${conflicted[@]}"; do
+        case "$file" in
+            CHANGELOG.md|Cargo.lock|cas-cli/Cargo.toml|crates/cas-*/Cargo.toml|docs/release-notes/*-slack.md) ;;
+            *) other+=("$file") ;;
+        esac
+    done
+    if ((${#other[@]})); then
+        git merge --abort
+        rm -rf "$scratch"
+        printf 'error: merging %s conflicts outside the release files:\n' "$remote/$base" >&2
+        printf '  %s\n' "${other[@]}" >&2
+        printf 'Resolve the merge on %s by hand, push, then rerun scripts/release.sh.\n' "$branch" >&2
+        exit 4
+    fi
+    for file in "${conflicted[@]}"; do
+        case "$file" in
+            CHANGELOG.md)
+                git show ":3:$file" >"$scratch/base-changelog.md"
+                python3 "$script_dir/release_changelog.py" rebase "$scratch/ours-changelog.md" \
+                    "$scratch/base-changelog.md" "$merge_base_version" "$file"
+                ;;
+            docs/release-notes/*)
+                # Both sides added this path: theirs is a published draft.
+                our_conflict_draft="$scratch/$(basename "$file")"
+                git show ":2:$file" >"$our_conflict_draft"
+                git checkout --theirs -- "$file"
+                ;;
+            *)
+                # Version lines and lock entries: take the base side of each
+                # conflicting hunk only; the bump below rewrites the versions.
+                git show ":2:$file" >"$scratch/ours"
+                git show ":1:$file" >"$scratch/common" 2>/dev/null || : >"$scratch/common"
+                git show ":3:$file" >"$scratch/theirs"
+                git merge-file --theirs -q "$scratch/ours" "$scratch/common" "$scratch/theirs" || true
+                cp "$scratch/ours" "$file"
+                ;;
+        esac
+        git add -- "$file"
+    done
+    git -c core.hooksPath=/dev/null commit --quiet --no-edit
+    say "merged $remote/$base; resolved release files: ${conflicted[*]}"
+}
+
+set_versions() {
+    local version="$1" manifest
+    for manifest in "${release_manifests[@]}"; do
+        [[ -f "$manifest" ]] || die "missing $manifest"
+        perl -0777 -i -pe "s/^version = \"[^\"]*\"/version = \"$version\"/m" "$manifest"
+    done
+    perl -0777 -i -pe \
+        "s/(\\[\\[package\\]\\]\\nname = \"(?:$release_packages)\"\\nversion = \")[^\"]*\"/\${1}$version\"/g" \
+        Cargo.lock
+}
+
+# The draft this release commits: --notes, our side of a draft path the base
+# also added, or the one draft this branch adds. Checked before any edit.
+draft_source() {
+    local version="$1" drafts=()
+    if [[ -n "$notes_file" ]]; then
+        printf '%s\n' "$notes_file"
+    elif [[ -n "$our_conflict_draft" ]]; then
+        printf '%s\n' "$our_conflict_draft"
     else
-        cargo build -p cas --release --target "$target" --locked
+        mapfile -t drafts < <(branch_drafts)
+        if ((${#drafts[@]} > 1)); then
+            die "this branch adds ${#drafts[@]} release-notes drafts (${drafts[*]}); keep one or pass --notes"
+        fi
+        if ((${#drafts[@]} == 0)); then
+            die "no release-notes draft: write $(draft_path "$version") (follow docs/release-notes/RUBRIC.md; {{VERSION}} is replaced), or pass --notes <file>"
+        fi
+        printf '%s\n' "${drafts[0]}"
     fi
+}
 
-    staging="$(mktemp -d)"
-    cp "target/$target/release/cas" "$staging/"
-    cp LICENSE "$staging/"
-    if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
-        ./scripts/test-check-portable-x86_64-isa.sh "$staging/cas"
+# Name the draft for this version and rewrite its version text.
+place_draft() {
+    local version="$1" source="$2" target old_version
+    target="$(draft_path "$version")"
+    old_version="$(basename "$source" | sed -n 's/.*-v\([0-9]*\.[0-9]*\.[0-9]*\)-slack\.md$/\1/p')"
+    mkdir -p "$(dirname "$target")"
+    if [[ "$source" != "$target" ]]; then
+        cp "$source" "$target.new"
+        if git ls-files --error-unmatch "$source" >/dev/null 2>&1; then
+            git rm --quiet -- "$source"
+        fi
+        mv "$target.new" "$target"
     fi
-    tar -czvf "$DIST_DIR/cas-$target.tar.gz" -C "$staging" cas LICENSE
-    rm -rf "$staging"
-done
+    perl -pi -e "s/\\{\\{VERSION\\}\\}/$version/g" "$target"
+    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
+        perl -pi -e "s/\\Q$old_version\\E/$version/g" "$target"
+    fi
+    perl -pi -e "s/^(Release date: )\\d{4}-\\d{2}-\\d{2}/\${1}$(release_date)/" "$target"
+    git add -- "$target"
+}
 
-echo ""
-echo "=== Local Audit Complete ==="
-ls -lh "$DIST_DIR"/*.tar.gz
+# Steps 1-3 plus the commit. Prints the version prepared.
+prepare() {
+    local base_version version current
+    fetch_base
+    sync_with_base
+    base_version="$(version_at "$remote/$base")"
+    [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read $base's version"
+    version="$(next_version "$base_version")"
+    current="$(version_at HEAD)"
+    if [[ "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
+        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]] \
+        && [[ -z "$notes_file" ]]; then
+        say "v$version is already prepared on $branch"
+        printf '%s\n' "$version"
+        return 0
+    fi
+    local source
+    source="$(draft_source "$version")"
+    set_versions "$version"
+    python3 "$script_dir/release_changelog.py" promote CHANGELOG.md "$version" "$(release_date)" "$base_version" \
+        || die "CHANGELOG.md promotion failed"
+    place_draft "$version" "$source"
+    git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}"
+    git -c core.hooksPath=/dev/null commit --quiet -m "release: v$version" \
+        -m "Release-Version: $version" -m "Prepared by scripts/release.sh on $branch from $base $base_version."
+    say "committed release v$version on $branch ($(git rev-parse --short HEAD))"
+    printf '%s\n' "$version"
+}
 
-if ! "$PUBLISH_TAG"; then
-    echo "Audit completed without creating or pushing a tag; no release was published."
+pr_number=""
+
+open_or_update_pr() {
+    local version="$1" title body
+    title="Release v$version: $branch"
+    body="$(mktemp)"
+    {
+        printf 'Release v%s, prepared by `scripts/release.sh`.\n\n' "$version"
+        printf 'The version bump, CHANGELOG promotion and release-notes draft ride in this PR, so the merge queue proves the tree that ships. The queue run builds both release archives (Release Prebuild); landing on %s publishes them (Release). No release PR follows.\n\n' "$base"
+        printf '## Changelog\n\n'
+        python3 "$script_dir/release_changelog.py" section CHANGELOG.md "$version"
+    } >"$body"
+    pr_number="$("$gh_bin" pr list --head "$branch" --base "$base" --state open --json number --jq '.[0].number // empty')"
+    if [[ -z "$pr_number" ]]; then
+        "$gh_bin" pr create --base "$base" --head "$branch" --title "$title" --body-file "$body" >/dev/null
+        pr_number="$("$gh_bin" pr list --head "$branch" --base "$base" --state open --json number --jq '.[0].number // empty')"
+        [[ -n "$pr_number" ]] || die "opened a PR for $branch but cannot find it"
+        say "opened PR #$pr_number"
+    else
+        "$gh_bin" pr edit "$pr_number" --title "$title" --body-file "$body" >/dev/null
+        say "updated PR #$pr_number to v$version"
+    fi
+    "$gh_bin" pr edit "$pr_number" --add-label release >/dev/null 2>&1 || true
+    rm -f "$body"
+    "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
+    say "auto-merge enabled on PR #$pr_number; the merge queue takes it when admission is green"
+}
+
+publish_branch() {
+    git push --quiet "$remote" "HEAD:refs/heads/$branch"
+}
+
+if "$print_only"; then
+    fetch_base
+    base_version="$(version_at "$remote/$base")"
+    version="$(next_version "$base_version")"
+    printf 'version=%s\n' "$version"
+    printf 'draft=%s\n' "$(draft_path "$version")"
     exit 0
 fi
 
-# Tell the operator, before the tag exists, which publication path the tag will
-# take (cas-3b7c0). Don't wait here (cas-28eb): the tag workflow's own lookup
-# already waits for an in-flight prebuild of this tree and adopts it, so
-# blocking the tag push only moved that wait in front of it (~11 min measured).
-prebuild_status="$(GITHUB_REPOSITORY="${RELEASE_REPO:-Richards-LLC/cassy}" \
-    GITHUB_SHA="$(git rev-parse HEAD)" RELEASE_PREBUILD_WAIT_SECONDS=0 \
-    ./scripts/find-release-prebuild.sh 2>/dev/null || true)"
-if grep -q '^found=true' <<<"$prebuild_status"; then
-    echo "Prebuilt release artifacts are ready; the tag will publish without compiling."
-elif grep -q '^reason=prebuild still queued or in progress' <<<"$prebuild_status"; then
-    echo "The Release Prebuild for this tree is still running; the tag workflow waits for it and adopts it."
-else
-    echo "NOTE: no prebuilt artifacts for this commit yet — the tag will build them inline (historically 13-26 min)."
-    echo "      Wait for the Release Prebuild workflow on this commit to finish if you want the fast path."
-fi
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the worktree has uncommitted changes; commit or stash them first"
 
-echo "Pushing annotated tag $TAG to trigger the authoritative Release workflow..."
-git push origin "$TAG"
-
-if "$MANUAL_PUBLISH"; then
-    echo ""
-    echo "WARNING: emergency manual publishing is intentionally competing with CI."
-    echo "Use only after disabling/cancelling the workflow or when its runners cannot publish."
-    gh release create "$TAG" \
-        --repo "${RELEASE_REPO:-Richards-LLC/cassy}" \
-        --title "CAS $TAG" \
-        --generate-notes \
-        "$DIST_DIR"/*.tar.gz
-    echo "Manual release created. Run scripts/release-published-receipt.sh $TAG before announcing digests."
-else
-    echo "CI now owns release creation. Do not upload dist/local-audit archives or announce their digests."
-    echo "After CI publishes both assets, run scripts/release-published-receipt.sh $TAG."
-    echo "Then run scripts/release-latency-receipt.sh $TAG for the tag-to-published timing receipt."
+version="$(prepare)"
+if "$dry_run"; then
+    say "dry run: v$version committed locally on $branch; nothing pushed"
+    exit 0
 fi
+publish_branch
+open_or_update_pr "$version"
+
+"$watch" || exit 0
+
+# Watch until the PR merges. Re-bump when another release takes the version.
+# A queued PR has a merge-queue entry and no auto-merge request; an open PR
+# with neither was ejected (or had auto-merge turned off): that needs repair.
+repo_slug="$("$gh_bin" repo view --json nameWithOwner -q .nameWithOwner)"
+pr_state() {
+    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f query='
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state mergeable
+      autoMergeRequest { enabledAt }
+      mergeQueueEntry { state }
+      mergeCommit { oid }
+    }
+  }
+}' --jq '.data.repository.pullRequest'
+}
+rebump() {
+    explicit_version=""
+    notes_file=""
+    version="$(prepare)"
+    publish_branch
+    open_or_update_pr "$version"
+}
+
+start_base_version="$(version_at "$remote/$base")"
+while :; do
+    sleep "$watch_interval"
+    state_json="$(pr_state 2>/dev/null)" || continue
+    case "$(jq -r '.state' <<<"$state_json")" in
+        MERGED)
+            say "PR #$pr_number merged as $(jq -r '.mergeCommit.oid // "?"' <<<"$state_json"); release.yml publishes v$version"
+            exit 0
+            ;;
+        CLOSED)
+            die "PR #$pr_number was closed without merging"
+            ;;
+    esac
+    fetch_base
+    base_version="$(version_at "$remote/$base")"
+    if [[ "$base_version" != "$start_base_version" ]] || remote_tag_exists "$version"; then
+        say "$base moved to $base_version; re-bumping"
+        rebump
+        start_base_version="$base_version"
+        continue
+    fi
+    if [[ "$(jq -r '.mergeable' <<<"$state_json")" == CONFLICTING ]]; then
+        say "PR #$pr_number conflicts with $base; merging it in"
+        rebump
+        continue
+    fi
+    if [[ "$(jq -r 'if .autoMergeRequest == null and .mergeQueueEntry == null then "stalled" else "moving" end' <<<"$state_json")" == stalled ]]; then
+        printf 'error: PR #%s is open with no auto-merge and no merge-queue entry: the queue ejected it or auto-merge was turned off.\n' "$pr_number" >&2
+        printf 'Repair the failure, push, then rerun scripts/release.sh.\n' >&2
+        exit 3
+    fi
+done

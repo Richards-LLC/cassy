@@ -1,20 +1,44 @@
 #!/usr/bin/env bash
 # Decide whether the checked-out tree is a *pending release* tree: the exact
-# contents a `vX.Y.Z` tag is about to be pushed at.
+# contents the release workflow is about to tag `vX.Y.Z` and publish.
 #
-# This is the trigger for prebuilding release artifacts at release-PR merge
-# instead of at tag time (cas-3b7c0). The release tree is final the moment the
-# version-bump PR lands on main, so the expensive platform builds no longer
-# have to sit on the tag's critical path.
+# The version bump rides in the epic PR (scripts/release.sh), so the release
+# tree exists the moment that PR enters the merge queue. release-prebuild.yml
+# asks this script, on the merge_group tree, whether to start the release
+# builds; release.yml asks it again on the main push whether to publish.
 #
 # A tree is pending exactly when:
-#   1. every release-train crate carries the same version, and
+#   1. every release crate carries the same version, and
 #   2. CHANGELOG.md has a heading for that version, and
-#   3. no `v<version>` tag exists yet.
+#   3. no `v<version>` tag exists yet, and
+#   4. with --base-version <v>: the version differs from <v> (the tree the
+#      change lands on), so an ordinary PR never opens the release lanes.
 #
 # (3) makes this self-disarming: once the tag is pushed, later main pushes at
 # the same version report pending=false and cost one cheap gate job.
+#
+# Output lines: pending=, version=, tag=, changed=, reason=. changed=true means
+# the version moved relative to --base-version; with pending=false that is a
+# broken release (a reused or lowered version) and the caller fails loudly.
 set -euo pipefail
+
+base_version=""
+while (($#)); do
+    case "$1" in
+        --base-version)
+            base_version="${2:-}"
+            shift 2 || shift
+            ;;
+        --base-version=*)
+            base_version="${1#--base-version=}"
+            shift
+            ;;
+        *)
+            printf 'usage: %s [--base-version <version>]\n' "$0" >&2
+            exit 2
+            ;;
+    esac
+done
 
 # RELEASE_TREE_ROOT exists so the self-test can point this at a fixture tree
 # instead of the checkout it lives in. CI never sets it.
@@ -34,10 +58,13 @@ crate_version() {
     sed -n 's/^version = "\([^"]*\)"/\1/p' "$1" | head -n 1
 }
 
+changed=false
+
 not_pending() {
     printf 'pending=false\n'
-    printf 'version=\n'
+    printf 'version=%s\n' "${version:-}"
     printf 'tag=\n'
+    printf 'changed=%s\n' "$changed"
     printf 'reason=%s\n' "$1"
     exit 0
 }
@@ -47,10 +74,21 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     not_pending "cas-cli/Cargo.toml version is not a release semver: ${version:-<empty>}"
 fi
 
+if [[ -n "$base_version" ]]; then
+    if [[ "$version" == "$base_version" ]]; then
+        not_pending "version $version is unchanged from the base tree"
+    fi
+    changed=true
+    highest="$(printf '%s\n%s\n' "$base_version" "$version" | sort -V | tail -n 1)"
+    if [[ "$highest" != "$version" ]]; then
+        not_pending "version $version is lower than the base tree's $base_version"
+    fi
+fi
+
 for manifest in "${release_crates[@]}"; do
     actual="$(crate_version "$manifest")"
     if [[ "$actual" != "$version" ]]; then
-        not_pending "$manifest is $actual, not $version; release train is mid-bump"
+        not_pending "$manifest is $actual, not $version; the release crates disagree"
     fi
 done
 
@@ -72,4 +110,5 @@ fi
 printf 'pending=true\n'
 printf 'version=%s\n' "$version"
 printf 'tag=%s\n' "$tag"
-printf 'reason=%s\n' "release train is at $version with no $tag yet"
+printf 'changed=%s\n' "$changed"
+printf 'reason=%s\n' "tree is at $version with no $tag yet"

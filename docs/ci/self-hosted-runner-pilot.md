@@ -1,5 +1,11 @@
 # Self-hosted Fast Validation pilot
 
+> **Retired workflow.** cas-f95b deleted
+> `.github/workflows/self-hosted-fast-validation.yml` and the release lanes'
+> self-hosted routing (`CASSY_RELEASE_SELF_HOSTED`); the merge queue runs
+> hosted (`CASSY_MERGE_QUEUE_SELF_HOSTED=disabled`). This page records the
+> pilot's design and measurements; it no longer describes a running lane.
+
 The push-triggered pilot is an advisory duplicate of the required hosted Fast
 Validation archive producer. Separately, the CI workflow may route the required
 archive producer, preflight, and doctest lanes for a `merge_group` tree to the

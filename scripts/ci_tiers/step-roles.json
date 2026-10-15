@@ -4,7 +4,7 @@
       "file": ".github/workflows/release.yml",
       "job": "release",
       "step": {
-        "run_contains": "--title \"CAS $VERSION\" \\"
+        "run_contains": "./scripts/release-publish.sh \"${args[@]}\""
       }
     }
   ],
@@ -50,13 +50,6 @@
     }
   ],
   "Build full suite archive": [
-    {
-      "file": ".github/workflows/self-hosted-fast-validation.yml",
-      "job": "trusted-suite-pilot",
-      "step": {
-        "run_contains": "-o \"$RUNNER_TEMP/archive.time\" \\"
-      }
-    },
     {
       "file": ".github/workflows/ci.yml",
       "job": "fast-validation-suite-build",

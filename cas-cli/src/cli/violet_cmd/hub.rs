@@ -210,7 +210,7 @@ pub fn connect_error(code: &str) -> VioletError {
 pub(super) fn connect_config(
     cas_root: Option<&std::path::Path>,
 ) -> Result<cmcp_core::config::Config, VioletError> {
-    use cmcp_core::config::{ServerConfig, VIOLET_SERVER};
+    use cmcp_core::config::VIOLET_SERVER;
 
     let not_configured = |detail: String| {
         VioletError::local(
@@ -234,41 +234,13 @@ pub(super) fn connect_config(
         ))
     })?;
 
-    // Resolve credential references the way the proxy does (VIOLET_*
-    // first, the legacy names second), from the environment and then the
-    // machine credentials file. A worker never receives a variable its
-    // factory policy reserves for the supervisor.
-    let policy = cas_root.and_then(|root| crate::mcp::worker_proxy_policy(root).ok().flatten());
-    let mut machine =
-        crate::cli::integrate::violet::machine_credential_values().unwrap_or_default();
-    if let Some(policy) = &policy {
-        machine.retain(|name, _| !policy.denies_env(name));
-    }
-    let resolve = |value: &mut String| -> Result<(), VioletError> {
-        if let Some(name) = value.strip_prefix("env:").filter(|name| !name.is_empty()) {
-            let resolved = cmcp_core::config::violet_credential_value(name, |candidate| {
-                std::env::var(candidate)
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .or_else(|| machine.get(candidate).cloned())
-            })
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| connect_error(&format!("missing_credential_env:{name}")))?;
-            *value = resolved;
-        }
-        Ok(())
-    };
-    match &mut server {
-        ServerConfig::Http { auth, headers, .. } | ServerConfig::Sse { auth, headers, .. } => {
-            if let Some(auth) = auth.as_mut() {
-                resolve(auth)?;
-            }
-            for value in headers.values_mut() {
-                resolve(value)?;
-            }
-        }
-        ServerConfig::Stdio { .. } => {}
-    }
+    let policy = cas_root
+        .map(crate::mcp::worker_proxy_policy)
+        .transpose()
+        .map_err(|_| not_configured("the worker credential policy could not be read".into()))?
+        .flatten();
+    let removed = policy.map(|p| p.supervisor_only_env).unwrap_or_default();
+    super::credentials::resolve(&mut server, cas_root, &removed)?;
     config.servers = std::collections::HashMap::from([(VIOLET_SERVER.to_string(), server)]);
     Ok(config)
 }

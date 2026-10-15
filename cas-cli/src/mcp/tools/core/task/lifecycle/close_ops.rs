@@ -7532,6 +7532,16 @@ impl CasCore {
         let parked_head = if close_disposition.requires_delivery_gates()
             && !supervisor_closing_merged_anchor
             && req.commit_receipt.is_none()
+            // GH #1177: a false park on another task's work must not become
+            // an implicit receipt that reintroduces that code during review.
+            // The ownership check retains real, unclaimed, and unreadable
+            // delivery anchors; explicit caller receipts also remain binding.
+            && !no_code_task_without_own_commits(
+                worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
+                &task,
+                &resolved_parent_branch,
+                req.commit_receipt.as_deref(),
+            )
         {
             let parked_repo = worker_worktree_path
                 .as_deref()

@@ -147,9 +147,11 @@ fn rendered_prompt_names_sender_machine_repo_and_how_to_reply() {
     let envelope = parse_envelope(&prompt).unwrap();
     assert_eq!(envelope.id, "pm_7");
     assert_eq!(envelope.machine, "box-b");
+    // pin: peer reply addresses must retain the sender's machine-qualified name.
     assert!(prompt.contains("far-heron-3@box-b"), "{prompt}");
     assert!(prompt.contains(REPO), "{prompt}");
     assert!(prompt.contains("in_reply_to"), "{prompt}");
+    // pin: the peer transport preserves the original body after its routing header.
     assert!(prompt.ends_with("can you take cas-1234?"), "{prompt}");
 }
 
@@ -184,6 +186,7 @@ fn peer_reply_and_action_intent_survive_the_cloud_body_contract_cas_1f25() {
             !prompt.contains("<cas-peer-intent"),
             "transport metadata is consumed: {prompt}"
         );
+        // pin: consuming the in-band cas-peer-intent marker must preserve the body verbatim.
         assert!(prompt.ends_with("Please coordinate this."));
     }
 }
@@ -295,6 +298,7 @@ fn delivery_admits_in_order_once_daemon_stamped_and_never_urgent() {
     let rows = machine.rows();
     assert_eq!(rows.len(), 2);
     assert!(rows[0].prompt.ends_with("first"));
+    // pin: the second claimed body remains second after peer admission.
     assert!(rows[1].prompt.ends_with("second"), "claim order is kept");
     for row in &rows {
         assert_eq!(row.target, "bright-lark-8");

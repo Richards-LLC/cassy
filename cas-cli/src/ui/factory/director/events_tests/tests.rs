@@ -3413,3 +3413,31 @@ fn ct2_p2_transcript_activity_within_threshold() {
     detector.initialize(&data);
     assert!(!detector.detect_changes_at(&data, None, std::time::Instant::now(), base).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
 }
+
+#[test]
+fn stall_confirmation_does_not_open_stores_below_threshold() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    for assigned_open in [false, true] {
+        let data = if assigned_open { assigned_unstarted_data(now, 10) }
+            else { stalled_data_for(make_agent_working_stalled("a", "lively-crow", "cas-probe", 0, Some(10), now)) };
+        let mut detector = DirectorEventDetector::new(vec!["lively-crow".into()], "supervisor".into());
+        detector.set_stall_threshold_secs(300);
+        detector.set_cas_root(root.path().into());
+        detector.initialize(&data);
+        assert!(!detector.detect_changes_at(&data, None, std::time::Instant::now(), now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })));
+        assert!(!root.path().join("cas.db").exists(), "a below-threshold tick must not resolve/open the agent store");
+    }
+}
+
+#[test]
+fn stall_confirmation_real_resolution_failure_keeps_checkpoint_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let data = stalled_data_for(make_agent_working_stalled("a", "unknown-worker", "cas-probe", 0, Some(900), now));
+    let mut detector = DirectorEventDetector::new(vec!["unknown-worker".into()], "supervisor".into());
+    detector.set_stall_threshold_secs(300);
+    detector.set_cas_root(root.path().into());
+    detector.initialize(&data);
+    assert!(detector.detect_changes_at(&data, None, std::time::Instant::now(), now).iter().any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. })));
+}

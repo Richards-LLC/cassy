@@ -1906,10 +1906,28 @@ impl CasService {
                         MergeRequestDecision::AlreadyIntegrated { .. }
                     )
                 });
-                // cas-ba4a: the live tip replaces a parked anchor only when it
-                // descends from it with this task's commits alone. A sibling
-                // task that is Open or Blocked (no active lease) or a force-
-                // pushed lane would otherwise be requested as this delivery.
+                // A rebase rewrites the old delivery's commit IDs, so its
+                // pushed head cannot descend from the recorded anchor. On a
+                // fresh, dedicated per-task push branch, with no active
+                // sibling task and an unmerged anchor, the branch itself is
+                // the delivery identity; report its live origin head instead
+                // of freezing the now-retired SHA. Keep the stricter
+                // attribution rule for shared worker branches.
+                let rebased_task_scoped_branch = task.status
+                    == cas_types::TaskStatus::AwaitingMerge
+                    && task.delivery_mode == cas_types::DeliveryMode::PushBranch
+                    && source_is_fresh
+                    && recorded_anchor.is_some()
+                    && !other_task_active
+                    && !anchor_integrated
+                    && task.assignee.as_deref().is_some_and(|assignee| {
+                        let expected = format!("factory/{assignee}-{}", task.id);
+                        branch.as_deref() == Some(expected.as_str())
+                    });
+                // cas-ba4a: on shared worker branches, the live tip replaces
+                // a parked anchor only when it descends from it with this
+                // task's commits alone. A sibling task that is Open or Blocked
+                // (no active lease) could otherwise be requested as this delivery.
                 let live_tip_continues_delivery = task.status
                     == cas_types::TaskStatus::AwaitingMerge
                     && recorded_anchor.is_some()
@@ -1934,7 +1952,9 @@ impl CasService {
                         })
                         .is_some();
                 let frozen_anchor = (task.status == cas_types::TaskStatus::AwaitingMerge
-                    && (other_task_active || anchor_integrated || !live_tip_continues_delivery))
+                    && (other_task_active
+                        || anchor_integrated
+                        || (!live_tip_continues_delivery && !rebased_task_scoped_branch)))
                     .then(|| recorded_anchor.clone())
                     .flatten();
                 // GH #1022: only a landed anchor with no other active task can
@@ -1952,7 +1972,10 @@ impl CasService {
                         // only when that tip contains it; a recorded branch
                         // from an earlier cycle is not this delivery.
                         Some(match recorded_anchor.as_deref() {
-                            Some(anchor) if task.status == cas_types::TaskStatus::AwaitingMerge => {
+                            Some(anchor)
+                                if task.status == cas_types::TaskStatus::AwaitingMerge
+                                    && !rebased_task_scoped_branch =>
+                            {
                                 crate::prompt_revalidation::merge_request_judged_tip(
                                     &repo.repo_root,
                                     Some(live),

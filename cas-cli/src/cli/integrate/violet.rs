@@ -3289,6 +3289,54 @@ mod tests {
     const TEST_LABEL: &str = "SOUNDWAVE";
     const TEST_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_SOUNDWAVE";
 
+    #[test]
+    fn cas_678d_update_keeps_legacy_shell_exports_usable_after_reference_rename() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for name in std::env::vars_os()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+        {
+            if name.to_string_lossy().starts_with("VIOLET_")
+                || name.to_string_lossy().starts_with("MECHA_")
+            {
+                env.remove(&name);
+            }
+        }
+        let home = env.home().to_path_buf();
+        let credentials = home.join("credentials.env");
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set("CAS_CREDENTIALS_FILE", &credentials);
+        env.set("SHELL", "/bin/bash");
+        env.set("MECHA_SLACK_TOKEN_LAPTOP", FAKE_TOKEN);
+        env.set("MECHA_VERCEL_BYPASS", FAKE_BYPASS);
+        let values = update_machine_credentials().unwrap();
+        assert_eq!(
+            values.get("VIOLET_SLACK_TOKEN_LAPTOP").map(String::as_str),
+            Some(FAKE_TOKEN)
+        );
+        assert_eq!(
+            values.get(VIOLET_DEFAULT_BYPASS_ENV).map(String::as_str),
+            Some(FAKE_BYPASS)
+        );
+        let raw = fs::read_to_string(&credentials).unwrap();
+        assert!(!raw.contains("MECHA_"));
+        assert!(raw.contains("export VIOLET_SLACK_TOKEN_LAPTOP="));
+        assert!(raw.contains("export VIOLET_VERCEL_BYPASS="));
+        assert!(
+            fs::read_to_string(home.join(".bash_profile"))
+                .unwrap()
+                .contains(&profile_source_line(&credentials))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(credentials).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn worker_machine_bootstrap_respects_denials_and_supervisor_retains_credentials_gh_1047() {

@@ -4615,6 +4615,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task_b.id.clone());
         let response = response_text(service.message_send(request).await.expect("fresh B request"));
+        // pin: this request must return its queued state once the worker asks for merge.
         assert!(response.contains("Message queued"), "{response}");
         let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
         let (row, envelope) = rows.iter().find_map(|row| {
@@ -4622,10 +4623,15 @@ mod cas_89e1_post_merge_message_type_tests {
             (envelope.task_id == task_b.id).then_some((row, envelope))
         }).expect("B's typed request reaches queue");
         assert_eq!(envelope.target_branch, "main");
+        // pin: the supervisor sees the exact merge-request disposition in the queued row.
         assert!(row.prompt.contains("Fresh worker delivery; please merge the branch."));
+        // pin: merge requests preserve the task risk label in their context.
         assert!(row.prompt.contains("**Risk:** concurrency"));
+        // pin: merge requests preserve the task lifecycle gate in their context.
         assert!(row.prompt.contains("**Door:** two-way"));
+        // pin: exact QA bundle paths remain attached to the merge request.
         assert!(row.prompt.contains("/proof/task-b/qa/bundle.json"));
+        // pin: file names from the task diff remain byte-preserved in the request.
         assert!(row.prompt.contains("A\ttask-b.txt"));
     }
 
@@ -5331,12 +5337,14 @@ mod cas_89e1_post_merge_message_type_tests {
             .iter()
             .find(|row| row.target == "worker-a")
             .unwrap_or_else(|| panic!("message queued for the worker: {rows:?}"));
+        // pin: the artifact spill envelope keeps this exact marker at the inline head.
         assert!(row.prompt.contains("RULING: keep the contract"), "{}", row.prompt);
         assert!(
             row.prompt.contains(&spilled[0].display().to_string()),
             "delivered message names the artifact: {}",
             row.prompt
         );
+        // pin: the full ruling must stay out of the inline prompt after spilling.
         assert!(!row.prompt.contains(&ruling), "only the head is delivered inline");
     }
 

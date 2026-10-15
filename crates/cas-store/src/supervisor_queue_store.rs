@@ -736,6 +736,7 @@ mod tests {
                 },
             ) => {
                 assert_eq!(id1, id2);
+                // pin: a newly inserted deduplicated notification must not claim prior delivery.
                 assert!(!prompt_delivered, "fresh insert has no prompt delivery yet");
                 id1
             }

@@ -11,7 +11,9 @@ Factory workers run the targeted tests for their change themselves. Every task
 assignment authorizes and requires adding or updating tests for the change and
 running its affected targeted tests. Workers close their own tasks; never ask
 the supervisor to close your task on their behalf. Follow `cas-tdd` and
-`CONTRIBUTING` for scoped test commands.
+`CONTRIBUTING` for scoped test commands. Docs-only and no-code tasks prove their
+acceptance check instead (e.g. markdownlint, `cas codemap status`, a published
+artifact); don't add code tests to them.
 
 Execute one assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.

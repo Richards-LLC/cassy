@@ -3309,7 +3309,8 @@ mod related_recall_response_tests {
         assert!(invalid_target_task.deliverables.work_target.is_none());
     }
 
-    // pin: this queued assignment must carry the authorized test and worker-owned close policy.
+    // pin: queued dispatch preserves test authorization, worker-owned close, and
+    // the docs-only acceptance-check exception for no-code tasks.
     #[tokio::test]
     async fn gh1123_create_with_live_assignee_queues_dispatch() {
         let temp = TempDir::new().unwrap();

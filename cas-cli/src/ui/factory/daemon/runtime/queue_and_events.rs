@@ -14424,6 +14424,14 @@ mod tests {
             .unwrap();
         assert_eq!(prompts.len(), harnesses.len());
         for prompt in prompts {
+            // pin: preserve the docs-only acceptance-check exception in every spawned brief.
+            assert!(
+                prompt
+                    .prompt
+                    .contains("Docs-only and no-code tasks prove their acceptance check instead"),
+                "missing docs-only exception: {}",
+                prompt.prompt
+            );
             assert!(
                 prompt
                     .prompt

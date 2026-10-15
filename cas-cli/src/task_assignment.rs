@@ -11,6 +11,8 @@ pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
     "JS, TS, and Python tests run directly in the worker. ",
     "The merge queue runs the full suite once; never run it locally. ",
     "Only `--full` Playwright and the Rust full suite are reserved for the merge queue. ",
+    "Docs-only and no-code tasks prove their acceptance check instead (e.g. ",
+    "markdownlint, `cas codemap status`, a published artifact); don't add code tests to them. ",
     "Workers close their own tasks; never ask the supervisor to close your task on their behalf."
 );
 

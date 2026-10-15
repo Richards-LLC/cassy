@@ -4664,6 +4664,65 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(row.prompt.contains("A\ttask-b.txt"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreviewed_reopen_merge_request_reaches_supervisor_cas_1cc7() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo, &["config", "user.name", "Cassy Test"]);
+        let root = repo.join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-unreviewed-message-test\"\n").unwrap();
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(repo, &["checkout", "-qb", "factory/worker-a-cas-unreviewed-message"]);
+        std::fs::write(repo.join("delivery.txt"), "unreviewed delivery\n").unwrap();
+        git(repo, &["add", "delivery.txt"]);
+        git(repo, &["commit", "-qm", "fix(cas-unreviewed-message): delivery"]);
+        let tip = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap().stdout).unwrap().trim().to_string();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents.register(&Agent::new_with_role("worker-id".into(), "worker-a".into(), AgentRole::Worker)).unwrap();
+        agents.register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-unreviewed-message".into(), "Unreviewed premature close".into());
+        task.status = TaskStatus::Closed;
+        task.assignee = Some("worker-a".into());
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some("factory/worker-a-cas-unreviewed-message".into());
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-unreviewed-message-test".into(), target_branch: "main".into() });
+        tasks.add(&task).unwrap();
+        core.cas_task_reopen(Parameters(serde_json::from_value(serde_json::json!({"id":task.id,"reason":"Unmerged tip was never reviewed"})).unwrap())).await.unwrap();
+        core.set_agent_id_for_testing("worker-id".into());
+        env.set("CAS_AGENT_ROLE", "worker");
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+        let mut request = message_request(true);
+        request.task_id = Some(task.id.clone());
+        let response = response_text(service.message_send(request).await.unwrap());
+        assert!(response.contains("Message queued"), "{response}");
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
+        let envelope = rows.iter().find_map(|row| crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)).expect("typed merge request is durable");
+        assert_eq!(envelope.branch_tip, tip);
+        let reopened = tasks.get(&task.id).unwrap();
+        let git = crate::prompt_revalidation::queued_merge_request_decision(repo, Some(&reopened), &envelope);
+        assert_eq!(crate::prompt_revalidation::merge_request_delivery_decision(Some(&reopened), &envelope, &git), crate::prompt_revalidation::MergeRequestDelivery::Deliver);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let inbox = response_text(service.inbox_poll(serde_json::from_value(serde_json::json!({"action":"inbox_poll"})).unwrap()).await.unwrap());
+        assert!(inbox.contains("Fresh worker delivery"), "{inbox}");
+        assert!(inbox.contains(&tip), "{inbox}");
+    }
+
     /// cas-b3ab: a worker whose default `factory/<name>` branch already landed
     /// resumes a task on its per-task branch `factory/<name>-<task>` with
     /// unmerged commits. Its merge request is judged by that branch and

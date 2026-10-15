@@ -2066,6 +2066,35 @@ fn no_active_epic_guidance(why: &str) -> String {
     )
 }
 
+fn factory_provision_build_compatibility(
+    session: &str,
+    provisioner_build: &str,
+) -> Result<(), String> {
+    let metadata_path = crate::ui::factory::metadata_path(session);
+    let raw = std::fs::read_to_string(&metadata_path).map_err(|_| {
+        format!(
+            "provision_build_identity_missing: factory session {session} has no readable build metadata. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+        )
+    })?;
+    let metadata =
+        serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).map_err(|_| {
+            format!(
+                "provision_build_identity_missing: factory session {session} has invalid build metadata. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+            )
+        })?;
+    let Some(daemon_build) = metadata.daemon_build_hash.as_deref() else {
+        return Err(format!(
+            "provision_build_identity_missing: factory session {session} has no recorded daemon build ID. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+        ));
+    };
+    if daemon_build != provisioner_build {
+        return Err(format!(
+            "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from installed provisioner build {provisioner_build}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+        ));
+    }
+    Ok(())
+}
+
 impl CasService {
 
     pub(super) async fn factory_spawn_workers(
@@ -2083,10 +2112,30 @@ impl CasService {
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
+        let provisioner_build = if ctx.factory_session.is_some() {
+            #[cfg(test)]
+            {
+                option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string()
+            }
+            #[cfg(not(test))]
+            {
+                crate::ui::factory::installed_provisioner_build_hash().map_err(|error| {
+                    let session = ctx.factory_session.as_deref().unwrap_or("<unknown>");
+                    Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        format!(
+                            "provision_build_identity_unavailable: cannot inspect the installed provisioner for factory session {session}: {error:#}. Restart this factory session with the installed binary before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+                        ),
+                    )
+                })?
+            }
+        } else {
+            option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string()
+        };
         self.factory_spawn_workers_in_with_provisioner_build(
             ctx,
             req,
-            option_env!("CAS_GIT_HASH").unwrap_or("unknown"),
+            &provisioner_build,
         )
         .await
     }
@@ -2095,12 +2144,17 @@ impl CasService {
         &self,
         ctx: &crate::ops::fleet::FleetContext,
         req: FactoryRequest,
-        _provisioner_build: &str,
+        provisioner_build: &str,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::types::validate_delivery_mode;
         use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_delivery_mode_at};
         use cas_types::{TaskStatus, TaskType};
+
+        if let Some(session) = ctx.factory_session.as_deref() {
+            factory_provision_build_compatibility(session, provisioner_build)
+                .map_err(|message| Self::error(ErrorCode::INVALID_REQUEST, message))?;
+        }
 
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -11491,6 +11545,7 @@ mod tests {
             None,
         );
         let mut metadata = serde_json::to_value(metadata).expect("serialize metadata");
+        assert!(metadata["daemon_build_hash"].is_string());
         metadata["daemon_build_hash"] = serde_json::json!("older-daemon-build");
         let sessions = crate::ui::factory::SessionManager::new();
         sessions.ensure_dir().expect("create session directory");

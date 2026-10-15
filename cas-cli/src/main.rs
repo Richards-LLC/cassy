@@ -9,6 +9,12 @@ use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-factory-build-id"))
+    {
+        println!("{}", option_env!("CAS_GIT_HASH").unwrap_or("unknown"));
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-factory-provisioner"))
     {
         let mut args = std::env::args_os().skip(2);

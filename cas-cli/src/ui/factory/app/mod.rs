@@ -4360,6 +4360,7 @@ mod tests {
                 name: name.to_string(),
                 created_at: created_at.to_string(),
                 daemon_pid: 1,
+                daemon_build_hash: None,
                 daemon_pid_starttime: None,
                 socket_path: "socket".to_string(),
                 ws_port: None,

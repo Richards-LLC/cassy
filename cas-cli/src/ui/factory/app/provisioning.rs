@@ -61,6 +61,45 @@ fn provisioner_executable() -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Read the build identity from the executable that a worker provision would
+/// launch. A factory daemon can outlive an atomic binary update, so its own
+/// compile-time hash is not sufficient on platforms where the executable path
+/// now resolves to the replacement binary.
+pub(crate) fn installed_provisioner_build_hash() -> anyhow::Result<String> {
+    #[cfg(test)]
+    {
+        return Ok(build_hash().to_string());
+    }
+
+    #[cfg(not(test))]
+    {
+        let executable = provisioner_executable()?;
+        let output = Command::new(&executable)
+            .arg("--internal-factory-build-id")
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to inspect the factory provisioner executable at {}",
+                    executable.display()
+                )
+            })?;
+        anyhow::ensure!(
+            output.status.success(),
+            "installed CAS executable did not return its factory build ID (status {})",
+            output.status
+        );
+        let hash = String::from_utf8(output.stdout)
+            .context("installed CAS executable returned a non-UTF-8 factory build ID")?
+            .trim()
+            .to_string();
+        anyhow::ensure!(
+            !hash.is_empty(),
+            "installed CAS executable returned an empty factory build ID"
+        );
+        Ok(hash)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CleanupPlan {
     repo: PathBuf,

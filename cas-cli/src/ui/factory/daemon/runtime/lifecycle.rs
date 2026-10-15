@@ -15,6 +15,29 @@ pub(crate) fn attention_episode_key(
     serde_json::json!([kind, subject, episode_start.to_rfc3339()]).to_string()
 }
 
+/// Route only typed routine nudges through the durable lane. The fallback
+/// baseline is durable task state (or a fixed unknown baseline), never retry time.
+/// With no baseline, UNIX_EPOCH coalesces unknown episodes for this worker/task/session
+/// until a durable baseline becomes available.
+fn enqueue_stall_nudge_prompt(
+    cas_dir: &std::path::Path,
+    session: &str,
+    prompt: &crate::ui::factory::director::Prompt,
+    episode_start: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<Option<i64>> {
+    let Some(task_id) = prompt.stall_nudge_task.as_deref() else { return Ok(None); };
+    let start = episode_start.unwrap_or_else(|| {
+        let fallback = crate::store::open_task_store_local(cas_dir).ok()
+            .and_then(|store| store.get(task_id).ok()).map(|task| task.updated_at)
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+        tracing::warn!(worker = %prompt.target, task_id, %fallback,
+            "stall nudge missing episode baseline; using durable fallback");
+        fallback
+    });
+    super::delivery::enqueue_worker_stall_nudge(cas_dir, session, &prompt.target, task_id,
+        &prompt.text, start).map(Some)
+}
+
 /// Persist one worker-health incident and hand it to the supervisor's durable
 /// prompt queue. The detector has already debounced the episode and the event
 /// has already been delivery-revalidated when this runs.
@@ -2165,6 +2188,7 @@ impl FactoryDaemon {
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
+            stall_nudge_gate_checks: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
@@ -3368,6 +3392,23 @@ impl FactoryDaemon {
                 );
                 continue;
             }
+            // A routine nudge has one queryable row and uses the queue's
+            // busy-recipient gate. Never write it directly into a Teams inbox.
+            if let Some(task_id) = prompt.stall_nudge_task.clone() {
+                let event = delivery_events.iter().find(|event| matches!(event,
+                    crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                        worker, task_id: event_task, escalate: false, ..
+                    } if worker == &prompt.target && event_task == &task_id));
+                let episode_start = event.and_then(|event| self.app.worker_attention_episode_start(event));
+                let cas_dir = self.app.cas_dir().to_path_buf();
+                let session = self.session_name.clone();
+                store_worker.submit("worker stall nudge", move || {
+                    if let Err(error) = enqueue_stall_nudge_prompt(&cas_dir, &session, &prompt, episode_start) {
+                        tracing::warn!(%error, "worker stall nudge enqueue failed");
+                    }
+                });
+                continue;
+            }
             // GH #682: the event snapshot was read before this
             // loop. Re-read assignment state at the final direct
             // transport boundary so a task that moved beyond Open
@@ -3535,5 +3576,28 @@ impl FactoryDaemon {
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stall_nudge_routing_rework_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_nudge_lifecycle_routes_missing_episode_durably_and_ignores_other_prompts() {
+        let root = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
+        let mut prompt = crate::ui::factory::director::Prompt {
+            target: "worker".into(), text: "quiet".into(), stall_nudge_task: Some("cas-unknown".into()),
+            retract_worker: None, retract_task: None, retract_epic: None,
+            drop_if_worker_assigned: None, durable_retry: true,
+        };
+        let first = enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, None).unwrap().unwrap();
+        assert_eq!(enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, None).unwrap(), Some(first));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        assert_eq!(queue.queued_prompt(first).unwrap().unwrap().kind.as_deref(), Some("worker_stall_nudge"));
+        prompt.stall_nudge_task = None;
+        assert_eq!(enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, Some(chrono::Utc::now())).unwrap(), None);
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
     }
 }

@@ -883,6 +883,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             load_1m: Some(41.5),
             live_cargo_workers: 0,
             requested_workers: 1,
+            requested_builders: 1,
+            expected_build: "yes",
             max_concurrent_builders: 2,
             disabled: false,
         };

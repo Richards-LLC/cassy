@@ -27,7 +27,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Workspace contract:** build in the worktree; durable proof goes in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** tasks labelled per `qa.user_facing_labels` need a `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics and internal tasks are exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
-- **Only you build Rust:** workers park unbuilt; at epic assembly build + test the tip once and note `ASSEMBLY_PROOF: head=<sha> result=PASS command=<cmd> log=<path>` on the epic.
+- **Full Rust gate:** when the base has a merge queue, that queue builds and tests the final tree; do not schedule a second assembly run. If queue proof is unavailable and the close gate accepts a local assembly proof, follow [workflow.md](references/workflow.md).
 - **Lessons remove causes:** [ladder and tags](references/workflow.md#lessons-must-remove-causes).
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
 - **Pane budget:** at most ~150 words; Answer first with bullets/table; keep findings, rejection reasons, measurements, and merge receipts; no process narration or recap.

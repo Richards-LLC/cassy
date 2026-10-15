@@ -90,6 +90,90 @@ impl Config {
                     .violet_bot_user_ids = (!ids.is_empty()).then_some(ids);
             }
             // Factory build contention
+            "factory.warn_stale_assignment" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.warn_stale_assignment = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.warn_stale_assignment: {value}"))
+                })?;
+            }
+            "factory.block_stale_assignment" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.block_stale_assignment = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.block_stale_assignment: {value}"))
+                })?;
+            }
+            "factory.stale_threshold_commits" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.stale_threshold_commits = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.stale_threshold_commits: {value}"))
+                })?;
+            }
+            "factory.stall_threshold_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.stall_threshold_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.stall_threshold_secs: {value}"))
+                })?;
+            }
+            "factory.context_recycle_threshold_percent" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.context_recycle_threshold_percent = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.context_recycle_threshold_percent: {value}"))
+                })?;
+            }
+            "factory.stall_after_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.stall_after_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.stall_after_secs: {value}"))
+                })?;
+            }
+            "factory.delivery_stalled_priority_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.delivery_stalled_priority_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.delivery_stalled_priority_secs: {value}"))
+                })?;
+            }
+            "factory.delivery_stalled_normal_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.delivery_stalled_normal_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.delivery_stalled_normal_secs: {value}"))
+                })?;
+            }
+            "factory.strict_cli" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.strict_cli = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.strict_cli: {value}"))
+                })?;
+            }
+            "factory.target_cache_high_watermark_percent" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.target_cache_high_watermark_percent = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.target_cache_high_watermark_percent: {value}"))
+                })?;
+            }
+            "factory.target_cache_low_watermark_percent" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.target_cache_low_watermark_percent = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.target_cache_low_watermark_percent: {value}"))
+                })?;
+            }
+            "factory.target_cache_min_idle_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.target_cache_min_idle_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.target_cache_min_idle_secs: {value}"))
+                })?;
+            }
+            "factory.target_cache_retention_count" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.target_cache_retention_count = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for factory.target_cache_retention_count: {value}"))
+                })?;
+            }
+            "factory.nice_cargo" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).nice_cargo =
+                    value.parse().map_err(|_| MemError::Parse(format!(
+                        "Invalid boolean value for factory.nice_cargo: {value}"
+                    )))?;
+            }
             "factory.max_concurrent_builders" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.max_concurrent_builders = value.parse().map_err(|_| {

@@ -408,6 +408,7 @@ fn is_worker_activity_event(event: &cas_types::Event) -> bool {
             | EventType::WorkerGitCommit
             | EventType::WorkerVerificationBlocked
             | EventType::WorkerPushBlocked
+            | EventType::WorkerActivity
             | EventType::VerificationStarted
             | EventType::VerificationAdded
             | EventType::TaskNoteAdded
@@ -2220,6 +2221,7 @@ impl CasService {
         // string says why, and is only surfaced when there is also no epic, so
         // epic-present behaviour is unchanged.
         let mut task_id_authorization: Option<Result<(), String>> = None;
+        let mut preassigned_task: Option<cas_types::Task> = None;
         let mut stale_assignee_notice = String::new();
         let mut split_spawn_note = String::new();
         if let Some(ref task_id) = req.task_id {
@@ -2267,6 +2269,7 @@ impl CasService {
                     ),
                 )
             })?;
+            preassigned_task = Some(task.clone());
             if task.is_terminal() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
@@ -2517,8 +2520,12 @@ impl CasService {
                 .unwrap_or_default()
                 .factory()
         };
-        let build_guard =
-            crate::factory_build_guard::inspect(&self.inner.cas_root, &factory_config, slots);
+        let build_guard = crate::factory_build_guard::inspect_for_task(
+            &self.inner.cas_root,
+            &factory_config,
+            slots,
+            preassigned_task.as_ref(),
+        );
         let force_build_guard = req.force.unwrap_or(false);
         if !build_guard.violations().is_empty() && !force_build_guard {
             return Err(Self::error(
@@ -7516,7 +7523,8 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
         if agent.status != cas_types::AgentStatus::Shutdown {
-            super::orphan_recovery::recover_worker_vanished(
+            // cas-b06f: requested, so reported by the shutdown receipt.
+            super::orphan_recovery::recover_worker_retired_on_request(
                 cas_root,
                 agents.as_ref(),
                 agent,

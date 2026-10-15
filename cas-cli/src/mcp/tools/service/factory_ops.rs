@@ -10115,6 +10115,54 @@ pub(crate) fn worker_liveness_for_agent(
     super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs)
 }
 
+/// cas-9bf6: the execution evidence `worker_status` reports for `worker`,
+/// reused by the director's stall classifier so the two surfaces agree.
+/// `executing` is the worker_status liveness verdict (turn evidence within
+/// `stall_secs`, or a CPU-busy harness); `head_commit_age` is the age of the
+/// worker clone's HEAD commit, which a Codex worker without commit hooks
+/// leaves as its only commit evidence. `None` when the worker is unknown.
+pub(crate) fn worker_stall_evidence(
+    cas_root: &std::path::Path,
+    worker: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    stall_secs: i64,
+) -> Option<WorkerStallEvidence> {
+    let store = crate::store::open_agent_store(cas_root).ok()?;
+    let agents = store.list(None).ok()?;
+    let agent = agents
+        .iter()
+        .filter(|agent| agent.name == worker)
+        .max_by_key(|agent| agent.registered_at)?;
+    let observation = worker_liveness_for_agent(cas_root, agent, now, stall_secs);
+    let clone_path = match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => Some(path),
+        WorkerClonePathResolve::NotOnDisk { .. } => None,
+    };
+    let head_commit_age = clone_path.and_then(|path| {
+        let output = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%ct", "HEAD"])
+            .current_dir(path)
+            .output()
+            .ok()?;
+        let secs: i64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+        let age = now.timestamp().saturating_sub(secs);
+        (age >= 0).then(|| std::time::Duration::from_secs(age as u64))
+    });
+    Some(WorkerStallEvidence {
+        executing: observation.state == super::worker_liveness::Liveness::Executing,
+        detail: observation.detail(),
+        head_commit_age,
+    })
+}
+
+/// See [`worker_stall_evidence`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerStallEvidence {
+    pub executing: bool,
+    pub detail: String,
+    pub head_commit_age: Option<std::time::Duration>,
+}
+
 pub(crate) fn worker_liveness_rows(
     cas_root: &std::path::Path,
     store: &dyn cas_store::AgentStore,

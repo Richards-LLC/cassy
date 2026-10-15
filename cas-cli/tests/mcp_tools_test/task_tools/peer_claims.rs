@@ -40,6 +40,8 @@ struct FakeState {
     agents: HashMap<String, (String, String, DateTime<Utc>)>,
     requests: Vec<String>,
     statuses: HashMap<String, String>,
+    replace_on_release: Option<String>,
+    revive_on_lock: Option<String>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -163,6 +165,9 @@ impl FakeCloud {
                 }
             },
             ("POST", "release") => {
+                if let Some(winner) = state.replace_on_release.take()
+                    && let Some(lock) = state.locks.get_mut(&key)
+                { lock.agent_id = winner; lock.renewed_at = now; lock.epoch += 1; }
                 if let Some(lock) = state.locks.get_mut(&key)
                     && lock.status == "active"
                     && lock.agent_id == agent_id
@@ -182,10 +187,12 @@ impl FakeCloud {
                 }
                 _ => (404, serde_json::json!({"error": "No active lock found"})),
             },
-            ("GET", "lock") => (
-                200,
-                serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))}),
-            ),
+            ("GET", "lock") => {
+                if let Some(holder) = state.revive_on_lock.take() {
+                    state.statuses.insert(holder, "active".into());
+                }
+                (200, serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))}))
+            },
             _ => (404, serde_json::json!({"error": "not found"})),
         }
     }
@@ -978,4 +985,32 @@ async fn cas_50713_successor_focus_moves_the_ended_local_supervisors_claim() {
         Some(cas::cloud::peer_claims::Acquire::Claimed)
     );
     assert_eq!(cloud.active_lock("cas-focus").unwrap().1.agent_id, new_id);
+}
+
+
+#[tokio::test]
+async fn cas_50713_recovery_keeps_a_revived_holder_or_raced_live_winner() {
+    for revived in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "old-worker");
+        let new = machine(&cloud.url, PROJECT, "replacement");
+        let winner = machine(&cloud.url, PROJECT, "live-winner");
+        for m in [&old, &new] { m.put_task("cas-race", TaskType::Task); }
+        cloud.live(&old, "old-worker");
+        cloud.live(&winner, "live-winner");
+        start(&old.core, "cas-race", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state.statuses.insert(old.agent_id.clone(), "shutdown".into());
+            if revived { state.revive_on_lock = Some(old.agent_id.clone()); }
+            else { state.replace_on_release = Some(winner.agent_id.clone()); }
+        }
+        let refused = start(&new.core, "cas-race", false).await.expect_err("live ownership wins recovery race");
+        assert!(refused.contains("HELD BY A PEER"), "{refused}");
+        assert_eq!(cloud.active_lock("cas-race").unwrap().1.agent_id,
+            if revived { &old.agent_id } else { &winner.agent_id }.clone());
+        assert_eq!(open_task_store(&new.cas_dir).unwrap().get("cas-race").unwrap().status, TaskStatus::Open);
+    }
 }

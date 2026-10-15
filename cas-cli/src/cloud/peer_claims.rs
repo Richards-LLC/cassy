@@ -362,19 +362,35 @@ impl PeerClaims {
     /// Re-read ownership and liveness, then use the wire protocol's owner-scoped
     /// release. A raced live holder is reported rather than overwritten.
     fn take_stale_peer(
-        &self, task_id: &str, kind: ClaimKind, observed: &PeerHold,
-        agent_id: &str, agent_name: &str, duration_secs: u32, deadline: Instant,
+        &self,
+        task_id: &str,
+        kind: ClaimKind,
+        observed: &PeerHold,
+        agent_id: &str,
+        agent_name: &str,
+        duration_secs: u32,
+        deadline: Instant,
     ) -> Acquire {
         let key = self.key(task_id);
         let current = match self.coordinator(agent_id).and_then(|c| c.get_lock(&key)) {
             Ok(Some(lock)) => self.hold(&key, &lock.agent_id),
-            Ok(None) => return Acquire::Unavailable("the stale claim disappeared; retry claiming".into()),
+            Ok(None) => {
+                return Acquire::Unavailable("the stale claim disappeared; retry claiming".into());
+            }
             Err(error) => return Acquire::Unavailable(error.to_string()),
         };
         if current.agent_id != observed.agent_id || !current.is_stale(Utc::now()) {
             return Self::answer(current);
         }
-        self.move_claim(task_id, kind, &current.agent_id, agent_id, agent_name, duration_secs, deadline)
+        self.move_claim(
+            task_id,
+            kind,
+            &current.agent_id,
+            agent_id,
+            agent_name,
+            duration_secs,
+            deadline,
+        )
     }
 
     /// A peer's hold from a refused claim. The 409 names the holder and when
@@ -415,15 +431,30 @@ impl PeerClaims {
     }
 
     fn move_claim(
-        &self, task_id: &str, kind: ClaimKind, from: &str,
-        agent_id: &str, agent_name: &str, duration_secs: u32, deadline: Instant,
+        &self,
+        task_id: &str,
+        kind: ClaimKind,
+        from: &str,
+        agent_id: &str,
+        agent_name: &str,
+        duration_secs: u32,
+        deadline: Instant,
     ) -> Acquire {
         let key = self.key(task_id);
-        let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
+        let reason = ClaimHolder::new(kind, agent_name, &self.project)
+            .on(&self.label)
+            .reason();
         let remaining = || {
-            let left = deadline.saturating_duration_since(Instant::now()).min(CLAIM_TIMEOUT);
-            if left.is_zero() { Err(CasError::Other("stale claim recovery budget exhausted".into())) }
-            else { Ok(left) }
+            let left = deadline
+                .saturating_duration_since(Instant::now())
+                .min(CLAIM_TIMEOUT);
+            if left.is_zero() {
+                Err(CasError::Other(
+                    "stale claim recovery budget exhausted".into(),
+                ))
+            } else {
+                Ok(left)
+            }
         };
         let moved = remaining()
             .and_then(|left| self.coordinator(from).map(|c| c.with_timeout(left)))

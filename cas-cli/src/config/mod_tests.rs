@@ -1169,7 +1169,7 @@ fn retired_jev_section_loads_and_is_dropped_on_save_cas_4971() {
     assert_eq!(reloaded.qa().user_facing_labels, vec!["mobile"]);
 }
 
-/// cas-fd0a: a pre-3.54.0 config carrying the retired post-merge sweep keys
+/// cas-fd0a: an older config carrying the retired post-merge sweep keys
 /// still loads through `Config::load`, keeps its other settings, refuses the
 /// retired keys for get/set, and loses them on the next save.
 #[test]

@@ -207,7 +207,7 @@ impl Config {
         if !retired.is_empty() {
             NOTED_FACTORY.call_once(|| {
                 eprintln!(
-                    "note: config.toml [factory] {} retired in 3.54.0 (the daemon no longer sweeps after merges; the merge queue is the integration proof); ignored and dropped on the next save.",
+                    "note: config.toml [factory] {} retired (the daemon no longer sweeps after merges; the merge queue is the integration proof); ignored and dropped on the next save.",
                     retired.join(", ")
                 )
             });

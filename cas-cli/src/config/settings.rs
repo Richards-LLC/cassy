@@ -718,7 +718,7 @@ pub struct FactoryConfig {
     #[serde(default)]
     pub ai_enrichment: cas_factory::AiEnrichmentConfig,
 
-    /// cas-fd0a (3.54.0): the daemon's post-merge workspace sweep, rolling
+    /// cas-fd0a: the daemon's post-merge workspace sweep, rolling
     /// integration and background gate are retired; the merge queue is the
     /// only integration proof. Their keys are still accepted so older config
     /// files load: they are ignored, noted once by `Config::load`, and dropped
@@ -1918,7 +1918,7 @@ mod tests {
         assert_eq!(fc.max_concurrent_builders, 6);
     }
 
-    /// cas-fd0a: a config file written before 3.54.0 still loads with the
+    /// cas-fd0a: a config file written before the retirement still loads with the
     /// retired sweep keys; they are recognised, ignored and never written back.
     #[test]
     fn retired_merge_sweep_keys_load_and_are_dropped_on_save() {

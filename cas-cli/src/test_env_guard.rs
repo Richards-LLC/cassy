@@ -288,6 +288,76 @@ impl Drop for TestEnvGuard {
 mod ambient_scrub_tests {
     use super::*;
     #[test]
+    fn repository_local_git_environment_is_scrubbed_cas_ea62() {
+        // Keep the in-process guard in sync with the shell suite boundary's
+        // `git rev-parse --local-env-vars`, without spawning Git per guard.
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let names = String::from_utf8(output.stdout).unwrap();
+        assert!(names.lines().any(|key| key == "GIT_DIR"));
+        for key in names.lines() {
+            assert!(is_scrubbed_ambient_env_key(key), "{key} must not redirect a fixture");
+        }
+        // User/tool configuration is not repository-local hook state.
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_AUTHOR_NAME"] {
+            assert!(!is_scrubbed_ambient_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn bare_fixture_under_hook_environment_preserves_parent_config_cas_ea62() {
+        let _guard = TestEnvGuard::new();
+        let parent = TempDir::new().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(parent.path())
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        let config = parent.path().join(".git/config");
+        let before = std::fs::read(&config).unwrap();
+        let fixture = TempDir::new().unwrap();
+        // Inject hook state into a separate test process, avoiding global
+        // environment mutations in this parallel test runner.
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "test_env_guard::ambient_scrub_tests::hook_environment_bare_fixture_child_cas_ea62",
+            ])
+            .env("GIT_DIR", parent.path().join(".git"))
+            .env("GIT_COMMON_DIR", parent.path().join(".git"))
+            .env("GIT_WORK_TREE", parent.path())
+            .env("GIT_INDEX_FILE", parent.path().join(".git/index"))
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert_eq!(std::fs::read(config).unwrap(), before, "parent config changed");
+        assert!(child.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+        assert!(fixture.path().join("HEAD").is_file());
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the hook environment regression"]
+    fn hook_environment_bare_fixture_child_cas_ea62() {
+        let guard = TestEnvGuard::new();
+        for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            assert!(std::env::var_os(key).is_none(), "leaked {key}");
+        }
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .output()
+            .unwrap();
+        assert!(initialized.status.success(), "{}", String::from_utf8_lossy(&initialized.stderr));
+        drop(guard);
+        assert!(std::env::var_os("GIT_DIR").is_some(), "guard must restore hook state");
+    }
+
+    #[test]
     fn ambient_cas_and_factory_state_is_scrubbed() {
         for key in [
             "CAS_ROOT",

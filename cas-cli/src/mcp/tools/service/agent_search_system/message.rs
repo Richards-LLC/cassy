@@ -210,6 +210,45 @@ pub(crate) fn target_is_reserved_source(target: &str) -> bool {
         .any(|prefix| target.starts_with(prefix))
 }
 
+
+/// GH #1196: why an operator turn cannot be delivered right now, or `None`
+/// when it can or the state is unknown. Delivery needs a Commander client
+/// connected to the session's daemon (it reports the count in `loop.json`,
+/// written every few seconds) or an enrolled cloud operator feed. An absent
+/// or stale `loop.json` is unknown: the daemon delivers once it is back.
+/// Red-first stub (cas-1be0).
+const GH_1196_RED_STUB: bool = true;
+
+pub(crate) fn operator_turn_undeliverable(
+    cas_root: &std::path::Path,
+    factory_session: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    if GH_1196_RED_STUB {
+        return None;
+    }
+    let status = crate::factory_daemon_health::read_status(cas_root, factory_session)?;
+    let fresh = now.signed_duration_since(status.written_at).num_seconds()
+        <= crate::factory_daemon_health::STATUS_STALE_SECS;
+    if !fresh || status.commander_clients != Some(0) {
+        return None;
+    }
+    let cloud_feed = cas_store::SqlitePromptQueueStore::open(cas_root)
+        .and_then(|store| store.operator_feed_binding())
+        .map(|binding| binding.is_some())
+        // An unreadable binding is unknown, not absent.
+        .unwrap_or(true);
+    if cloud_feed {
+        return None;
+    }
+    Some(format!(
+        "No Commander device is attached to factory session {factory_session}, and this \
+         project has no cloud operator feed, so nothing can deliver this turn. Nothing was \
+         queued. Reach the operator in the terminal or another channel; once a Commander \
+         device connects, operator sends are delivered normally."
+    ))
+}
+
 #[cfg(test)]
 mod viktor_provenance_tests {
     use super::queued_message_provenance_at;
@@ -1511,6 +1550,14 @@ impl CasService {
                     format!("Failed to encode Commander reply: {error}"),
                 )
             })?;
+            // GH #1196: with no Commander client connected to this session's
+            // daemon and no enrolled cloud feed, nothing can deliver this
+            // turn. Say so now instead of queuing it to expire in 15 min.
+            if let Some(reason) =
+                operator_turn_undeliverable(&self.inner.cas_root, factory_session, chrono::Utc::now())
+            {
+                return Err(Self::error(ErrorCode::INVALID_REQUEST, reason));
+            }
             let reply = queue
                 .record_operator_turn(&cas_store::OperatorTurn {
                     source: "supervisor",
@@ -6068,6 +6115,113 @@ mod cas_89e1_post_merge_message_type_tests {
                 .expect("answered session replies")
                 .is_empty()
         );
+    }
+
+    /// GH #1196: with the session's daemon reporting no Commander client and
+    /// no cloud operator feed, an operator send fails at once and queues
+    /// nothing; with a client connected, or no daemon status at all
+    /// (unknown), it queues as before.
+    #[tokio::test(flavor = "current_thread")]
+    async fn gh_1196_operator_send_with_no_commander_attached_fails_at_once() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-no-commander".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = || -> AgentRequest {
+            serde_json::from_value(serde_json::json!({
+                "action": "message",
+                "target": "operator",
+                "kind": "status",
+                "summary": "build status",
+                "message": "The build is green.",
+            }))
+            .expect("operator request")
+        };
+        let write_clients = |clients: Option<u64>| {
+            let now = chrono::Utc::now();
+            crate::factory_daemon_health::write_status(
+                &cas_root,
+                &crate::factory_daemon_health::DaemonLoopStatus {
+                    pid: 1,
+                    session: "factory-no-commander".into(),
+                    written_at: now,
+                    last_pass_at: now,
+                    phase: "idle".into(),
+                    passes: 1,
+                    pending_spawns: 0,
+                    in_flight_spawn: None,
+                    in_flight_started_at: None,
+                    loop_thread_wait: None,
+                    helpers_killed: Vec::new(),
+                    last_reset: None,
+                    max_pass_ms: None,
+                    p99_pass_ms: None,
+                    window_passes: 0,
+                    passes_over_100ms: 0,
+                    phase_latency: Default::default(),
+                    slow_steps: Vec::new(),
+                    wedge: None,
+                    job_lanes: Default::default(),
+                    lane_violations: 0,
+                    lane_violation_sites: Vec::new(),
+                    frames: Default::default(),
+                    frames_coalesced: 0,
+                    frame_bytes_p50: None,
+                    frame_window_ms: 0,
+                    frames_per_s: None,
+                    commander_clients: clients,
+                },
+            )
+            .expect("write loop.json");
+        };
+        let queued = || {
+            crate::store::open_prompt_queue_store(&cas_root)
+                .expect("prompt queue")
+                .peek_operator_replies("factory-no-commander", 10)
+                .expect("read operator replies")
+                .len()
+        };
+
+        write_clients(Some(0));
+        let error = service
+            .message_send(request())
+            .await
+            .expect_err("no Commander attached: refused at send time");
+        assert!(
+            error.message.contains("No Commander device is attached to factory session factory-no-commander"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("Nothing was queued"), "{error:?}");
+        assert_eq!(queued(), 0, "nothing is queued to expire");
+
+        write_clients(Some(1));
+        let response = response_text(service.message_send(request()).await.expect("queued"));
+        assert!(response.contains("Commander status queued"), "{response}");
+        assert_eq!(queued(), 1);
+
+        std::fs::remove_file(crate::factory_daemon_health::status_path(
+            &cas_root,
+            "factory-no-commander",
+        ))
+        .expect("remove loop.json");
+        let response = response_text(service.message_send(request()).await.expect("queued"));
+        assert!(response.contains("Commander status queued"), "unknown state still queues: {response}");
     }
 
     #[tokio::test(flavor = "current_thread")]

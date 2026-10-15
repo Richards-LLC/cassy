@@ -3425,8 +3425,11 @@ impl SqlitePromptQueueStore {
                 "SELECT source, target, factory_session, origin_agent_id, origin_kind,
                     COALESCE(last_pending_detail, last_pending_reason, 'undeliverable')
              FROM prompt_queue WHERE id = ? AND highest_stage = 'abandoned'
-               AND source <> 'delivery-watchdog'",
-                params![prompt_id],
+               AND source <> 'delivery-watchdog'
+               -- GH #1196: an automatic Commander mirror of a pane reply was
+               -- not sent by the supervisor, so its loss is not theirs to act on.
+               AND (?2 OR dedupe_key IS NULL OR dedupe_key NOT LIKE 'commander-mirror:%')",
+                params![prompt_id, GH_1196_RED_STUB],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -3439,10 +3442,16 @@ impl SqlitePromptQueueStore {
                 },
             )
             .optional()?;
-        let Some((mut sender, target, mut session, origin_id, origin_kind, reason)) = original
+        let Some((mut sender, target, mut session, origin_id, origin_kind, mut reason)) = original
         else {
             return Ok(None);
         };
+        // GH #1196: the operator never belongs to a factory session, so a
+        // session-membership reason misleads. What failed is that no
+        // Commander device took the message.
+        if !GH_1196_RED_STUB && (target.eq_ignore_ascii_case("operator") || target.starts_with("commander:")) {
+            reason = "no Commander device received it before it expired".to_string();
+        }
         if origin_kind.as_deref() == Some("registered_agent") {
             (sender, session) = Self::abandonment_recipient_in_tx(
                 tx,
@@ -3676,6 +3685,16 @@ impl SqlitePromptQueueStore {
         )
     }
 
+    /// Record an abandonment notice as part of the recipient's episode (GH
+    /// #1196, communication contract v2 P3.3). Within
+    /// [`ABANDONMENT_EPISODE_SECS`] a recipient gets one notice, then at most
+    /// one update:
+    ///
+    /// - no notice in the window: insert it;
+    /// - the latest notice is still unread: fold this abandonment into it;
+    /// - it was read and no update exists yet: insert the update;
+    /// - the update was read too: count it, and say nothing until the window
+    ///   ends. Each message's own `message_status` still reports it.
     fn insert_abandonment_body_in_tx(
         tx: &Connection,
         sender: &str,
@@ -3684,15 +3703,76 @@ impl SqlitePromptQueueStore {
         summary: &str,
         dedupe_key: &str,
     ) -> Result<()> {
+        let now = Utc::now();
+        let window_start =
+            (now - chrono::Duration::seconds(ABANDONMENT_EPISODE_SECS)).to_rfc3339();
+        let episode: Vec<(i64, String, bool)> = {
+            let mut statement = tx.prepare(
+                "SELECT id, COALESCE(dedupe_key, ''),
+                        processed_at IS NULL AND transport_delivered_at IS NULL
+                           AND assumed_seen_at IS NULL AND acked_at IS NULL
+                   FROM prompt_queue
+                  WHERE source = 'delivery-watchdog' AND target = ?1
+                    AND factory_session IS ?2 AND created_at >= ?3
+                    AND dedupe_key LIKE 'delivery-abandoned%'
+                  ORDER BY id DESC",
+            )?;
+            statement
+                .query_map(params![sender, session, window_start], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let episode = if GH_1196_RED_STUB { Vec::new() } else { episode };
+        if let Some((id, _, true)) = episode.first() {
+            tx.execute(
+                "UPDATE prompt_queue
+                    SET prompt = prompt || char(10) || 'Also: ' || ?2,
+                        summary = 'Messages abandoned (episode continues)'
+                  WHERE id = ?1",
+                params![id, notice],
+            )?;
+            return Ok(());
+        }
+        let has_update = episode
+            .iter()
+            .any(|(_, key, _)| key.starts_with("delivery-abandoned-update:"));
+        if has_update {
+            tracing::info!(
+                recipient = sender,
+                notice,
+                "GH #1196: abandonment folded into an already-reported episode"
+            );
+            return Ok(());
+        }
+        let (notice, summary, dedupe_key) = if episode.is_empty() {
+            (notice.to_string(), summary.to_string(), dedupe_key.to_string())
+        } else {
+            (
+                format!(
+                    "Update since the last abandonment notice in this hour: {notice}\n\
+                     Further abandonments this hour are recorded on each message \
+                     (`message_status`) without another notice."
+                ),
+                format!("Update: {summary}"),
+                format!("delivery-abandoned-update:{dedupe_key}"),
+            )
+        };
         tx.execute(
             "INSERT OR IGNORE INTO prompt_queue
                 (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
              VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?)",
-            params![sender, notice, Utc::now().to_rfc3339(), session, summary, dedupe_key],
+            params![sender, notice, now.to_rfc3339(), session, summary, dedupe_key],
         )?;
         Ok(())
     }
 }
+
+/// One recipient's abandonment notices fold into one episode per hour
+/// (GH #1196): a notice, then at most one update.
+pub const ABANDONMENT_EPISODE_SECS: i64 = 3600;
+/// Red-first stub (cas-1be0).
+const GH_1196_RED_STUB: bool = true;
 
 struct AbandonedSenderNotice {
     sender: String,
@@ -12642,6 +12722,101 @@ mod tests {
             report.pending_reason,
             Some(PendingReason::AbandonedUnknownTarget)
         );
+    }
+
+    /// GH #1196: one recipient's abandonment notices fold into one episode
+    /// per hour: a notice, abandonments folded into it while it is unread,
+    /// then at most one update after it was read, then silence.
+    #[test]
+    fn gh_1196_abandonment_notices_fold_into_one_episode_per_recipient() {
+        let (_temp, store) = create_test_store();
+        let notices = |store: &SqlitePromptQueueStore| -> Vec<(i64, String)> {
+            let conn = store.conn.lock().unwrap();
+            let mut statement = conn
+                .prepare(
+                    "SELECT id, prompt FROM prompt_queue
+                      WHERE source = 'delivery-watchdog' AND target = 'supervisor'
+                      ORDER BY id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        };
+        let abandon_one = |store: &SqlitePromptQueueStore, target: &str| -> i64 {
+            let id = store
+                .enqueue_with_session("supervisor", target, "old work", "sess")
+                .unwrap();
+            backdate(store, id, 30 * 24 * 60 * 60);
+            assert_eq!(store.abandon_pending_older_than(900).unwrap(), 1);
+            id
+        };
+
+        let first = abandon_one(&store, "worker-1");
+        assert_eq!(notices(&store).len(), 1);
+        let folded = abandon_one(&store, "worker-2");
+        let rows = notices(&store);
+        assert_eq!(rows.len(), 1, "an unread notice absorbs the next abandonment");
+        assert!(rows[0].1.contains(&first.to_string()), "{}", rows[0].1);
+        assert!(rows[0].1.contains(&format!("Also: Message {folded} to worker-2")), "{}", rows[0].1);
+
+        store.mark_transport_delivered(rows[0].0).unwrap();
+        let updated = abandon_one(&store, "worker-3");
+        let rows = notices(&store);
+        assert_eq!(rows.len(), 2, "one update after the notice was read");
+        assert!(rows[1].1.starts_with("Update since the last abandonment notice"), "{}", rows[1].1);
+        assert!(rows[1].1.contains(&updated.to_string()), "{}", rows[1].1);
+
+        store.mark_transport_delivered(rows[1].0).unwrap();
+        abandon_one(&store, "worker-4");
+        assert_eq!(notices(&store).len(), 2, "no repeat after the update was read");
+    }
+
+    /// GH #1196: an abandoned automatic Commander mirror was never sent by
+    /// the supervisor, so it raises no notice; an explicit operator turn's
+    /// notice names the real cause instead of session membership.
+    #[test]
+    fn gh_1196_operator_abandonments_skip_mirrors_and_name_the_cause() {
+        let (_temp, store) = create_test_store();
+        let mirror = store
+            .enqueue_idempotent(
+                "supervisor",
+                "operator",
+                "{}",
+                Some("sess"),
+                None,
+                None,
+                "commander-mirror:sess:sup:turn-1",
+                None,
+            )
+            .unwrap();
+        let EnqueueIdempotentResult::Created(mirror) = mirror else {
+            panic!("fresh mirror row");
+        };
+        backdate(&store, mirror, 30 * 24 * 60 * 60);
+        let explicit = store
+            .enqueue_with_session("supervisor", "operator", "{}", "sess")
+            .unwrap();
+        backdate(&store, explicit, 30 * 24 * 60 * 60);
+        assert_eq!(store.abandon_pending_older_than(900).unwrap(), 2);
+        let conn = store.conn.lock().unwrap();
+        let prompts: Vec<String> = conn
+            .prepare("SELECT prompt FROM prompt_queue WHERE source = 'delivery-watchdog'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(prompts[0].contains(&format!("Message {explicit} to operator")), "{prompts:?}");
+        assert!(!prompts[0].contains(&mirror.to_string()), "{prompts:?}");
+        assert!(
+            prompts[0].contains("no Commander device received it before it expired"),
+            "{prompts:?}"
+        );
+        assert!(!prompts[0].contains("factory session"), "{prompts:?}");
     }
 
     #[test]

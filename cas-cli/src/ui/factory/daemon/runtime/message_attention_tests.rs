@@ -763,3 +763,23 @@ fn cas_07ee_closure_without_merge_evidence_still_alarms() {
         "closure alone does not prove the requested merge for #{id}"
     );
 }
+
+/// GH #1196: a message about a task that was cancelled after it was sent
+/// asks nothing more of anyone, so it raises no unread or stalled notice.
+#[test]
+fn gh_1196_cancelled_task_no_longer_needs_attention() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = f.aged("supervisor", "worker", "cas-1be0 merged; re-close now");
+    let mut task = Task::new("cas-1be0".into(), "delivery".into());
+    task.status = TaskStatus::Cancelled;
+    task.closed_at = Some(chrono::Utc::now());
+    crate::store::open_task_store_local(&f.cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    assert!(
+        f.scan().is_empty(),
+        "a task cancelled after #{id} retires its alarm"
+    );
+}

@@ -972,6 +972,35 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # cas-c4b2: the app ships no fonts, so its sans-serif and monospace
+      # stacks resolve to whatever the machine renders. Ubuntu's hosted image
+      # renders DejaVu, which moved the J2, J5, J14 and J15 layouts; the
+      # journeys were written against Noto Sans and IBM Plex Mono
+      # (artifacts cas-c4b2/hosted-diagnosis.md). Install those and make Noto
+      # Sans the generic sans-serif and system-ui face.
+      - name: Install the fonts the journeys are written against
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends fonts-noto-core fonts-ibm-plex
+          mkdir -p "$HOME/.config/fontconfig"
+          cat > "$HOME/.config/fontconfig/fonts.conf" <<'FONTS'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <match target="pattern">
+              <test qual="any" name="family"><string>sans-serif</string></test>
+              <edit name="family" mode="prepend_first" binding="strong"><string>Noto Sans</string></edit>
+            </match>
+            <match target="pattern">
+              <test qual="any" name="family"><string>system-ui</string></test>
+              <edit name="family" mode="prepend_first" binding="strong"><string>Noto Sans</string></edit>
+            </match>
+          </fontconfig>
+          FONTS
+          fc-cache -f >/dev/null
+          echo "sans-serif: $(fc-match sans-serif)"
+          echo "IBM Plex Mono: $(fc-match 'IBM Plex Mono')"
+
       - name: Run Commander journeys shard ${{ matrix.shard }}/6
         working-directory: hub-web
         env:

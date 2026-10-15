@@ -3003,8 +3003,37 @@ impl FactoryDaemon {
             }
         }
 
-        // cas-223f: the director refresh's jobs share the queue job
-        // runtime; nothing of theirs outlives the loop.
+        // cas-223f review M4: prompts waiting for their fresh re-check are not
+        // dropped at shutdown. Finished re-checks are delivered as decided;
+        // ones that never reported are re-checked here, as the inject loop
+        // did before cas-223f.
+        let (rechecked, unchecked) = director_refresh
+            .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2));
+        for batch in rechecked {
+            let super::factory_jobs::DeliverabilityBatch {
+                prompts,
+                events,
+                refresh_started,
+            } = batch;
+            for (prompt, deliverable) in prompts {
+                if !deliverable {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &events, refresh_started, store_worker)
+                    .await;
+            }
+        }
+        for pending in unchecked {
+            for prompt in pending.prompts {
+                if !self.app.prompt_is_still_deliverable(&prompt) {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker)
+                    .await;
+            }
+        }
         drop(director_refresh);
         // cas-d2a2: queue stamps run on the StoreWorker through the queue
         // job lanes; drain the lanes first so no critical stamp is still
@@ -3197,6 +3226,11 @@ impl FactoryDaemon {
         for (worker, task) in failed {
             self.app.clear_worker_health_probe(&worker, &task);
         }
+        // cas-223f review M1: the git half of the stall evidence arrives from
+        // its own job on the external lane.
+        if let Some(evidence) = refresh.take_ci_status(&mut self.queue_jobs) {
+            self.app.apply_ci_status(evidence);
+        }
         if due {
             crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
         }
@@ -3208,6 +3242,7 @@ impl FactoryDaemon {
             for (worker, task) in refresh.submit_health_probes(&self.app, &mut self.queue_jobs, requests) {
                 self.app.clear_worker_health_probe(&worker, &task);
             }
+            refresh.start_ci_status(&self.app, &mut self.queue_jobs);
             match applied {
                 // cas-627f: an idle tick with zero events never reads the
                 // store again; the relays and follow-up still run.

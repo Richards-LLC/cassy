@@ -925,10 +925,14 @@ pub struct FactoryApp {
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
     lane_ci_pending: delivery_evidence::LaneCiCache,
-    /// Factory loop v2 (cas-223f): supervisor-stall evidence for the focused
-    /// epic's parked deliveries, computed off the loop with each director
-    /// snapshot. The stall check only looks it up.
-    delivery_evidence: delivery_evidence::DeliveryEvidenceMap,
+    /// Factory loop v2 (cas-223f): the store half of the supervisor-stall
+    /// evidence for the focused epic's parked deliveries, read with each
+    /// director snapshot on the read lane.
+    parked_facts: delivery_evidence::ParkedFactsMap,
+    /// The git half (delivery tips, lane CI, merged state), from the latest
+    /// `CiStatus` job on the external lane. The stall check joins the two in
+    /// memory and only looks them up.
+    git_evidence: delivery_evidence::GitEvidenceMap,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1390,9 +1394,13 @@ impl FactoryApp {
             data: loaded_data,
             blocks_deps,
             idle_liveness,
-            evidence,
+            facts,
         } = inputs;
-        let evidence = evidence.unwrap_or_else(|| self.delivery_evidence.clone());
+        // cas-223f review M3: revalidation joins the fresh read's store facts
+        // with the latest git evidence. It never falls back to cached facts.
+        let evidence = facts
+            .as_ref()
+            .map(|facts| delivery_evidence::combine(facts, &self.git_evidence));
         // cas-ae6d (GH #100): the instant the snapshot backing a "no
         // dispatchable tasks" claim was actually read. That claim is counted
         // from `director_data` (session/epic-scoped — see the comment on
@@ -1427,6 +1435,12 @@ impl FactoryApp {
                         self.event_detector.worker_idle_since(worker),
                     )
                 } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
+                    if !delivery_state_is_authoritative {
+                        // The fresh read failed: uncertain, so deliver it,
+                        // as before cas-223f. Never decide from the cache.
+                        return Some(event.clone());
+                    }
+                    let evidence = evidence.clone().unwrap_or_default();
                     self.supervisor_stall_event_is_current(event, &unfiltered_data, &evidence)
                         .then(|| event.clone())
                 } else {
@@ -1583,6 +1597,17 @@ impl FactoryApp {
         let load = self
             .director_refresh_request()
             .read(self.director_stores.as_ref());
+        // Synchronous callers resolve the git half of the stall evidence
+        // here too; the daemon runs it as a `CiStatus` job instead.
+        if let Some(facts) = load.facts()
+            && let Some(request) = delivery_evidence::CiStatusRequest::new(
+                self.delivery_repo_root(),
+                facts,
+                std::sync::Arc::clone(&self.lane_ci_pending),
+            )
+        {
+            self.git_evidence = request.run();
+        }
         self.apply_director_refresh(load)
     }
 
@@ -1620,9 +1645,10 @@ impl FactoryApp {
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
         // cas-223f: the git, CI and task-store evidence arrived with the
         // snapshot; this only looks it up.
+        let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
         let actionable = self.supervisor_actionable_from_evidence(
             &self.unfiltered_director_data,
-            &self.delivery_evidence,
+            &evidence,
             &held_workers,
             now,
         );

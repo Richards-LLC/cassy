@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use cas_factory::SourceChangesInfo;
 
-use super::delivery_evidence::{DeliveryEvidenceMap, StallEvidenceRequest};
+use super::delivery_evidence::{CiStatusRequest, GitEvidenceMap, ParkedFactsMap, StallEvidenceRequest};
 use super::{
     CasDbFingerprint, FactoryApp, merge_director_data_preserving_git, unfiltered_snapshot_from,
 };
@@ -52,7 +52,16 @@ pub(crate) struct DirectorRefreshLoad {
     git_due: bool,
     director: DirectorLoad,
     requested_after: Instant,
-    evidence: Option<DeliveryEvidenceMap>,
+    /// The store half of the supervisor-stall evidence.
+    facts: Option<ParkedFactsMap>,
+}
+
+impl DirectorRefreshLoad {
+    /// The store facts read with this snapshot, for a caller that resolves
+    /// the git half on its own thread.
+    pub(super) fn facts(&self) -> Option<&ParkedFactsMap> {
+        self.facts.as_ref()
+    }
 }
 
 enum DirectorLoad {
@@ -89,16 +98,13 @@ impl DirectorRefreshRequest {
             DirectorLoad::Loaded(Ok(data)) => Some(data),
             _ => None,
         };
-        let evidence = self
-            .stall
-            .as_ref()
-            .map(|stall| stall.evidence(fresh, stores));
+        let facts = self.stall.as_ref().map(|stall| stall.facts(fresh, stores));
         DirectorRefreshLoad {
             fingerprint,
             git_due: self.git_due,
             director,
             requested_after: self.requested_after,
-            evidence,
+            facts,
         }
     }
 }
@@ -123,8 +129,9 @@ pub(crate) struct DeliveryInputs {
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
     /// Liveness of each idle worker, observed off the loop.
     pub(super) idle_liveness: HashMap<String, Option<Observation>>,
-    /// Supervisor-stall delivery evidence against the fresh read.
-    pub(super) evidence: Option<DeliveryEvidenceMap>,
+    /// Supervisor-stall store facts against the fresh read; `None` when the
+    /// read failed (uncertain) or no `SupervisorStalled` event needs them.
+    pub(super) facts: Option<ParkedFactsMap>,
 }
 
 impl DeliveryInputs {
@@ -164,15 +171,15 @@ impl DeliveryRequest {
                 )
             })
             .collect();
-        let evidence = match (&self.stall, &data) {
-            (Some(stall), Ok(fresh)) => Some(stall.evidence(Some(fresh), stores)),
+        let facts = match (&self.stall, &data) {
+            (Some(stall), Ok(fresh)) => Some(stall.facts(Some(fresh), stores)),
             _ => None,
         };
         DeliveryInputs {
             data,
             blocks_deps,
             idle_liveness,
-            evidence,
+            facts,
         }
     }
 }
@@ -286,11 +293,24 @@ impl FactoryApp {
             .to_string();
         Some(StallEvidenceRequest::new(
             self.cas_dir.clone(),
-            self.delivery_repo_root(),
             epic_id,
             &self.unfiltered_director_data,
-            std::sync::Arc::clone(&self.lane_ci_pending),
         ))
+    }
+
+    /// The `CiStatus` job for the parked deliveries the last snapshot read,
+    /// or `None` when none needs git evidence (cas-223f review M1).
+    pub(crate) fn ci_status_request(&self) -> Option<CiStatusRequest> {
+        CiStatusRequest::new(
+            self.delivery_repo_root(),
+            &self.parked_facts,
+            std::sync::Arc::clone(&self.lane_ci_pending),
+        )
+    }
+
+    /// Apply a finished `CiStatus` job.
+    pub(crate) fn apply_ci_status(&mut self, evidence: GitEvidenceMap) {
+        self.git_evidence = evidence;
     }
 
     /// Capture what the delivery stage's fresh read needs to revalidate
@@ -340,8 +360,8 @@ impl FactoryApp {
             return Ok(Vec::new());
         }
         let git_due = load.git_due;
-        if let Some(evidence) = load.evidence {
-            self.delivery_evidence = evidence;
+        if let Some(facts) = load.facts {
+            self.parked_facts = facts;
         }
         let db_changed = match load.director {
             DirectorLoad::Loaded(loaded) => {

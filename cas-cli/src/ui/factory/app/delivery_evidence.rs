@@ -7,12 +7,18 @@
 //! `merge-base --is-ancestor` (twice), and on a CI cache miss `git` plus `gh`
 //! with 2 s timeouts (measured: supervisor stall p99 1,820 ms on 10-15).
 //!
-//! [`StallEvidenceRequest`] captures what that evidence needs on the loop,
-//! and [`StallEvidenceRequest::evidence`] computes it inside the
-//! `DirectorSnapshot` job (and inside the delivery read for revalidation).
-//! The loop keeps the decision: it feeds the precomputed
-//! [`DeliveryEvidence`] to `supervisor_actionable_state_with_classifiers`
-//! through lookups. A parked delivery whose evidence has not arrived yet is
+//! The evidence now comes from two jobs, so slow external calls never hold
+//! the shared read lane (review round 1, M1):
+//! - [`StallEvidenceRequest::facts`] reads the store half ([`ParkedFacts`]:
+//!   blocker and hold notes, open QA passes, the recorded delivery refs)
+//!   inside the `DirectorSnapshot` and delivery reads, on the read lane.
+//! - [`CiStatusRequest::run`] resolves the git half ([`GitEvidence`]: the
+//!   delivery tip, lane CI via `gh`, whether the anchor is already on its
+//!   target) as a `CiStatus` job on the external lane.
+//!
+//! The loop keeps the decision: [`combine`] joins the two in memory and the
+//! stall check looks the result up. A parked delivery whose evidence has not
+//! arrived, or was computed for different inputs, is
 //! [`DeliveryHold::EvidencePending`], never "merge now".
 
 use std::collections::HashMap;
@@ -29,8 +35,42 @@ use crate::ui::factory::director::{
 
 /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled result
 /// is final for its tip; a pending one is re-read after a minute. Shared with
-/// the jobs that compute evidence.
+/// the `CiStatus` jobs.
 pub(crate) type LaneCiCache = Arc<Mutex<HashMap<(String, String), (std::time::Instant, bool)>>>;
+
+/// The store half of one parked delivery's evidence (read lane).
+#[derive(Debug, Clone)]
+pub(crate) struct ParkedFacts {
+    task: TaskSummary,
+    worker: String,
+    target: Option<String>,
+    /// A blocker note, hold decision or open QA pass (GH #896, cas-58d3).
+    store_hold: Option<DeliveryHold>,
+    /// The QA pass read failed: as before cas-223f, no hold and no CI check.
+    qa_unreadable: bool,
+    parked_branch: Option<String>,
+    anchor: Option<String>,
+    close_rejection: String,
+}
+
+/// Store facts by task id.
+pub(crate) type ParkedFactsMap = HashMap<String, ParkedFacts>;
+
+/// The git half of one parked delivery's evidence (external lane).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitEvidence {
+    /// The facts this was computed from; different facts make it stale.
+    inputs: (String, Option<String>, Option<String>, Option<String>),
+    /// The delivery branch and commit a merge-now alert names (cas-58d3).
+    delivery: (String, Option<String>),
+    /// Lane CI still running (cas-207e).
+    ci_pending: bool,
+    /// The anchor is already on its target (merged, close blocked).
+    merged_close_blocked: Option<MergedCloseBlockedTask>,
+}
+
+/// Git evidence by task id.
+pub(crate) type GitEvidenceMap = HashMap<String, GitEvidence>;
 
 /// What the stall check needs to know about one parked delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +88,24 @@ pub(crate) struct DeliveryEvidence {
 /// Evidence by task id.
 pub(crate) type DeliveryEvidenceMap = HashMap<String, DeliveryEvidence>;
 
-/// A parked delivery the evidence is computed for.
+impl ParkedFacts {
+    fn inputs(&self) -> (String, Option<String>, Option<String>, Option<String>) {
+        (
+            self.worker.clone(),
+            self.parked_branch.clone(),
+            self.anchor.clone(),
+            self.target.clone(),
+        )
+    }
+
+    /// Whether the git half is needed at all: a store hold or an unreadable
+    /// QA read already decides.
+    fn needs_git(&self) -> bool {
+        self.store_hold.is_none() && !self.qa_unreadable
+    }
+}
+
+/// A parked delivery the facts are read for.
 #[derive(Debug, Clone)]
 struct ParkedDelivery {
     task: TaskSummary,
@@ -82,45 +139,34 @@ fn parked_deliveries(data: &DirectorData, epic_id: &str) -> Vec<ParkedDelivery> 
         .collect()
 }
 
-/// Everything the evidence needs, captured on the loop.
+/// Everything the store facts need, captured on the loop.
 #[derive(Debug, Clone)]
 pub(crate) struct StallEvidenceRequest {
     cas_dir: PathBuf,
-    repo_root: PathBuf,
     epic_id: String,
     /// The parked deliveries in the loop's current snapshot, for a job that
     /// reads no new snapshot (the database is unchanged).
     parked: Vec<ParkedDelivery>,
-    lane_ci_pending: LaneCiCache,
 }
 
 impl StallEvidenceRequest {
-    pub(crate) fn new(
-        cas_dir: PathBuf,
-        repo_root: PathBuf,
-        epic_id: String,
-        current: &DirectorData,
-        lane_ci_pending: LaneCiCache,
-    ) -> Self {
+    pub(crate) fn new(cas_dir: PathBuf, epic_id: String, current: &DirectorData) -> Self {
         let parked = parked_deliveries(current, &epic_id);
         Self {
             cas_dir,
-            repo_root,
             epic_id,
             parked,
-            lane_ci_pending,
         }
     }
 
-    /// Compute the evidence for every parked delivery, from `fresh` when the
-    /// job read a new snapshot, otherwise from the loop's. Runs git, gh and
-    /// store reads: call it only off the loop (or from a caller that already
-    /// reads synchronously).
-    pub(crate) fn evidence(
+    /// Read the store facts for every parked delivery, from `fresh` when the
+    /// job read a new snapshot, otherwise from the loop's. Store reads only
+    /// (task records and QA passes); no git, no network.
+    pub(crate) fn facts(
         &self,
         fresh: Option<&DirectorData>,
         stores: Option<&DirectorStores>,
-    ) -> DeliveryEvidenceMap {
+    ) -> ParkedFactsMap {
         let parked = match fresh {
             Some(data) => parked_deliveries(data, &self.epic_id),
             None => self.parked.clone(),
@@ -128,83 +174,123 @@ impl StallEvidenceRequest {
         parked
             .into_iter()
             .map(|parked| {
-                let evidence = self.evidence_for(&parked, stores);
-                (parked.task.id.clone(), evidence)
+                let facts = self.facts_for(parked, stores);
+                (facts.task.id.clone(), facts)
             })
             .collect()
     }
 
-    fn evidence_for(
-        &self,
-        parked: &ParkedDelivery,
-        stores: Option<&DirectorStores>,
-    ) -> DeliveryEvidence {
-        let task = &parked.task;
-        let delivery = resolve_task_delivery(stores, task, &parked.worker, &self.repo_root);
-        let hold = self.classify_delivery_hold(stores, parked, &delivery);
-        let merged_close_blocked = if hold.is_none() {
-            parked.target.as_deref().and_then(|target| {
-                classify_merged_close_blocked_task(
-                    stores,
-                    task,
-                    &delivery.0,
-                    target,
-                    &self.repo_root,
-                )
-            })
-        } else {
+    fn facts_for(&self, parked: ParkedDelivery, stores: Option<&DirectorStores>) -> ParkedFacts {
+        let record = stores
+            .and_then(|stores| cas_store::TaskStore::get(&stores.task_store, &parked.task.id).ok());
+        let mut store_hold = None;
+        if let Some(record) = &record {
+            if blocker_note_after_park(&record.notes) {
+                store_hold = Some(DeliveryHold::BlockerNote);
+            } else if hold_decision_after_park(&record.notes) {
+                // cas-58d3: a supervisor decision holding the merge.
+                store_hold = Some(DeliveryHold::SupervisorDecision);
+            }
+        }
+        let mut qa_unreadable = false;
+        if store_hold.is_none() {
+            let now = Utc::now();
+            match cas_store::list_qa_passes(&self.cas_dir, &parked.task.id) {
+                Ok(passes) => {
+                    if passes
+                        .into_iter()
+                        .any(|pass| pass.state.is_active() && pass.deadline_at > now)
+                    {
+                        store_hold = Some(DeliveryHold::QaPassOpen);
+                    }
+                }
+                Err(_) => qa_unreadable = true,
+            }
+        }
+        let deliverables = record.as_ref().map(|record| &record.deliverables);
+        ParkedFacts {
+            worker: parked.worker,
+            target: parked.target,
+            store_hold,
+            qa_unreadable,
+            parked_branch: deliverables.and_then(|d| d.parked_branch.clone()),
+            anchor: deliverables
+                .and_then(|d| d.factory_branch_anchor.as_deref())
+                .map(str::trim)
+                .filter(|anchor| !anchor.is_empty())
+                .map(str::to_string),
+            close_rejection: record
+                .as_ref()
+                .and_then(|record| last_close_rejection_reason(&record.notes))
+                .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
+            task: parked.task,
+        }
+    }
+}
+
+/// The `CiStatus` job: the git half of the evidence. Runs `git` and `gh`
+/// (2 s timeouts each), so it belongs on the external lane, never the read
+/// lane.
+#[derive(Debug, Clone)]
+pub(crate) struct CiStatusRequest {
+    repo_root: PathBuf,
+    facts: Vec<ParkedFacts>,
+    lane_ci_pending: LaneCiCache,
+}
+
+impl CiStatusRequest {
+    /// `None` when no parked delivery needs git evidence.
+    pub(crate) fn new(
+        repo_root: PathBuf,
+        facts: &ParkedFactsMap,
+        lane_ci_pending: LaneCiCache,
+    ) -> Option<Self> {
+        let facts: Vec<ParkedFacts> = facts.values().filter(|f| f.needs_git()).cloned().collect();
+        (!facts.is_empty()).then_some(Self {
+            repo_root,
+            facts,
+            lane_ci_pending,
+        })
+    }
+
+    /// Resolve every delivery's tip, lane CI and merged state.
+    pub(crate) fn run(&self) -> GitEvidenceMap {
+        self.facts
+            .iter()
+            .map(|facts| (facts.task.id.clone(), self.evidence_for(facts)))
+            .collect()
+    }
+
+    fn evidence_for(&self, facts: &ParkedFacts) -> GitEvidence {
+        let repo_root = &self.repo_root;
+        let delivery = task_delivery_ref(
+            &facts.task.id,
+            &facts.worker,
+            facts.parked_branch.as_deref(),
+            facts.anchor.as_deref(),
+            |branch| crate::git_evidence::resolve_branch_sha(repo_root, branch),
+            |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
+        );
+        let ci_pending = self.delivery_ci_pending(facts, &delivery);
+        let merged_close_blocked = if ci_pending {
             None
+        } else {
+            facts
+                .target
+                .as_deref()
+                .and_then(|target| self.merged_close_blocked(facts, &delivery.0, target))
         };
-        DeliveryEvidence {
-            worker: parked.worker.clone(),
+        GitEvidence {
+            inputs: facts.inputs(),
             delivery,
-            hold,
+            ci_pending,
             merged_close_blocked,
         }
     }
 
-    /// GH #896 (cas-e4f8): whether a parked delivery is deliberately waiting
-    /// on a decision, so the stall relay leaves it out of "merge now". Reads
-    /// the task's notes (a blocker or hold decision raised after it last
-    /// parked), the QA pass rows (an open pass whose deadline has not passed)
-    /// and the delivery's lane CI (cas-207e).
-    fn classify_delivery_hold(
-        &self,
-        stores: Option<&DirectorStores>,
-        parked: &ParkedDelivery,
-        delivery: &(String, Option<String>),
-    ) -> Option<DeliveryHold> {
-        let task = &parked.task;
-        if let Some(stores) = stores
-            && let Ok(record) = cas_store::TaskStore::get(&stores.task_store, &task.id)
-        {
-            if blocker_note_after_park(&record.notes) {
-                return Some(DeliveryHold::BlockerNote);
-            }
-            // cas-58d3: a supervisor decision holding the merge.
-            if hold_decision_after_park(&record.notes) {
-                return Some(DeliveryHold::SupervisorDecision);
-            }
-        }
-        let now = Utc::now();
-        if cas_store::list_qa_passes(&self.cas_dir, &task.id)
-            .ok()?
-            .into_iter()
-            .any(|pass| pass.state.is_active() && pass.deadline_at > now)
-        {
-            return Some(DeliveryHold::QaPassOpen);
-        }
-        self.delivery_ci_pending(parked, delivery)
-            .then_some(DeliveryHold::LaneCiPending)
-    }
-
     /// cas-207e: a parked delivery whose lane CI is still running is not a
     /// ready merge. Read through a cache so repeated checks stay cheap.
-    fn delivery_ci_pending(
-        &self,
-        parked: &ParkedDelivery,
-        delivery: &(String, Option<String>),
-    ) -> bool {
+    fn delivery_ci_pending(&self, facts: &ParkedFacts, delivery: &(String, Option<String>)) -> bool {
         let (branch, Some(tip)) = delivery else {
             return false;
         };
@@ -215,89 +301,99 @@ impl StallEvidenceRequest {
         {
             return *pending;
         }
-        let target = parked.target.clone().unwrap_or_else(|| "main".to_string());
+        let target = facts.target.clone().unwrap_or_else(|| "main".to_string());
         // The lock is not held across git and gh.
-        let pending = crate::mcp::tools::core::workflow::delivery_ci_pending(
-            branch,
-            &target,
-            &self.repo_root,
-        );
+        let pending =
+            crate::mcp::tools::core::workflow::delivery_ci_pending(branch, &target, &self.repo_root);
         if let Ok(mut cache) = self.lane_ci_pending.lock() {
             cache.insert(key, (std::time::Instant::now(), pending));
         }
         pending
     }
-}
 
-/// cas-58d3: the delivery branch and commit a merge-now alert names for a
-/// parked task, from its per-task branch, recorded parked branch and delivery
-/// anchor rather than the worker's base branch.
-fn resolve_task_delivery(
-    stores: Option<&DirectorStores>,
-    task: &TaskSummary,
-    worker: &str,
-    repo_root: &Path,
-) -> (String, Option<String>) {
-    let parked =
-        stores.and_then(|stores| cas_store::TaskStore::get(&stores.task_store, &task.id).ok());
-    let deliverables = parked.as_ref().map(|parked| &parked.deliverables);
-    task_delivery_ref(
-        &task.id,
-        worker,
-        deliverables.and_then(|d| d.parked_branch.as_deref()),
-        deliverables.and_then(|d| d.factory_branch_anchor.as_deref()),
-        |branch| crate::git_evidence::resolve_branch_sha(repo_root, branch),
-        |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
-    )
-}
-
-/// Merged-close-blocked evidence for a parked task only when its delivery
-/// anchor is already reachable from the resolved target. Missing task or git
-/// evidence is unknown, which keeps the merge demand rather than inventing a
-/// merged verdict.
-fn classify_merged_close_blocked_task(
-    stores: Option<&DirectorStores>,
-    task: &TaskSummary,
-    factory_branch: &str,
-    target_branch: &str,
-    repo_root: &Path,
-) -> Option<MergedCloseBlockedTask> {
-    let target_tip = crate::git_evidence::resolve_branch_sha(repo_root, target_branch)?;
-    let stores = stores?;
-    let parked = cas_store::TaskStore::get(&stores.task_store, &task.id).ok()?;
-    let anchor = parked
-        .deliverables
-        .factory_branch_anchor
-        .as_deref()
-        .map(str::trim)
-        .filter(|anchor| !anchor.is_empty())?;
-    let anchor_sha = crate::git_evidence::resolve_branch_sha(repo_root, anchor)?;
-    if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
-        return None;
+    /// Merged-close-blocked evidence only when the delivery anchor is already
+    /// reachable from the resolved target. Missing git evidence is unknown,
+    /// which keeps the merge demand rather than inventing a merged verdict.
+    fn merged_close_blocked(
+        &self,
+        facts: &ParkedFacts,
+        factory_branch: &str,
+        target_branch: &str,
+    ) -> Option<MergedCloseBlockedTask> {
+        let repo_root: &Path = &self.repo_root;
+        let target_tip = crate::git_evidence::resolve_branch_sha(repo_root, target_branch)?;
+        let anchor = facts.anchor.as_deref()?;
+        let anchor_sha = crate::git_evidence::resolve_branch_sha(repo_root, anchor)?;
+        if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
+            return None;
+        }
+        Some(MergedCloseBlockedTask {
+            task_id: facts.task.id.clone(),
+            factory_branch: factory_branch.to_string(),
+            anchor: anchor.to_string(),
+            target_branch: target_branch.to_string(),
+            target_tip,
+            close_rejection: facts.close_rejection.clone(),
+        })
     }
-    Some(MergedCloseBlockedTask {
-        task_id: task.id.clone(),
-        factory_branch: factory_branch.to_string(),
-        anchor: anchor.to_string(),
-        target_branch: target_branch.to_string(),
-        target_tip,
-        close_rejection: last_close_rejection_reason(&parked.notes)
-            .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
-    })
 }
 
-/// The stall classifiers over precomputed evidence: lookups only, no IO.
-/// `(resolve_delivery, classify_merged_close_blocked, classify_delivery_hold)`
-/// in the order `supervisor_actionable_state_with_classifiers` takes them.
+/// Join the store facts with the git evidence, in memory. A delivery whose
+/// git evidence is missing or was computed for other facts is
+/// [`DeliveryHold::EvidencePending`].
+pub(crate) fn combine(facts: &ParkedFactsMap, git: &GitEvidenceMap) -> DeliveryEvidenceMap {
+    facts
+        .iter()
+        .map(|(task_id, facts)| {
+            let pending_delivery = || (format!("factory/{}", facts.worker), None);
+            let evidence = if let Some(hold) = facts.store_hold {
+                DeliveryEvidence {
+                    worker: facts.worker.clone(),
+                    delivery: pending_delivery(),
+                    hold: Some(hold),
+                    merged_close_blocked: None,
+                }
+            } else if facts.qa_unreadable {
+                // As before cas-223f: an unreadable QA read is no hold, and
+                // CI is not consulted.
+                DeliveryEvidence {
+                    worker: facts.worker.clone(),
+                    delivery: git
+                        .get(task_id)
+                        .filter(|found| found.inputs == facts.inputs())
+                        .map(|found| found.delivery.clone())
+                        .unwrap_or_else(pending_delivery),
+                    hold: None,
+                    merged_close_blocked: None,
+                }
+            } else {
+                match git.get(task_id).filter(|found| found.inputs == facts.inputs()) {
+                    Some(found) => DeliveryEvidence {
+                        worker: facts.worker.clone(),
+                        delivery: found.delivery.clone(),
+                        hold: found.ci_pending.then_some(DeliveryHold::LaneCiPending),
+                        merged_close_blocked: found.merged_close_blocked.clone(),
+                    },
+                    None => DeliveryEvidence {
+                        worker: facts.worker.clone(),
+                        delivery: pending_delivery(),
+                        hold: Some(DeliveryHold::EvidencePending),
+                        merged_close_blocked: None,
+                    },
+                }
+            };
+            (task_id.clone(), evidence)
+        })
+        .collect()
+}
+
+/// The stall classifiers over combined evidence: lookups only, no IO.
 pub(crate) fn evidence_hold(
     evidence: &DeliveryEvidenceMap,
     task: &TaskSummary,
     worker: &str,
 ) -> Option<DeliveryHold> {
-    match evidence
-        .get(&task.id)
-        .filter(|found| found.worker == worker)
-    {
+    match evidence.get(&task.id).filter(|found| found.worker == worker) {
         Some(found) => found.hold,
         None => Some(DeliveryHold::EvidencePending),
     }

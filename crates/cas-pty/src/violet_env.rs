@@ -355,6 +355,38 @@ mod tests {
     }
 
     #[test]
+    fn cas_0a4c_review_shared_denials_cover_credential_aliases() {
+        let mut guard = TestEnvGuard::temp_home();
+        let path = guard.home().join("credentials.env");
+        guard.set("CAS_CREDENTIALS_FILE", &path);
+        let canonical = "VIOLET_SLACK_TOKEN_SUPERVISOR";
+        let legacy = format!(
+            "{}_SUPERVISOR",
+            cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix
+        );
+        private_file(
+            &path,
+            &format!("{canonical}='canonical-fixture'\n{legacy}='legacy-fixture'\n"),
+        );
+        guard.set(canonical, "inherited-canonical-fixture");
+        guard.set(&legacy, "inherited-legacy-fixture");
+        for denied in [canonical, legacy.as_str()] {
+            let values =
+                resolved_environment_for_references(&[], &[denied.into()], &[legacy.clone()]);
+            assert!(!values.contains_key(canonical));
+            assert!(!values.contains_key(&legacy));
+        }
+        guard.remove(canonical);
+        guard.remove(&legacy);
+        for denied in [canonical, legacy.as_str()] {
+            let values =
+                resolved_environment_for_references(&[], &[denied.into()], &[legacy.clone()]);
+            assert!(!values.contains_key(canonical));
+            assert!(!values.contains_key(&legacy));
+        }
+    }
+
+    #[test]
     fn cas_678d_round3_literal_comments_and_private_file_safety() {
         use std::os::unix::fs::symlink;
         let guard = TestEnvGuard::temp_home();

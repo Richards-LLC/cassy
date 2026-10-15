@@ -4355,12 +4355,10 @@ mod tests {
             .output();
     }
 
-    /// cas-38e7: the worker push guard no longer runs the repository's
-    /// fast-rows gate. A guard installed by an earlier build (which delegated
-    /// to scripts/fast-rows-pre-push.sh) is refreshed in place, and a push of
-    /// the worker's own branch succeeds even when that script would refuse.
+    /// cas-043b: refreshing an older worker push guard preserves the current
+    /// fast-rows delegate, and the installed guard refuses when that gate does.
     #[test]
-    fn worker_push_no_longer_runs_the_fast_rows_gate_cas_38e7() {
+    fn worker_push_runs_fast_rows_gate_from_installed_hook_cas_043b() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_git_repo_for_hook_test();
         let repo = tmp.path();
@@ -4398,7 +4396,6 @@ mod tests {
         TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
         let installed = std::fs::read_to_string(&pre_push).unwrap();
         assert_eq!(installed, TeamsManager::WORKER_PRE_PUSH_HOOK);
-        assert!(!installed.contains("fast-rows-pre-push.sh"), "{installed}");
 
         let push = std::process::Command::new("git")
             .args(["push", "origin", "factory/w"])
@@ -4409,11 +4406,13 @@ mod tests {
             .current_dir(&wt)
             .output()
             .unwrap();
-        assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stderr));
-        assert!(!repo.join(".git/gate-ran").exists(), "the retired fast-rows gate must not run");
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        assert!(!push.status.success(), "the fast-rows gate must refuse this push: {stderr}");
+        assert!(stderr.contains("FIX version-literals"), "{stderr}");
+        assert!(repo.join(".git/gate-ran").exists(), "the installed hook must invoke fast rows");
         let tip = String::from_utf8_lossy(&git(&wt, &["rev-parse", "HEAD"]).stdout).trim().to_string();
         let pushed = git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]);
-        assert_eq!(String::from_utf8_lossy(&pushed.stdout).trim(), tip);
+        assert!(!pushed.status.success(), "a refused tip must not reach the remote: {tip}");
         let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }
 

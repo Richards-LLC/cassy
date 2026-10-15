@@ -929,12 +929,15 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     fn named_test_path_hides_host_tools_beside_cargo_cas_a9fc() {
         let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
             let bin = tempfile::tempdir().unwrap();
+            let tools = tempfile::tempdir().unwrap();
+            fake_cargo(&tools.path().join("cas-a9fc-downstream-tool"), "exit 0");
             for name in ["cas", "codex", "claude"] {
                 fake_cargo(&bin.path().join(name), "exit 0");
             }
             let original = std::env::var_os("PATH").unwrap();
             let path = std::env::join_paths(
-                std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&original)),
+                [bin.path().to_path_buf(), tools.path().to_path_buf()]
+                    .into_iter().chain(std::env::split_paths(&original)),
             )
             .unwrap();
             path_test_child(
@@ -962,6 +965,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     done
     command -v rustc > /dev/null || exit 24
     command -v git > /dev/null || exit 25
+    command -v cas-a9fc-downstream-tool > /dev/null || exit 26
     printf '%s\n' "$PATH" > target/selected-path
     printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );
@@ -985,6 +989,58 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(
             passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(selected) 1")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_rustup_cargo_cannot_restore_host_harness_path_cas_a9fc() {
+        let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
+            let _env = crate::test_support::TestEnvGuard::new();
+            let original = std::env::var_os("PATH").unwrap_or_default();
+            let Some(rustup) = std::env::split_paths(&original)
+                .map(|dir| dir.join("rustup")).find(|path| executable(path)) else {
+                eprintln!("SKIP real rustup control: rustup is unavailable");
+                return;
+            };
+            let available = Command::new(&rustup).args(["which", "cargo"]).output().unwrap();
+            if !available.status.success() {
+                eprintln!("SKIP real rustup control: no active toolchain");
+                return;
+            }
+            let home = tempfile::tempdir().unwrap();
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            for name in ["cargo", "rustc", "rustdoc", "rustup"] {
+                std::os::unix::fs::symlink(&rustup, bin.join(name)).unwrap();
+            }
+            for name in ["cas", "codex", "claude"] {
+                fake_cargo(&bin.join(name), "exit 0");
+            }
+            fake_cargo(&bin.join("cargo-nextest"), r#"for tool in cas codex claude; do
+    if command -v "$tool" > /dev/null; then
+        printf 'rustup restored host tool: %s\n' "$tool" >&2
+        exit 23
+    fi
+done
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+            let path = std::env::join_paths(
+                std::iter::once(bin.clone()).chain(std::env::split_paths(&original)),
+            ).unwrap();
+            path_test_child("real_rustup_cargo_cannot_restore_host_harness_path_cas_a9fc", &path, &bin);
+            return;
+        };
+        let bin = PathBuf::from(bin);
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CARGO_HOME", bin.parent().unwrap());
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(selected)"].map(str::to_string);
+        execute_at(&root, &args, &repo, &bin.join("cargo"))
+            .expect("the real rustup proxy must not restore host harness binaries");
+        assert!(!passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
     }
 
     #[cfg(unix)]
@@ -1046,6 +1102,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     #[cfg(unix)]
     #[test]
     fn private_fake_cas_fixture_preserves_process_path_cas_a9fc() {
+        let _env = crate::test_support::TestEnvGuard::new();
         let original = std::env::var_os("PATH");
         let cas = crate::test_support::fake_cas_on_path();
         let found = Command::new("sh")

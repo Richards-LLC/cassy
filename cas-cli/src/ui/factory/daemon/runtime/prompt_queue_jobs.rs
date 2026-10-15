@@ -671,6 +671,9 @@ pub(crate) struct QueueJobs {
     settling_rows: HashMap<i64, (usize, Option<Instant>)>,
     /// When a stamp last landed or was deferred.
     last_stamp_progress: Instant,
+    /// Mirror results collected, current or stale (tests).
+    #[cfg(test)]
+    mirror_results_seen: usize,
     /// Inbox prunes completed (watchdog and tests).
     pub(crate) prunes_done: u64,
 }
@@ -725,6 +728,8 @@ impl QueueJobs {
             prunes_done: 0,
             settling_rows: HashMap::new(),
             last_stamp_progress: Instant::now(),
+            #[cfg(test)]
+            mirror_results_seen: 0,
         }
     }
 
@@ -1171,6 +1176,10 @@ impl QueueJobs {
                     log_prune(&report);
                 }
                 QueueJobOutcome::Mirrored(state) => {
+                    #[cfg(test)]
+                    {
+                        self.mirror_results_seen += 1;
+                    }
                     // cas-4272: only the scan in flight hands its cursors
                     // back; a scan whose drop was already reported is stale.
                     if self.mirror_in_flight && result.generation == self.mirror_generation {

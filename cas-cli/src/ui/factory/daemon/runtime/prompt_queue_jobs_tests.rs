@@ -866,19 +866,7 @@ fn a_stale_mirror_result_is_ignored() {
     // The stale scan finishes; its result is posted before the current scan
     // starts (jobs.rs posts, then the lane takes the requeued rerun).
     stale_ran.recv_timeout(Duration::from_secs(10)).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let running = match &jobs.exec {
-            Exec::Lanes(runtime) => runtime.lane_stats(Lane::Write).running,
-            Exec::Inline(_) => unreachable!(),
-        };
-        if running.is_some_and(|job| job.kind == "MirrorWrite") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the current scan never started");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    jobs.apply_completions();
+    settle(&mut jobs, |jobs| jobs.mirror_results_seen == 1);
     assert!(jobs.mirror_in_flight, "the stale result must not end the newer scan");
     assert!(jobs.mirror_state.is_none(), "the newer scan still holds the cursors");
     release_current.send(()).unwrap();

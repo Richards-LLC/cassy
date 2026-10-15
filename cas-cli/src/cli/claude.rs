@@ -606,6 +606,7 @@ mod tests {
 
     #[test]
     fn bare_launch_command_sets_profile_scrubs_api_key_and_forwards_args() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let args = vec![OsString::from("--continue"), OsString::from("--verbose")];
         let command = build_claude_command("alt", Path::new("/tmp/.claude-alt"), &args);
 
@@ -636,6 +637,7 @@ mod tests {
 
     #[test]
     fn bare_chrome_guard_covers_both_launch_builders_and_skips_auth() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let mut supported = Command::new("claude");
         enable_chrome(&mut supported, true);
         assert_eq!(
@@ -696,7 +698,7 @@ mod tests {
             "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
         ];
         if let Ok(profile) = std::env::var("FA64_PROFILE_PROBE") {
-            let mut env = crate::test_support::TestEnvGuard::new();
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
             for key in KEYS {
                 env.set(key, "fixture-override");
             }
@@ -820,6 +822,7 @@ mod tests {
 
     #[test]
     fn inherited_launch_preserves_account_selectors_and_scrubs_credentials() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let args = vec![OsString::from("--continue")];
         let command = build_inherited_claude_command(&args);
         let envs = command.get_envs().collect::<Vec<_>>();
@@ -834,6 +837,7 @@ mod tests {
 
     #[test]
     fn main_profile_clears_profile_selectors_for_the_legacy_default_store() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let command = build_claude_command("main", Path::new("/tmp/.claude"), &[]);
         let envs = command.get_envs().collect::<Vec<_>>();
 

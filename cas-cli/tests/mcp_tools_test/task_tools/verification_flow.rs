@@ -1945,7 +1945,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
     }, {
         "file": "src/description.rs",
         "category": "clarity",
-        "severity": "warning",
+        "severity": "high",
         "description": "description alias is accepted",
         "fix": "replace with a concise explanation",
     }, {

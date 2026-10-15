@@ -9,17 +9,17 @@ const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
 const DELIVERY_PR_MERGED_ENVELOPE_OPEN: &str = "<delivery-pr-merged ";
 const DELIVERY_PR_MERGED_ENVELOPE_CLOSE: &str = "</delivery-pr-merged>";
 
-/// cas-8725: the two CAS-emitted envelopes that join `<cas-merge-request>` as
-/// things a registered worker may wake an idle supervisor with.
+/// CAS-emitted envelopes that join `<cas-merge-request>` as things a
+/// registered worker may wake an idle supervisor with.
 ///
-/// Both are attached by CAS, never typed by the sender: `<cas-blocker …>` by
-/// `coordination action=message blocker=true`, and
-/// `<cas-verification-dispatch …>` by the close path itself at the moment it
-/// creates the dispatch. The wake gate keys on the envelope AND on the
-/// server-stamped row origin, so the grammar alone is not authority — see
-/// `FactoryDaemon::supervisor_wake_class`.
+/// Blocker and verification envelopes are attached by CAS; status/ready is
+/// attached when a worker explicitly supplies `kind=status|ready`. The wake
+/// gate also requires the server-stamped row origin, so the grammar alone is
+/// not authority — see `FactoryDaemon::supervisor_wake_class`.
 const BLOCKER_ENVELOPE_OPEN: &str = "<cas-blocker ";
 const BLOCKER_ENVELOPE_CLOSE: &str = "</cas-blocker>";
+const WORKER_ACTION_ENVELOPE_OPEN: &str = "<cas-worker-action ";
+const WORKER_ACTION_ENVELOPE_CLOSE: &str = "</cas-worker-action>";
 const VERIFICATION_DISPATCH_ENVELOPE_OPEN: &str = "<cas-verification-dispatch ";
 const VERIFICATION_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-verification-dispatch>";
 
@@ -776,6 +776,7 @@ pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
         || parse_spawn_preassign_failed_envelope(prompt)
         || parse_ci_red_run_envelope(prompt)
         || parse_worker_attention_envelope(prompt)
+        || parse_worker_action_envelope(prompt).is_some()
 }
 
 /// Worker idle/stall relay emitted by the factory daemon (cas-d4ae).
@@ -1202,6 +1203,19 @@ pub(crate) struct BlockerEnvelope {
     pub task_id: Option<String>,
 }
 
+/// A worker's explicitly typed status or ready action for its supervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerActionKind {
+    Status,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerActionEnvelope {
+    pub kind: WorkerActionKind,
+    pub worker: String,
+}
+
 /// CAS's own handoff for a close that just entered verification (cas-8725).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationDispatchEnvelope {
@@ -1271,6 +1285,48 @@ pub(crate) fn parse_blocker_envelope(prompt: &str) -> Option<BlockerEnvelope> {
             .filter(|value| !value.is_empty())
             .map(str::to_string),
     })
+}
+
+/// Frame a typed worker status/ready message so it may wake an idle supervisor.
+///
+/// This is a machine-readable type marker; the worker's words stay first.
+pub(crate) fn attach_worker_action_envelope(
+    message: &str,
+    kind: WorkerActionKind,
+    worker: &str,
+    task_id: Option<&str>,
+) -> String {
+    let kind = match kind {
+        WorkerActionKind::Status => "status",
+        WorkerActionKind::Ready => "ready",
+    };
+    let task_attribute = task_id
+        .map(|id| format!(" task_id=\"{}\"", xml_attribute_value(id)))
+        .unwrap_or_default();
+    format!(
+        "{message}\n\n{WORKER_ACTION_ENVELOPE_OPEN}kind=\"{kind}\" worker=\"{}\"{task_attribute}>\
+         </cas-worker-action>",
+        xml_attribute_value(worker),
+    )
+}
+
+/// Parse the typed worker action at the very end of a prompt.
+pub(crate) fn parse_worker_action_envelope(prompt: &str) -> Option<WorkerActionEnvelope> {
+    if !prompt.ends_with(WORKER_ACTION_ENVELOPE_CLOSE) {
+        return None;
+    }
+    let open = prompt.rfind(WORKER_ACTION_ENVELOPE_OPEN)?;
+    let tag_end = prompt[open..].find('>')? + open;
+    let tag = &prompt[open..tag_end];
+    let kind = match xml_attribute(tag, "kind")? {
+        "status" => WorkerActionKind::Status,
+        "ready" => WorkerActionKind::Ready,
+        _ => return None,
+    };
+    let worker = xml_attribute(tag, "worker")
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    Some(WorkerActionEnvelope { kind, worker })
 }
 
 /// Build the verification-dispatch handoff CAS enqueues for the supervisor

@@ -25,6 +25,24 @@ pub enum NotificationPriority {
     Normal = 2,
 }
 
+/// Contract severity for a supervisor-facing alarm (communication-contract-v2 P2.7).
+///
+/// This is separate from queue ordering: priority controls delivery order,
+/// while severity controls wake and coalescing policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlarmClass {
+    Blocker,
+    Action,
+    Info,
+}
+
+impl AlarmClass {
+    /// Whether this class is allowed to wake an idle supervisor.
+    pub const fn wakes_idle(self) -> bool {
+        matches!(self, Self::Blocker | Self::Action)
+    }
+}
+
 impl From<u8> for NotificationPriority {
     fn from(value: u8) -> Self {
         match value {

@@ -251,7 +251,7 @@ pub use recording_store::{
 
 // Supervisor queue store for factory sessions
 pub use supervisor_queue_store::{
-    NotificationPriority, NotifyIdempotentResult, SqliteSupervisorQueueStore,
+    AlarmClass, NotificationPriority, NotifyIdempotentResult, SqliteSupervisorQueueStore,
     SupervisorNotification, SupervisorQueueStore,
 };
 

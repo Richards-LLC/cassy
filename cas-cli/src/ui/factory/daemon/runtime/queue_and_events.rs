@@ -1451,6 +1451,9 @@ pub enum SupervisorWakeClass {
     CloudPeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
+    /// A registered worker's typed `status` or `ready` action (cas-48e5).
+    /// This is the `action` severity under communication-contract-v2 P2.7.
+    WorkerAction,
     /// A registered worker's CAS-framed `<cas-blocker …>` (cas-8725). Attached
     /// by `coordination action=message blocker=true`, never by the sender's own
     /// words: the same sentence sent as free text stays inbox-only.
@@ -1470,6 +1473,22 @@ pub enum SupervisorWakeClass {
     /// daemon already coalesces it per channel. Daemon-stamped only: no
     /// registered sender can raise it.
     SlackActivity,
+}
+
+impl SupervisorWakeClass {
+    /// Map the wake signal to communication-contract-v2 severity. Only
+    /// blocker and action signals are currently eligible to wake; informational
+    /// events remain inbox/digest traffic.
+    fn alarm_class(self) -> cas_store::AlarmClass {
+        match self {
+            Self::Blocker => cas_store::AlarmClass::Blocker,
+            _ => cas_store::AlarmClass::Action,
+        }
+    }
+
+    fn wakes_idle(self) -> bool {
+        self.alarm_class().wakes_idle()
+    }
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -4790,8 +4809,8 @@ impl FactoryDaemon {
     /// was a caller-settable string, so it stated intent and proved nothing):
     /// - only rows CAS itself stamped as written by its own machinery, an
     ///   authenticated peer supervisor, or a registered worker sending a
-    ///   CAS-framed merge request, blocker or verification-dispatch handoff
-    ///   (cas-8725) — never arbitrary messages;
+    ///   CAS-framed merge request, typed status/ready action, blocker or
+    ///   verification-dispatch handoff (cas-8725) — never arbitrary messages;
     /// - only when the pane's own signals are quiet right now — judged by
     ///   heartbeat/activity freshness alone, since a supervisor owns its epic
     ///   for the whole session and that ownership is not an in-flight turn;
@@ -4815,7 +4834,8 @@ impl FactoryDaemon {
         source: &str,
         prompt: &str,
     ) -> bool {
-        Self::supervisor_wake_class(sender, supervisor_name, source, prompt).is_some()
+        Self::supervisor_wake_class(sender, supervisor_name, source, prompt)
+            .is_some_and(SupervisorWakeClass::wakes_idle)
     }
 
     /// The one place that answers "may THIS sender wake the supervisor with
@@ -4921,7 +4941,14 @@ impl FactoryDaemon {
                 // dispatch-id handoff sat unread for the whole time it blocked
                 // a close, and blockers were found by polling.
                 _ => {
-                    if crate::prompt_revalidation::parse_merge_request_envelope(prompt).is_some() {
+                    if matches!(role, cas_types::AgentRole::Worker)
+                        && crate::prompt_revalidation::parse_worker_action_envelope(prompt)
+                            .is_some_and(|envelope| envelope.worker.eq_ignore_ascii_case(name))
+                    {
+                        Some(SupervisorWakeClass::WorkerAction)
+                    } else if crate::prompt_revalidation::parse_merge_request_envelope(prompt)
+                        .is_some()
+                    {
                         Some(SupervisorWakeClass::MergeRequest)
                     } else if crate::prompt_revalidation::parse_blocker_envelope(prompt).is_some() {
                         Some(SupervisorWakeClass::Blocker)
@@ -5068,7 +5095,7 @@ impl FactoryDaemon {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
                 WakeSender::Daemon | WakeSender::Registered { .. } => {
-                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-8725, cas-e753)"
+                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, worker action, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-48e5, cas-8725, cas-e753)"
                 }
             });
         };
@@ -5093,6 +5120,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::MergeRequest => {
                 "supervisor pane is quiet and the row is a registered worker's merge request"
+            }
+            SupervisorWakeClass::WorkerAction => {
+                "supervisor pane is quiet and the row is a registered worker's typed status or ready action"
             }
             SupervisorWakeClass::Blocker => {
                 "supervisor pane is quiet and the row is a registered worker's blocker escalation"
@@ -11704,6 +11734,83 @@ mod tests {
         assert!(!routine.allowed);
         assert_eq!(routine.kind, WakeOutcome::NotApplicable);
         assert_eq!(routine.kind.as_str(), "wake_not_applicable");
+    }
+
+    #[test]
+    fn typed_worker_status_and_ready_wake_idle_supervisor_as_action() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let sender = worker_sender("swift-fox");
+
+        for (kind, label) in [
+            (
+                crate::prompt_revalidation::WorkerActionKind::Status,
+                "status",
+            ),
+            (crate::prompt_revalidation::WorkerActionKind::Ready, "ready"),
+        ] {
+            let prompt = crate::prompt_revalidation::attach_worker_action_envelope(
+                &format!("{label}: review my update"),
+                kind,
+                "swift-fox",
+                Some("cas-48e5"),
+            );
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &sender,
+                    "cosmic-bear-43",
+                    "swift-fox",
+                    &prompt,
+                ),
+                Some(SupervisorWakeClass::WorkerAction),
+                "{label} is the action severity class"
+            );
+            assert_eq!(
+                SupervisorWakeClass::WorkerAction.alarm_class(),
+                cas_store::AlarmClass::Action
+            );
+            assert!(cas_store::AlarmClass::Action.wakes_idle());
+            let decision = FactoryDaemon::supervisor_wake_decision(
+                &data,
+                "cosmic-bear-43",
+                "cosmic-bear-43",
+                &sender,
+                "swift-fox",
+                &prompt,
+                quiet_pane(),
+                now,
+            );
+            assert!(decision.allowed, "{label}: {}", decision.reason);
+        }
+
+        let ordinary = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &sender,
+            "swift-fox",
+            "status: review my update",
+            quiet_pane(),
+            now,
+        );
+        assert!(!ordinary.allowed, "free text remains inbox-only");
+
+        let mismatched_sender = crate::prompt_revalidation::attach_worker_action_envelope(
+            "status: review my update",
+            crate::prompt_revalidation::WorkerActionKind::Status,
+            "another-worker",
+            None,
+        );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &sender,
+                "cosmic-bear-43",
+                "swift-fox",
+                &mismatched_sender,
+            ),
+            None,
+            "the envelope worker must match the registry sender"
+        );
     }
 
     /// A supervisor's own outbound rows must not wake its own pane.

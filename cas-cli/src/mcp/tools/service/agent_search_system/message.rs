@@ -1657,6 +1657,75 @@ impl CasService {
             );
         }
 
+        // P3.8: a worker may explicitly type a status/ready message to its
+        // own supervisor as an action wake. Ordinary worker messages remain
+        // inbox-only, and the registered same-session endpoints are required
+        // before CAS attaches the marker consumed by the wake gate.
+        let worker_action_kind = if role == "worker" {
+            match req.kind.as_deref() {
+                Some("status" | "ready") => {
+                    let session = factory_session
+                        .as_deref()
+                        .filter(|session| !session.trim().is_empty())
+                        .ok_or_else(|| {
+                            Self::error(
+                                ErrorCode::INVALID_REQUEST,
+                                "kind=status|ready requires a registered worker and its same-session supervisor",
+                            )
+                        })?;
+                    let registered_worker = agent_from_store.as_ref().is_some_and(|agent| {
+                        agent.role == cas_types::AgentRole::Worker
+                            && agent.factory_session.as_deref() == Some(session)
+                    });
+                    let same_session_supervisor =
+                        resolved_target_agent.as_ref().is_some_and(|agent| {
+                            agent.role == cas_types::AgentRole::Supervisor
+                                && agent.factory_session.as_deref() == Some(session)
+                                && matches!(
+                                    agent.status,
+                                    cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+                                )
+                        });
+                    if !registered_worker || !same_session_supervisor {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_REQUEST,
+                            "kind=status|ready is only for a registered worker messaging its same-session supervisor",
+                        ));
+                    }
+                    if req.merge_request.unwrap_or(false) || req.blocker.unwrap_or(false) {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            "kind=status|ready cannot be combined with merge_request=true or blocker=true",
+                        ));
+                    }
+                    Some(if req.kind.as_deref() == Some("status") {
+                        crate::prompt_revalidation::WorkerActionKind::Status
+                    } else {
+                        crate::prompt_revalidation::WorkerActionKind::Ready
+                    })
+                }
+                Some(other) => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "worker messages support kind=status or kind=ready to the same-session supervisor, not '{other}'"
+                        ),
+                    ));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(kind) = worker_action_kind {
+            message = crate::prompt_revalidation::attach_worker_action_envelope(
+                &message,
+                kind,
+                &display_name,
+                req.task_id.as_deref(),
+            );
+        }
+
         // cas-bc8c: a genuine merge request receives an immutable envelope so
         // transport can suppress it once its requested tip has landed. That
         // envelope is a message type, not a property of the sender's task
@@ -4916,6 +4985,81 @@ mod cas_89e1_post_merge_message_type_tests {
             .find(|row| row.target == "supervisor-b")
             .expect("explicit supervisor target remains accepted");
         assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_status_and_ready_kinds_are_scoped_to_the_same_session_supervisor() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".to_string());
+        agents.register(&worker).expect("register worker");
+        let mut supervisor_a =
+            Agent::new("supervisor-a-id".to_string(), "supervisor-a".to_string());
+        supervisor_a.role = AgentRole::Supervisor;
+        supervisor_a.factory_session = Some("factory-a".to_string());
+        agents
+            .register(&supervisor_a)
+            .expect("register owning supervisor");
+        let mut supervisor_b =
+            Agent::new("supervisor-b-id".to_string(), "supervisor-b".to_string());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".to_string());
+        agents
+            .register(&supervisor_b)
+            .expect("register sibling supervisor");
+        core.set_agent_id_for_testing(worker.id.clone());
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+
+        for (kind, expected) in [
+            (
+                "status",
+                crate::prompt_revalidation::WorkerActionKind::Status,
+            ),
+            ("ready", crate::prompt_revalidation::WorkerActionKind::Ready),
+        ] {
+            let mut request = message_request_to("supervisor");
+            request.kind = Some(kind.to_string());
+            let response = response_text(
+                service
+                    .message_send(request)
+                    .await
+                    .expect("same-session worker action is queued"),
+            );
+            assert!(response.contains("Message queued"), "{response}");
+            let rows = crate::store::open_prompt_queue_store(&cas_root)
+                .unwrap()
+                .poll_all(10)
+                .unwrap();
+            let row = rows.last().expect("typed worker row");
+            assert_eq!(row.target, "supervisor-a");
+            assert_eq!(
+                crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)
+                    .map(|envelope| envelope.kind),
+                Some(expected)
+            );
+        }
+
+        let mut cross_session = message_request_to("supervisor-b");
+        cross_session.kind = Some("status".to_string());
+        let error = service
+            .message_send(cross_session)
+            .await
+            .expect_err("typed status cannot target a sibling session");
+        assert!(
+            error.message.contains("same-session supervisor"),
+            "{error:?}"
+        );
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve

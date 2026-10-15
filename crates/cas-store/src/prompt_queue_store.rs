@@ -3428,8 +3428,8 @@ impl SqlitePromptQueueStore {
                AND source <> 'delivery-watchdog'
                -- GH #1196: an automatic Commander mirror of a pane reply was
                -- not sent by the supervisor, so its loss is not theirs to act on.
-               AND (?2 OR dedupe_key IS NULL OR dedupe_key NOT LIKE 'commander-mirror:%')",
-                params![prompt_id, GH_1196_RED_STUB],
+               AND (dedupe_key IS NULL OR dedupe_key NOT LIKE 'commander-mirror:%')",
+                params![prompt_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -3449,7 +3449,7 @@ impl SqlitePromptQueueStore {
         // GH #1196: the operator never belongs to a factory session, so a
         // session-membership reason misleads. What failed is that no
         // Commander device took the message.
-        if !GH_1196_RED_STUB && (target.eq_ignore_ascii_case("operator") || target.starts_with("commander:")) {
+        if target.eq_ignore_ascii_case("operator") || target.starts_with("commander:") {
             reason = "no Commander device received it before it expired".to_string();
         }
         if origin_kind.as_deref() == Some("registered_agent") {
@@ -3723,7 +3723,6 @@ impl SqlitePromptQueueStore {
                 })?
                 .collect::<std::result::Result<_, _>>()?
         };
-        let episode = if GH_1196_RED_STUB { Vec::new() } else { episode };
         if let Some((id, _, true)) = episode.first() {
             tx.execute(
                 "UPDATE prompt_queue
@@ -3771,8 +3770,6 @@ impl SqlitePromptQueueStore {
 /// One recipient's abandonment notices fold into one episode per hour
 /// (GH #1196): a notice, then at most one update.
 pub const ABANDONMENT_EPISODE_SECS: i64 = 3600;
-/// Red-first stub (cas-1be0).
-const GH_1196_RED_STUB: bool = true;
 
 struct AbandonedSenderNotice {
     sender: String,

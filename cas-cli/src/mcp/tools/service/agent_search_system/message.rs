@@ -216,17 +216,11 @@ pub(crate) fn target_is_reserved_source(target: &str) -> bool {
 /// connected to the session's daemon (it reports the count in `loop.json`,
 /// written every few seconds) or an enrolled cloud operator feed. An absent
 /// or stale `loop.json` is unknown: the daemon delivers once it is back.
-/// Red-first stub (cas-1be0).
-const GH_1196_RED_STUB: bool = true;
-
 pub(crate) fn operator_turn_undeliverable(
     cas_root: &std::path::Path,
     factory_session: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<String> {
-    if GH_1196_RED_STUB {
-        return None;
-    }
     let status = crate::factory_daemon_health::read_status(cas_root, factory_session)?;
     let fresh = now.signed_duration_since(status.written_at).num_seconds()
         <= crate::factory_daemon_health::STATUS_STALE_SECS;

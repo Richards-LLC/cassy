@@ -2,9 +2,6 @@
 //! Acting on work retires its alarm without inventing a per-message read receipt.
 use super::*;
 
-/// Red-first stub (cas-1be0).
-const GH_1196_RED_STUB: bool = true;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MessageAttention {
     Needed,
@@ -172,9 +169,7 @@ impl FactoryDaemon {
                                 > row.created_at;
                             // GH #1196: a cancelled task asks nothing more of
                             // anyone; a closed one must also carry the merge.
-                            (!GH_1196_RED_STUB
-                                && task.status == cas_types::TaskStatus::Cancelled
-                                && ended_after_row)
+                            (task.status == cas_types::TaskStatus::Cancelled && ended_after_row)
                                 || (task.status == cas_types::TaskStatus::Closed
                                     && task.closed_at.is_some_and(|at| at > row.created_at)
                                     && (task.deliverables.merge_commit.is_some()

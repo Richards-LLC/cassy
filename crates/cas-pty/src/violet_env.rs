@@ -1,6 +1,7 @@
 //! The environment direct harnesses and update probes actually receive.
 //! Private-file fallback is read-only and never executes shell text.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -37,7 +38,32 @@ pub fn literal_assignment(line: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    let value = value.trim();
+    // Shell comments start only at an unquoted # following whitespace.
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous_space = true;
+    let mut end = value.len();
+    for (i, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            previous_space = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && (ch == '\'' || ch == '"') {
+            quote = Some(ch);
+        } else if quote.is_none() && ch == '#' && previous_space {
+            end = i;
+            break;
+        }
+        previous_space = ch.is_whitespace();
+    }
+    let value = value[..end].trim();
     if value.contains(['$', '`']) {
         return None;
     }
@@ -52,18 +78,51 @@ pub fn literal_assignment(line: &str) -> Option<(String, String)> {
 }
 
 pub fn literal_file_values(path: &Path) -> BTreeMap<String, String> {
-    // Do not follow credentials-file links or read an unbounded file.
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return BTreeMap::new();
+    let read = || -> std::io::Result<String> {
+        #[cfg(unix)]
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        const LIMIT: u64 = 1024 * 1024;
+        if !metadata.is_file() || metadata.len() > LIMIT {
+            return Err(std::io::Error::other("unsafe credentials file"));
+        }
+        #[cfg(unix)]
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(std::io::Error::other("unsafe credentials file"));
+        }
+        let mut text = String::new();
+        file.take(LIMIT).read_to_string(&mut text)?;
+        Ok(text)
     };
-    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
-        return BTreeMap::new();
+    match read() {
+        Ok(text) => text.lines().filter_map(literal_assignment).collect(),
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn_once(&format!("credentials:{}", path.display()), || {
+                    tracing::warn!(path = %path.display(), "Violet credentials file refused; require a regular file owned by the current user with no group/other permissions and at most 1 MiB");
+                });
+            }
+            BTreeMap::new()
+        }
     }
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(literal_assignment)
-        .collect()
+}
+
+fn warn_once(key: &str, warn: impl FnOnce()) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    if WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.into())
+    {
+        warn();
+    }
 }
 
 pub fn resolved_environment(
@@ -104,9 +163,12 @@ fn references(text: &str) -> Vec<String> {
     result
 }
 
-pub fn missing_references(harness: &str, env: &BTreeMap<String, String>) -> Vec<String> {
+pub fn registration_references(
+    harness: &str,
+    env: &BTreeMap<String, String>,
+) -> (PathBuf, BTreeSet<String>) {
     let Some(home) = env.get("HOME").map(PathBuf::from) else {
-        return vec![];
+        return (PathBuf::new(), BTreeSet::new());
     };
     let (path, names) = if harness == "claude" {
         let path = env
@@ -155,6 +217,11 @@ pub fn missing_references(harness: &str, env: &BTreeMap<String, String>) -> Vec<
         }
         (path, names)
     };
+    (path, names.into_iter().collect())
+}
+
+pub fn missing_references(harness: &str, env: &BTreeMap<String, String>) -> Vec<String> {
+    let (path, names) = registration_references(harness, env);
     names
         .into_iter()
         .filter(|name| !env.get(name).is_some_and(|v| !v.trim().is_empty()))
@@ -164,12 +231,13 @@ pub fn missing_references(harness: &str, env: &BTreeMap<String, String>) -> Vec<
 
 pub fn hydrate(harness: &str, overrides: &mut Vec<(String, String)>, removed: &[String]) {
     let env = resolved_environment(overrides, removed);
+    let (_, names) = registration_references(harness, &env);
     for warning in missing_references(harness, &env) {
-        eprintln!("warning: Violet launch: {warning}");
+        warn_once(&warning, || tracing::warn!("Violet launch: {warning}"));
     }
     for (name, value) in env
         .into_iter()
-        .filter(|(name, _)| canonical_credential(name))
+        .filter(|(name, _)| canonical_credential(name) && names.contains(name))
     {
         if let Some((_, current)) = overrides.iter_mut().rev().find(|(key, _)| key == &name) {
             *current = value;
@@ -204,6 +272,40 @@ pub fn configure_command(command: &mut Command, harness: &str) {
 mod tests {
     use super::*;
     use crate::test_env_guard::TestEnvGuard;
+    fn private_file(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fn registrations(home: &Path, token: &str) {
+        std::fs::write(home.join(".claude.json"), format!(r#"{{"mcpServers":{{"violet":{{"headers":{{"Authorization":"Bearer ${{{token}}}"}}}}}}}}"#)).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            format!("[mcp_servers.violet]\nbearer_token_env_var='{token}'\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cas_678d_round3_literal_comments_and_private_file_safety() {
+        use std::os::unix::fs::symlink;
+        let guard = TestEnvGuard::temp_home();
+        let path = guard.home().join("credentials.env");
+        private_file(
+            &path,
+            "TOKEN='contains # hash' # comment\nOTHER=literal # comment\n",
+        );
+        assert_eq!(literal_file_values(&path)["TOKEN"], "contains # hash");
+        assert_eq!(literal_file_values(&path)["OTHER"], "literal");
+        let link = guard.home().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(literal_file_values(&link).is_empty());
+        private_file(&path, &"x".repeat(1024 * 1024 + 1));
+        assert!(literal_file_values(&path).is_empty());
+        assert!(literal_file_values(guard.home()).is_empty());
+    }
+
     #[test]
     fn cas_678d_round3_hydration_injects_only_registered_account() {
         use std::os::unix::fs::PermissionsExt;
@@ -213,12 +315,23 @@ mod tests {
         guard.set("VIOLET_SLACK_TOKEN_REGISTERED", "");
         guard.set("VIOLET_SLACK_TOKEN_UNRELATED", "");
         std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_REGISTERED='registered'\nVIOLET_SLACK_TOKEN_UNRELATED='unrelated'\n").unwrap();
-        std::fs::set_permissions(home.join("credentials.env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(
+            home.join("credentials.env"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         std::fs::write(home.join(".claude.json"), r#"{"mcpServers":{"violet":{"headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_REGISTERED}"}}}}"#).unwrap();
         let mut pane = vec![];
         hydrate("claude", &mut pane, &[]);
-        assert!(pane.iter().any(|(k,v)| k == "VIOLET_SLACK_TOKEN_REGISTERED" && v == "registered"));
-        assert!(!pane.iter().any(|(k,_)| k == "VIOLET_SLACK_TOKEN_UNRELATED"));
+        assert!(
+            pane.iter()
+                .any(|(k, v)| k == "VIOLET_SLACK_TOKEN_REGISTERED" && v == "registered")
+        );
+        assert!(
+            !pane
+                .iter()
+                .any(|(k, _)| k == "VIOLET_SLACK_TOKEN_UNRELATED")
+        );
     }
 
     #[test]
@@ -248,19 +361,19 @@ mod tests {
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        guard.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        registrations(&home, "VIOLET_SLACK_TOKEN_FIXTURE");
         guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
         guard.set("VIOLET_SLACK_TOKEN_FIXTURE", "");
         for harness in ["claude", "codex"] {
             for value in ["first-fixture", "second-fixture"] {
-                std::fs::write(
-                    home.join("credentials.env"),
-                    format!("export VIOLET_SLACK_TOKEN_FIXTURE='{value}'\n"),
-                )
-                .unwrap();
+                private_file(
+                    &home.join("credentials.env"),
+                    &format!("export VIOLET_SLACK_TOKEN_FIXTURE='{value}'\n"),
+                );
                 let config = crate::PtyConfig {
                     command: harness.into(),
                     cwd: Some(home.clone()),
+                    env: vec![("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()))],
                     ..Default::default()
                 };
                 let mut pty = crate::Pty::spawn("violet-launch-fixture", config).unwrap();
@@ -297,7 +410,11 @@ mod tests {
         let path = guard.home().join("credentials.env");
         guard.set("CAS_CREDENTIALS_FILE", &path);
         guard.set("VIOLET_SLACK_TOKEN_FIXTURE", "");
-        std::fs::write(&path, "export VIOLET_SLACK_TOKEN_FIXTURE='fixture-value'\nexport VIOLET_SLACK_TOKEN_BAD='$(pass show secret)'\n").unwrap();
+        private_file(
+            &path,
+            "export VIOLET_SLACK_TOKEN_FIXTURE='fixture-value'\nexport VIOLET_SLACK_TOKEN_BAD='$(pass show secret)'\n",
+        );
+        registrations(guard.home(), "VIOLET_SLACK_TOKEN_FIXTURE");
         let expected = resolved_environment(&[], &[]);
         assert_eq!(
             expected

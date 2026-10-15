@@ -13,6 +13,86 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+fn violet_registrations(home: &std::path::Path, token: &str, bypass: Option<&str>) {
+    std::fs::write(home.join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{"type":"http", "url":"https://violet-hub.vercel.app/mcp/slack", "headers":{
+        "Authorization":format!("Bearer ${{{token}}}"), "x-vercel-protection-bypass":bypass.map(|v| format!("${{{v}}}")).unwrap_or_default()
+    }}}}).to_string()).unwrap();
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), format!("[mcp_servers.violet]\nurl='https://violet-hub.vercel.app/mcp/slack'\nbearer_token_env_var='{token}'\n{}", bypass.map(|v| format!("env_http_headers={{x-vercel-protection-bypass='{v}'}}\n")).unwrap_or_default())).unwrap();
+}
+fn private_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn cas_678d_round3_factory_hydration_obeys_server_and_env_denials() {
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    let credentials = home.join("credentials.env");
+    std::fs::write(
+        &credentials,
+        "VIOLET_SLACK_TOKEN_SELECTED='selected'\nVIOLET_SLACK_TOKEN_OTHER='other'\n",
+    )
+    .unwrap();
+    private_permissions(&credentials);
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    env.set("VIOLET_SLACK_TOKEN_SELECTED", "");
+    env.set("VIOLET_SLACK_TOKEN_OTHER", "");
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_SELECTED", None);
+    let root = home.join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    for (policy, allowed) in [
+        ("", true),
+        ("supervisor_only_mcp=['violet']", false),
+        ("supervisor_only_env=['VIOLET_SLACK_TOKEN_SELECTED']", false),
+    ] {
+        std::fs::write(root.join("config.toml"), format!("[factory]\n{policy}\n")).unwrap();
+        for inherited in [false, true] {
+            env.set(
+                "VIOLET_SLACK_TOKEN_SELECTED",
+                if inherited { "inherited" } else { "" },
+            );
+            for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+                let configs = Mux::factory_pane_configs(&MuxConfig {
+                    cwd: home.join("project"),
+                    cas_root: Some(root.clone()),
+                    workers: 1,
+                    worker_cli: cli,
+                    include_director: false,
+                    ..Default::default()
+                });
+                let mut pane = configs
+                    .into_iter()
+                    .find(|(name, _)| name == "worker-1")
+                    .unwrap()
+                    .1;
+                pane.hydrate_violet_environment();
+                assert_eq!(
+                    env_value(&pane, "VIOLET_SLACK_TOKEN_SELECTED"),
+                    if allowed {
+                        Some(if inherited { "inherited" } else { "selected" })
+                    } else {
+                        None
+                    },
+                    "{cli:?} policy={policy}"
+                );
+                assert!(env_value(&pane, "VIOLET_SLACK_TOKEN_OTHER").is_none());
+                if !allowed {
+                    assert!(
+                        pane.env_remove
+                            .contains(&"VIOLET_SLACK_TOKEN_SELECTED".into())
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
     let mut guard = TestEnvGuard::temp_home();
@@ -21,8 +101,18 @@ fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
     guard.set("SHELL", "/bin/bash");
     guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
     guard.set("VIOLET_SLACK_TOKEN_FACTORY_FIXTURE", "");
-    std::fs::write(home.join("credentials.env"), "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='private-fixture'\n").unwrap();
-    std::fs::write(home.join(".profile"), "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='$(pass show secret)'\n").unwrap();
+    std::fs::write(
+        home.join("credentials.env"),
+        "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='private-fixture'\n",
+    )
+    .unwrap();
+    private_permissions(&home.join("credentials.env"));
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_FACTORY_FIXTURE", None);
+    std::fs::write(
+        home.join(".profile"),
+        "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='$(pass show secret)'\n",
+    )
+    .unwrap();
     let proxy = home.join(".config/code-mode-mcp/config.toml");
     std::fs::create_dir_all(proxy.parent().unwrap()).unwrap();
     std::fs::write(proxy, "[servers.violet]\ntransport='http'\nurl='https://violet-hub.vercel.app/mcp/slack'\nauth='env:VIOLET_SLACK_TOKEN_FACTORY_FIXTURE'\n").unwrap();
@@ -40,8 +130,11 @@ async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas
     let project = tempfile::tempdir().unwrap();
     let root = project.path().join(".cas");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("config.toml"),
-        "[factory]\nworker_credential_env = ['GITHUB_TOKEN', 'VERCEL_TOKEN']\n").unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['GITHUB_TOKEN', 'VERCEL_TOKEN']\n",
+    )
+    .unwrap();
     let credentials = env.home().join("credentials.env");
     env.set("CAS_CREDENTIALS_FILE", &credentials);
     env.set("NEON_API_KEY", "not-granted-fixture");
@@ -51,8 +144,11 @@ async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas
         if from_file {
             env.remove("GITHUB_TOKEN");
             env.remove("VERCEL_TOKEN");
-            std::fs::write(&credentials,
-                "export GITHUB_TOKEN='github-fixture'\nexport VERCEL_TOKEN='vercel-fixture'\n").unwrap();
+            std::fs::write(
+                &credentials,
+                "export GITHUB_TOKEN='github-fixture'\nexport VERCEL_TOKEN='vercel-fixture'\n",
+            )
+            .unwrap();
         } else {
             env.set("GITHUB_TOKEN", "github-fixture");
             env.set("VERCEL_TOKEN", "vercel-fixture");
@@ -106,8 +202,11 @@ fn missing_declared_worker_credential_warns_without_refusing_cas_82bc() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path().join(".cas");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("config.toml"),
-        "[factory]\nworker_credential_env = ['GITHUB_TOKEN']\n").unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['GITHUB_TOKEN']\n",
+    )
+    .unwrap();
     for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
         let configs = Mux::factory_pane_configs(&MuxConfig {
             cwd: project.path().into(), cas_root: Some(root.clone()),
@@ -177,8 +276,11 @@ fn credential_allowlist_cannot_override_factory_identity_cas_82bc() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path().join(".cas");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("config.toml"),
-        "[factory]\nworker_credential_env = ['CAS_AGENT_ROLE']\n").unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        "[factory]\nworker_credential_env = ['CAS_AGENT_ROLE']\n",
+    )
+    .unwrap();
     let configs = Mux::factory_pane_configs(&MuxConfig {
         cwd: project.path().into(), cas_root: Some(root), workers: 1,
         worker_cli: SupervisorCli::Codex, include_director: false,
@@ -205,8 +307,12 @@ fn factory_supervisor_only_mcp_and_env_isolate_claude_and_codex_gh_1047() {
 [factory]
 supervisor_only_mcp = ["vercel", "neon"]
 supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY", "DEPLOY_FIXTURE_TOKEN"]
-"#).unwrap();
-    std::fs::write(cas_root.join("proxy.toml"), r#"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cas_root.join("proxy.toml"),
+        r#"
 [servers.vercel]
 transport = "http"
 auth = "env:VERCEL_TOKEN"
@@ -216,13 +322,20 @@ auth = "env:NEON_API_KEY"
 [servers.context7]
 transport = "http"
 auth = "env:DEPLOY_FIXTURE_TOKEN"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let source = project.path().join(".mcp.json");
-    std::fs::write(&source, serde_json::json!({"mcpServers": {
-        "vercel": {"command": "vercel-fixture"},
-        "neon": {"command": "neon-fixture"},
-        "context7": {"command": "context7-fixture"}
-    }}).to_string()).unwrap();
+    std::fs::write(
+        &source,
+        serde_json::json!({"mcpServers": {
+            "vercel": {"command": "vercel-fixture"},
+            "neon": {"command": "neon-fixture"},
+            "context7": {"command": "context7-fixture"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
     let before = std::fs::read(&source).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&source, worktree.join(".mcp.json")).unwrap();
@@ -255,10 +368,20 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
         assert_eq!(std::fs::read(&source).unwrap(), before, "supervisor config is untouched");
         assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
         let materialized: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap()
-        ).unwrap();
-        assert!(!std::fs::symlink_metadata(cas_root.join("worker-mcp/worker-1.json")).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read(worktree.join(".mcp.json")).unwrap(), before, "existing worker configuration is untouched");
+            &std::fs::read(cas_root.join("worker-mcp/worker-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !std::fs::symlink_metadata(cas_root.join("worker-mcp/worker-1.json"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(worktree.join(".mcp.json")).unwrap(),
+            before,
+            "existing worker configuration is untouched"
+        );
         assert!(materialized["mcpServers"].get("vercel").is_none());
         assert!(materialized["mcpServers"].get("neon").is_none());
         assert!(materialized["mcpServers"].get("context7").is_some());
@@ -341,9 +464,18 @@ fn restricted_grok_adapter_refuses_native_discovery_without_substitution_gh_1047
     std::fs::write(project.path().join(".mcp.json"), original).unwrap();
     for (policy, restricted) in [
         ("[factory]\n", false),
-        ("[factory]\nsupervisor_only_mcp = ['denied-fixture']\n", true),
-        ("[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true),
-        ("[factory]\nsupervisor_only_mcp = []\nsupervisor_only_env = []\n", false),
+        (
+            "[factory]\nsupervisor_only_mcp = ['denied-fixture']\n",
+            true,
+        ),
+        (
+            "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n",
+            true,
+        ),
+        (
+            "[factory]\nsupervisor_only_mcp = []\nsupervisor_only_env = []\n",
+            false,
+        ),
     ] {
         std::fs::write(cas_root.join("config.toml"), policy).unwrap();
         let config = MuxConfig {
@@ -383,8 +515,16 @@ fn codex_env_policy_disables_literal_env_servers_preserving_safe_launch_gh_1047(
         ("[factory]\n", false, false),
         ("[factory]\nsupervisor_only_env = []\n", false, false),
         ("[factory]\nsupervisor_only_mcp = ['vercel']\n", false, true),
-        ("[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, false),
-        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n", true, true),
+        (
+            "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n",
+            true,
+            false,
+        ),
+        (
+            "[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n",
+            true,
+            true,
+        ),
     ] {
         std::fs::write(cas_root.join("config.toml"), policy).unwrap();
         let config = MuxConfig {
@@ -425,23 +565,39 @@ fn codex_env_denials_read_selected_home_and_nested_project_layers_gh_1047() {
     let cas_root = project.path().join(".cas");
     let nested = project.path().join("nested");
     let account = project.path().join("account");
-    for path in [&cas_root, &project.path().join(".codex"), &nested.join(".codex"),
-        &env.home().join(".codex"), &account] {
+    for path in [
+        &cas_root,
+        &project.path().join(".codex"),
+        &nested.join(".codex"),
+        &env.home().join(".codex"),
+        &account,
+    ] {
         std::fs::create_dir_all(path).unwrap();
     }
-    std::fs::write(cas_root.join("config.toml"),
-        "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n").unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[factory]\nsupervisor_only_env = ['DENIED_LITERAL_FIXTURE_TOKEN']\n",
+    )
+    .unwrap();
     for (path, source) in [
-        (env.home().join(".codex/config.toml"),
-            "[mcp_servers.default_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'default-fixture'\n"),
-        (account.join("config.toml"),
-            "[mcp_servers.account_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'account-fixture'\n"),
-        (project.path().join(".codex/config.toml"),
-            "[mcp_servers.project_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'parent-fixture'\n"),
-        (nested.join(".codex/config.toml"),
+        (
+            env.home().join(".codex/config.toml"),
+            "[mcp_servers.default_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'default-fixture'\n",
+        ),
+        (
+            account.join("config.toml"),
+            "[mcp_servers.account_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'account-fixture'\n",
+        ),
+        (
+            project.path().join(".codex/config.toml"),
+            "[mcp_servers.project_env.env]\nDENIED_LITERAL_FIXTURE_TOKEN = 'parent-fixture'\n",
+        ),
+        (
+            nested.join(".codex/config.toml"),
             "[mcp_servers.project_env.env]\nALLOWED_FIXTURE_TOKEN = 'child-fixture'\n\
              [mcp_servers.safe.env]\nALLOWED_FIXTURE_TOKEN = 'safe-fixture'\n\
-             [plugins.unknown_fixture]\nenabled = true\n"),
+             [plugins.unknown_fixture]\nenabled = true\n",
+        ),
     ] {
         std::fs::write(path, source).unwrap();
     }
@@ -490,7 +646,11 @@ async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
     std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = [\"vercel\", \"neon\"]\nsupervisor_only_env = [\"VERCEL_TOKEN\", \"NEON_API_KEY\", \"DEPLOY_FIXTURE_TOKEN\"]\n").unwrap();
-    std::fs::write(cas_root.join("proxy.toml"), "[servers.context7]\ntransport = 'http'\nauth = 'env:DEPLOY_FIXTURE_TOKEN'\n").unwrap();
+    std::fs::write(
+        cas_root.join("proxy.toml"),
+        "[servers.context7]\ntransport = 'http'\nauth = 'env:DEPLOY_FIXTURE_TOKEN'\n",
+    )
+    .unwrap();
     let source = project.path().join(".mcp.json");
     let original = serde_json::json!({"mcpServers": {
         "vercel": {"command": "vercel-fixture"},
@@ -546,7 +706,10 @@ async fn codex_unrestricted_and_server_only_admission_preserves_spawn_gh_1047() 
     std::fs::create_dir_all(&cas_root).unwrap();
     for (policy, server_only) in [
         ("[factory]\n", false),
-        ("[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = []\n", true),
+        (
+            "[factory]\nsupervisor_only_mcp = ['vercel']\nsupervisor_only_env = []\n",
+            true,
+        ),
     ] {
         std::fs::write(cas_root.join("config.toml"), policy).unwrap();
         let configs = Mux::factory_pane_configs(&MuxConfig {
@@ -557,8 +720,17 @@ async fn codex_unrestricted_and_server_only_admission_preserves_spawn_gh_1047() 
         let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
         assert_eq!(worker.effective_command(), "codex");
         assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
-        assert_eq!(worker.args.iter().any(|arg| arg == "mcp_servers.vercel.enabled=false"), server_only);
-        worker.env.push(("CAS_GH1047_SAFE_LAUNCH_FIXTURE".into(), "allowed-fixture".into()));
+        assert_eq!(
+            worker
+                .args
+                .iter()
+                .any(|arg| arg == "mcp_servers.vercel.enabled=false"),
+            server_only
+        );
+        worker.env.push((
+            "CAS_GH1047_SAFE_LAUNCH_FIXTURE".into(),
+            "allowed-fixture".into(),
+        ));
         worker.command = "/bin/sh".into();
         worker.args = vec!["-c".into(), "test \"$CAS_GH1047_SAFE_LAUNCH_FIXTURE\" = allowed-fixture && printf 'safe-codex-admission\\n'".into()];
         let mut pty = crate::pty::Pty::spawn("safe-codex-local-probe", worker).unwrap();
@@ -599,7 +771,11 @@ fn invalid_worker_resource_policy_refuses_launch_before_execution_gh_1047() {
         worker.args = vec!["-c".into(), "exit 0".into()];
         assert!(crate::pty::Pty::spawn("refused-worker", worker).is_err());
     }
-    std::fs::write(cas_root.join("config.toml"), "[factory]\nsupervisor_only_mcp = ['server.with.dots']\n").unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[factory]\nsupervisor_only_mcp = ['server.with.dots']\n",
+    )
+    .unwrap();
     std::fs::write(project.path().join(".mcp.json"), "{}").unwrap();
     let configs = Mux::factory_pane_configs(&MuxConfig {
         cwd: project.path().into(), cas_root: Some(cas_root), workers: 1,
@@ -645,6 +821,11 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
     env.set("VIOLET_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
     env.set("UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE", "unrelated");
 
+    violet_registrations(
+        env.home(),
+        "VIOLET_SLACK_TOKEN_TEST_WORKER",
+        Some("VIOLET_VERCEL_BYPASS_TEST_WORKER"),
+    );
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 1,
@@ -718,6 +899,11 @@ fn factory_panes_forward_both_violet_credential_generations() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     env.set("XDG_CONFIG_HOME", config_home.path());
     env.set("HOME", config_home.path());
+    violet_registrations(
+        config_home.path(),
+        "VIOLET_SLACK_TOKEN_COMPAT_TEST",
+        Some("VIOLET_VERCEL_BYPASS"),
+    );
     let contract = cas_types::violet_compatibility::violet_compatibility();
     let tokens =
         cas_types::violet_compatibility::violet_credential_names("VIOLET_SLACK_TOKEN_COMPAT_TEST");
@@ -1214,6 +1400,12 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
         "export VIOLET_SLACK_TOKEN_CREDENTIALS_FILE='token-from-file'\nexport VIOLET_VERCEL_BYPASS='bypass-from-file'\n",
     )
     .unwrap();
+    private_permissions(&credentials);
+    violet_registrations(
+        home.path(),
+        "VIOLET_SLACK_TOKEN_CREDENTIALS_FILE",
+        Some("VIOLET_VERCEL_BYPASS"),
+    );
     env.set("CAS_CREDENTIALS_FILE", &credentials);
     env.remove("VIOLET_SLACK_TOKEN_CREDENTIALS_FILE");
     env.remove("VIOLET_VERCEL_BYPASS");
@@ -1280,6 +1472,12 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"
         "export VIOLET_SLACK_TOKEN_PROFILE_SOURCE='token-from-profile'\nexport VIOLET_VERCEL_BYPASS_PROFILE_SOURCE='bypass-from-profile'\n",
     )
     .unwrap();
+    private_permissions(&credentials);
+    violet_registrations(
+        home.path(),
+        "VIOLET_SLACK_TOKEN_PROFILE_SOURCE",
+        Some("VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"),
+    );
     std::fs::write(
         home.path().join(".profile"),
         format!(
@@ -1659,10 +1857,41 @@ fn factory_pane_configs_codex_worker_inherits_supervisor_cli_in_cs_env_cas_1544(
 #[test]
 fn effective_command_parses_nice_layouts_cas_046c() {
     for (command, args, expected) in [
-        ("codex", vec!["--model", "large", "--effort", "high"], "codex"),
-        ("nice", vec!["-n", "10", "codex", "--model", "large", "--effort", "high"], "codex"),
-        ("nice", vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex"),
-        ("nice", vec!["--adjustment", "-5", "claude", "--effort", "high", "--model", "codex"], "claude"),
+        (
+            "codex",
+            vec!["--model", "large", "--effort", "high"],
+            "codex",
+        ),
+        (
+            "nice",
+            vec!["-n", "10", "codex", "--model", "large", "--effort", "high"],
+            "codex",
+        ),
+        (
+            "nice",
+            vec![
+                "--adjustment=10",
+                "codex",
+                "--effort",
+                "high",
+                "--model",
+                "large",
+            ],
+            "codex",
+        ),
+        (
+            "nice",
+            vec![
+                "--adjustment",
+                "-5",
+                "claude",
+                "--effort",
+                "high",
+                "--model",
+                "codex",
+            ],
+            "claude",
+        ),
         ("nice", vec!["-n10", "claude", "--model", "codex"], "claude"),
         ("nice", vec!["--", "codex", "--model", "large"], "codex"),
         ("nice", vec!["claude", "--model", "codex"], "claude"),

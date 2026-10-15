@@ -126,13 +126,17 @@ pub(super) fn finish_worker_config(
         }
     };
     let project_grants = project_proxy_credential_names(cas_root, &policy);
-    config.env.extend(
-        proxy_credential_environment(cas_root, &policy)
-            .into_iter()
-            .filter(|(name, _)| {
-                !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
-            }),
-    );
+    let proxy_environment = proxy_credential_environment(cas_root, &policy, config);
+    for (name, _) in &proxy_environment {
+        if cas_pty::violet_env::canonical_credential(name) {
+            config.grant_worker_credential(name);
+        }
+    }
+    config
+        .env
+        .extend(proxy_environment.into_iter().filter(|(name, _)| {
+            !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
+        }));
     for name in &project_grants {
         config.grant_worker_credential(name);
     }
@@ -154,10 +158,21 @@ pub(super) fn finish_worker_config(
             missing.insert(name.as_str());
         }
     }
-    let warning = [("missing", missing), ("supervisor_only", conflicts), ("reserved", reserved)]
-        .into_iter().filter(|(_, names)| !names.is_empty())
-        .map(|(reason, names)| format!("{reason}={}", names.into_iter().collect::<Vec<_>>().join(",")))
-        .collect::<Vec<_>>().join("; ");
+    let warning = [
+        ("missing", missing),
+        ("supervisor_only", conflicts),
+        ("reserved", reserved),
+    ]
+    .into_iter()
+    .filter(|(_, names)| !names.is_empty())
+    .map(|(reason, names)| {
+        format!(
+            "{reason}={}",
+            names.into_iter().collect::<Vec<_>>().join(",")
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("; ");
     if !warning.is_empty() {
         config.env.push((cas_pty::WORKER_CREDENTIAL_WARNING_ENV.into(), warning));
     }
@@ -245,8 +260,13 @@ fn grant_worker_github_read_token(config: &mut PtyConfig, project_grants: &BTree
 /// the supervisor, but they are machine-global state rather than a grant to a
 /// worker in this project. The project `.cas/proxy.toml` and explicit factory
 /// credential allowlist are the auditable worker grant sources.
-fn project_proxy_credential_names(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = policy.worker_credential_env.iter()
+fn project_proxy_credential_names(
+    cas_root: Option<&PathBuf>,
+    policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy,
+) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = policy
+        .worker_credential_env
+        .iter()
         .filter(|name| grantable_worker_credential(name) && !policy.denies_env(name))
         .cloned().collect();
     let Some(cas_root) = cas_root else {
@@ -333,8 +353,14 @@ fn user_proxy_config_document() -> Option<toml::Value> {
 /// the supervisor's login shell had sourced. Resolve the same private
 /// credentials file and shell profile used by `cas integrate violet` as a
 /// fallback, while keeping an explicitly exported value authoritative.
-fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> Vec<(String, String)> {
-    let mut names: BTreeSet<String> = policy.worker_credential_env.iter()
+fn proxy_credential_environment(
+    cas_root: Option<&PathBuf>,
+    policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy,
+    config: &PtyConfig,
+) -> Vec<(String, String)> {
+    let mut names: BTreeSet<String> = policy
+        .worker_credential_env
+        .iter()
         .filter(|name| grantable_worker_credential(name) && !policy.denies_env(name))
         .cloned().collect();
     let mut values = BTreeMap::new();
@@ -364,7 +390,20 @@ fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::
     }
     // Canonical Violet values must match the direct harness/probe resolver;
     // a later shell-profile assignment must not replace the private-file value.
-    let violet = cas_pty::violet_env::resolved_environment(&[], &[]);
+    let violet = cas_pty::violet_env::resolved_environment(&config.env, &config.env_remove);
+    let registered = if policy.denies_server("violet") {
+        BTreeSet::new()
+    } else {
+        cas_pty::violet_env::registration_references(config.effective_command(), &violet).1
+    };
+    // The shared proxy collector is also the authorization boundary for native
+    // harness refs. Never pre-inject another account's canonical Violet token.
+    names.retain(|name| {
+        !cas_pty::violet_env::canonical_credential(name) || registered.contains(name)
+    });
+    names.extend(registered.into_iter().filter(|name| {
+        cas_pty::violet_env::canonical_credential(name) && !policy.denies_env(name)
+    }));
     names
         .into_iter()
         .filter_map(|name| {

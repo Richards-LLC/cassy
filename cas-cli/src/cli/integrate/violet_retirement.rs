@@ -323,6 +323,7 @@ struct ProfileRetirement {
     warnings: Vec<(PathBuf, String)>,
     authenticated: Vec<PathBuf>,
     credential_warnings: Vec<String>,
+    unexported: std::collections::BTreeSet<String>,
 }
 
 impl ProfileRetirement {
@@ -330,11 +331,23 @@ impl ProfileRetirement {
         // Display only the outer error context: parser chains may contain
         // credential values from the file being parsed.
         let reason = error.to_string();
+        if self
+            .warnings
+            .contains(&(path.to_path_buf(), reason.clone()))
+        {
+            return;
+        }
         eprintln!(
             "warning: Violet migration skipped {}: {reason}",
             path.display()
         );
         self.warnings.push((path.to_path_buf(), reason));
+    }
+    fn credential_repair(&mut self, warning: String) {
+        if !self.credential_warnings.contains(&warning) {
+            eprintln!("warning: Violet credential reference repaired: {warning}");
+            self.credential_warnings.push(warning);
+        }
     }
 }
 
@@ -541,9 +554,13 @@ fn migrate_installed_hub_with_probe(probe: &dyn HubProbe) -> Result<ProfileRetir
     update.private_before = private_before;
     let mut report = retire_machine_profiles_with(&home, &extra, Some(&update));
     if let Ok(user) = Scope::User.config_path()
-        && let Err(error) = retire_project_proxy(&user)
+        && user.is_file()
     {
-        report.warn(&user, error);
+        match update.migrate_profile(&user, "proxy", &mut report) {
+            Ok(true) => report.migrated += 1,
+            Ok(false) => {}
+            Err(error) => report.warn(&user, error),
+        }
     }
     Ok(report)
 }
@@ -610,8 +627,7 @@ impl<'a> UpdateMigration<'a> {
                 "legacy name had no value"
             };
             let warning = format!("{}: {name} → {replacement} ({reason})", path.display());
-            eprintln!("warning: Violet credential reference repaired: {warning}");
-            report.credential_warnings.push(warning);
+            report.credential_repair(warning);
         }
         replacement
     }
@@ -671,6 +687,7 @@ impl<'a> UpdateMigration<'a> {
         if raw.trim().is_empty() {
             return Ok(false);
         }
+        let mut referenced = std::collections::BTreeSet::new();
         let mut headers = std::collections::HashMap::new();
         let mut auth = None;
         let (changed, rewritten, url, sse) = if format == "claude" {
@@ -685,6 +702,10 @@ impl<'a> UpdateMigration<'a> {
             if let Some(entries) = entry["headers"].as_object() {
                 for (name, value) in entries {
                     let text = value.as_str().context("Violet header is not a string")?;
+                    substitute_references(text, &mut |name| {
+                        referenced.insert(name.to_owned());
+                        name.to_owned()
+                    });
                     headers.insert(name.clone(), self.expand(text));
                 }
             }
@@ -694,6 +715,73 @@ impl<'a> UpdateMigration<'a> {
                 entry["url"].as_str().unwrap().to_owned(),
                 entry["type"].as_str() == Some("sse"),
             )
+        } else if format == "proxy" {
+            // Only the operator's Cassy-managed document permits canonical
+            // account rebinding; native/user-authored harness refs stay strict.
+            if !raw.lines().any(|line| line.trim() == "# managed") {
+                return Ok(false);
+            }
+            let mut doc: toml_edit::DocumentMut = raw
+                .parse()
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let mut changed = retire_proxy_document(&mut doc);
+            let Some(entry) = doc
+                .get_mut("servers")
+                .and_then(|s| s.get_mut(VIOLET_SERVER))
+                .and_then(|s| s.as_table_like_mut())
+            else {
+                return Ok(false);
+            };
+            let Some(url) = entry
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|url| is_violet_hub_url(url))
+                .map(str::to_owned)
+            else {
+                return Ok(false);
+            };
+            if let Some(item) = entry.get_mut("auth") {
+                if let Some(name) = item
+                    .as_str()
+                    .and_then(|v| v.strip_prefix("env:"))
+                    .map(str::to_owned)
+                {
+                    let replacement = if !self.usable(&name)
+                        && Self::managed_token(&name)
+                        && self.candidates.len() == 1
+                    {
+                        let replacement = self.candidates[0].clone();
+                        report.credential_repair(format!(
+                            "{}: {name} → {replacement} (Cassy-managed proxy)",
+                            path.display()
+                        ));
+                        replacement
+                    } else {
+                        name.clone()
+                    };
+                    if replacement != name {
+                        set_string(item, &format!("env:{replacement}"));
+                        changed = true;
+                    }
+                    referenced.insert(replacement.clone());
+                    auth = Some(self.value(&replacement));
+                } else if let Some(value) = item.as_str() {
+                    auth = Some(Ok(value.into()));
+                }
+            }
+            if let Some(entries) = entry.get("headers").and_then(|h| h.as_table_like()) {
+                for (name, item) in entries.iter() {
+                    let value = item.as_str().context("Violet header is not a string")?;
+                    let value = if let Some(name) = value.strip_prefix("env:") {
+                        referenced.insert(name.into());
+                        self.value(name)
+                    } else {
+                        Ok(value.into())
+                    };
+                    headers.insert(name.into(), value);
+                }
+            }
+            (changed, doc.to_string(), url, false)
         } else {
             let mut doc: toml_edit::DocumentMut = raw
                 .parse()
@@ -711,6 +799,7 @@ impl<'a> UpdateMigration<'a> {
                 return Ok(false);
             }
             if let Some(name) = entry.get("bearer_token_env_var").and_then(|v| v.as_str()) {
+                referenced.insert(name.to_owned());
                 auth = Some(self.value(name));
             }
             if let Some(entries) = entry.get("http_headers").and_then(|h| h.as_table_like()) {
@@ -729,6 +818,9 @@ impl<'a> UpdateMigration<'a> {
                 .and_then(|h| h.as_table_like())
             {
                 for (name, value) in entries.iter() {
+                    if let Some(name) = value.as_str() {
+                        referenced.insert(name.to_owned());
+                    }
                     headers.insert(
                         name.into(),
                         self.value(
@@ -815,10 +907,27 @@ impl<'a> UpdateMigration<'a> {
                     .all(|required| tools.iter().any(|t| t == required)) =>
             {
                 eprintln!(
-                    "Violet {}: authenticated tools/list PASS ({})",
+                    "Violet {}: authenticated tools/list PASS (Cassy launches) ({})",
                     path.display(),
                     tools.join(", ")
                 );
+                let unexported: Vec<_> = referenced
+                    .into_iter()
+                    .filter(|name| {
+                        cas_pty::violet_env::canonical_credential(name)
+                            && !std::env::var(name)
+                                .ok()
+                                .is_some_and(|v| !v.trim().is_empty())
+                            && report.unexported.insert(name.clone())
+                    })
+                    .collect();
+                if !unexported.is_empty() {
+                    eprintln!(
+                        "Violet {}: {} not exported in updater environment; bare claude/codex in a new shell may lack these variables; use cas claude / cas codex or export them",
+                        path.display(),
+                        unexported.join(", ")
+                    );
+                }
                 report.authenticated.push(path.to_owned());
             }
             ProbeOutcome::Unauthorized => anyhow::bail!(
@@ -901,10 +1010,16 @@ mod tests {
     fn cas_678d_round3_managed_proxy_rebinds_only_unique_candidate() {
         for (managed, ambiguous) in [(true, false), (true, true), (false, false)] {
             let (mut env, probe) = update_fixture();
-            if ambiguous { env.set("VIOLET_SLACK_TOKEN_SECOND", "second-fixture"); }
+            if ambiguous {
+                env.set("VIOLET_SLACK_TOKEN_SECOND", "second-fixture");
+            }
             let path = Scope::User.config_path().unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let original = format!("{}# preserve\nallowlist = ['violet.violet_read']\n[servers.violet]\ntransport = 'http'\nurl = '{}'\nauth = 'env:VIOLET_SLACK_TOKEN_CASSY_PROXY'\n", if managed { "# managed\n" } else { "" }, violet_hub_url());
+            let original = format!(
+                "{}# preserve\nallowlist = ['violet.violet_read']\n[servers.violet]\ntransport = 'http'\nurl = '{}'\nauth = 'env:VIOLET_SLACK_TOKEN_CASSY_PROXY'\n",
+                if managed { "# managed\n" } else { "" },
+                violet_hub_url()
+            );
             std::fs::write(&path, &original).unwrap();
             let report = migrate_installed_hub_with_probe(&probe).unwrap();
             let written = std::fs::read_to_string(&path).unwrap();
@@ -912,11 +1027,15 @@ mod tests {
                 assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
                 assert!(written.contains("# preserve"));
                 assert!(report.authenticated.contains(&path));
-                assert!(report.credential_warnings.iter().any(|w| w.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE")));
+                assert!(report.credential_warnings.iter().any(|w| {
+                    w.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE")
+                }));
             } else {
                 assert_eq!(written, original);
                 assert!(!report.authenticated.contains(&path));
-                if managed { assert!(report.warnings.iter().any(|(_,w)| w.contains("ambiguous"))); }
+                if managed {
+                    assert!(report.warnings.iter().any(|(_, w)| w.contains("ambiguous")));
+                }
             }
         }
     }
@@ -940,6 +1059,11 @@ mod tests {
         let credentials = home.join("credentials.env");
         std::fs::write(&credentials,
             "export VIOLET_SLACK_TOKEN_SOUNDWAVE='fixture-token'\nexport MECHA_VERCEL_BYPASS='fixture-bypass'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         env.set("CAS_CREDENTIALS_FILE", credentials);
         env.set("MECHA_SLACK_TOKEN_CASSY_PROXY", "");
         env.set("MECHA_VERCEL_BYPASS", "");

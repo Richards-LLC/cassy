@@ -309,7 +309,11 @@ mcp__cas__task action=ready."
 /// launch-time intro prompt CAS queues for the worker (see
 /// `queue_codex_worker_intro_prompt`). Uses Claude's `mcp__cas__` tool prefix.
 pub fn claude_worker_contract(worker_name: &str) -> String {
-    worker_contract("mcp__cas__", Some(worker_name), WorkerContractHarness::Claude)
+    worker_contract(
+        "mcp__cas__",
+        Some(worker_name),
+        WorkerContractHarness::Claude,
+    )
 }
 
 /// The Codex worker contract, delivered as `--config developer_instructions`.
@@ -1037,7 +1041,7 @@ impl PtyConfig {
     /// a project/task proxy definition. A value placed directly in `env` is not
     /// a grant and is removed from a worker unless this marker is present.
     pub fn grant_worker_credential(&mut self, key: &str) {
-        if !PROTECTED_OPERATOR_ENV.contains(&key) {
+        if !PROTECTED_OPERATOR_ENV.contains(&key) && !crate::violet_env::canonical_credential(key) {
             return;
         }
         let marker = format!("{key}:{}", worker_credential_grant_nonce());
@@ -1049,6 +1053,60 @@ impl PtyConfig {
             self.env
                 .push((WORKER_CREDENTIAL_GRANT_ENV.to_string(), marker));
         }
+    }
+
+    /// Resolve only the selected harness's credential references. Worker grants
+    /// come from the policy-filtered factory builder and cannot be inherited.
+    pub fn hydrate_violet_environment(&mut self) {
+        let harness = self.effective_command().to_owned();
+        if harness != "claude" && harness != "codex" {
+            return;
+        }
+        let role = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|(k, v)| (k == "CAS_AGENT_ROLE").then_some(v.as_str()));
+        let factory = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|(k, v)| (k == "CAS_FACTORY_MODE").then_some(v.as_str()))
+            == Some("1");
+        if role == Some("worker") || (factory && role != Some("supervisor")) {
+            let grants: std::collections::BTreeSet<String> = self
+                .env
+                .iter()
+                .filter_map(|(k, v)| {
+                    let (name, nonce) = v.split_once(':')?;
+                    (k == WORKER_CREDENTIAL_GRANT_ENV
+                        && nonce == worker_credential_grant_nonce()
+                        && crate::violet_env::canonical_credential(name))
+                    .then(|| name.to_owned())
+                })
+                .collect();
+            let mut names: std::collections::BTreeSet<String> = std::env::vars_os()
+                .filter_map(|(k, _)| k.into_string().ok())
+                .filter(|k| crate::violet_env::canonical_credential(k))
+                .collect();
+            names.extend(
+                self.env
+                    .iter()
+                    .map(|(k, _)| k.clone())
+                    .filter(|k| crate::violet_env::canonical_credential(k)),
+            );
+            let resolved = crate::violet_env::resolved_environment(&self.env, &self.env_remove);
+            names.extend(crate::violet_env::registration_references(&harness, &resolved).1);
+            for name in names {
+                if crate::violet_env::canonical_credential(&name) && !grants.contains(&name) {
+                    self.env.retain(|(k, _)| k != &name);
+                    if !self.env_remove.contains(&name) {
+                        self.env_remove.push(name);
+                    }
+                }
+            }
+        }
+        crate::violet_env::hydrate(&harness, &mut self.env, &self.env_remove);
     }
 
     /// Remove protected operator credentials from a worker's inherited
@@ -2402,10 +2460,7 @@ impl Pty {
             return Err(Error::pty(reason.clone()));
         }
         config.apply_worker_credential_policy();
-        let harness = config.effective_command().to_string();
-        if harness == "claude" || harness == "codex" {
-            crate::violet_env::hydrate(&harness, &mut config.env, &config.env_remove);
-        }
+        config.hydrate_violet_environment();
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
 
@@ -3265,10 +3320,33 @@ mod tests {
     #[test]
     fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
         for (args, cli, account_env) in [
-            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
-            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
-            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
-            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
+            (
+                vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"],
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                vec![
+                    "--adjustment=10",
+                    "codex",
+                    "--effort",
+                    "high",
+                    "--model",
+                    "large",
+                ],
+                "codex",
+                "CODEX_HOME",
+            ),
+            (
+                vec!["-n10", "claude", "--effort", "high", "--model", "codex"],
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                vec!["--", "codex", "--model", "large"],
+                "codex",
+                "CODEX_HOME",
+            ),
         ] {
             let config = PtyConfig {
                 command: "nice".into(),
@@ -3721,8 +3799,10 @@ mod tests {
                 command: cli.into(),
                 env: vec![
                     ("CAS_AGENT_ROLE".into(), "worker".into()),
-                    (WORKER_CREDENTIAL_WARNING_ENV.into(),
-                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into()),
+                    (
+                        WORKER_CREDENTIAL_WARNING_ENV.into(),
+                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into(),
+                    ),
                 ],
                 ..Default::default()
             };

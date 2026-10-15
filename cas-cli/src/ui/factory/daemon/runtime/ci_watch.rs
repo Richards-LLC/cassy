@@ -57,6 +57,9 @@ pub(crate) struct CiFailure {
     /// They are retained only to make the one current alert explain what did
     /// not get replayed to the supervisor.
     suppressed_red_runs: Vec<SuppressedCiRun>,
+    /// cas-6c13: the integration branch that already contains the red
+    /// commit. A merged lane's red run is a blocker, not a routine notice.
+    pub merged_into: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1202,9 +1205,36 @@ pub(crate) fn collect_failures(
             failing_job,
             failing_test,
             suppressed_red_runs,
+            merged_into: None,
         });
     }
     Ok(failures)
+}
+
+/// cas-6c13: name, for each red factory-lane run, a non-factory branch that
+/// already contains its commit (`git branch -a --contains`). Read-only Git.
+pub(crate) fn mark_merged_failures(project: &Path, mut failures: Vec<CiFailure>) -> Vec<CiFailure> {
+    for failure in failures
+        .iter_mut()
+        .filter(|f| f.branch.starts_with("factory/"))
+    {
+        let args = [
+            "branch",
+            "-a",
+            "--format=%(refname:short)",
+            "--contains",
+            &failure.head_sha,
+        ];
+        let Ok(output) = run_external_git_command(project, &args.map(str::to_string)) else {
+            continue;
+        };
+        failure.merged_into = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|name| name.trim().trim_start_matches("origin/"))
+            .find(|name| !name.is_empty() && !name.starts_with("factory/") && *name != "HEAD")
+            .map(str::to_string);
+    }
+    failures
 }
 
 /// Extract the common Rust/nextest failure shape without treating log parsing
@@ -1237,8 +1267,14 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
             )
         })
         .unwrap_or_default();
+    let next = match &failure.merged_into {
+        Some(integration) => format!(
+            "BLOCKER: this commit is already merged into {integration}. Fix or revert it there before {integration} is queued."
+        ),
+        None => "This red run is the branch's latest completed conclusion; inspect or fix it before merging further lanes.".to_string(),
+    };
     format!(
-        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nFailing job: {}{}{}\nThis red run is the branch's latest completed conclusion; inspect or fix it before merging further lanes.\n</ci-red-run>",
+        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nFailing job: {}{}{}\n{next}\n</ci-red-run>",
         failure.branch,
         failure.head_sha,
         failure.run_id,
@@ -1260,7 +1296,19 @@ pub(crate) fn emit_failure(
 ) -> Result<bool, String> {
     let key = failure.dedupe_key();
     let source = format!("lifecycle-wake:{key}");
-    let summary = format!("CI FAILED: {} ({})", failure.branch, failure.head_sha);
+    let (summary, priority) = match &failure.merged_into {
+        Some(integration) => (
+            format!(
+                "BLOCKER: merged lane {} is red in {integration}",
+                failure.branch
+            ),
+            NotificationPriority::Critical,
+        ),
+        None => (
+            format!("CI FAILED: {} ({})", failure.branch, failure.head_sha),
+            NotificationPriority::High,
+        ),
+    };
     match queue
         .enqueue_idempotent(
             &source,
@@ -1268,7 +1316,7 @@ pub(crate) fn emit_failure(
             &relay_body(failure),
             Some(factory_session),
             Some(&summary),
-            Some(NotificationPriority::High),
+            Some(priority),
             &key,
             Some(&cas_store::QueueOrigin::Daemon),
         )
@@ -1750,6 +1798,7 @@ mod tests {
             failing_job: "test".to_string(),
             failing_test: None,
             suppressed_red_runs: Vec::new(),
+            merged_into: None,
         };
         assert_eq!(failure.dedupe_key(), "ci-red-run:main:abc123");
         assert_eq!(failure.dedupe_key(), failure.clone().dedupe_key());
@@ -1768,6 +1817,7 @@ mod tests {
             failing_job: "Fast Validation".to_string(),
             failing_test: None,
             suppressed_red_runs: Vec::new(),
+            merged_into: None,
         };
         assert!(emit_failure(&queue, "factory-session", &failure).unwrap());
         assert!(!emit_failure(&queue, "factory-session", &failure).unwrap());
@@ -1775,6 +1825,103 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "lifecycle-wake:ci-red-run:main:abc123");
         assert!(rows[0].prompt.contains("Failing job: Fast Validation"));
+    }
+
+    /// cas-6c13: a red run on a lane already merged into an integration
+    /// branch is a critical blocker wake that names that branch.
+    #[test]
+    fn red_run_on_a_merged_lane_is_a_blocker_naming_the_integration_branch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let failure = CiFailure {
+            branch: "factory/noble-gopher-88-cas-38e7".to_string(),
+            head_sha: "bc452ab0d".to_string(),
+            run_id: 38684348776,
+            run_url: "https://github.test/runs/38684348776".to_string(),
+            failing_job: "Scoped Validation".to_string(),
+            failing_test: None,
+            suppressed_red_runs: Vec::new(),
+            merged_into: Some("release-flow/c-runtime-removal".to_string()),
+        };
+        assert!(emit_failure(&queue, "factory-session", &failure).unwrap());
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].priority, NotificationPriority::Critical);
+        assert_eq!(
+            rows[0].summary.as_deref(),
+            Some(
+                "BLOCKER: merged lane factory/noble-gopher-88-cas-38e7 is red in release-flow/c-runtime-removal"
+            )
+        );
+        assert!(rows[0].prompt.contains(
+            "BLOCKER: this commit is already merged into release-flow/c-runtime-removal"
+        ));
+        assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(
+            &rows[0].prompt
+        ));
+    }
+
+    #[test]
+    fn mark_merged_failures_names_the_branch_that_contains_the_red_commit() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .current_dir(repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&["checkout", "-q", "-b", "factory/merged"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "merged lane"]);
+        let merged = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "factory/open", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "open lane"]);
+        let open = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "epic/release", "main"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge lane",
+            "factory/merged",
+        ]);
+        let failure = |branch: &str, sha: &str| CiFailure {
+            branch: branch.to_string(),
+            head_sha: sha.to_string(),
+            run_id: 1,
+            run_url: "url".to_string(),
+            failing_job: "Scoped Validation".to_string(),
+            failing_test: None,
+            suppressed_red_runs: Vec::new(),
+            merged_into: None,
+        };
+        let marked = mark_merged_failures(
+            repo,
+            vec![
+                failure("factory/merged", &merged),
+                failure("factory/open", &open),
+            ],
+        );
+        assert_eq!(marked[0].merged_into.as_deref(), Some("epic/release"));
+        assert_eq!(
+            marked[1].merged_into, None,
+            "an unmerged lane stays a routine notice"
+        );
     }
 
     #[test]
@@ -1790,6 +1937,7 @@ mod tests {
             failing_job: "Fast Validation".to_string(),
             failing_test: None,
             suppressed_red_runs: Vec::new(),
+            merged_into: None,
         };
 
         assert!(emit_failure(&queue, "factory-session", &failure).unwrap());

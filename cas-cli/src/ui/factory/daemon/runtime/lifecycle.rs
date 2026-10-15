@@ -2330,8 +2330,10 @@ impl FactoryDaemon {
                             super::ci_watch::collect_ci_wakes(&transport, &candidates),
                             !candidates.is_empty(),
                         );
-                        let failures =
-                            super::ci_watch::collect_failures(&transport, &watched_branches)?;
+                        let failures = super::ci_watch::mark_merged_failures(
+                            &project,
+                            super::ci_watch::collect_failures(&transport, &watched_branches)?,
+                        );
                         let mut queue_poll = super::ci_watch::collect_tracked_merge_queue_ejections(
                             &transport,
                             &deliveries,

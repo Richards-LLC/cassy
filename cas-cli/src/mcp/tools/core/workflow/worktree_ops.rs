@@ -32,6 +32,11 @@ enum BranchCiState {
         sha: String,
         url: Option<String>,
     },
+    /// cas-6c13: a code delivery whose lane CI has not finished. Refused.
+    CodePending {
+        sha: String,
+        url: Option<String>,
+    },
     NoChecks {
         sha: String,
         reason: String,
@@ -104,6 +109,14 @@ fn admit_branch_ci(
             ));
         }
         return Ok(true);
+    }
+    // cas-6c13: never merge code on pending lane CI. A pending run can still
+    // fail (cas-38e7 went red 7 min after a merge on pending); no override.
+    if let BranchCiState::CodePending { sha, url } = state {
+        return Err(format!(
+            "CI PENDING: refusing worktree_merge for {sha}: lane CI is still running ({}). Retry when it finishes; pending CI cannot be overridden. No merge was attempted.",
+            url.as_deref().unwrap_or("run URL unavailable")
+        ));
     }
     Ok(false)
 }
@@ -237,6 +250,7 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
             ref test_checks, ..
         } if test_checks.iter().any(|name| is_code_check_name(name)) => return state,
         BranchCiState::Red { .. }
+        | BranchCiState::CodePending { .. }
         | BranchCiState::UnvalidatedCode { .. }
         | BranchCiState::CodeValidationUnconfirmed { .. } => return state,
         BranchCiState::Green { sha, .. } => {
@@ -245,13 +259,7 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
                 reason: "only documentation checks succeeded".to_string(),
             };
         }
-        BranchCiState::Pending { sha, url } => (
-            sha,
-            format!(
-                "code checks are pending ({})",
-                url.as_deref().unwrap_or("run URL unavailable"),
-            ),
-        ),
+        BranchCiState::Pending { sha, url } => return BranchCiState::CodePending { sha, url },
         BranchCiState::NoChecks {
             sha,
             reason,
@@ -641,6 +649,17 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "CI check-run (pending; advisory)",
             url.as_deref().unwrap_or("unavailable"),
         ),
+        BranchCiState::CodePending { sha, url } => (
+            sha,
+            format!(
+                "CI state: pending — code checks for {sha} are still running{}.",
+                url.as_deref()
+                    .map(|url| format!(": {url}"))
+                    .unwrap_or_default()
+            ),
+            "CI check-run (pending code; merge refused)",
+            url.as_deref().unwrap_or("unavailable"),
+        ),
         BranchCiState::NoChecks {
             sha,
             reason,
@@ -695,7 +714,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
          Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
-         Merge policy: red CI and documentation-only success for code deliveries require an explicit supervisor override; pending, unavailable and no-checks receipts remain advisory.\n\n",
+         Merge policy: a code delivery is refused while its CI is pending; red CI and documentation-only success for code deliveries require an explicit supervisor override; unavailable and no-checks receipts remain advisory.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
 }
@@ -4231,10 +4250,15 @@ mod tests {
             if conclusion.is_some() {
                 assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
             } else {
-                assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                // cas-6c13: pending code CI is refused, even with an override.
+                for (override_requested, reason) in [(false, None), (true, Some("ship it"))] {
+                    let refusal = admit_branch_ci(&state, override_requested, reason).unwrap_err();
+                    assert!(refusal.starts_with("CI PENDING"), "{refusal}");
+                    assert!(refusal.contains("No merge was attempted"), "{refusal}");
+                }
                 assert!(
                     describe_branch_ci_state("factory/ci-fixture", &state)
-                        .contains("code validation not confirmed for")
+                        .contains("pending code; merge refused")
                 );
             }
             let receipt = describe_branch_ci_state("factory/ci-fixture", &state);

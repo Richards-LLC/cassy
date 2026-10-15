@@ -126,15 +126,16 @@ pub(super) fn finish_worker_config(
         }
     };
     let project_grants = project_proxy_credential_names(cas_root, &policy);
-    config.env.extend(
-        proxy_credential_environment(cas_root, &policy)
-            .into_iter()
-            .filter(|(name, _)| {
-                !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
-            }),
-    );
+    let proxy_environment = proxy_credential_environment(cas_root, &policy, config);
+    config
+        .env
+        .extend(proxy_environment.into_iter().filter(|(name, _)| {
+            !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
+        }));
     for name in &project_grants {
-        config.grant_worker_credential(name);
+        if !cas_pty::violet_env::canonical_credential(name) || !policy.denies_server("violet") {
+            config.grant_worker_credential(name);
+        }
     }
     grant_worker_github_read_token(config, &project_grants);
     config.apply_worker_credential_policy();
@@ -154,10 +155,21 @@ pub(super) fn finish_worker_config(
             missing.insert(name.as_str());
         }
     }
-    let warning = [("missing", missing), ("supervisor_only", conflicts), ("reserved", reserved)]
-        .into_iter().filter(|(_, names)| !names.is_empty())
-        .map(|(reason, names)| format!("{reason}={}", names.into_iter().collect::<Vec<_>>().join(",")))
-        .collect::<Vec<_>>().join("; ");
+    let warning = [
+        ("missing", missing),
+        ("supervisor_only", conflicts),
+        ("reserved", reserved),
+    ]
+    .into_iter()
+    .filter(|(_, names)| !names.is_empty())
+    .map(|(reason, names)| {
+        format!(
+            "{reason}={}",
+            names.into_iter().collect::<Vec<_>>().join(",")
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("; ");
     if !warning.is_empty() {
         config.env.push((cas_pty::WORKER_CREDENTIAL_WARNING_ENV.into(), warning));
     }
@@ -333,8 +345,14 @@ fn user_proxy_config_document() -> Option<toml::Value> {
 /// the supervisor's login shell had sourced. Resolve the same private
 /// credentials file and shell profile used by `cas integrate violet` as a
 /// fallback, while keeping an explicitly exported value authoritative.
-fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy) -> Vec<(String, String)> {
-    let mut names: BTreeSet<String> = policy.worker_credential_env.iter()
+fn proxy_credential_environment(
+    cas_root: Option<&PathBuf>,
+    policy: &cas_types::factory_worker_policy::FactoryWorkerPolicy,
+    config: &mut PtyConfig,
+) -> Vec<(String, String)> {
+    let mut names: BTreeSet<String> = policy
+        .worker_credential_env
+        .iter()
         .filter(|name| grantable_worker_credential(name) && !policy.denies_env(name))
         .cloned().collect();
     let mut values = BTreeMap::new();
@@ -362,9 +380,33 @@ fn proxy_credential_environment(cas_root: Option<&PathBuf>, policy: &cas_types::
     for path in credential_source_paths() {
         load_shell_environment(&path, &mut values, &mut BTreeSet::new(), 0);
     }
+    // Canonical Violet values must match the direct harness/probe resolver;
+    // a later shell-profile assignment must not replace the private-file value.
+    let violet = cas_pty::violet_env::resolved_environment(&config.env, &config.env_remove);
+    if matches!(config.effective_command(), "claude" | "codex") {
+        let registered = if policy.denies_server("violet") {
+            BTreeSet::new()
+        } else {
+            cas_pty::violet_env::registration_references(config.effective_command(), &violet).1
+        };
+        // The existing role policy authorizes the union of native refs and
+        // proxy/config grants; unrelated private-file accounts stay excluded.
+        names.extend(registered);
+        names.retain(|name| !cas_pty::violet_env::canonical_credential(name) || !policy.denies_server("violet"));
+        names.retain(|name| !policy.denies_env(name));
+        for name in &names {
+            if !cas_pty::violet_env::canonical_credential(name) { continue; }
+            // Authorization does not depend on whether today's file has a value.
+            config.grant_worker_credential(name);
+        }
+    }
     names
         .into_iter()
         .filter_map(|name| {
+            if cas_pty::violet_env::canonical_credential(&name) {
+                return violet.get(&name).filter(|v| !v.trim().is_empty())
+                    .cloned().map(|value| (name, value));
+            }
             std::env::var(&name)
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -455,6 +497,9 @@ fn shell_assignment(line: &str) -> Option<(String, String)> {
         return None;
     }
     let raw_value = raw_value.trim();
+    if raw_value.contains(['$', '`']) {
+        return None;
+    }
     let value = if raw_value.starts_with('\'') && raw_value.ends_with('\'') {
         raw_value[1..raw_value.len() - 1].replace("'\\''", "'")
     } else if raw_value.starts_with('"') && raw_value.ends_with('"') {

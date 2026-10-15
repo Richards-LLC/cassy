@@ -377,6 +377,38 @@ struct Badge {
     changed_at: Option<Instant>,
 }
 
+/// Most frame sizes one window keeps for its median.
+const FRAME_BYTES_CAP: usize = 4096;
+
+/// TUI frames sent since the last status window (cas-77f39).
+#[derive(Debug)]
+struct FrameWindow {
+    started: Instant,
+    counts: std::collections::BTreeMap<&'static str, u64>,
+    coalesced: u64,
+    bytes: Vec<u64>,
+}
+
+impl FrameWindow {
+    fn starting(started: Instant) -> Self {
+        Self {
+            started,
+            counts: std::collections::BTreeMap::new(),
+            coalesced: 0,
+            bytes: Vec::new(),
+        }
+    }
+}
+
+/// One window of TUI frames, as `loop.json` records it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FrameStats {
+    pub(crate) frames: std::collections::BTreeMap<String, u64>,
+    pub(crate) coalesced: u64,
+    pub(crate) bytes_p50: Option<u64>,
+    pub(crate) window_ms: u64,
+}
+
 /// A wedge the watchdog has detected and not yet seen clear.
 #[derive(Debug, Clone)]
 struct WedgeState {
@@ -417,6 +449,7 @@ pub(crate) struct LoopProgress {
         Mutex<std::collections::BTreeMap<&'static str, crate::factory_daemon_health::PhaseLatency>>,
     slow: Mutex<SlowSteps>,
     badge: Mutex<Badge>,
+    frames: Mutex<FrameWindow>,
     wedge: Mutex<Option<WedgeState>>,
 }
 
@@ -536,6 +569,7 @@ impl LoopProgress {
             phase_window: Mutex::new(std::collections::BTreeMap::new()),
             slow: Mutex::new(SlowSteps::default()),
             badge: Mutex::new(Badge::default()),
+            frames: Mutex::new(FrameWindow::starting(now)),
             wedge: Mutex::new(None),
         })
     }
@@ -698,6 +732,40 @@ impl LoopProgress {
                 suppressed,
                 "daemon step over budget"
             );
+        }
+    }
+
+    /// Count one TUI frame the loop sent: its cause, the other causes it
+    /// carried, and its size.
+    pub(crate) fn record_frame(&self, cause: &'static str, coalesced: u32, bytes: usize) {
+        if let Ok(mut window) = self.frames.lock() {
+            *window.counts.entry(cause).or_default() += 1;
+            window.coalesced += u64::from(coalesced);
+            if window.bytes.len() < FRAME_BYTES_CAP {
+                window.bytes.push(bytes as u64);
+            }
+        }
+    }
+
+    /// Take the frames recorded since the last call.
+    pub(crate) fn take_frame_window(&self) -> FrameStats {
+        let now = self.clock.now();
+        let Ok(mut window) = self.frames.lock() else {
+            return FrameStats::default();
+        };
+        let taken = std::mem::replace(&mut *window, FrameWindow::starting(now));
+        drop(window);
+        let mut bytes = taken.bytes;
+        bytes.sort_unstable();
+        FrameStats {
+            frames: taken
+                .counts
+                .into_iter()
+                .map(|(cause, count)| (cause.to_string(), count))
+                .collect(),
+            coalesced: taken.coalesced,
+            bytes_p50: (!bytes.is_empty()).then(|| bytes[(bytes.len() - 1) / 2]),
+            window_ms: now.saturating_duration_since(taken.started).as_millis() as u64,
         }
     }
 
@@ -946,6 +1014,10 @@ impl LoopProgress {
                 .iter()
                 .map(cas_store::lane_guard::LaneViolation::describe)
                 .collect(),
+            frames: Default::default(),
+            frames_coalesced: 0,
+            frame_bytes_p50: None,
+            frame_window_ms: 0,
         }
     }
 }
@@ -1063,6 +1135,7 @@ pub(crate) fn spawn_watchdog(
             let mut ticks_since_write = ticks_per_write;
             let mut window = PassWindow::default();
             let mut phase_latency = std::collections::BTreeMap::new();
+            let mut frame_stats = FrameStats::default();
             while !shutdown.load(Ordering::Relaxed) {
                 let wedge = progress.check_wedge();
                 let wedged_now = wedge.as_ref().is_some_and(|wedge| wedge.new);
@@ -1091,6 +1164,7 @@ pub(crate) fn spawn_watchdog(
                         progress.report_over_budget_jobs();
                         window = progress.take_pass_window();
                         phase_latency = progress.take_phase_window();
+                        frame_stats = progress.take_frame_window();
                         ticks_since_write = 0;
                     }
                     status.max_pass_ms = window.max_ms;
@@ -1098,6 +1172,10 @@ pub(crate) fn spawn_watchdog(
                     status.window_passes = window.passes;
                     status.passes_over_100ms = window.over_100ms;
                     status.phase_latency = phase_latency.clone();
+                    status.frames = frame_stats.frames.clone();
+                    status.frames_coalesced = frame_stats.coalesced;
+                    status.frame_bytes_p50 = frame_stats.bytes_p50;
+                    status.frame_window_ms = frame_stats.window_ms;
                     if let Err(error) = write_status(&cas_dir, &status) {
                         tracing::debug!(%error, "cas-73b5: could not write the daemon loop status");
                     }
@@ -1464,6 +1542,47 @@ mod tests {
                 .running
                 .is_none()
         );
+    }
+
+    /// cas-77f39 (GH #1210): `loop.json` carries the window's frames by
+    /// cause, the coalesced causes, the median frame size and the window
+    /// length, so frames/s is visible without external sampling.
+    #[test]
+    fn flv2_frames_per_cause_reach_loop_json() {
+        let clock = FakeClock::new();
+        let progress = LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)));
+        progress.record_frame("input", 0, 40);
+        for bytes in [60, 70, 900] {
+            progress.record_frame("output_focused", 1, bytes);
+        }
+        clock.advance(Duration::from_secs(5));
+        let window = progress.take_frame_window();
+        assert_eq!(window.frames.get("input"), Some(&1));
+        assert_eq!(window.frames.get("output_focused"), Some(&3));
+        assert_eq!(window.coalesced, 3);
+        assert_eq!(window.bytes_p50, Some(60));
+        assert_eq!(window.window_ms, 5_000);
+        let next = progress.take_frame_window();
+        assert!(next.frames.is_empty() && next.bytes_p50.is_none());
+
+        let mut status = progress.status(1, "s", Utc::now());
+        status.frames = window.frames.clone();
+        status.frame_window_ms = window.window_ms;
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["frames"]["output_focused"], 3);
+        assert_eq!(json["frame_window_ms"], 5_000);
+        let mut legacy = json.clone();
+        for field in [
+            "frames",
+            "frames_coalesced",
+            "frame_bytes_p50",
+            "frame_window_ms",
+        ] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
+        let parsed: crate::factory_daemon_health::DaemonLoopStatus =
+            serde_json::from_value(legacy).unwrap();
+        assert!(parsed.frames.is_empty(), "older status files still parse");
     }
 
     /// cas-6931 review: the badge holds the worst slow step of its 10 s

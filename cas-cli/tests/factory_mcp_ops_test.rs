@@ -870,6 +870,10 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
             job_lanes: Default::default(),
             lane_violations: 0,
             lane_violation_sites: Vec::new(),
+            frames: Default::default(),
+            frames_coalesced: 0,
+            frame_bytes_p50: None,
+            frame_window_ms: 0,
         },
     )
     .unwrap();

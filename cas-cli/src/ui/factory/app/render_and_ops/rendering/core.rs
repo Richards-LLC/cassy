@@ -113,6 +113,23 @@ impl FactoryApp {
         self.compact_host_cursor().map(|(_, state)| state)
     }
 
+    /// Whether `pane`'s terminal is on screen in the last drawn layout: a
+    /// pane of the Panes view (the supervisor and the visible workers; in
+    /// tabbed mode only the selected tab), the compact view's supervisor, or
+    /// the open terminal dialog. Mission Control draws no PTY panes. The
+    /// render scheduler draws no frame for output from other panes
+    /// (cas-77f39, factory loop v2 §5.1); a layout change redraws and
+    /// refreshes this.
+    pub(crate) fn pane_on_screen(&self, pane: &str) -> bool {
+        use crate::ui::factory::renderer::FactoryViewMode;
+        if self.show_terminal_dialog && self.terminal_pane_name.as_deref() == Some(pane) {
+            return true;
+        }
+        let in_panes_view = self.factory_view_mode == FactoryViewMode::Panes
+            && self.full_pty_content_areas.contains_key(pane);
+        in_panes_view || self.compact_pty_content_areas.contains_key(pane)
+    }
+
     pub(crate) fn full_pane_hyperlink_map(&self) -> HyperlinkMap {
         self.full_pane_hyperlinks.clone()
     }
@@ -1196,6 +1213,36 @@ mod hyperlink_tests {
     use ratatui::buffer::Cell;
     use ratatui::layout::Rect;
     use std::sync::Arc;
+
+    /// cas-77f39 (GH #1210): the render scheduler draws output frames only
+    /// for panes the last layout put on screen.
+    #[test]
+    fn flv2_pane_on_screen_follows_the_drawn_layout() {
+        use crate::ui::factory::renderer::FactoryViewMode;
+        let mut app = FactoryApp::for_test();
+        let supervisor = app.supervisor_name.clone();
+        assert!(!app.pane_on_screen(&supervisor), "nothing drawn yet");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 48)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.pane_on_screen(&supervisor));
+        assert!(!app.pane_on_screen("not-a-pane"));
+
+        app.factory_view_mode = FactoryViewMode::MissionControl;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            !app.pane_on_screen(&supervisor),
+            "Mission Control draws no PTY panes"
+        );
+
+        app.terminal_pane_name = Some("shell".to_string());
+        assert!(
+            !app.pane_on_screen("shell"),
+            "a background shell is off screen"
+        );
+        app.show_terminal_dialog = true;
+        assert!(app.pane_on_screen("shell"), "the terminal dialog shows it");
+    }
 
     #[test]
     fn pane_hyperlinks_are_recorded_at_final_screen_offsets_for_two_panes() {

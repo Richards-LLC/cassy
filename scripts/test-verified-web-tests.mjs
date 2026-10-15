@@ -37,15 +37,15 @@ for (const runner of ['vitest', 'playwright']) {
 }
 
 for (const runner of ['vitest', 'playwright']) {
-  test(`${runner}: host guard and authoritative worker cap`, () => {
+  test(`${runner}: runs the native runner directly with the authoritative worker cap`, () => {
     const cwd = mkdtempSync(join(tmpdir(), 'cas-web-admission-fixture-'));
     mkdirSync(join(cwd, 'e2e/.results'), { recursive: true });
     try {
       const flag = runner === 'vitest' ? '--maxWorkers' : '--workers';
       runVerified(runner, [flag, '50'], { cwd, env: {}, spawn: (exe, args, opts) => {
-        assert.equal(exe, 'python3');
-        assert.match(args[0], /scripts\/worker-memory\.py$/);
-        assert.equal(args[1], '--');
+        assert.equal(exe, process.execPath);
+        assert.match(args[0], runner === 'vitest' ? /vitest\/vitest\.mjs$/ : /@playwright\/test\/cli\.js$/);
+        assert.equal(args.some(arg => /worker-memory/.test(arg)), false);
         assert.equal(args.filter(arg => arg.startsWith(flag)).join(), flag + (runner === 'vitest' ? '=2' : '=4'));
         assert.equal(args.includes('50'), false);
         const report = runner === 'vitest' ? args.find(arg => arg.startsWith('--outputFile=')).slice(13) : opts.env.PLAYWRIGHT_JSON_OUTPUT_NAME;

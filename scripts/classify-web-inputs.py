@@ -8,10 +8,11 @@ files hub-web's scripts and tests load, or this classifier. A change elsewhere
 in scripts/ or .github/ no longer triggers it (cas-7822: PR #1191 touched one
 unrelated script and spent 1132 s in the step). That includes
 .github/workflows/ci.yml (cas-c846: PR #1198 changed only ci.yml outside
-hub-web, ran ~13 min of journeys and was ejected twice by them).
-scripts/test-hub-web-gate.py and scripts/ci_tiers/test-policy.py pin the step's
-wiring in ci.yml instead, and the release train still runs the full journeys
-(cas-9f70) before publication.
+hub-web, ran ~13 min of journeys and was ejected twice by them). Release
+plumbing is not an input either (cas-a1b0): hub-web no longer runs its scripts
+through scripts/worker-memory.py, so that wrapper's import closure (host
+memory, assembly proof, release scratch and env) left this list, and a
+release-script change no longer pays ~22 min of Commander checks.
 
 Fail-closed: a Git failure exits nonzero, and the caller then runs the web
 check.
@@ -30,18 +31,10 @@ WEB_INPUTS = (
     'docs/design/design-tokens.json',
     # Imported by hub-web/scripts/visual-qa.mjs and the real-hub journeys.
     'scripts/visual-qa.mjs',
-    # Wraps npm build/typecheck/visual-qa and run-verified-tests.mjs, with its
-    # import closure.
-    'scripts/worker-memory.py',
-    'scripts/host_memory.py',
-    'scripts/assembly-proof.py',
-    'scripts/proof_target.py',
-    'scripts/release_scratch.py',
-    'scripts/release_env.py',
     # Run inside the CI Commander step.
     'scripts/test-ci-journey-evidence-upload.sh',
     # The decision itself. The workflow that runs the step is not an input
-    # (cas-c846): test-hub-web-gate.py pins its wiring without the journeys.
+    # (cas-c846).
     'scripts/classify-web-inputs.py',
     '.github/actions/classify-required-diff/',
 )

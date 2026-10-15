@@ -540,77 +540,9 @@ with host.admission('worker',dict(os.environ),lambda env:{HIGH!r},directory=path
             lane.flush()
             yield
 
-    def test_frontend_runner_waits_for_proof_and_reports_wait(self):
-        # Execute the actual frontend entry point with one fake native runner.
-        # Relocate only the lease directory to avoid touching a production proof.
-        scripts = self.root / 'scripts'
-        scripts.mkdir()
-        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py', 'release_env.py', 'proof_target.py']:
-            shutil.copy(ROOT / 'scripts' / name, scripts / name)
-        (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
-            "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
-        runner = self.root / 'hub/scripts/run-verified-tests.mjs'
-        runner.parent.mkdir(parents=True)
-        body = subprocess.check_output(['git', 'show', 'aa6418b37:hub-web/scripts/run-verified-tests.mjs'], cwd=ROOT, text=True) if BASELINE else (ROOT / 'hub-web/scripts/run-verified-tests.mjs').read_text()
-        runner.write_text(body)
-        marker = self.root / 'started'
-        fake = self.root / 'hub/node_modules/vitest/vitest.mjs'
-        fake.parent.mkdir(parents=True)
-        fake.write_text("import {writeFileSync} from 'node:fs'; writeFileSync(" + json.dumps(str(marker)) + ", 'started'); const file=process.argv.find(a=>a.startsWith('--outputFile=')).slice(13); writeFileSync(file, JSON.stringify({numPassedTests:1}));")
-        env = dict(self.env, CAS_RELEASE_GATE_ASSEMBLY_MEMORY_WAIT_SECS='3')
-        # cas-833e: a free taste lane would admit this bounded run beside the
-        # proof; hold it busy so the entry point must wait its turn.
-        with self.admit('proof'), self.busy_taste_lane():
-            child = subprocess.Popen(['node', str(runner), 'vitest'], cwd=self.root/'hub', env=env,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                prefix = self.wait_for_proof(child, marker)
-            except BaseException:
-                child.kill()
-                child.communicate(timeout=3)
-                raise
-        stdout, stderr = child.communicate(timeout=5)
-        stdout = prefix + stdout
-        self.assertEqual(child.returncode, 0, stdout + stderr)
-        self.assertIn('waiting for host memory (proof running', stdout)
-        self.assertIn('verified-web-tests: PASS (1 vitest tests passed)', stdout)
-        self.assertTrue(marker.exists())
-
-    def test_package_build_typecheck_and_visual_qa_wait_at_actual_entrypoints(self):
-        scripts = self.root / 'scripts'
-        scripts.mkdir()
-        for name in ['host_memory.py', 'worker-memory.py', 'assembly-proof.py', 'release_scratch.py', 'release_env.py', 'proof_target.py']:
-            shutil.copy(ROOT / 'scripts' / name, scripts / name)
-        (scripts / 'host_memory.py').write_text((scripts / 'host_memory.py').read_text().replace(
-            "DIRECTORY = Path('/var/tmp') / f'cas-host-memory-{os.getuid()}'", f'DIRECTORY = Path({str(self.pool)!r})'))
-        hub = self.root / 'hub'
-        hub.mkdir()
-        binaries = self.root / 'bin'
-        binaries.mkdir()
-        marker = self.root / 'started'
-        for name in ['npm', 'vite', 'tsc']:
-            stub = binaries / name
-            stub.write_text('#!' + sys.executable + "\nimport pathlib;pathlib.Path(" + repr(str(marker)) + ").write_text('started')\n")
-            stub.chmod(0o755)
-        env = dict(self.env, PATH=str(binaries)+os.pathsep+self.env['PATH'])
-        commands = json.loads((ROOT/'hub-web/package.json').read_text())['scripts']
-        for name in ['build', 'typecheck', 'visual-qa']:
-            with self.subTest(name=name):
-                marker.unlink(missing_ok=True)
-                with self.admit('proof'), self.busy_taste_lane():
-                    child = subprocess.Popen(['sh', '-c', commands[name]], cwd=hub, env=env,
-                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    try:
-                        prefix = self.wait_for_proof(child, marker)
-                    except BaseException:
-                        child.kill()
-                        child.communicate(timeout=3)
-                        raise
-                stdout, stderr = child.communicate(timeout=5)
-                stdout = prefix + stdout
-                self.assertEqual(child.returncode, 0, stdout+stderr)
-                self.assertIn('waiting for host memory (proof running', stdout)
-                self.assertTrue(marker.exists())
+    # cas-a1b0: hub-web no longer runs its npm scripts or native test runners
+    # through this wrapper (it stopped CI journeys on the shared runner, cas-f632),
+    # so the entry-point admission tests for hub-web were removed with it.
 
     def test_worker_wait_has_deadline_without_starting_command(self):
         with self.admit('proof'):

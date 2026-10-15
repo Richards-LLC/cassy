@@ -2067,214 +2067,6 @@ fn no_active_epic_guidance(why: &str) -> String {
 }
 
 impl CasService {
-    /// Render the durable integration-sweep report without mutating task or
-    /// worker state.  Acceptance deliberately lives in a separate branch so a
-    /// supervisor can inspect the exact targets and assertion evidence first.
-    pub(super) async fn factory_sweep_tasks(
-        &self,
-        req: FactoryRequest,
-    ) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::TaskCreateRequest;
-
-        let report = crate::factory_sweep_tasks::read_report(
-            &self.inner.cas_root,
-            req.id.as_deref(),
-        )
-        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-        let report_path = crate::factory_sweep_tasks::report_path(&self.inner.cas_root);
-
-        if !req.accept.unwrap_or(false) {
-            return Ok(Self::success(render_sweep_task_report(&report, &report_path)));
-        }
-
-        self.inner
-            .resolve_live_supervisor_authority()
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INVALID_REQUEST,
-                    format!(
-                        "sweep_tasks acceptance requires a live registered supervisor: {error:?}"
-                    ),
-                )
-            })?;
-
-        if !report.status.eq_ignore_ascii_case("FAILED") || report.classes.is_empty() {
-            return Ok(Self::success(format!(
-                "No failed integration-sweep classes are ready for acceptance. Report: {}",
-                report_path.display()
-            )));
-        }
-
-        let project_root = self
-            .inner
-            .cas_root
-            .parent()
-            .unwrap_or(&self.inner.cas_root);
-        let target_repo = project_root.to_string_lossy().into_owned();
-        let target_branch = report.integration_branch.clone();
-        let mut report = report;
-        let mut created = 0usize;
-        let mut queued = 0usize;
-        let mut errors = Vec::new();
-
-        for class_index in 0..report.classes.len() {
-            let proposal = report.classes[class_index].clone();
-            let task_id = if let Some(task_id) = proposal.task_id.clone() {
-                task_id
-            } else {
-                let description = format!(
-                    "Integration sweep failure class {class_id} ({class_name}).\n\n\
-                     Failing targets:\n{targets}\n\nFailing tests:\n{tests}\n\n\
-                     Assertion text:\n{assertion}\n\nSweep log: {log}\n\n\
-                     Suggested worker lane: {lane}",
-                    class_id = proposal.failure_class,
-                    class_name = proposal.class_name,
-                    targets = format_bullets(&proposal.failing_targets),
-                    tests = format_bullets(&proposal.failing_tests),
-                    assertion = if proposal.assertion_text.is_empty() {
-                        "(assertion text was not captured)"
-                    } else {
-                        &proposal.assertion_text
-                    },
-                    log = proposal.log_path,
-                    lane = proposal.suggested_lane,
-                );
-                let task_request = TaskCreateRequest {
-                    title: proposal.title.clone(),
-                    description: Some(description),
-                    priority: 1,
-                    task_type: "bug".to_owned(),
-                    risk: Some("none".to_owned()),
-                    door: None,
-                    proof_targets: None,
-                    supervisor_override: None,
-                    reason: None,
-                    labels: Some("factory,release-gate,integration-sweep".to_owned()),
-                    notes: Some(format!(
-                        "Ready-to-file integration-sweep class {}. Failing targets: {}.\n\
-                         Assertion text: {}",
-                        proposal.failure_class,
-                        proposal.failing_targets.join(", "),
-                        if proposal.assertion_text.is_empty() {
-                            "(not captured)"
-                        } else {
-                            &proposal.assertion_text
-                        },
-                    )),
-                    blocked_by: None,
-                    design: None,
-                    acceptance_criteria: Some(format!(
-                        "Fix every failing target in class {} and rerun the recorded sweep lane.\n\
-                         Preserve the failure-class evidence in the task notes.",
-                        proposal.failure_class
-                    )),
-                    external_ref: Some(proposal.log_path.clone()),
-                    assignee: None,
-                    demo_statement: None,
-                    execution_note: None,
-                    epic: None,
-                    depth: Some("deep".to_owned()),
-                };
-                match self
-                    .inner
-                    .cas_task_create_with_target(
-                        task_request,
-                        Some(&target_repo),
-                        Some(&target_branch),
-                        true,
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        let text = call_tool_text(result);
-                        match created_task_id(&text) {
-                            Some(task_id) => {
-                                report.classes[class_index].task_id = Some(task_id.clone());
-                                created += 1;
-                                task_id
-                            }
-                            None => {
-                                let error = format!(
-                                    "task create receipt did not include a task id: {}",
-                                    text.trim()
-                                );
-                                report.classes[class_index].spawn_error = Some(error.clone());
-                                errors.push(format!("{}: {error}", proposal.failure_class));
-                                continue;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let detail = format!("task creation failed: {error}");
-                        report.classes[class_index].spawn_error = Some(detail.clone());
-                        errors.push(format!("{}: {detail}", proposal.failure_class));
-                        continue;
-                    }
-                }
-            };
-
-            if report.classes[class_index].spawn_request_id.is_some() {
-                continue;
-            }
-
-            let spawn_request: FactoryRequest = serde_json::from_value(serde_json::json!({
-                "action": "spawn_workers",
-                "count": 1,
-                "task_id": task_id,
-                "delivery_mode": "push_branch",
-                "isolate": true,
-                "lane": proposal.suggested_lane,
-            }))
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("build sweep worker request: {error}"),
-                )
-            })?;
-            match self.factory_spawn_workers(spawn_request).await {
-                Ok(result) => {
-                    let text = call_tool_text(result);
-                    if let Some(request_id) = spawn_request_id(&text) {
-                        report.classes[class_index].spawn_request_id = Some(request_id);
-                        queued += 1;
-                    } else {
-                        let detail = format!(
-                            "worker spawn receipt did not include a request id: {}",
-                            text.trim()
-                        );
-                        report.classes[class_index].spawn_error = Some(detail.clone());
-                        errors.push(format!("{}: {detail}", proposal.failure_class));
-                    }
-                }
-                Err(error) => {
-                    let detail = format!("worker spawn failed: {error}");
-                    report.classes[class_index].spawn_error = Some(detail.clone());
-                    errors.push(format!("{}: {detail}", proposal.failure_class));
-                }
-            }
-
-            // Persist after each class so a daemon restart cannot create a
-            // duplicate task or worker for classes already accepted.
-            crate::factory_sweep_tasks::write_report(&self.inner.cas_root, &report).map_err(
-                |error| Self::error(ErrorCode::INTERNAL_ERROR, error),
-            )?;
-        }
-
-        report.accepted_at = Some(chrono::Utc::now().to_rfc3339());
-        crate::factory_sweep_tasks::write_report(&self.inner.cas_root, &report)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
-
-        let mut output = format!(
-            "Accepted {} integration-sweep failure class(es): created {created} task(s), queued {queued} isolated worker(s).\nReport: {}",
-            report.classes.len(),
-            report_path.display()
-        );
-        if !errors.is_empty() {
-            output.push_str("\nPartial failures:\n");
-            output.push_str(&format_bullets(&errors));
-        }
-        Ok(Self::success(output))
-    }
 
     pub(super) async fn factory_spawn_workers(
         &self,
@@ -3807,13 +3599,6 @@ impl CasService {
                     )
                 })
                 .unwrap_or_default();
-            // cas-6f48: a red epic integration gate refuses merges into it.
-            // Like daemon health, it is urgent, so it sits above the scope
-            // heading; cloud presence and the mailbox footer stay below.
-            let health = format!(
-                "{}{health}",
-                crate::epic_gate::status_section(&self.inner.cas_root)
-            );
             let mailbox_session = factory_session.clone().or_else(|| {
                 self.inner
                     .get_registered_agent_id_read_only()
@@ -4130,11 +3915,6 @@ impl CasService {
                 crate::factory_daemon_health::worker_status_section(&self.inner.cas_root, session)
             })
             .unwrap_or_default();
-        // cas-6f48: a red epic integration gate refuses merges into it.
-        let daemon_health_section = format!(
-            "{}{daemon_health_section}",
-            crate::epic_gate::status_section(&self.inner.cas_root)
-        );
         let spawn_section = factory_session
             .clone()
             .and_then(|session| {
@@ -6776,11 +6556,6 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
-        // cas-6f48: the epic's integration gate (green tip, or red culprit).
-        report.push_str(&crate::epic_gate::epic_status_line(
-            &self.inner.cas_root,
-            epic.branch.as_deref().unwrap_or(parent_branch),
-        ));
         let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
         if !staged.is_empty() {
             report.push_str("\nStaged integration batch receipts:\n");
@@ -7227,86 +7002,6 @@ impl CasService {
 
         Ok(Self::success(output))
     }
-}
-
-fn format_bullets(values: &[String]) -> String {
-    if values.is_empty() {
-        return "- (none recorded)".to_owned();
-    }
-    values
-        .iter()
-        .map(|value| format!("- {value}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn call_tool_text(result: CallToolResult) -> String {
-    result
-        .content
-        .into_iter()
-        .filter_map(|content| match content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn created_task_id(text: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        line.strip_prefix("Created task: ")
-            .and_then(|rest| rest.split_whitespace().next())
-            .filter(|id| id.starts_with("cas-"))
-            .map(ToOwned::to_owned)
-    })
-}
-
-fn spawn_request_id(text: &str) -> Option<String> {
-    text.split_once("request ID: ")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .filter(|id| id.starts_with("cas-"))
-        .map(ToOwned::to_owned)
-}
-
-fn render_sweep_task_report(
-    report: &crate::factory_sweep_tasks::SweepTaskReport,
-    report_path: &std::path::Path,
-) -> String {
-    let mut output = format!(
-        "Integration sweep fix proposals\nStatus: {}\nFailures: {}\nClasses: {}\nIntegration: {} @ {}\nLog: {}\nReport: {}",
-        report.status,
-        report.failure_count,
-        report.classes.len(),
-        report.integration_branch,
-        report.integration_tip,
-        report.log_path,
-        report_path.display(),
-    );
-    for class in &report.classes {
-        output.push_str(&format!(
-            "\n\n{} [{}]\nSuggested lane: {}\nTargets:\n{}\nTests:\n{}\nAssertion text: {}",
-            class.title,
-            class.failure_class,
-            class.suggested_lane,
-            format_bullets(&class.failing_targets),
-            format_bullets(&class.failing_tests),
-            if class.assertion_text.is_empty() {
-                "(not captured)"
-            } else {
-                &class.assertion_text
-            },
-        ));
-        if let Some(task_id) = class.task_id.as_deref() {
-            output.push_str(&format!("\nTask: {task_id}"));
-        }
-        if let Some(request_id) = class.spawn_request_id.as_deref() {
-            output.push_str(&format!("\nSpawn request: {request_id}"));
-        }
-        if let Some(error) = class.spawn_error.as_deref() {
-            output.push_str(&format!("\nError: {error}"));
-        }
-    }
-    output
 }
 
 fn process_command_line(pid: u32) -> String {

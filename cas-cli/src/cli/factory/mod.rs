@@ -28,7 +28,7 @@ use crate::ui::factory::{
     generate_session_name,
 };
 use crate::worktree::GitOperations;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use cas_factory::routing::{CapabilitySnapshot, resolve_lane_specs, validate_lane_request};
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use clap::{Args, Subcommand};
@@ -747,19 +747,6 @@ pub enum FactoryCommands {
         cas_root: Option<std::path::PathBuf>,
     },
 
-    /// Recover a missed rolling integration event in a bounded fresh process.
-    #[command(hide = true)]
-    IntegrationRecover {
-        /// Re-sweep origin/main plus all currently open epic branches without
-        /// requiring a focused epic merge event.
-        #[arg(long)]
-        base_only: bool,
-        /// Restrict recovery to these comma-separated release epic IDs. An empty
-        /// value tests only the trunk. Required for release-train self-heal.
-        #[arg(long, requires = "base_only")]
-        release_epics: Option<String>,
-    },
-
     /// Run as a factory daemon (internal use)
     #[command(hide = true)]
     Daemon {
@@ -1167,10 +1154,6 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
-            FactoryCommands::IntegrationRecover {
-                base_only,
-                release_epics,
-            } => execute_integration_recover(cas_root, *base_only, release_epics.as_deref()),
             FactoryCommands::Daemon {
                 session,
                 cwd,
@@ -1827,143 +1810,6 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
 }
 
-/// Authenticate a one-shot integration recovery against registered supervisor
-/// state, then run the existing production coordinator in this fresh process.
-/// Environment role/name hints are deliberately not authority inputs.
-fn execute_integration_recover(
-    cas_root: Option<&std::path::Path>,
-    base_only: bool,
-    release_epics: Option<&str>,
-) -> Result<()> {
-    let cas_root = cas_root.context("Cassy project root is unavailable")?;
-    let session = std::env::var("CAS_FACTORY_SESSION")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .context("recovery requires CAS_FACTORY_SESSION from the active factory session")?;
-    let core = crate::mcp::CasCore::with_daemon(cas_root.to_path_buf(), None, None);
-    let caller = core
-        .resolve_live_supervisor_authority()
-        .map_err(|error| anyhow::anyhow!("recovery authorization refused: {error:?}"))?;
-
-    let root_output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cas_root)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("could not resolve the current Git project root")?;
-    if !root_output.status.success() {
-        bail!("recovery authorization refused: CAS root is not inside a Git project");
-    }
-    let project_root = std::fs::canonicalize(String::from_utf8_lossy(&root_output.stdout).trim())
-        .context("could not canonicalize the current Git project root")?;
-    let canonical_cas = std::fs::canonicalize(cas_root).context("could not resolve .cas root")?;
-    if canonical_cas != project_root.join(".cas") {
-        bail!(
-            "recovery authorization refused: selected .cas root does not belong to the current Git project"
-        );
-    }
-    let metadata_path = crate::ui::factory::session_metadata_path_named(&session);
-    let metadata: crate::ui::factory::SessionMetadata = serde_json::from_slice(
-        &std::fs::read(&metadata_path)
-            .with_context(|| format!("factory session metadata unavailable for {session}"))?,
-    )
-    .context("factory session metadata is malformed")?;
-    let focus = metadata.pinned_epic_id.or(metadata.epic_id);
-    if base_only || focus.is_none() {
-        validate_recovery_supervisor_identity(
-            Some(&caller),
-            &session,
-            &metadata.name,
-            metadata.project_dir.as_deref(),
-            &project_root,
-        )?;
-    } else {
-        validate_recovery_supervisor_binding(
-            Some(&caller),
-            &session,
-            &metadata.name,
-            metadata.project_dir.as_deref(),
-            &project_root,
-            focus.clone(),
-        )?;
-    }
-    let config = crate::config::Config::load(cas_root)
-        .context("could not load factory recovery settings")?
-        .factory();
-    let release_epics = release_epics.map(|ids| {
-        ids.split(',')
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    });
-    let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
-        &project_root,
-        cas_root,
-        &session,
-        focus.as_deref(),
-        base_only,
-        release_epics.as_deref(),
-        &config,
-    )
-    .map_err(|error| anyhow::anyhow!("integration recovery failed: {error}"))?;
-    println!("{summary}");
-    Ok(())
-}
-
-fn validate_recovery_supervisor_binding(
-    caller: Option<&cas_types::Agent>,
-    requested_session: &str,
-    metadata_session: &str,
-    metadata_project: Option<&str>,
-    project_root: &std::path::Path,
-    focus: Option<String>,
-) -> Result<String> {
-    validate_recovery_supervisor_identity(
-        caller,
-        requested_session,
-        metadata_session,
-        metadata_project,
-        project_root,
-    )?;
-    focus
-        .filter(|epic| !epic.trim().is_empty())
-        .context("recovery authorization refused: factory session has no focused epic")
-}
-
-fn validate_recovery_supervisor_identity(
-    caller: Option<&cas_types::Agent>,
-    requested_session: &str,
-    metadata_session: &str,
-    metadata_project: Option<&str>,
-    project_root: &std::path::Path,
-) -> Result<()> {
-    let caller = caller.context("recovery authorization refused: caller is unknown")?;
-    if caller.role != cas_types::AgentRole::Supervisor || !caller.is_alive() {
-        bail!("recovery authorization refused: caller is not a live registered supervisor");
-    }
-    if requested_session.trim().is_empty()
-        || caller.factory_session.as_deref() != Some(requested_session)
-        || metadata_session != requested_session
-    {
-        bail!(
-            "recovery authorization refused: registered supervisor is not bound to this factory session"
-        );
-    }
-    let metadata_project = metadata_project
-        .filter(|path| !path.trim().is_empty())
-        .and_then(|path| std::fs::canonicalize(path).ok())
-        .context(
-            "recovery authorization refused: factory session has no canonical project binding",
-        )?;
-    let project_root = std::fs::canonicalize(project_root)
-        .context("recovery authorization refused: project root cannot be canonicalized")?;
-    if metadata_project != project_root {
-        bail!("recovery authorization refused: factory session belongs to a different project");
-    }
-    Ok(())
-}
-
 fn execute_unified_preflight(cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = crate::store::find_git_toplevel(&cwd).unwrap_or(cwd);
@@ -2443,7 +2289,6 @@ fn preflight_factory_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::AgentStore;
     use crate::ui::factory::FactoryConfig;
 
     /// cas-31ec: `cas` exports its build knobs before the factory launch
@@ -2482,175 +2327,6 @@ mod tests {
                 &operator,
             ),
             None
-        );
-    }
-
-    fn recovery_supervisor() -> cas_types::Agent {
-        let mut caller = cas_types::Agent::new("registered-supervisor".into(), "lead".into());
-        caller.role = cas_types::AgentRole::Supervisor;
-        caller.factory_session = Some("factory-a".into());
-        caller
-    }
-
-    #[test]
-    fn recovery_authorization_requires_live_registered_supervisor_and_project_focus() {
-        let project = tempfile::tempdir().unwrap();
-        let caller = recovery_supervisor();
-        assert_eq!(
-            validate_recovery_supervisor_binding(
-                Some(&caller),
-                "factory-a",
-                "factory-a",
-                Some(project.path().to_str().unwrap()),
-                project.path(),
-                Some("cas-focused".into()),
-            )
-            .unwrap(),
-            "cas-focused"
-        );
-        assert!(
-            validate_recovery_supervisor_binding(
-                None,
-                "factory-a",
-                "factory-a",
-                Some(project.path().to_str().unwrap()),
-                project.path(),
-                Some("cas-focused".into()),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("caller is unknown")
-        );
-
-        let mut worker = caller.clone();
-        worker.role = cas_types::AgentRole::Worker;
-        assert!(
-            validate_recovery_supervisor_binding(
-                Some(&worker),
-                "factory-a",
-                "factory-a",
-                Some(project.path().to_str().unwrap()),
-                project.path(),
-                Some("cas-focused".into()),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("live registered supervisor")
-        );
-        assert!(
-            validate_recovery_supervisor_binding(
-                Some(&caller),
-                "factory-b",
-                "factory-b",
-                Some(project.path().to_str().unwrap()),
-                project.path(),
-                Some("cas-focused".into()),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("factory session")
-        );
-        assert!(
-            validate_recovery_supervisor_binding(
-                Some(&caller),
-                "factory-a",
-                "factory-a",
-                Some("/missing/project/path"),
-                project.path(),
-                Some("cas-focused".into()),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("project binding")
-        );
-        assert!(
-            validate_recovery_supervisor_binding(
-                Some(&caller),
-                "factory-a",
-                "factory-a",
-                Some(project.path().to_str().unwrap()),
-                project.path(),
-                None,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("focused epic")
-        );
-    }
-
-    #[test]
-    fn integration_recover_accepts_explicit_base_only_mode() {
-        let parsed = crate::cli::try_parse_from_with_wordmark([
-            "cas",
-            "factory",
-            "integration-recover",
-            "--base-only",
-        ])
-        .unwrap();
-        assert!(parsed.command.is_some(), "expected factory command");
-    }
-
-    #[test]
-    fn integration_recover_accepts_explicit_release_selection() {
-        for selection in ["cas-one,cas-two", ""] {
-            let parsed = crate::cli::try_parse_from_with_wordmark([
-                "cas",
-                "factory",
-                "integration-recover",
-                "--base-only",
-                "--release-epics",
-                selection,
-            ])
-            .unwrap();
-            assert!(parsed.command.is_some());
-        }
-        assert!(
-            crate::cli::try_parse_from_with_wordmark([
-                "cas",
-                "factory",
-                "integration-recover",
-                "--release-epics",
-                "cas-one",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn recovery_cli_rejects_unknown_and_registered_worker_even_with_supervisor_env_hint() {
-        let temp = tempfile::tempdir().unwrap();
-        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let mut worker = cas_types::Agent::new("worker-agent".into(), "worker".into());
-        worker.role = cas_types::AgentRole::Worker;
-        worker.factory_session = Some("factory-a".into());
-        crate::store::open_agent_store(&cas_root)
-            .unwrap()
-            .register(&worker)
-            .unwrap();
-
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("CAS_SESSION_ID", worker.id.as_str()),
-            ("CAS_FACTORY_SESSION", "factory-a"),
-            ("CAS_AGENT_ROLE", "supervisor"),
-            ("CAS_AGENT_NAME", "claimed-supervisor"),
-        ]);
-        let error = execute_integration_recover(Some(&cas_root), false, None).unwrap_err();
-        assert!(
-            error.to_string().contains("recovery authorization refused"),
-            "{error:#}"
-        );
-        drop(_env);
-
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("CAS_SESSION_ID", "unregistered-agent"),
-            ("CAS_FACTORY_SESSION", "factory-a"),
-            ("CAS_AGENT_ROLE", "supervisor"),
-            ("CAS_AGENT_NAME", "claimed-supervisor"),
-        ]);
-        let error = execute_integration_recover(Some(&cas_root), false, None).unwrap_err();
-        assert!(
-            error.to_string().contains("recovery authorization refused"),
-            "{error:#}"
         );
     }
 

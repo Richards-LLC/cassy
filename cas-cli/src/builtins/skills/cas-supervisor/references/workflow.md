@@ -272,26 +272,10 @@ The default merge preserves the worker checkout for continued work. A later
 has no nonterminal tasks. Keep the worker running while another process
 depends on its checkout path.
 
-After a successful merge into an `epic/` branch, the factory daemon launches a
-bounded sweep of the project's detected test runner (`cargo nextest run --workspace
---no-fail-fast` for a Cargo project, the `test` script for a Node project) in a reusable
-detached merged-tip worktree. The sweep is asynchronous and capped by
-`[factory].merge_sweep_timeout_secs`; inspect the epic note and the durable
-`<cas-root>/merge-sweeps/` log before accepting another merge when it reports
-`FAILED`, `TIMED OUT`, or `SETUP FAILED`. Set `[factory].merge_sweep = false`
-only when the host cannot absorb this additional validation load.
-The sweep starts `[factory].merge_sweep_quiet_secs` (default 300 s) after the
-last epic merge. A burst of merges runs one sweep of the newest tip, and each
-merge cancels a stale running sweep at once. Set it to 0 to start immediately.
-A project whose suites need their own script or environment sets
-`[factory].merge_sweep_command` (run via `sh -c` instead of the detected
-runner) and a `[factory.merge_sweep_env]` table in `config.toml`. Set
-`[factory].merge_sweep_cwd = "web"` to run the command or detected runner in
-that subdirectory; without it, detection searches the checkout and nested
-directories for a test manifest. The sweep
-log shows only the variable names. A sweep the build guard defers is noted on
-the epic without a relay; the run that finally goes ahead sends one relay
-naming its result and integration tip.
+A merge into an `epic/` branch runs no local suite (3.54.0). The epic's one
+integration proof is the merge queue run for its PR. When that PR leaves the
+queue without merging, the daemon sends one `merge_queue_ejected` wake naming
+the PR and the failing job; nothing is re-enqueued automatically.
 
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
@@ -412,8 +396,8 @@ After the rebase, run the same command against the new base.
   `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
 
 A matching patch-id proves the diff is the same. It does not prove the diff
-still integrates with the new base: the merge sweep and the Phase 4 final
-gate still run. A green CI run is not a review verdict.
+still integrates with the new base: the merge queue run on the epic PR
+still proves that. A green CI run is not a review verdict.
 
 ## Phase 3: Review (Shared Mode)
 

@@ -260,7 +260,6 @@ fn coord_req(action: &str) -> CoordinationRequest {
         priority: None,
         notification_id: None,
         count: None,
-        accept: None,
         worker_names: None,
         lane: None,
         branch: None,

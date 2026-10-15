@@ -209,48 +209,6 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
-        key: "factory.merge_sweep",
-        section: "factory",
-        name: "Post-Merge Workspace Sweep",
-        description: "Run one bounded cargo nextest --workspace --no-fail-fast sweep on each merged epic tip. Disable only when the factory host cannot absorb the additional validation load.",
-        value_type: ConfigType::Bool,
-        default: "true",
-        constraint: Constraint::None,
-        advanced: false,
-        requires_feature: None,
-        keywords: &["factory", "merge", "sweep", "nextest", "workspace", "epic"],
-        use_cases: &["Catch merged-tree regressions before the next merge", "Disable on a deliberately constrained host"],
-    });
-
-    registry.register(ConfigMeta {
-        key: "factory.merge_sweep_command",
-        section: "factory",
-        name: "Post-Merge Sweep Command",
-        description: "Command the post-merge sweep runs (via sh -c in the merged-tip worktree) instead of the detected cargo nextest or package test script. Empty keeps detection. Its environment comes from the [factory.merge_sweep_env] table in config.toml, whose values are never logged.",
-        value_type: ConfigType::String,
-        default: "",
-        constraint: Constraint::None,
-        advanced: true,
-        requires_feature: None,
-        keywords: &["factory", "merge", "sweep", "command", "test", "env"],
-        use_cases: &["Run the suite the way CI runs it", "Give database-backed suites their setup step"],
-    });
-
-    registry.register(ConfigMeta {
-        key: "factory.release_gate_home_dir",
-        section: "factory",
-        name: "Assembly Proof Scratch Base",
-        description: "Absolute scratch base for the assembly proof's plain clone, on the checkout filesystem outside system temporary roots, TMPDIR and every .cas ancestor (for example /home/cas-release-gate/base). The daemon passes it as CAS_RELEASE_GATE_HOME_DIR. Empty reports NOT CONFIGURED without running or attributing a failed suite.",
-        value_type: ConfigType::String,
-        default: "",
-        constraint: Constraint::None,
-        advanced: true,
-        requires_feature: None,
-        keywords: &["factory", "release", "assembly", "scratch", "clone", "integration"],
-        use_cases: &["Configure automatic assembly sweeps without daemon environment variables"],
-    });
-
-    registry.register(ConfigMeta {
         key: "factory.epic_base_branch",
         section: "factory",
         name: "Epic Base Branch",
@@ -265,48 +223,6 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             "Cut epics and workers from staging in a staging-first repository",
             "Leave empty to use the repository's default branch",
         ],
-    });
-
-    registry.register(ConfigMeta {
-        key: "factory.merge_sweep_cwd",
-        section: "factory",
-        name: "Post-Merge Sweep Working Directory",
-        description: "Directory relative to the merged-tip checkout for the sweep command or detected runner. Empty uses automatic runner discovery.",
-        value_type: ConfigType::String,
-        default: "",
-        constraint: Constraint::None,
-        advanced: true,
-        requires_feature: None,
-        keywords: &["factory", "merge", "sweep", "cwd", "directory", "test"],
-        use_cases: &["Run a web app suite from web/", "Select one runner in a multi-app repository"],
-    });
-
-    registry.register(ConfigMeta {
-        key: "factory.merge_sweep_timeout_secs",
-        section: "factory",
-        name: "Post-Merge Sweep Timeout",
-        description: "Maximum wall-clock seconds allowed for one post-merge cargo nextest workspace sweep before it is terminated and reported.",
-        value_type: ConfigType::Int,
-        default: "1800",
-        constraint: Constraint::Range(1, 86_400),
-        advanced: true,
-        requires_feature: None,
-        keywords: &["factory", "merge", "sweep", "timeout", "nextest"],
-        use_cases: &["Bound validation on a shared host", "Allow a larger workspace more time to finish"],
-    });
-
-    registry.register(ConfigMeta {
-        key: "factory.merge_sweep_quiet_secs",
-        section: "factory",
-        name: "Post-Merge Sweep Quiet Period",
-        description: "Seconds with no further epic merge before the rolling integration sweep starts. A burst of merges runs one sweep of the newest tip; each merge still cancels a stale running sweep. 0 starts immediately.",
-        value_type: ConfigType::Int,
-        default: "300",
-        constraint: Constraint::Range(0, 3_600),
-        advanced: true,
-        requires_feature: None,
-        keywords: &["factory", "merge", "sweep", "debounce", "quiet", "proof"],
-        use_cases: &["Leave QA browser runs host memory during merge bursts", "Start every sweep immediately with 0"],
     });
 
     registry.register(ConfigMeta {

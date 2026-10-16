@@ -423,7 +423,10 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
 
     let source = fs::read_to_string(worktree.join("docs/release-reports/v3.19.0.md")).unwrap();
     let (user_section, developer_and_rest) = source.split_once("## Under the hood").unwrap();
-    assert!(source.contains("Published 9 September 2026 · 16:51 UTC"));
+    // pin: the operator reads Eastern 12-hour times (cas-5389)
+    assert!(source.contains("Published 9 September 2026 · 12:51 PM ET"));
+    assert!(!source.contains("UTC"), "{source}");
+    assert!(source.contains("date: 2026-09-09\n"));
     assert!(source.contains("The release is ready to inspect."));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("areas: [\"Tasks\"]"));
@@ -578,5 +581,8 @@ release_train_announce_posted_block
             .contains("GitHub release: <https://github.com/example/project/releases/tag/v3.19.0>")
     );
     assert!(receipt_text.contains("<https://example.test/user-1>"));
+    // pin: the POSTED block shows the operator's Eastern 12-hour time (cas-5389)
+    assert!(receipt_text.contains("1 January 2099 · 7:00 PM ET"), "{receipt_text}");
+    assert!(!receipt_text.contains("UTC"), "{receipt_text}");
     assert_markdownlint_clean(&repo_root, &[&report_path, &announce_path]);
 }

@@ -12976,12 +12976,13 @@ mod tests {
             .map(|row| row.unwrap())
             .collect();
         assert_eq!(prompts.len(), 1, "{prompts:?}");
+        // pin: the notice must name the exact abandoned operator turn so the supervisor can look it up.
         assert!(prompts[0].contains(&format!("Message {explicit} to operator")), "{prompts:?}");
         assert!(!prompts[0].contains(&mirror.to_string()), "{prompts:?}");
-        assert!(
-            prompts[0].contains("no Commander device received it before it expired"),
-            "{prompts:?}"
-        );
+        // pin: GH #1196 contract: the operator-facing cause is "no Commander device", not session membership.
+        let cause = "no Commander device received it before it expired";
+        assert!(prompts[0].contains(cause), "{prompts:?}");
+        // pin: GH #1196: the misleading session-membership reason must not reach operator notices.
         assert!(!prompts[0].contains("factory session"), "{prompts:?}");
     }
 

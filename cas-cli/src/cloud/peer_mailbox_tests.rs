@@ -836,3 +836,42 @@ async fn cas_4ac8_persistent_ack_rate_limit_is_bounded_and_named_in_mailbox_heal
     );
     assert!(mailbox_status_section(&machine.cas, Some("factory-a")).contains("rate limited"));
 }
+
+#[tokio::test]
+async fn cas_4ac8_retry_after_blocks_later_chunks_ack_and_metadata_requests() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "600"))
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let mailbox = HttpPeerMailbox::new(&endpoint, "test-token");
+        assert!(
+            mailbox
+                .claim(&[REPO.into()], &["one".into()], "consumer")
+                .is_err()
+        );
+        let later = mailbox
+            .claim(&[REPO.into()], &["two".into()], "consumer")
+            .unwrap_err();
+        assert!(later.contains("rate limited"), "{later}");
+        let ack = mailbox
+            .ack("consumer", &[("pm-one".into(), PeerAckOutcome::Delivered)])
+            .unwrap_err();
+        assert!(ack.contains("rate limited"), "{ack}");
+        let status = mailbox.status("pm-one").unwrap_err();
+        assert!(status.contains("rate limited"), "{status}");
+        assert!(mailbox.sender_labels(REPO, &["sender".into()]).is_empty());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "HTTP escaped shared-client cooldown"
+    );
+}

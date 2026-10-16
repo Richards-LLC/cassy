@@ -1375,10 +1375,8 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
 }
 
 
-#[tokio::test]
-async fn ct2_p3_peer_mail_survives_restart() {
+async fn restart_peer_mail(unregister: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    for unregister in [false, true] {
         let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
         let endpoint = server.uri();
         let alpha = TestMachine::new("machine-alpha");
@@ -1406,7 +1404,9 @@ async fn ct2_p3_peer_mail_survives_restart() {
                 old.status = cas::types::AgentStatus::Shutdown;
                 agents.update(&old).unwrap();
             }
-            registry.lock().unwrap().get_mut("b-old").unwrap()["status"] = json!("shutdown");
+            // Cloud presence can lag a locally ended session (including a
+            // missed shutdown). The stale address is still a valid mailbox.
+            registry.lock().unwrap().get_mut("b-old").unwrap()["status"] = json!("stale");
             let peers = peers_of(&alpha.cas_dir, "a");
             let old_peer = resolve_peer_target(&peers, "peer-beta@machine-beta").unwrap().unwrap();
             let receipt = send_to_peer(&alpha.cas_dir, "a", old_peer, "mail while down", None, None).unwrap();
@@ -1433,5 +1433,14 @@ async fn ct2_p3_peer_mail_survives_restart() {
             let peers = peers_of(&alpha.cas_dir, "a");
             assert_eq!(resolve_peer_target(&peers, "peer-beta@machine-beta").unwrap().unwrap().agent_id, "b-new");
         }).await.unwrap();
-    }
+}
+
+#[tokio::test]
+async fn ct2_p3_peer_mail_survives_restart() {
+    restart_peer_mail(false).await;
+}
+
+#[tokio::test]
+async fn cas_8063_peer_mail_survives_unregister_restart() {
+    restart_peer_mail(true).await;
 }

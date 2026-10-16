@@ -37,10 +37,12 @@ describe("bundled UI and mono fonts", () => {
       ["JetBrainsMono-latin-wght.woff2", 40404],
     ] as const;
     for (const [file, size] of pinned) {
+      // pin: the stated bundle-size increase; a font swap must restate it.
       expect(readFileSync(src(`./fonts/${file}`)).byteLength, file).toBe(size);
     }
     for (const license of ["LICENSE.Inter.txt", "LICENSE.JetBrainsMono.txt"]) {
       expect(existsSync(src(`./fonts/${license}`)), license).toBe(true);
+      // pin: redistributing the fonts requires the OFL 1.1 text to ship with them.
       expect(readFileSync(src(`./fonts/${license}`), "utf8"), license).toContain("SIL Open Font License, Version 1.1");
     }
   });

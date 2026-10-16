@@ -77,7 +77,37 @@ pub(crate) fn daemon_relaunch_args(config: &DaemonConfig) -> Vec<std::ffi::OsStr
     if !config.phone_home {
         args.push("--no-phone-home".into());
     }
+    // cas-a5c0 (cas-2992 item 2): the resolved specs, so per-worker and
+    // supervisor cli/model/effort/account-dir overrides survive the re-exec.
+    for spec in &factory.resolved_worker_specs {
+        args.push("--worker-spec-json".into());
+        args.push(relaunch_spec_json(spec).into());
+    }
+    if let Some(ref spec) = factory.resolved_supervisor_spec {
+        args.push("--supervisor-spec-json".into());
+        args.push(relaunch_spec_json(spec).into());
+    }
     args
+}
+
+/// One resolved spec in the `--worker-spec` JSON schema the child's resolver
+/// reads: `{name, cli, model, effort, config_dir}`, unset fields omitted.
+fn relaunch_spec_json(spec: &cas_mux::WorkerSpec) -> String {
+    let mut object = serde_json::Map::new();
+    if let Some(ref name) = spec.name {
+        object.insert("name".into(), name.clone().into());
+    }
+    object.insert("cli".into(), spec.cli.backend().name().into());
+    if let Some(ref model) = spec.model {
+        object.insert("model".into(), model.clone().into());
+    }
+    if let Some(effort) = spec.effort {
+        object.insert("effort".into(), effort.as_str().into());
+    }
+    if let Some(ref config_dir) = spec.config_dir {
+        object.insert("config_dir".into(), config_dir.clone().into());
+    }
+    serde_json::Value::Object(object).to_string()
 }
 
 #[cfg(not(unix))]

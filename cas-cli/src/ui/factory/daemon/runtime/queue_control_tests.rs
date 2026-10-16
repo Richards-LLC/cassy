@@ -128,7 +128,9 @@ fn cas_7b6b_round2_failed_reads_eventually_release_batch_with_unknown_evidence()
     let mut preparation = super::super::queue_control_jobs::PromptPreparation::default();
     let mut raw = Some(batch);
     let mut released = None;
+    let mut attempts = 0;
     for n in 0..8 {
+        attempts += 1;
         released = preparation.advance(
             &mut jobs,
             raw.take(),
@@ -148,6 +150,12 @@ fn cas_7b6b_round2_failed_reads_eventually_release_batch_with_unknown_evidence()
     assert_eq!(
         preparation.recipient("worker-a").unwrap().tool_call,
         ToolCallEvidence::Unknown
+    );
+    assert_eq!(attempts, 3, "release after three unusable read attempts");
+    assert!(preparation.allows_delivery(Instant::now() + Duration::from_secs(1)));
+    assert!(
+        preparation.agents().is_empty(),
+        "Unknown is not registered sender authority"
     );
     assert!(!preparation.has_pending());
 }
@@ -189,6 +197,11 @@ fn cas_7b6b_round2_slow_reads_eventually_release_batch_off_the_loop() {
         preparation.recipient("worker-a").unwrap().tool_call,
         ToolCallEvidence::Unknown
     );
+    assert!(
+        preparation.allows_delivery(Instant::now() + Duration::from_secs(1)),
+        "degraded observations must pass the delivery guard rather than carry the batch again"
+    );
+    assert!(preparation.agents().is_empty());
     assert!(!preparation.has_pending());
 }
 

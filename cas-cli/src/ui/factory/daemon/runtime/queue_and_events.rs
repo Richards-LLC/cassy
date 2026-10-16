@@ -6716,7 +6716,10 @@ impl FactoryDaemon {
             .prompt_preparation
             .recipient(pane)
             .map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
-            .unwrap_or(RecipientWakeEvidence { recently_active: false, awaiting_first_prompt: true })
+            .unwrap_or(RecipientWakeEvidence {
+                recently_active: false,
+                awaiting_first_prompt: true,
+            })
     }
 
     /// Forward pending supervisor replies to the authenticated Commander hub

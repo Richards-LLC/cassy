@@ -70,6 +70,10 @@ pub struct Peer {
     /// (cas-d58d).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The branch checked out where the supervisor works (cas-f707), which
+    /// is the branch it delivers into (cas-a131).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Whether the caller's own account registered this supervisor:
     /// `None` when either account is unknown (cas-d58d).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,6 +214,7 @@ fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
             .filter(|user| !user.is_empty())
             .map(str::to_string),
         owner: agent_meta(agent, META_OWNER),
+        branch: agent_meta(agent, META_BRANCH),
         own: None,
     })
 }

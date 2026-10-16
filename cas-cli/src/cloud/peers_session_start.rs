@@ -123,6 +123,11 @@ pub fn render_session_start_peers(report: &PeerReport, tool_prefix: &str) -> Opt
             claims(detail),
         ));
     }
+    // cas-a131: same files in flight into the same target as a peer.
+    for overlap in super::peer_merge::render_overlaps(&report.overlaps) {
+        out.push('\n');
+        out.push_str(&overlap);
+    }
     if live > SESSION_START_PEER_ROWS {
         out.push_str(&format!("\n+{} more live", live - SESSION_START_PEER_ROWS));
     }

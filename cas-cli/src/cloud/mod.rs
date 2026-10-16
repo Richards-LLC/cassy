@@ -35,6 +35,7 @@ pub mod peers_session_start;
 pub mod presence;
 // cas-f9c7: cross-machine supervisor messaging through a cloud peer mailbox.
 pub mod peer_mailbox;
+pub mod peer_merge;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;

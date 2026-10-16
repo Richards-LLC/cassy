@@ -113,6 +113,9 @@ pub struct PeerReport {
     /// Same-repo supervisors of other accounts that `peers.same_repo_scope =
     /// own` left out of `peers` (cas-d58d).
     pub hidden_peers: usize,
+    /// In-flight branches of yours and a peer's that change the same files
+    /// on the way into the same target (cas-a131). Informational only.
+    pub overlaps: Vec<super::peer_merge::BranchOverlap>,
     pub error: Option<String>,
 }
 
@@ -168,6 +171,7 @@ impl PeerReport {
             status: "ready".into(),
             peers: Vec::new(),
             hidden_peers: 0,
+            overlaps: Vec::new(),
             error: None,
         }
     }
@@ -421,6 +425,9 @@ pub fn discover_peer_report(
             peers::owner_label(other)
         )));
     }
+    // cas-a131: same-file overlap between in-flight branches into the same
+    // target, before any narrowing to one selected peer.
+    report.overlaps = in_flight_overlaps(cas_root, &supervisors, &agents, &aliases, now);
     if let Some(selected) = selected {
         let peer = super::peer_mailbox::resolve_peer_target(&supervisors, selected)
             .map_err(CasError::Other)?
@@ -506,6 +513,57 @@ pub fn discover_peer_report(
     Ok(report)
 }
 
+/// cas-a131: this project's active worktrees and each listed peer's live
+/// workers, as in-flight branches into their targets, compared file by file.
+/// A peer's target is the branch its supervisor registered.
+fn in_flight_overlaps(
+    cas_root: &Path,
+    supervisors: &[Peer],
+    agents: &[AgentInfo],
+    aliases: &[String],
+    now: DateTime<Utc>,
+) -> Vec<super::peer_merge::BranchOverlap> {
+    use super::peer_merge::{InFlight, OVERLAP_BUDGET, find_overlaps};
+    let Some(repo) = cas_root.parent() else {
+        return Vec::new();
+    };
+    let own: Vec<InFlight> = crate::store::open_worktree_store(cas_root)
+        .ok()
+        .and_then(|store| store.list_active().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|worktree| InFlight { branch: worktree.branch, target: worktree.parent_branch })
+        .collect();
+    if own.is_empty() {
+        return Vec::new();
+    }
+    let mut theirs = Vec::new();
+    for supervisor in supervisors {
+        let Some(target) = supervisor.branch.clone() else {
+            continue;
+        };
+        let owner = agents.iter().find(|a| a.id == supervisor.agent_id);
+        let label = format!(
+            "{}@{} ({})",
+            supervisor.name,
+            supervisor.machine,
+            peers::owner_label(supervisor)
+        );
+        for agent in agents.iter().filter(|agent| {
+            belongs_to_peer(agent, supervisor, owner, aliases)
+                && heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS)
+        }) {
+            if let Some(branch) = meta(agent, peers::META_BRANCH) {
+                theirs.push((label.clone(), InFlight { branch: branch.to_string(), target: target.clone() }));
+            }
+        }
+    }
+    if theirs.is_empty() {
+        return Vec::new();
+    }
+    find_overlaps(repo, &own, &theirs, std::time::Instant::now() + OVERLAP_BUDGET)
+}
+
 pub fn ascii_terminal() -> bool {
     let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
         .into_iter()
@@ -570,6 +628,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         ));
         if report.peers.is_empty() {
             line("  no other supervisors seen in the last 24h".into());
+        }
+        for overlap_line in super::peer_merge::render_overlaps(&report.overlaps) {
+            line(overlap_line);
         }
         if report.hidden_peers > 0 {
             line(format!(

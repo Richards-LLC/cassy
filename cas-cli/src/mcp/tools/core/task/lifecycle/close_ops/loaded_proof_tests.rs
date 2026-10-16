@@ -22,6 +22,25 @@ fn cas_a576_exact_issue_receipt_passes_real_risk_close_gate() {
 }
 
 #[test]
+fn cas_a576_rust_module_filter_target_is_refused() {
+    for target in [
+        "cas::some::single_test",
+        "cargo test some::single_test",
+        "whole::single_test",
+        "vitest_lookalike",
+        "go build",
+        "explicit Rust (cas::some::single_test)",
+    ] {
+        let task = concurrency_task(&format!(
+            "target={target}; parallelism=16; loops=3; result=PASS"
+        ));
+        let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .expect_err("a structured Rust subset must not satisfy whole-target scope");
+        assert!(error.contains("missing=[target]"), "{target}: {error}");
+    }
+}
+
+#[test]
 fn cas_a576_refusal_reports_parsed_missing_fields_and_example() {
     let task =
         concurrency_task("non-Rust target: vitest src/example.test.ts --jobs 16; result=PASS");

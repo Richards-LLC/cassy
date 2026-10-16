@@ -106,10 +106,14 @@ fn supersedes(intent: &Intent, agent: &Agent) -> bool {
 pub(crate) struct Snapshot {
     files: std::collections::BTreeMap<PathBuf, Result<Intent, String>>,
     listing_failed: bool,
+    generation: Option<std::time::SystemTime>,
 }
 
 impl Snapshot {
     pub(crate) fn load(root: &Path) -> Self {
+        // Capture BEFORE listing: an enqueue during loading must invalidate
+        // this snapshot at the next post-lease check too.
+        let generation = directory_generation(root);
         match paths(root) {
             Ok(files) => Self {
                 files: files
@@ -121,14 +125,28 @@ impl Snapshot {
                     })
                     .collect(),
                 listing_failed: false,
+                generation,
             },
             Err(error) => {
                 tracing::warn!(%error, "cloud shutdown intent listing unavailable; checking agent fences directly");
                 Self {
                     files: Default::default(),
                     listing_failed: true,
+                    generation,
                 }
             }
+        }
+    }
+
+    /// Call only after acquiring the shared presence lease. Atomic intent
+    /// creation/replacement/removal changes the directory generation, so a
+    /// completed shutdown from another daemon cannot hide behind a stale pass.
+    pub(crate) fn refresh_after_lease(&mut self, root: &Path) {
+        if self.listing_failed
+            || self.generation.is_none()
+            || self.generation != directory_generation(root)
+        {
+            *self = Self::load(root);
         }
     }
 
@@ -144,6 +162,9 @@ impl Snapshot {
             path(root, &agent.id, session),
         ];
         if self.listing_failed {
+            if agent.cc_session_id.is_none() {
+                return Err("shutdown intent unavailable: cannot check an unknown harness session without a directory listing".into());
+            }
             for file in &direct {
                 if !self.files.contains_key(file) {
                     match read(file) {
@@ -174,6 +195,41 @@ impl Snapshot {
             }
         }
         Ok(false)
+    }
+}
+
+fn directory_generation(root: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(root.join(DIR))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+/// Revalidate before replacing an existing intent. A stale pass must not
+/// recreate retired work or overwrite a completion recorded during HTTP.
+fn persist_pending(file: &Path, candidate: Intent) -> std::io::Result<Option<Intent>> {
+    match read(file) {
+        Ok(current) if current.completed_at.is_some() => Ok(Some(current)),
+        Ok(_) => {
+            write(file, &candidate, false)?;
+            Ok(Some(candidate))
+        }
+        Err(error) if missing(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn complete_superseded(file: &Path, now: DateTime<Utc>) -> std::io::Result<Option<Intent>> {
+    let mut current = match read(file) {
+        Ok(current) => current,
+        Err(error) if missing(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if current.completed_at.is_none() {
+        current.completed_at = Some(now);
+        current.cause = "superseded by a new local registration".into();
+        persist_pending(file, current)
+    } else {
+        Ok(Some(current))
     }
 }
 
@@ -357,6 +413,7 @@ pub(crate) fn drain_snapshot(
     // Supersession and completed-fence pruning need no network-work lease.
     // Only cleanup that is actually due competes with presence readers.
     let mut due = Vec::new();
+    let mut retired = Vec::new();
     let mut agents = None;
     for (file, result) in &mut snapshot.files {
         let intent = match result {
@@ -387,9 +444,10 @@ pub(crate) fn drain_snapshot(
                 .get(&intent.agent_id)
             {
                 Ok(agent) if supersedes(intent, &agent) => {
-                    intent.completed_at = Some(now);
-                    intent.cause = "superseded by a new local registration".into();
-                    write(file, intent, false).map_err(|error| error.to_string())?;
+                    match complete_superseded(file, now).map_err(|error| error.to_string())? {
+                        Some(current) => *intent = current,
+                        None => retired.push(file.clone()),
+                    }
                     continue;
                 }
                 Ok(_) | Err(cas_store::StoreError::NotFound(_)) => {}
@@ -402,6 +460,9 @@ pub(crate) fn drain_snapshot(
         if now >= intent.next_retry_at || now >= intent.expires_at {
             due.push(file.clone());
         }
+    }
+    for file in retired {
+        snapshot.files.remove(&file);
     }
     if due.is_empty() {
         return Ok(());
@@ -437,7 +498,14 @@ pub(crate) fn drain_snapshot(
             Err(error) => {
                 intent.cause = format!("local session check failed: {error}");
                 intent.next_retry_at = now + chrono::Duration::seconds(30);
-                write(&file, &intent, false).map_err(|error| error.to_string())?;
+                match persist_pending(&file, intent).map_err(|error| error.to_string())? {
+                    Some(current) => {
+                        snapshot.files.insert(file, Ok(current));
+                    }
+                    None => {
+                        snapshot.files.remove(&file);
+                    }
+                }
                 continue;
             }
         };
@@ -484,8 +552,14 @@ pub(crate) fn drain_snapshot(
                 }
             }
         }
-        write(&file, &intent, false).map_err(|error| error.to_string())?;
-        snapshot.files.insert(file, Ok(intent));
+        match persist_pending(&file, intent).map_err(|error| error.to_string())? {
+            Some(current) => {
+                snapshot.files.insert(file, Ok(current));
+            }
+            None => {
+                snapshot.files.remove(&file);
+            }
+        }
     }
     Ok(())
 }

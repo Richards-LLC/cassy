@@ -135,8 +135,11 @@ a real SessionStart advances a fenced incarnation even when failed local cleanup
 revival or automatic registration left the row active. Automatic MCP reinsertion
 after `/clear` remains fenced without a session id, regardless of PID ancestry.
 Shutdown checks supersession without the network lease and takes the exclusive
-lease only for due work. Presence shares parsed fences within each pass; listing
-failures are isolated from unrelated agents. Startup
+lease only for due work. Presence shares parsed fences within each pass and
+refreshes them after acquiring its lease when the intent directory changes.
+A listing failure fails closed for an unknown harness session; known sessions
+can still check their direct fences. Cleanup re-reads pending work before writing
+so a stale pass cannot recreate retired files or overwrite a completion. Startup
 replies without waiting for Cloud work; concurrent startup requests coalesce by
 agent and are drained after the current presence pass. A panicked presence pass
 can be restarted by the next kick. A retained ended row advances its registration

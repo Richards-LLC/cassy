@@ -31,6 +31,7 @@ pub const PRESENCE_DIR: &str = "cloud_presence";
 /// Per-request cap for presence calls, so a slow cloud never holds a
 /// heartbeat tick for the coordinator's default thirty seconds.
 pub const PRESENCE_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_ENDED_CAUSE: &str = "session ended; cloud shutdown pending or completed";
 /// Backoff after the second consecutive failure; it doubles from here.
 pub const BACKOFF_BASE_SECS: i64 = 30;
 /// Longest wait between two registration attempts.
@@ -278,9 +279,10 @@ fn register_with_shutdown(
             );
         }
     };
+    shutdown.refresh_after_lease(cas_root);
     let cause = match shutdown.is_ended(cas_root, agent, now) {
         Ok(false) => None,
-        Ok(true) => Some("session ended; cloud shutdown pending or completed".into()),
+        Ok(true) => Some(SESSION_ENDED_CAUSE.into()),
         Err(error) => Some(error),
     };
     if let Some(cause) = cause {
@@ -388,6 +390,9 @@ pub(crate) fn tick_with_shutdown(
     }
     let outcome = |record: PresenceRecord, ok: TickAction| match record.state {
         PresenceState::Registered => ok,
+        PresenceState::Failing if record.cause.as_deref() == Some(SESSION_ENDED_CAUSE) => {
+            TickAction::Waiting
+        }
         PresenceState::Failing => TickAction::Failed(record.cause.unwrap_or_default()),
     };
     let Some(record) = load(cas_root, &agent.id) else {
@@ -425,6 +430,12 @@ pub(crate) fn tick_with_shutdown(
             Ok(None) => return TickAction::Waiting,
             Err(error) => return TickAction::Failed(format!("cloud presence lease: {error}")),
         };
+        shutdown.refresh_after_lease(cas_root);
+        match shutdown.is_ended(cas_root, agent, now) {
+            Ok(true) => return TickAction::Waiting,
+            Ok(false) => {}
+            Err(cause) => return TickAction::Failed(cause),
+        }
         coordinator.heartbeat_presence(&agent.id, Some(&metadata))
     };
     match heartbeat {
@@ -719,38 +730,80 @@ mod round5_tests {
     use super::*;
     use crate::store::init_cas_dir;
     use crate::test_support::TestEnvGuard;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn late_fence(mode: &str) {
         let env = TestEnvGuard::temp_home();
         let root = init_cas_dir(env.home()).unwrap();
         let server = MockServer::start().await;
-        Mock::given(any()).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&server).await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
         let mut agent = Agent::new("late-fence".into(), "late-fence".into());
         agent.cc_session_id = Some("same".into());
         let now = Utc::now();
         if mode == "heartbeat" {
-            save(&root, &PresenceRecord {
-                agent_id: agent.id.clone(), state: PresenceState::Registered, cause: None, failures: 0,
-                last_attempt_at: now, registered_at: Some(now), next_retry_at: None, focus: None, branch: None,
-            });
+            save(
+                &root,
+                &PresenceRecord {
+                    agent_id: agent.id.clone(),
+                    state: PresenceState::Registered,
+                    cause: None,
+                    failures: 0,
+                    last_attempt_at: now,
+                    registered_at: Some(now),
+                    next_retry_at: None,
+                    focus: None,
+                    branch: None,
+                },
+            );
         }
         let mut snapshot = super::super::shutdown::Snapshot::load(&root);
         super::super::shutdown::enqueue(&root, &agent, "same", &server.uri()).unwrap();
         let endpoint = server.uri();
         let mode = mode.to_string();
         let (action, record) = tokio::task::spawn_blocking(move || {
-            let client = CloudCoordinator::new(CloudConfig {endpoint, token: Some("test-token".into()), ..Default::default()}).unwrap();
+            let client = CloudCoordinator::new(CloudConfig {
+                endpoint,
+                token: Some("test-token".into()),
+                ..Default::default()
+            })
+            .unwrap();
             if mode == "register" {
-                (None, Some(register_with_shutdown(&client, &root, &agent, now, &mut snapshot)))
+                (
+                    None,
+                    Some(register_with_shutdown(
+                        &client,
+                        &root,
+                        &agent,
+                        now,
+                        &mut snapshot,
+                    )),
+                )
             } else {
-                (Some(tick_with_shutdown(&client, &root, &agent, now, &mut snapshot)), None)
+                (
+                    Some(tick_with_shutdown(
+                        &client,
+                        &root,
+                        &agent,
+                        now,
+                        &mut snapshot,
+                    )),
+                    None,
+                )
             }
-        }).await.unwrap();
-        assert!(server.received_requests().await.unwrap().is_empty(), "stale snapshot must not resurrect Cloud presence");
-        if let Some(action) = action { assert_eq!(action, TickAction::Waiting); }
+        })
+        .await
+        .unwrap();
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "stale snapshot must not resurrect Cloud presence"
+        );
+        if let Some(action) = action {
+            assert_eq!(action, TickAction::Waiting);
+        }
         if let Some(record) = record {
             assert_eq!(record.state, PresenceState::Failing);
             assert!(record.cause.unwrap().contains("session ended"));
@@ -758,9 +811,15 @@ mod round5_tests {
     }
 
     #[tokio::test]
-    async fn cas_4ac8_round5_late_fence_blocks_first_registration() { late_fence("tick").await; }
+    async fn cas_4ac8_round5_late_fence_blocks_first_registration() {
+        late_fence("tick").await;
+    }
     #[tokio::test]
-    async fn cas_4ac8_round5_late_fence_blocks_heartbeat() { late_fence("heartbeat").await; }
+    async fn cas_4ac8_round5_late_fence_blocks_heartbeat() {
+        late_fence("heartbeat").await;
+    }
     #[tokio::test]
-    async fn cas_4ac8_round5_late_fence_blocks_direct_registration() { late_fence("register").await; }
+    async fn cas_4ac8_round5_late_fence_blocks_direct_registration() {
+        late_fence("register").await;
+    }
 }

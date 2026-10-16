@@ -2398,24 +2398,35 @@ fn worker_pattern_kill_group(group: &[Vec<String>], piped: bool, depth: usize) -
 /// redirections. In particular, metacharacters inside a quoted commit message
 /// stay inside one word and can never be mistaken for file-creation syntax.
 fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
+    factory_shell_tokens_with_literals(command).0
+}
+
+/// Preserve whether the outer shell can change a word's program structure.
+/// Single-quoted words are literal; numeric status/PID parameters cannot inject
+/// shell syntax. The effect collector still checks their use as commands/paths.
+fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bool>) {
     let mut tokens = Vec::new();
+    let mut literals = Vec::new();
     let mut word = String::new();
+    let mut literal = true;
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
-
-    let push_word = |tokens: &mut Vec<ShellToken>, word: &mut String| {
+    let push_word = |tokens: &mut Vec<ShellToken>, literals: &mut Vec<bool>, word: &mut String, literal: &mut bool| {
         if !word.is_empty() {
             tokens.push(ShellToken::Word(std::mem::take(word)));
+            literals.push(*literal);
+            *literal = true;
         }
     };
-
-    for ch in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
         if comment {
             if matches!(ch, '\n' | '\r') {
                 comment = false;
-                push_word(&mut tokens, &mut word);
+                push_word(&mut tokens, &mut literals, &mut word, &mut literal);
                 tokens.push(ShellToken::Operator(';'));
+                literals.push(true);
             }
             continue;
         }
@@ -2423,6 +2434,16 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
             word.push(ch);
             escaped = false;
             continue;
+        }
+        if quote != Some('\'') {
+            if ch == '$' && chars.peek().is_some_and(|next| matches!(next, '?' | '$' | '!')) {
+                word.push(ch);
+                word.push(chars.next().unwrap());
+                continue;
+            }
+            if matches!(ch, '$' | '`') || (quote.is_none() && matches!(ch, '*' | '?' | '[')) {
+                literal = false;
+            }
         }
         match quote {
             Some(active) if ch == active => quote = None,
@@ -2432,14 +2453,16 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
                 '\'' | '"' => quote = Some(ch),
                 '#' if word.is_empty() => comment = true,
                 '>' | '<' | '|' | '&' | ';' | '(' | ')' => {
-                    push_word(&mut tokens, &mut word);
+                    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
                     tokens.push(ShellToken::Operator(ch));
+                    literals.push(true);
                 }
                 '\n' | '\r' => {
-                    push_word(&mut tokens, &mut word);
+                    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
                     tokens.push(ShellToken::Operator(';'));
+                    literals.push(true);
                 }
-                ch if ch.is_whitespace() => push_word(&mut tokens, &mut word),
+                ch if ch.is_whitespace() => push_word(&mut tokens, &mut literals, &mut word, &mut literal),
                 _ => word.push(ch),
             },
         }
@@ -2447,8 +2470,8 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     if escaped {
         word.push('\\');
     }
-    push_word(&mut tokens, &mut word);
-    tokens
+    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
+    (tokens, literals)
 }
 
 /// Return shell statements with heredoc bodies and comments removed. Quoted
@@ -5823,6 +5846,8 @@ fn factory_workspace_contract_denial(
         "a write with an unresolved effective working directory"
         | "a link with an unresolved effective working directory"
         | "an unresolved shell payload"
+        | "an unresolved shell executable"
+        | "an unresolved shell write target"
         | "a shell command without a resolvable payload"
         | "a shell payload beyond the resolution limit"
         | "an unmatched shell scope") {
@@ -7663,6 +7688,14 @@ mod workspace_contract_tests {
             ("sh -c 'cd && printf x > new.rs'; HOME=src", true),
             ("CDPATH=../..; cd ./src && printf x > new.rs", false),
             ("sh -c \"$UNKNOWN_SCRIPT\"", true),
+            ("sh -c '$UNKNOWN_SCRIPT'", true),
+            ("sh -c '$(printf touch) src/new.rs'", true),
+            ("sh -c 'cd $(printf src) && printf x > new.rs'", true),
+            ("sh -c 'printf x > \"$(printf src/new.rs)\"'", true),
+            ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
+            ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
+            ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
+            ("sh -c \"printf '%s' $?\"", false),
             ("cd src && printf x > new.rs", false),
             ("D=src; cd \"$D\" && printf x > new.rs", false),
             ("cd ../.. && cd worktrees/worker-e460 && printf x > local.rs", false),

@@ -49,6 +49,9 @@ fn render(tokens: &[ShellToken]) -> String {
 }
 
 fn rooted(raw: &str, cwd: Option<&Path>, original: &Path) -> Result<String, &'static str> {
+    if raw.contains("$(") || raw.contains('`') || raw == "$" {
+        return Err("an unresolved shell write target");
+    }
     if Path::new(raw).is_absolute() || raw.starts_with('~') {
         return Ok(raw.to_string());
     }
@@ -69,6 +72,75 @@ fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
     }
 }
 
+/// Extract substitutions kept opaque inside a quoted shell word. Unquoted
+/// substitutions are already split into subprocess scopes by the tokenizer.
+fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
+    let bytes = word.as_bytes();
+    let mut bodies = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes.get(index..index + 2) == Some(b"$(") {
+            let end = substitution_end(bytes, index + 2, 0).ok_or("an unresolved shell payload")?;
+            bodies.push(&word[index + 2..end]);
+            index = end + 1;
+        } else if bytes[index] == b'`' {
+            let start = index + 1;
+            index = start;
+            while index < bytes.len() && bytes[index] != b'`' {
+                index += if bytes[index] == b'\\' { 2 } else { 1 };
+            }
+            if index >= bytes.len() {
+                return Err("an unresolved shell payload");
+            }
+            bodies.push(&word[start..index]);
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(bodies)
+}
+
+fn substitution_end(bytes: &[u8], mut index: usize, depth: usize) -> Option<usize> {
+    if depth > 8 {
+        return None;
+    }
+    let mut parentheses = 1;
+    let mut quote = None;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'\\' && quote != Some(b'\'') {
+            index += 2;
+            continue;
+        }
+        if quote == Some(b'\'') {
+            if ch == b'\'' {
+                quote = None;
+            }
+        } else if bytes.get(index..index + 2) == Some(b"$(") {
+            index = substitution_end(bytes, index + 2, depth + 1)?;
+        } else if quote == Some(b'"') {
+            if ch == b'"' {
+                quote = None;
+            }
+        } else {
+            match ch {
+                b'\'' | b'"' => quote = Some(ch),
+                b'(' => parentheses += 1,
+                b')' => {
+                    parentheses -= 1;
+                    if parentheses == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
 fn collect_script(
     script: &str,
     mut dirs: Directories,
@@ -80,7 +152,8 @@ fn collect_script(
     if depth > 8 {
         return Err("a shell payload beyond the resolution limit");
     }
-    let tokens = factory_shell_tokens(&shell_command_without_heredoc_bodies(script));
+    let (tokens, literal_words) =
+        factory_shell_tokens_with_literals(&shell_command_without_heredoc_bodies(script));
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
     // Directory operands use only bindings visible before that cd. The
@@ -110,12 +183,14 @@ fn collect_script(
                 tokens.get(start.wrapping_sub(1)),
                 Some(ShellToken::Operator('&' | '|'))
             );
+        let mut statement_start = start;
         let mut statement = &tokens[start..end];
         start = end + 1;
         while matches!(statement.first(), Some(ShellToken::Word(word))
             if matches!(word.as_str(), "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"))
         {
             statement = &statement[1..];
+            statement_start += 1;
         }
         let incoming = dirs.clone();
         let and_then =
@@ -139,9 +214,23 @@ fn collect_script(
                     _ => None,
                 })
                 .collect();
+            let word_literals: Vec<bool> = statement
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| {
+                    matches!(token, ShellToken::Word(_))
+                        .then_some(literal_words[statement_start + index])
+                })
+                .collect();
             let index = unwrapped_command_index(&words);
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
+            if name.is_some_and(|name| {
+                name.contains(['$', '`', '*', '?'])
+                    || (name.contains('[') && !matches!(name, "[" | "[["))
+            }) {
+                return Err("an unresolved shell executable");
+            }
 
             // A cwd-changing wrapper is scoped to the invoked command. Its
             // computed directory cannot be attributed to the hook's cwd.
@@ -155,6 +244,25 @@ fn collect_script(
             } else {
                 dirs.clone()
             };
+
+            // A quoted argument may execute a substitution even though the
+            // outer tokenizer correctly keeps it as one word. Its filesystem
+            // effects are checked in a subprocess scope; its output remains
+            // unresolved when used as an executable, directory or write path.
+            for (word, literal) in words.iter().zip(&word_literals) {
+                if !literal {
+                    for body in substitution_bodies(word)? {
+                        collect_script(
+                            body,
+                            statement_dirs.clone(),
+                            original,
+                            &directory_values,
+                            depth + 1,
+                            effects,
+                        )?;
+                    }
+                }
+            }
 
             for directory in &statement_dirs {
                 let base = directory.as_deref();
@@ -283,6 +391,7 @@ fn collect_script(
                 }
             }
 
+            let mut payload_literal = true;
             let payload = if matches!(
                 name,
                 Some("sh" | "bash" | "dash" | "zsh" | "ksh" | "script" | "su" | "runuser")
@@ -293,18 +402,40 @@ fn collect_script(
                             || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
                     })
                     .map(|position| {
+                        payload_literal = index
+                            .and_then(|index| word_literals.get(index + position + 2))
+                            .copied()
+                            .unwrap_or(false);
                         args.get(position + 1)
                             .cloned()
                             .ok_or("a shell command without a resolvable payload")
                     })
                     .transpose()?
             } else if name == Some("eval") {
+                payload_literal = word_literals[index.unwrap() + 1..]
+                    .iter()
+                    .all(|literal| *literal);
                 Some(args.join(" "))
             } else {
-                env_split_string_payload(&words)
+                let payload = env_split_string_payload(&words);
+                if let Some(payload) = &payload {
+                    let candidates: Vec<bool> = words
+                        .iter()
+                        .zip(&word_literals)
+                        .filter(|(word, _)| {
+                            *word == payload
+                                || word.strip_prefix("-S") == Some(payload.as_str())
+                                || word.strip_prefix("--split-string=") == Some(payload.as_str())
+                        })
+                        .map(|(_, literal)| *literal)
+                        .collect();
+                    payload_literal =
+                        !candidates.is_empty() && candidates.iter().all(|literal| *literal);
+                }
+                payload
             };
             if let Some(payload) = payload {
-                if payload.contains(['$', '`']) {
+                if !payload_literal {
                     return Err("an unresolved shell payload");
                 }
                 let nested = collect_script(

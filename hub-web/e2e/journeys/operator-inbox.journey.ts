@@ -428,7 +428,7 @@ async function enrollReplyBrowser(reader: import("@playwright/test").Page, cloud
   await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
   const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
   await cloud.approve(code, { capabilities: ["feed:read", ...(owner ? ["account:manage"] : [])] });
-  await expect(inbox.getByRole("button", { name: /soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
+  await expect(inbox.getByRole("button", { name: /^soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
   return inbox;
 }
 

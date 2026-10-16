@@ -54,6 +54,7 @@ pub mod foreign_rows;
 // cas-9e81: pub(crate) so factory_ops can reuse `config_gen`'s canonical
 // known-Claude-config-dir list instead of re-deriving `~/.claude` by hand.
 pub(crate) mod hook;
+pub use hook::{execute_native_pre_tool_use, is_native_codex_pre_tool};
 mod init;
 pub mod integrate;
 pub mod interactive;

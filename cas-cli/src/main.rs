@@ -59,8 +59,8 @@ fn main() -> ExitCode {
     }
     // Native Codex Cargo admission must not wait for Sentry, logging,
     // telemetry or development-tracer databases before selecting its route.
-    if cli::hook::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
-        return match cli::hook::execute_native_pre_tool_use() {
+    if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
+        return match cli::execute_native_pre_tool_use() {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => {
                 let output = cas::hooks::HookOutput::with_pre_tool_permission("deny", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive.");

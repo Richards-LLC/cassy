@@ -1523,5 +1523,6 @@ fn cas_940c_worker_mcp_config_roundtrip_and_invalid_rejection() {
         assert!(config.set("factory.claude.worker_mcp", "all").is_err());
         assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
     }
+    // pin: persisted TOML must reject modes outside the two operator-facing values.
     assert!(toml::from_str::<Config>("[factory.claude]\nworker_mcp='all'").is_err());
 }

@@ -3998,3 +3998,33 @@ fn cas_940c_worker_mcp_modes_preserve_supervisor_and_codex_launches() {
         }
     }
 }
+
+#[test]
+fn cas_940c_inherit_refuses_denials_and_needs_no_strict_capability() {
+    let mut env = TestEnvGuard::temp_home();
+    // Inherit must also work on a CLI without strict/config options.
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "");
+    for (policy, refused) in [
+        ("", false),
+        ("worker_credential_env=['CAS_940C_ALLOWED']", false),
+        ("supervisor_only_mcp=['external']", true),
+        ("supervisor_only_env=['PRIVATE_FIXTURE']", true),
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), format!("[factory]\n{policy}\n[factory.claude]\nworker_mcp='inherit'\n")).unwrap();
+        let mut pane = Mux::new(24, 80).build_add_worker_config("worker", project.path().into(), Some(&root), "supervisor", None, None);
+        let error = env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR");
+        assert_eq!(error.is_some(), refused, "policy={policy}: {error:?}");
+        assert!(!root.join("worker-mcp/worker.json").exists());
+        assert!(!pane.args.contains(&"--strict-mcp-config".into()));
+        if refused {
+            let message = error.unwrap();
+            assert!(message.contains("cas_only") && message.contains("denial policy"));
+            pane.command = "/bin/sh".into();
+            pane.args = vec!["-c".into(), "exit 0".into()];
+            assert!(crate::pty::Pty::spawn("inherit-refused-before-discovery", pane).is_err());
+        }
+    }
+}

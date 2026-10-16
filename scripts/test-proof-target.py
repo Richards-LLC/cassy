@@ -56,6 +56,22 @@ class TargetTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(REPO / 'scripts/proof_target.py'), 'run', str(root), '--', *command],
                               env=dict(os.environ, **env), capture_output=True, text=True)
 
+    def test_scratch_root_relocates_the_seed_build_cache(self):
+        # cas-baa8: assembly clones seed from the baseline the refresh script
+        # published, under [factory] scratch_root when it is set.
+        b = self.b_worktree()
+        scratch = self.base / 'scratch'
+        old = os.environ.get('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT')
+        self.addCleanup(lambda: os.environ.__setitem__('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT', old)
+                        if old is not None else os.environ.pop('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT', None))
+        os.environ['CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT'] = ''
+        self.assertEqual(targets.cache_root(b), self.a.resolve() / '.cas/build-cache')
+        os.environ['CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT'] = str(scratch)
+        root = targets.cache_root(b)
+        self.assertEqual(root.parent.parent, scratch)
+        self.assertEqual(root.name, 'build-cache')
+        self.assertTrue(root.parent.name.startswith('A-'))
+
     def test_two_worktrees_never_share_inherited_freshness(self):
         b = self.b_worktree()
         compiler = self.base / 'fixture-compiler.py'

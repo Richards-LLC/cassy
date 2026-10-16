@@ -1615,6 +1615,29 @@ assert_named_failure scratch-base "$output"
 grep -qF 'filesystem boundary' <<<"$output" && ok 'scratch-base names a cross-device base' \
     || bad "scratch-base omitted the filesystem boundary: $output"
 
+# cas-baa8: a base inside the configured [factory] scratch_root may sit on
+# another device; release_env.py decides, the same resolver that derived it.
+factory_scratch="$tmp/factory-scratch"
+mkdir -p "$factory_scratch"
+factory_key="$(cd "$repo" && python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts"); import release_env; print(release_env.project_key(Path(".cas").absolute()))')"
+mkdir -p "$factory_scratch/$factory_key"
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$factory_scratch/$factory_key/release-gate" \
+    CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT="$factory_scratch" \
+    CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+if grep -qE '^PASS scratch-base' <<<"$output" && grep -qF 'factory.scratch_root' <<<"$output"; then
+    ok 'scratch-base accepts a cross-device base inside factory.scratch_root'
+else
+    bad "scratch-base refused the configured factory.scratch_root base: $output"
+fi
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
+    CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT="$factory_scratch" \
+    CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+assert_named_failure scratch-base "$output"
+grep -qF 'filesystem boundary' <<<"$output" && ok 'scratch-base still refuses an unrelated cross-device base' \
+    || bad "scratch-base accepted a cross-device base outside factory.scratch_root: $output"
+
 output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
     CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=11 \
     CAS_RELEASE_GATE_LAST_ARCHIVE_BYTES=100 CAS_RELEASE_GATE_FREE_BYTES=199 \

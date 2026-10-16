@@ -2,11 +2,9 @@
 
 #![cfg(feature = "mcp-proxy")]
 
-use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cas::store::AgentStore;
 use cas::types::{Agent, AgentRole};
 use serde_json::{Value, json};
 

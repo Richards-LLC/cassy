@@ -78,15 +78,19 @@ impl VioletThreadResolver for DaemonVioletResolver {
             .runtime
             .lock()
             .map_err(|_| RemoteError::unavailable("Violet runtime lock poisoned"))?;
-        match runtime.block_on(tokio::time::timeout(
-            timeout,
-            self.proxy.call_tool(
-                &self.caller,
-                cmcp_core::config::VIOLET_SERVER,
-                "violet_read",
-                Some(args),
-            ),
-        )) {
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                timeout,
+                self.proxy.call_tool(
+                    &self.caller,
+                    cmcp_core::config::VIOLET_SERVER,
+                    "violet_read",
+                    Some(args),
+                ),
+            )
+            .await
+        });
+        match result {
             Ok(Ok(value)) => decode_violet_result(value),
             Ok(Err(error)) => Err(RemoteError::unavailable(
                 cmcp_core::describe_upstream_call_error(&error),

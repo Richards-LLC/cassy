@@ -56,6 +56,25 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
       await expect(row.getByText(/Enable alerts, then run cas hub restart on soundwave/)).toBeVisible();
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
+      await page.emulateMedia({ forcedColors: "active" });
+      expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      for (const button of [enable, inbox.getByRole("button", { name: "Refresh machine status" }), inbox.getByRole("button", { name: "Sign out", exact: true })]) {
+        const edges = await button.evaluate((node) => {
+          const style = getComputedStyle(node);
+          return ["Top", "Right", "Bottom", "Left"].map((side) => ({
+            width: parseFloat(style.getPropertyValue(`border-${side.toLowerCase()}-width`)),
+            style: style.getPropertyValue(`border-${side.toLowerCase()}-style`),
+            color: style.getPropertyValue(`border-${side.toLowerCase()}-color`),
+          }));
+        });
+        for (const edge of edges) {
+          expect(edge.width).toBeGreaterThan(0);
+          expect(edge.style).toBe("solid");
+          expect(edge.color).not.toBe("rgba(0, 0, 0, 0)");
+        }
+      }
+      if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-enable-forced-colors.png` });
+      await page.emulateMedia({ forcedColors: null });
       await enable.focus();
       await enable.press("Enter");
       await expect(row.getByText("Waiting for the first report", { exact: true })).toBeVisible();

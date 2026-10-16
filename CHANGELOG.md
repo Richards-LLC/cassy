@@ -7,6 +7,168 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Supervisors across projects** — Was: a supervisor could message only
+  supervisors working in the same project. → Now: any of your own live
+  supervisors, on any project or machine, can be listed (`cas peers --all`)
+  and messaged by name or project name; another user's supervisors are never
+  listed or reachable. Cross-project delivery needs the matching Cassy Cloud
+  update.
+- **Peers at session start** — Was: after `/clear`, nothing told a supervisor
+  that another supervisor was live on the same repo. → Now: session start lists
+  each live peer with its machine, heartbeat, claimed work and owning account;
+  `peers.same_repo_scope = own` keeps only your own.
+- **Merge courtesy for shared branches** — Was: supervisors sharing a target
+  branch had to announce merges by hand. → Now: a merge sends the others one
+  "about to merge" note, and `cas peers` warns when in-flight branches change
+  the same file. Nothing is locked or held.
+- **Peer mail stands out** — Was: replies from other supervisors were buried
+  among system notices. → Now: peer and operator messages lead the inbox, and
+  notices about workers that have already ended fold into one digest row.
+- **Backlog hygiene checks** — Was: open tasks that were already delivered,
+  finished epics left open, long-idle work and tasks citing deleted code went
+  unnoticed. → Now: `cas doctor` and supervisor session start flag all four,
+  with the evidence for each.
+- **Communication health** — Was: missed or duplicated messages were found by
+  accident. → Now: `cas doctor`, shutdown and the release gate report five
+  measured targets: no false abandons, every operator relay receipted, no
+  duplicate reads, at most one nudge per worker-hour, nothing gated without an
+  outcome.
+- **Idle projects keep syncing** — Was: a project with no open session on a
+  machine stopped pulling and pushing to Cassy Cloud. → Now: the Commander hub
+  syncs idle Cloud-linked projects in the background under a sync lease.
+- **One shared Claude setup per machine** — Was: each Claude account folder
+  kept its own commands, skills and settings, so a command could vanish when
+  you switched accounts. → Now: `cas accounts link` shares everything except
+  login files with the main folder (`--dry-run` previews it, and a printed
+  restore script undoes it), `cas accounts drift` reports differences, and
+  sessions show which account they use.
+- **Claude launch options** — Was: Claude agents started without names, and
+  workers loaded every configured MCP server. → Now: each agent is named for
+  its role, workers load only the Cassy server by default
+  (`factory.claude.worker_mcp = "inherit"` restores the old behaviour per
+  project), and `factory.claude.remote_control` and
+  `factory.claude.fallback_model` are available.
+- **Scratch drive for build caches** — Was: worker build targets, proof scratch
+  and assembly caches always lived inside the project. → Now:
+  `factory.scratch_root` moves them to another disk, including one on a
+  different device, and cleanup reports find them there.
+- **Commander remembers the last conversation** — Was: reloading while a
+  machine was unreachable showed "0 conversations" until it answered. → Now:
+  the last conversation and its kept messages appear at once, above the
+  machine's outage card.
+- **Commander machine-offline notices** — Was: Commander could not tell you a
+  machine had gone offline. → Now: an opted-in hub reports its presence, and
+  the account's device view shows outages and recoveries.
+- **Elegant tests, not copious** — Was: the skills pushed for more tests and
+  never for fewer. → Now: one short principle (the fewest tests that fail
+  without the change) reaches every assignment, task start and review, and
+  merge requests show test and source line counts for information.
+
+### Changed
+
+- **Commander conversations** — Was: conversations rode on the old terminal
+  pane grid. → Now: they mount on their own; a reconnect keeps the open thread
+  on screen, and the leftover terminal-only resize and reveal gates are gone.
+- **Release reports** — Was: reports often said "0 issues closed", led with
+  GitHub closures and used internal wording. → Now: they lead with what
+  shipped, group changes by area in plain words, count issues correctly, and
+  show times in Eastern 12-hour form, as do the Slack drafts.
+- **Faster release checks** — Was: a web-only fix still reran the whole Rust
+  suite, browser journeys ran twice, and fonts were installed on every journey
+  shard. → Now: a lane runs only what its change touches, journeys run once,
+  and the redundant font install is gone.
+- **Finished epics close themselves** — Was: closing a finished epic often
+  needed manual owner transfers, receipts and override notes. → Now: an epic
+  whose owner is gone is adopted, and work already on the default branch counts
+  as merged.
+
+### Fixed
+
+- **Exact-commit CI without a merge queue** — Was: on a repository with no
+  merge queue, an epic could close because its tip was on the default branch,
+  even if CI never ran there. → Now: it needs green CI on that exact commit.
+- **Memories no longer lost when projects merge** — Was: memory ids were
+  per-checkout counters, so merging two projects could archive a distinct
+  memory that shared an id. → Now: new memories get random ids, colliding
+  older ones are recovered deterministically, and folds follow Cassy Cloud's
+  rename rule.
+- **Team-linked projects sync again** — Was: a team-linked machine could push
+  personal rows and stop pulling team changes. → Now: team-linked sync runs in
+  team scope only, and the purge freshness check reads the team watermark.
+- **Reminders wake the supervisor** — Was: a fired reminder could sit unread
+  for minutes, and a supervisor's own reminders raised "unread" alarms. → Now:
+  each fired reminder wakes an idle supervisor once, without false alarms.
+- **One turn per event** — Was: an event could reach the supervisor as a
+  pointer, a body and repeated replays. → Now: its body arrives inline, once.
+- **Fewer false alarms** — Was: workers who had already acted were reported as
+  stalled or unread, an exhausted merge request read "(unknown task) moved on",
+  and "merge required" nags repeated while CI was still running. → Now: a
+  worker's later message, note or status change counts as acknowledgement, the
+  waiting merge stays visible, and the nag waits for finished CI against the
+  live target.
+- **Held tasks stay held** — Was: closing a dependency could move a task held
+  for another reason back to ready. → Now: only dependency holds are released.
+- **Close-gate accuracy** — Was: close could record a local-only commit as the
+  delivery, check a parked task against the worktree's next branch, refuse a
+  delivery that only merged main, accept a proof that had not happened yet, and
+  fail to hand a branch to an isolated worker. → Now: the delivery must be on
+  the pushed branch, each task is measured on its own branch, merge-only
+  deliveries are recognised, claimed proofs must cite a receipt, and branch
+  hand-off works for isolated workers.
+- **Shell write guard** — Was: words after a `$(…)` could be read as a new
+  command, and writes after `cd`, inside `sh -c` or through a link made in the
+  same command were judged against the wrong path. → Now: the guard follows
+  argument position, the working directory and link targets.
+- **Claude workers keep their place** — Was: clearing a Claude worker's context
+  dropped its registration, a standalone daemon's first Claude workers could
+  not start isolated, and the macOS daemon relaunch lost worker settings.
+  → Now: all three keep their registration and settings.
+- **Codex Cargo guard under load** — Was: under heavy load, Codex's pre-tool
+  hook could time out and let a raw Cargo build run. → Now: admission is
+  bounded and the timeout budget is larger, so the capped runner still applies.
+- **CI watchdog** — Was: one HTTP 403 failed the whole stale-run watchdog, and
+  that was relayed as "CI failed on main". → Now: API errors are isolated and
+  only real CI verdicts are relayed.
+- **Worker status** — Was: a slow `gh` call could stall worker status. → Now:
+  its subprocesses are time-limited.
+- **Neon setup** — Was: `cas integrate neon init` failed on its first call.
+  → Now: it lists organizations correctly, so disposable database branches can
+  be created.
+- **Dependency edits** — Was: adding and removing a dependency read its type
+  differently. → Now: both use one parser.
+
+### Tests
+
+- **Flake fixes** — Was: several tests failed under load or inside a factory
+  session: a shutdown drain, a torn inbox read, memory ordering with random
+  ids, and update tests that wrote into the real worktree. → Now: inbox writes
+  are atomic under a lock, and those tests are deterministic and isolated.
+- **Deployed-cloud inbox journey** — Was: Commander's cloud inbox was proven
+  only against a stand-in. → Now: a two-profile journey runs against the
+  deployed cloud, including revoke and key rotation.
+- **Leaner fold tests** — Was: the memory-fold tests repeated near-identical
+  cases. → Now: they share one table.
+
+### Documentation
+
+- **Coordination contracts** — Was: the claim, routing and reply APIs had no
+  fixtures, and the guides named an unpublished call. → Now: versioned request
+  and response fixtures define them, and the guides name only published calls.
+- **Code map** — Was: `.claude/CODEMAP.md` was out of date. → Now: it matches
+  this release's layout.
+
+### Internal
+
+- **Claim coordination groundwork** — Was: there was no client side for shared
+  work claims. → Now: a request journal and claim, status, release and transfer
+  actions exist; they stay inactive until the matching Cloud and Violet
+  services are live.
+- **Dead code removed** — Was: unused search entry points and a startup vector
+  cleanup remained. → Now: they are gone, and older embedding files are left in
+  place.
+
 ## [3.60.0] - 2026-10-16
 
 ### Fixed

@@ -3312,6 +3312,17 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    fn legacy_token(label: &str) -> String {
+        format!("{}_{label}", violet_compatibility().legacy_token_prefix)
+    }
+
+    fn legacy_env_prefix() -> &'static str {
+        violet_compatibility()
+            .legacy_token_prefix
+            .strip_suffix("SLACK_TOKEN")
+            .unwrap()
+    }
+
     const FAKE_TOKEN: &str = "xoxb-fake-secret-value-do-not-leak";
     const FAKE_BYPASS: &str = "bypass-secret-do-not-leak";
     const TEST_LABEL: &str = "SOUNDWAVE";
@@ -3348,16 +3359,16 @@ mod tests {
         env.set("XDG_CONFIG_HOME", home.join(".config"));
         env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
         env.set("SHELL", "/bin/bash");
-        env.set("MECHA_SLACK_TOKEN_EXTERNAL", "keychain-fixture");
+        env.set(legacy_token("EXTERNAL"), "keychain-fixture");
         for name in [
-            "MECHA_SLACK_TOKEN_EXPRESSION",
-            "VIOLET_SLACK_TOKEN_EXPRESSION",
-            "VIOLET_SLACK_TOKEN_EXTERNAL",
+            legacy_token("EXPRESSION"),
+            "VIOLET_SLACK_TOKEN_EXPRESSION".into(),
+            "VIOLET_SLACK_TOKEN_EXTERNAL".into(),
         ] {
             env.remove(name);
         }
-        let original = "export MECHA_SLACK_TOKEN_EXPRESSION='$(pass show secret)'\nexport MECHA_SLACK_TOKEN_EXTERNAL='static-profile-fixture'\n";
-        fs::write(home.join(".profile"), original).unwrap();
+        let original = format!("export {}='$(pass show secret)'\nexport {}='static-profile-fixture'\n", legacy_token("EXPRESSION"), legacy_token("EXTERNAL"));
+        fs::write(home.join(".profile"), &original).unwrap();
         let values = update_machine_credentials().unwrap();
         assert!(!values.contains_key("VIOLET_SLACK_TOKEN_EXPRESSION"));
         assert!(!values.contains_key("VIOLET_SLACK_TOKEN_EXTERNAL"));
@@ -3422,7 +3433,7 @@ mod tests {
             .collect::<Vec<_>>()
         {
             if name.to_string_lossy().starts_with("VIOLET_")
-                || name.to_string_lossy().starts_with("MECHA_")
+                || name.to_string_lossy().starts_with(legacy_env_prefix())
             {
                 env.remove(&name);
             }
@@ -3432,10 +3443,12 @@ mod tests {
         env.set("XDG_CONFIG_HOME", home.join(".config"));
         env.set("CAS_CREDENTIALS_FILE", &credentials);
         env.set("SHELL", "/bin/bash");
-        env.set("MECHA_SLACK_TOKEN_LAPTOP", "");
-        env.set("MECHA_VERCEL_BYPASS", "");
+        env.set(legacy_token("LAPTOP"), "");
+        env.set(&violet_compatibility().legacy_bypass_env, "");
         let profile_text = format!(
-            "export MECHA_SLACK_TOKEN_LAPTOP='{FAKE_TOKEN}'\nexport MECHA_VERCEL_BYPASS='{FAKE_BYPASS}'\n"
+            "export {}='{FAKE_TOKEN}'\nexport {}='{FAKE_BYPASS}'\n",
+            legacy_token("LAPTOP"),
+            violet_compatibility().legacy_bypass_env
         );
         fs::write(home.join(".profile"), &profile_text).unwrap();
         let values = update_machine_credentials().unwrap();
@@ -3448,7 +3461,7 @@ mod tests {
             Some(FAKE_BYPASS)
         );
         let raw = fs::read_to_string(&credentials).unwrap();
-        assert!(!raw.contains("MECHA_"));
+        assert!(!raw.contains(legacy_env_prefix()));
         assert!(raw.contains("export VIOLET_SLACK_TOKEN_LAPTOP="));
         assert!(raw.contains("export VIOLET_VERCEL_BYPASS="));
         assert_eq!(

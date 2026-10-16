@@ -4104,6 +4104,7 @@ impl FactoryDaemon {
     ) -> bool {
         // cas-54a2: a focus change made since the last refresh pass (from the
         // keyboard, say) is still in its slot; it must not be lost.
+        self.flush_epic_focus_write(store_worker);
         // cas-d2a2: queue stamps run on the StoreWorker through the queue
         // job lanes; drain the lanes first so no critical stamp is still
         // waiting on a lane while the StoreWorker reports idle (jobs.rs).

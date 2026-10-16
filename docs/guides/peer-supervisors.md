@@ -159,9 +159,9 @@ coordination action=peers scope=all
 ```
 
 ```text
-Supervisors of your account (every project and machine, via Cassy Cloud):
-  bright-newt-56 [live] violet on prowl, heartbeat 12s ago
-    session violet-smooth-heron-38 | focus -
+Your account's supervisors, all projects and machines (Cassy Cloud):
+  bright-newt-56 [live] gabber-studio on prowl, heartbeat 19s ago
+    session gabber-studio-smooth-heron-38 | focus -
 ```
 
 Address one by project, name, or `name@machine`. A project name that still

@@ -47,3 +47,6 @@ mod ws_client;
 pub(crate) use queue_and_events::{
     InboxDeferredWrite, NormalDeliveryProbe, ObservedWorkerExit, UrgentWakeProbe,
 };
+
+#[cfg(test)]
+mod supervisor_notice_tests;

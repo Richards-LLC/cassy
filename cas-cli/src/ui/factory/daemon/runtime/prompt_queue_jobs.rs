@@ -96,7 +96,11 @@ pub(crate) enum QueueStamp {
     },
     /// A Teams inbox copy was written while the row stays pending for a
     /// later wake (GH #751, cas-786a6 L4).
-    DeferredInbox { pane_bytes: u64 },
+    DeferredInbox {
+        pane_bytes: u64,
+        warn_supervisor: String,
+        session: String,
+    },
     /// One declined wake-gate pass (cas-9e81 detail; cas-786a6 L4). Control
     /// counts declines from the selection snapshot; this persists the one.
     WakeDecline { detail: String },
@@ -179,7 +183,37 @@ impl QueueStamp {
                 failed,
                 detail,
             } => queue.mark_broadcast_outcome(row, *attempted, *succeeded, *failed, detail.as_deref()),
-            Self::DeferredInbox { pane_bytes } => queue.record_deferred_inbox(row, *pane_bytes),
+            Self::DeferredInbox {
+                pane_bytes,
+                warn_supervisor,
+                session,
+            } => queue.record_deferred_inbox(row, *pane_bytes).inspect_err(|_| {
+                // cas-1ba0: the Teams copy survives, but without this marker
+                // a tool boundary cannot take the claim. Report the degraded
+                // path durably, once per row, rather than only in logs.
+                let notice = format!(
+                    "Warning: deferred inbox handoff not recorded: notification_id={row}; \
+                     target={recipient}. tool-boundary surfacing unavailable; the Teams copy \
+                     waits until the recipient's turn boundary. Inspect with \
+                     coordination action=message_status notification_id={row}",
+                );
+                if let Err(notice_error) = queue.enqueue_idempotent(
+                    "daemon",
+                    warn_supervisor,
+                    &notice,
+                    Some(session.as_str()),
+                    Some("Deferred inbox handoff not recorded"),
+                    None,
+                    &format!("deferred-inbox-stamp-failed:{row}"),
+                    Some(&cas_store::QueueOrigin::Daemon),
+                ) {
+                    tracing::error!(
+                        prompt_id = row,
+                        %notice_error,
+                        "failed to persist supervisor warning about deferred inbox handoff"
+                    );
+                }
+            }),
             Self::WakeDecline { detail } => queue.record_wake_gate_decline(row, detail).map(drop),
             Self::ObservedWakeReceipt => queue.record_recipient_surfaced(
                 row,

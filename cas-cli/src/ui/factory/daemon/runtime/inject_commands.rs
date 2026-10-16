@@ -153,12 +153,14 @@ impl FactoryDaemon {
                             delivery.urgent_wake_probe_opened = true;
                             NudgeReport {
                                 outcome,
+                                channel: super::delivery::DeliveryChannel::Pty,
                                 wake: cas_store::WakeAttempt::Fired,
                                 wake_detail: Some("urgent interrupt-and-inject".to_string()),
                             }
                         }
                         cas_mux::InjectOutcome::DeferredComposerDirty => NudgeReport::not_attempted(
                             outcome,
+                            super::delivery::DeliveryChannel::Pty,
                             "urgent delivery retained until the operator composer is clean",
                         ),
                     });

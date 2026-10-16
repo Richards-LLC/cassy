@@ -560,8 +560,19 @@ pub(crate) fn wake_attempt_narrative(
 /// claimed by the daemon's transport. A Claude teams handoff is claimed when
 /// the inbox file is written, but Claude Code renders it only at a turn
 /// boundary, so "claimed" is not "rendered".
-pub(crate) fn recipient_receipt_narrative(receipt: Option<cas_store::SurfacingSource>) -> String {
+pub(crate) fn recipient_receipt_narrative(
+    receipt: Option<cas_store::SurfacingSource>,
+    poll_settled: Option<&str>,
+) -> String {
     use cas_store::SurfacingSource;
+    // cas-6ccb: an inbox_poll that withheld the row, did not replay it, or
+    // showed it as a redelivery settled it; the recipient confirmed nothing.
+    if let (Some(SurfacingSource::InboxPoll), Some(reason)) = (receipt, poll_settled) {
+        return format!(
+            "recipient_receipt: {reason} (poll_settled; not an acknowledgement, and not repeated \
+             at the next turn).\n"
+        );
+    }
     let line = match receipt {
         None => return String::new(),
         Some(SurfacingSource::HookSurfaced) => {
@@ -859,6 +870,29 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        // Resolve cross-machine peers before applying the local inbox cap.
+        // Their Cloud body must be readable on the receiving machine: spilling
+        // first sent a path on the sender's disk instead of the full text
+        // (communication contract P3.6, cas-5c2c). Local messages retain their
+        // existing cap/spill policy; peer urgency and identity checks still run.
+        if role == "supervisor"
+            && let Some(sender) = agent_from_store.as_ref()
+            && let Some(sent) = self
+                .peer_message_send(
+                    sender,
+                    &target,
+                    &summary,
+                    &message,
+                    req.in_reply_to,
+                    req.urgent.unwrap_or(false),
+                    req.kind.as_deref(),
+                    req.blocker.unwrap_or(false),
+                )
+                .await?
+        {
+            return Ok(sent);
+        }
+
         if let Some(refusal) = over_cap_refusal {
             let to_operator = target.eq_ignore_ascii_case("operator") || commander_target;
             if role != "supervisor" || to_operator {
@@ -936,27 +970,6 @@ impl CasService {
                     .map(|a| a.name)
             })
         };
-
-        // cas-f9c7: a supervisor addressing a peer supervisor of this repo on
-        // another machine (or replying to one) goes through the cloud peer
-        // mailbox; everything else stays on the local queue below.
-        if role == "supervisor"
-            && let Some(sender) = agent_from_store.as_ref()
-            && let Some(sent) = self
-                .peer_message_send(
-                    sender,
-                    &target,
-                    &summary,
-                    &message,
-                    req.in_reply_to,
-                    req.urgent.unwrap_or(false),
-                    req.kind.as_deref(),
-                    req.blocker.unwrap_or(false),
-                )
-                .await?
-        {
-            return Ok(sent);
-        }
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let addressed_operator = target.eq_ignore_ascii_case("operator") || commander_target;
@@ -2141,35 +2154,17 @@ impl CasService {
                             ) {
                                 message = format!("{hold}\n\n{message}");
                             }
-                            let review = crate::review_body::delivery_body(
+                            // cas-8b0e: the in-band review shows the worker's
+                            // proof:/ci: lines and renders unsupplied fields
+                            // neutrally; a missing merge base keeps the task
+                            // metadata with the comparison error.
+                            let review = crate::review_body::merge_request_review(
                                 &repo.repo_root,
-                                Some(&task),
+                                &task,
                                 &target_tip,
                                 &branch_tip,
-                                None,
-                                None,
-                                None,
-                            )
-                            .unwrap_or_else(|error| {
-                                // A missing merge base does not disable the existing
-                                // typed request: still show authoritative task metadata.
-                                crate::review_body::ReviewBody {
-                                    summary: &format!(
-                                        "```text\n{} -> {}\n```",
-                                        target_tip, branch_tip
-                                    ),
-                                    before: "Baseline behavior run not supplied.",
-                                    after: "Changed behavior run not supplied.",
-                                    evidence: &crate::review_body::task_evidence(&task),
-                                    details: &format!("\nGit comparison unavailable: {error}\n"),
-                                    risk: &crate::review_body::task_risk(&task),
-                                    door: &task
-                                        .door
-                                        .map(|door| door.to_string())
-                                        .unwrap_or_else(|| "not declared".into()),
-                                }
-                                .render()
-                            });
+                                &message,
+                            );
                             message = attach_merge_request_envelope(
                                 &format!("{message}\n\n{review}"),
                                 &MergeRequestEnvelope {
@@ -2970,11 +2965,14 @@ impl CasService {
             }
         }
 
-        // This is an at-most-once claim for the polling API: the store records
-        // recipient-seen state in the same transaction that selects the rows,
-        // before this MCP response is handed back. That prevents concurrent
-        // duplicate delivery, but a response lost after this point is not
-        // replayed by a later poll. Daemon transport state remains independent.
+        // The store records recipient-seen state in the same transaction that
+        // selects the rows, before this MCP response is handed back. That
+        // prevents concurrent duplicate delivery; a later poll does not replay
+        // a row. cas-6ccb (GH #1215): a row polled but never acknowledged with
+        // message_ack is shown once more by the next turn's hook (the
+        // `inbox_poll` receipt, older than that turn, with no ack), so a row
+        // polled mid-turn and not acted on is not lost. Daemon transport state
+        // remains independent.
         // cas-3bf1 (GH #176): poll every alias this agent answers to, not just
         // its registered pane name. A supervisor answers to two, and rows
         // addressed to the logical `supervisor` alias were previously
@@ -3057,6 +3055,7 @@ impl CasService {
         // operator-readable reason; no suppression may disappear silently.
         let mut withheld: Vec<(i64, String)> = Vec::new();
         let mut redelivered = 0usize;
+        let mut shown_redeliveries: Vec<i64> = Vec::new();
         // cas-098d (GH #904): older transport deliveries are claimed and named,
         // not replayed.
         let mut replays: Vec<(i64, String)> = Vec::new();
@@ -3250,6 +3249,8 @@ impl CasService {
                 }
                 InboxRedelivery::MarkRedelivery => {
                     redelivered += 1;
+                    // cas-6ccb: shown again in full here; no third showing.
+                    shown_redeliveries.push(message.id);
                     body.push_str(&format!(
                         "**[{}] From: {} — {INBOX_REDELIVERY_MARKER} (already delivered {})**\n\
                         Summary: {}\n{}\n{}Message: {}\n\n",
@@ -3278,6 +3279,28 @@ impl CasService {
                 }
             }
             rendered += 1;
+        }
+        // cas-6ccb (GH #1215): a row this poll withheld as already done, or
+        // named without replaying it, is settled now, so the next turn's
+        // repeat of unacknowledged polled rows never brings back its body.
+        // No ack and no stage change: the recipient confirmed none of these.
+        let settled: Vec<(i64, String)> = withheld
+            .iter()
+            .map(|(id, reason)| (*id, format!("withheld by inbox_poll: {reason}")))
+            .chain(replays.iter().map(|(id, what)| {
+                (*id, format!("not replayed by inbox_poll: {what}"))
+            }))
+            .chain(shown_redeliveries.iter().map(|id| {
+                (*id, "shown again by inbox_poll as an earlier delivery".to_string())
+            }))
+            .collect();
+        if let Err(error) = queue.settle_polled_rows(&aliases, &settled) {
+            tracing::warn!(
+                target: "cas::coordination",
+                recipient = %recipient,
+                %error,
+                "cas-6ccb: could not settle withheld inbox rows; they may be repeated once"
+            );
         }
 
         let replay_note = (!replays.is_empty()).then(|| {
@@ -3319,9 +3342,10 @@ impl CasService {
         }
 
         let mut output = format!(
-            "Pulled {rendered} unread message(s) for {recipient} (at-most-once inbox claim: \
-             marked seen before this response is delivered; daemon transport delivery is \
-             unchanged)"
+            "Pulled {rendered} unread message(s) for {recipient} (inbox claim: marked seen \
+             now; a direct message you neither message_ack nor answer is shown once more at \
+             your next turn, except broadcasts and rows withheld or marked already delivered \
+             here; daemon transport delivery is unchanged)"
         );
         if redelivered > 0 {
             output.push_str(&format!(
@@ -3581,18 +3605,36 @@ impl CasService {
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
-                let receipt_line = recipient_receipt_narrative(r.recipient_receipt);
+                let receipt_line = recipient_receipt_narrative(
+                    r.recipient_receipt,
+                    r.recipient_poll_settled.as_deref(),
+                );
                 // cas-15f2: a row that no daemon can select used to read
                 // "awaiting_delivery" for a full 15 minutes and then flip to
                 // abandoned, so the operator watching it had no way to tell
                 // "in flight" from "already doomed" — two supervisors waited on
                 // exactly this. State the deadline while it is still pending,
                 // and say the reason out loud once it is terminal.
+                let handoff = if r.stage == cas_store::DeliveryStage::Gated
+                    && r.pending_reason == Some(cas_store::PendingReason::GatedNotReady)
+                {
+                    queue
+                        .inbox_handoff_state(notification_id)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("Failed to query deferred inbox status: {error}"),
+                            )
+                        })?
+                } else {
+                    cas_store::InboxHandoffState::NotHeld
+                };
                 let pending_deadline_line = pending_deadline_narrative(
                     r.stage,
                     r.pending_reason,
                     r.pending_detail.as_deref(),
                     undelivered_after_secs,
+                    handoff,
                 );
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
@@ -3739,6 +3781,7 @@ fn pending_deadline_narrative(
     pending_reason: Option<cas_store::PendingReason>,
     pending_detail: Option<&str>,
     undelivered_after_secs: Option<i64>,
+    handoff: cas_store::InboxHandoffState,
 ) -> String {
     use cas_store::DeliveryStage;
     // cas-d1659: a row parked for a busy recipient is neither doomed nor on
@@ -3752,21 +3795,24 @@ fn pending_deadline_narrative(
             pending_detail.unwrap_or("no detail was recorded")
         );
     }
-    // cas-a1ed: a row the daemon selected and then held behind a declined
-    // wake is not on the never-selected deadline; no sweep abandons it while
-    // its recipient stays in the session. The same reason also marks a
-    // delivery the daemon is retrying (an operator draft in the composer),
-    // and that retry budget can still abandon the row, so say both.
+    // GatedNotReady also covers composer retries. Only the durable Teams
+    // handoff marker promises tool-boundary surfacing without a retry deadline.
     if stage == DeliveryStage::Gated
         && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
     {
-        return format!(
-            "held: still pending — a wake held for a busy recipient surfaces at its next tool \
-             call or turn start and does not expire while it stays in the session; a delivery \
-             being retried (for example behind an operator draft) is abandoned once its \
-             {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {}\n",
-            pending_detail.unwrap_or("no detail was recorded")
-        );
+        let detail = pending_detail.unwrap_or("no detail was recorded");
+        return if handoff == cas_store::InboxHandoffState::HeldTeamsInbox {
+            format!(
+                "held inbox: still pending — surfaces at its next tool call or turn start; \
+                 does not expire while the recipient stays in the session — {detail}\n"
+            )
+        } else {
+            format!(
+                "delivery retry: still pending — no held inbox handoff is recorded; \
+                 transport retries (for example behind an operator draft) are abandoned \
+                 once the {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {detail}\n"
+            )
+        };
     }
     match stage {
         DeliveryStage::Abandoned => format!(
@@ -3867,13 +3913,19 @@ fn row_factory_session(
 #[cfg(test)]
 mod pending_deadline_tests {
     use super::pending_deadline_narrative;
-    use cas_store::DeliveryStage;
+    use cas_store::{DeliveryStage, InboxHandoffState};
 
     /// The 15 minutes two supervisors spent watching "awaiting_delivery" must
     /// now say how much of the budget is left.
     #[test]
     fn a_pending_row_states_how_long_before_it_is_abandoned() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60));
+        let line = pending_deadline_narrative(
+            DeliveryStage::Enqueued,
+            None,
+            None,
+            Some(60),
+            InboxHandoffState::NotHeld,
+        );
         assert!(
             line.contains("abandoned as undeliverable in 840s"),
             "{line}"
@@ -3893,22 +3945,29 @@ mod pending_deadline_tests {
             let line = pending_deadline_narrative(
                 DeliveryStage::Gated,
                 Some(cas_store::PendingReason::GatedNotReady),
-                Some("wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken"),
+                Some(
+                    "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken",
+                ),
                 Some(waited),
+                InboxHandoffState::HeldTeamsInbox,
             );
             assert!(line.contains("still pending"), "{line}");
             assert!(line.contains("next tool"), "{line}");
             assert!(!line.contains("abandoned as undeliverable"), "{line}");
             assert!(!line.contains("PAST"), "{line}");
-            // Review M2: the composer-draft retry shares the reason and can
-            // still be abandoned; the line must not promise otherwise.
-            assert!(line.contains("retry budget"), "{line}");
+            assert!(!line.contains("retry budget"), "{line}");
         }
     }
 
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200));
+        let line = pending_deadline_narrative(
+            DeliveryStage::Enqueued,
+            None,
+            None,
+            Some(1200),
+            InboxHandoffState::NotHeld,
+        );
         assert!(line.contains("PAST"), "{line}");
         assert!(line.contains("not still in flight"), "{line}");
     }
@@ -3920,6 +3979,7 @@ mod pending_deadline_tests {
             None,
             Some("target no longer belongs to factory session"),
             Some(1800),
+            InboxHandoffState::NotHeld,
         );
         assert!(line.contains("undeliverable"), "{line}");
         assert!(
@@ -3931,7 +3991,13 @@ mod pending_deadline_tests {
 
     #[test]
     fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None);
+        let line = pending_deadline_narrative(
+            DeliveryStage::Abandoned,
+            None,
+            None,
+            None,
+            InboxHandoffState::NotHeld,
+        );
         assert!(line.contains("no reason was recorded"), "{line}");
     }
 
@@ -3944,6 +4010,7 @@ mod pending_deadline_tests {
             Some(cas_store::PendingReason::AwaitingBusyRecipient),
             Some("recipient busy: wake budget spent after 3 attempts"),
             Some(1200),
+            InboxHandoffState::NotHeld,
         );
         assert!(line.contains("busy recipient: still pending"), "{line}");
         assert!(line.contains("next turn start or tool call"), "{line}");
@@ -3954,10 +4021,18 @@ mod pending_deadline_tests {
     #[test]
     fn a_delivered_row_adds_no_deadline_noise() {
         assert!(
-            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30)).is_empty()
+            pending_deadline_narrative(
+                DeliveryStage::Delivered,
+                None,
+                None,
+                Some(30),
+                InboxHandoffState::NotHeld
+            )
+            .is_empty()
         );
     }
 }
+
 
 #[cfg(test)]
 mod cross_session_routing_tests {
@@ -4119,11 +4194,18 @@ mod inbox_poll_identity_tests {
     #[test]
     fn recipient_receipt_separates_rendered_from_claimed() {
         use cas_store::SurfacingSource;
-        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced));
-        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed));
+        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced), None);
+        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed), None);
         assert!(rendered.contains("rendered —"), "{rendered}");
         assert!(claimed.contains("claimed, not rendered"), "{claimed}");
-        assert!(super::recipient_receipt_narrative(None).is_empty());
+        assert!(super::recipient_receipt_narrative(None, None).is_empty());
+        // cas-6ccb: a settled poll receipt says why, and that it is no ack.
+        let settled = super::recipient_receipt_narrative(
+            Some(SurfacingSource::InboxPoll),
+            Some("withheld by inbox_poll: merge request for cas-1, already done"),
+        );
+        assert!(settled.starts_with("recipient_receipt: withheld by inbox_poll:"), "{settled}");
+        assert!(settled.contains("not an acknowledgement"), "{settled}");
     }
 
     /// The three wake-attempt states must read differently. If two of them

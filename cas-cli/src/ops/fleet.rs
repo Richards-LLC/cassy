@@ -412,6 +412,9 @@ pub(crate) fn focus_epic(
         OperationError::Failed(format!("Failed to persist factory delivery mode: {e}"))
     })?;
     record_focus_epic_event(cas_root, factory_session, Some(epic_id), Some(delivery_mode));
+    if let Err(error) = crate::supervisor_notices::integration_overlap(cas_root, &epic, factory_session) {
+        tracing::warn!(%error, epic_id, "integration overlap notice failed");
+    }
 
     Ok(format!(
         "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode})"
@@ -622,3 +625,7 @@ pub(crate) async fn run_worker_operation(
         Err(error) => Err(OperationError::Failed(error.message.to_string())),
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_supervisor_notices_tests.rs"]
+mod supervisor_notice_tests;

@@ -7,7 +7,7 @@ use chrono::{TimeZone, Utc};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const PROJECT: &str = "memory-collision-project";
+const PROJECT: &str = "gabber-studio";
 const TEAM: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 struct Fixture {
@@ -56,11 +56,15 @@ impl Fixture {
     }
 
     async fn respond(&self, remote: &Entry) {
-        self.server.reset().await;
         let mut wire = serde_json::to_value(remote).unwrap();
         wire["project_id"] = serde_json::json!(PROJECT);
         wire["updated_at"] = serde_json::json!("2099-10-16T12:00:00Z");
         wire["revision"] = serde_json::json!("7");
+        self.respond_wires(vec![wire], "2026-10-16T12:00:00Z").await;
+    }
+
+    async fn respond_wires(&self, wires: Vec<serde_json::Value>, pulled_at: &str) {
+        self.server.reset().await;
         let endpoint = if self.team {
             format!("/api/teams/{TEAM}/sync/pull")
         } else {
@@ -69,8 +73,8 @@ impl Fixture {
         Mock::given(method("GET"))
             .and(path(endpoint))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "entries": [wire], "tasks": [], "rules": [], "skills": [],
-                "pulled_at": "2026-10-16T12:00:00Z",
+                "entries": wires, "tasks": [], "rules": [], "skills": [],
+                "pulled_at": pulled_at,
             })))
             .mount(&self.server)
             .await;
@@ -116,6 +120,193 @@ fn legacy_pair() -> (Entry, Entry) {
     b.title = Some("Second checkout".into());
     b.origin_project = Some(PROJECT.into());
     (a, b)
+}
+
+// pin: literal IDs from Cloud 193102b memoryIdentitySha256/rekeyedMemoryId,
+// including #163's Beta/Alpha vectors. Cassy never computes alias-fold IDs.
+fn cloud_vectors(team: bool) -> Vec<serde_json::Value> {
+    let vectors: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("cloud_rekey_vectors.json")).unwrap();
+    vectors
+        .into_iter()
+        .filter(|v| v["scope"]["kind"] == if team { "team" } else { "personal" })
+        .map(|v| {
+            let mut wire = v["data"].clone();
+            wire["project_id"] = serde_json::json!(PROJECT);
+            wire["origin_project"] = serde_json::json!(PROJECT);
+            wire["updated_at"] = serde_json::json!("2099-10-16T12:00:00Z");
+            wire["revision"] = serde_json::json!("7");
+            wire
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cas_e29c_cloud_fold_vectors_round_trip_store_search_edit_push_replay() {
+    use crate::hybrid_search::{SearchIndex, SearchOptions};
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        let (mut keeper, remote) = legacy_pair();
+        keeper.id = "2026-10-01-1".into();
+        let f = Fixture::new(team, &keeper, &remote).await;
+        let wires = cloud_vectors(team);
+        f.respond_wires(wires.clone(), "2026-10-16T12:00:00Z").await;
+        let result = f.pull().unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pulled_entries, wires.len());
+        let index = SearchIndex::in_memory().unwrap();
+        let editing = SyncingEntryStore::new(f.entries.clone(), f.syncer.queue.clone())
+            .with_cloud_config(Arc::new(CloudConfig {
+                team_id: team.then(|| TEAM.into()),
+                team_only: team,
+                ..Default::default()
+            }));
+        let mut echoed = Vec::new();
+        for wire in &wires {
+            let id = wire["id"].as_str().unwrap();
+            let mut entry = editing.get(id).unwrap();
+            index.index_entry(&entry).unwrap();
+            let hits = index
+                .search(
+                    &SearchOptions {
+                        query: wire["content"].as_str().unwrap().into(),
+                        ..Default::default()
+                    },
+                    &f.entries.list().unwrap(),
+                )
+                .unwrap();
+            assert!(hits.iter().any(|hit| hit.id == id), "not searchable: {id}");
+            entry.content.push_str(" edited in Cassy");
+            editing.update(&entry).unwrap();
+            let mut echo = serde_json::to_value(editing.get(id).unwrap()).unwrap();
+            assert_eq!(
+                echo["id"], wire["id"],
+                "opaque ID must remain byte-identical"
+            );
+            assert_eq!(echo.get("created").is_some(), wire.get("created").is_some());
+            echo["project_id"] = serde_json::json!(PROJECT);
+            echo["updated_at"] = serde_json::json!("2099-10-17T12:00:00Z");
+            echo["revision"] = serde_json::json!("8");
+            echoed.push(echo);
+        }
+        let push_path = if team {
+            format!("/api/teams/{TEAM}/sync/push")
+        } else {
+            "/api/sync/push".into()
+        };
+        Mock::given(method("POST"))
+            .and(path(&push_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": {"inserted": 0, "updated": wires.len(), "skipped": 0},
+                "synced": {"entries": {"inserted": 0, "updated": wires.len(), "skipped": 0}}
+            })))
+            .expect(1)
+            .mount(&f.server)
+            .await;
+        let pushed = if team {
+            f.syncer.push_team(TEAM)
+        } else {
+            f.syncer.push()
+        }
+        .unwrap();
+        assert!(pushed.errors.is_empty(), "{:?}", pushed.errors);
+        assert_eq!(pushed.pushed_entries, wires.len());
+        let requests = f.server.received_requests().await.unwrap();
+        let request = requests.iter().find(|r| r.url.path() == push_path).unwrap();
+        let mut json = String::new();
+        GzDecoder::new(request.body.as_slice())
+            .read_to_string(&mut json)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let sent = payload["entries"].as_array().unwrap();
+        for wire in &wires {
+            let row = sent.iter().find(|row| row["id"] == wire["id"]).unwrap();
+            assert_eq!(row.get("created").is_some(), wire.get("created").is_some());
+            assert!(
+                row["content"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("edited in Cassy")
+            );
+        }
+        f.respond_wires(echoed, "2026-10-17T12:00:00Z").await;
+        for _ in 0..2 {
+            assert!(f.pull().unwrap().errors.is_empty());
+        }
+        assert_eq!(f.entries.list().unwrap().len(), wires.len() + 1);
+        assert!(f.entries.list_archived().unwrap().is_empty());
+        assert!(f.syncer.queue.list_all(20).unwrap().is_empty());
+        assert_eq!(f.entries.get(&keeper.id).unwrap().content, keeper.content);
+    }
+}
+
+#[tokio::test]
+async fn cas_e29c_occupied_fold_preserves_both_bodies_and_never_stalls_pull() {
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        for missing_created in [false, true] {
+            let mut wire = cloud_vectors(team)[if missing_created { 2 } else { 0 }].clone();
+            let (mut incumbent, remote) = legacy_pair();
+            incumbent.id = wire["id"].as_str().unwrap().into();
+            let f = Fixture::new(team, &incumbent, &remote).await;
+            if missing_created {
+                let mut local = serde_json::to_value(&incumbent).unwrap();
+                local.as_object_mut().unwrap().remove("created");
+                f.entries
+                    .update(&serde_json::from_value(local).unwrap())
+                    .unwrap();
+            }
+            f.respond_wires(vec![wire.clone()], "2026-10-16T12:00:00Z")
+                .await;
+            let result = f.pull().unwrap();
+            assert!(
+                result.errors.is_empty(),
+                "preserved conflict is not a pull error"
+            );
+            assert_eq!(result.conflicts_resolved_local, 1);
+            assert_eq!(
+                serde_json::to_value(&result).unwrap()["memory_fold_conflicts"][0],
+                wire["id"]
+            );
+            assert_eq!(
+                f.entries.get(&incumbent.id).unwrap().content,
+                incumbent.content
+            );
+            let records = f.syncer.queue.list_conflicts(20).unwrap();
+            let record = records
+                .iter()
+                .find(|r| r.strategy == "fold_conflict")
+                .unwrap();
+            let before: serde_json::Value =
+                serde_json::from_str(&record.discarded_row_json).unwrap();
+            assert_eq!(before["incoming"]["content"], wire["content"]);
+            assert_eq!(before["local"]["content"], incumbent.content);
+            assert!(f.entries.list_archived().unwrap().is_empty());
+            let watermark = if team {
+                format!("last_team_pull_at_{TEAM}_{PROJECT}")
+            } else {
+                "last_pull_at".into()
+            };
+            assert_eq!(
+                f.syncer.queue.get_metadata(&watermark).unwrap().as_deref(),
+                Some("2026-10-16T12:00:00Z")
+            );
+            wire["id"] = serde_json::json!("subsequent-opaque-memory");
+            wire["content"] = serde_json::json!("later pull still syncs");
+            f.respond_wires(vec![wire], "2026-10-17T12:00:00Z").await;
+            assert_eq!(f.pull().unwrap().pulled_entries, 1);
+            assert_eq!(
+                f.entries.get("subsequent-opaque-memory").unwrap().content,
+                "later pull still syncs"
+            );
+            assert_eq!(
+                f.syncer.queue.get_metadata(&watermark).unwrap().as_deref(),
+                Some("2026-10-17T12:00:00Z")
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -1,0 +1,148 @@
+[
+  {
+    "scope": {
+      "kind": "personal",
+      "id": "u1"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:d9509bd4336dfcc8271c8a42fbbf5ba8a7442c988957f1f7c9cbf24062fa3aef",
+    "data": {
+      "id": "2026-10-01-1-fold32f8e973b71e",
+      "title": "Beta",
+      "content": "beta body",
+      "created": "2026-10-01T11:00:00.000Z"
+    }
+  },
+  {
+    "scope": {
+      "kind": "personal",
+      "id": "u1"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:39dfce808ac07da9c97161424ca9c396676baf89d09c27b33f0ca7e598c9446a",
+    "data": {
+      "id": "2026-10-01-1-folde6fa4bada261",
+      "title": "Alpha",
+      "content": "alpha body",
+      "created": "2026-10-01T09:00:00.000Z"
+    }
+  },
+  {
+    "scope": {
+      "kind": "personal",
+      "id": "u1"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:cfb453f44ea8f3b22737cbaee207e8dfadf4c20c15752c1b33b3f3a0d715bfdf",
+    "data": {
+      "id": "2026-10-01-1-fold2f3d6e14d3d8",
+      "title": "No birth A",
+      "content": "unrecorded alpha"
+    }
+  },
+  {
+    "scope": {
+      "kind": "personal",
+      "id": "u1"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:b50d44789e6b87e86dc7b8f450cdd78abe574a88618c458480fb6e56bf6c4cce",
+    "data": {
+      "id": "2026-10-01-1-fold010506a8290d",
+      "title": "No birth B",
+      "content": "unrecorded beta"
+    }
+  },
+  {
+    "scope": {
+      "kind": "personal",
+      "id": "u1"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "mem-0123456789abcdef0123456789abcdef",
+    "identity_sha256": "sha256:cc4c88427f04951dba895d6858bb8f2dd94aef5eee3558b3e1d662a547a37da2",
+    "data": {
+      "id": "mem-0123456789abcdef0123456789abcdef-fold35702191fb4d",
+      "title": "Microseconds",
+      "content": "unicode 🦀 café",
+      "created": "2026-10-01T13:00:00.123456+02:00"
+    }
+  },
+  {
+    "scope": {
+      "kind": "team",
+      "id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:d9509bd4336dfcc8271c8a42fbbf5ba8a7442c988957f1f7c9cbf24062fa3aef",
+    "data": {
+      "id": "2026-10-01-1-fold89e9afd88d08",
+      "title": "Beta",
+      "content": "beta body",
+      "created": "2026-10-01T11:00:00.000Z"
+    }
+  },
+  {
+    "scope": {
+      "kind": "team",
+      "id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:39dfce808ac07da9c97161424ca9c396676baf89d09c27b33f0ca7e598c9446a",
+    "data": {
+      "id": "2026-10-01-1-fold05f32f090f3e",
+      "title": "Alpha",
+      "content": "alpha body",
+      "created": "2026-10-01T09:00:00.000Z"
+    }
+  },
+  {
+    "scope": {
+      "kind": "team",
+      "id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:cfb453f44ea8f3b22737cbaee207e8dfadf4c20c15752c1b33b3f3a0d715bfdf",
+    "data": {
+      "id": "2026-10-01-1-fold4acac60ed3e5",
+      "title": "No birth A",
+      "content": "unrecorded alpha"
+    }
+  },
+  {
+    "scope": {
+      "kind": "team",
+      "id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "2026-10-01-1",
+    "identity_sha256": "sha256:b50d44789e6b87e86dc7b8f450cdd78abe574a88618c458480fb6e56bf6c4cce",
+    "data": {
+      "id": "2026-10-01-1-foldfd8b842a9830",
+      "title": "No birth B",
+      "content": "unrecorded beta"
+    }
+  },
+  {
+    "scope": {
+      "kind": "team",
+      "id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "canonical_id": "gabber-studio",
+    "from_id": "mem-0123456789abcdef0123456789abcdef",
+    "identity_sha256": "sha256:cc4c88427f04951dba895d6858bb8f2dd94aef5eee3558b3e1d662a547a37da2",
+    "data": {
+      "id": "mem-0123456789abcdef0123456789abcdef-fold3355c8a38c03",
+      "title": "Microseconds",
+      "content": "unicode 🦀 café",
+      "created": "2026-10-01T13:00:00.123456+02:00"
+    }
+  }
+]

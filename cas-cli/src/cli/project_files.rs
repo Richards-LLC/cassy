@@ -1,7 +1,7 @@
 //! Ownership and Git reconciliation for files installed by `cas update`.
 //! See docs/ARCHITECTURE.md, “Managed project files”. Never pushes.
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -75,7 +75,14 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 // Read the effective rules (including nested/global ignores) without touching
 // the index. A project exception is a conflict, not permission to override it.
 fn ignore_conflicts(root: &Path, paths: &[String]) -> Result<Vec<String>> {
-    let mut child = Command::new("git")
+    // File-backed stdin avoids a bidirectional pipe deadlock on large catalogs.
+    let mut input = tempfile::tempfile()?;
+    for path in paths {
+        input.write_all(path.trim_start_matches('/').as_bytes())?;
+        input.write_all(&[0])?;
+    }
+    input.rewind()?;
+    let output = Command::new("git")
         .arg("-C")
         .arg(root)
         .args([
@@ -86,17 +93,8 @@ fn ignore_conflicts(root: &Path, paths: &[String]) -> Result<Vec<String>> {
             "-z",
             "--stdin",
         ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut input = Vec::new();
-    for path in paths {
-        input.extend_from_slice(path.trim_start_matches('/').as_bytes());
-        input.push(0);
-    }
-    child.stdin.take().unwrap().write_all(&input)?;
-    let output = child.wait_with_output()?;
+        .stdin(Stdio::from(input))
+        .output()?;
     if !matches!(output.status.code(), Some(0 | 1)) {
         bail!(
             "cannot inspect managed ignore rules: {}",

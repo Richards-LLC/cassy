@@ -109,17 +109,15 @@ impl SpawnIngress {
         jobs.apply_completions();
         for result in jobs.take_external_completions_where(|kind| kind == SPAWN_QUEUE_POLL) {
             self.in_flight = None;
-            match result.outcome {
-                Ok(ExternalOutcome::Done(value)) => self.ready.push_back(
-                    value
-                        .downcast::<Result<SpawnBatch, String>>()
-                        .map(|value| *value)
-                        .unwrap_or_else(|_| Err("spawn poll returned an invalid result".into())),
-                ),
-                other => self
-                    .ready
-                    .push_back(Err(format!("spawn poll did not finish: {other:?}"))),
-            }
+            let outcome = match result.outcome {
+                Ok(ExternalOutcome::Done(value)) => value
+                    .downcast::<Result<SpawnBatch, String>>()
+                    .map(|value| *value)
+                    .unwrap_or_else(|_| Err("spawn poll returned an invalid result".into())),
+                Ok(ExternalOutcome::Dropped) => Err("critical spawn poll was dropped".into()),
+                Err(error) => Err(format!("spawn poll panicked: {error:?}")),
+            };
+            self.ready.push_back(outcome);
         }
         accepted
     }

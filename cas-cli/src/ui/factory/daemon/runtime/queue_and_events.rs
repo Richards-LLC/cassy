@@ -693,7 +693,7 @@ fn spawn_queue_reset_report(
 ///
 /// `reported` holds request ids already surfaced, so a stalled row is reported
 /// once rather than on every tick.
-fn stalled_spawn_requests<'a>(
+pub(super) fn stalled_spawn_requests<'a>(
     pending: &'a [cas_store::SpawnRequest],
     now: chrono::DateTime<chrono::Utc>,
     min_age: chrono::Duration,

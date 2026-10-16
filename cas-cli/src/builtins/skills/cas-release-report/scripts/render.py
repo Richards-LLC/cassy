@@ -257,13 +257,13 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{escape(name)}</text>')
         for j, item in enumerate(ids):
             mark = f'data-change="{j+1}"><title>{escape(item)}</title>' if by_change else f'data-issue="{item}"><title>Issue #{item}</title>'
-            svg.append(f'<circle cx="{156+(j%7)*25}" cy="{y+(j//7)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
+            svg.append(f'<circle cx="{160+(j%7)*22}" cy="{y+(j//7)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
         svg.append(f'<text x="337" y="{y+5}" text-anchor="end" class="svg-count">{count}</text></g>')
         description.append(name + ' ' + str(count))
-        y += 40 + max(0, (count-1)//7)*20
+        y += 34 + max(0, (count-1)//7)*20
     if not shown:
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{"No changes listed" if by_change else "No GitHub issues closed"}</text>')
-        y += 40
+        y += 34
     unit = 'shipped change' if by_change else 'closed GitHub issue'
     if by_change:
         legend = ('One dot, one shipped change. ' +

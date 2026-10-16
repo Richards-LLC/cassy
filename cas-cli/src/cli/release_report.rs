@@ -590,7 +590,11 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         pdf_written,
         issue_count: acquired.issue_count,
         asset_count: acquired.assets.len(),
-        change_count: acquired.changes.len(),
+        change_count: if source_written {
+            acquired.changes.len()
+        } else {
+            count_changes_in_source(&source)
+        },
         change_areas: area_counts(&acquired.changes),
         warnings: acquired.warnings.clone(),
         retrieved_at: acquired.retrieved_at.clone(),
@@ -1143,17 +1147,17 @@ const AREAS: [(&str, &[&str]); 8] = [
         "alert", "spawn", "daemon", "typing", "keystroke", "tool call", "cas serve",
         "peer", "prompt", "nudge", "respawn", "stall",
     ]),
-    ("Tasks and merges", &[
+    ("Tasks", &[
         "task", "delivery", "deliveries", "merge request", "merges", "parked", "close gate",
         "qa", "verification", "epic", "review", "proof", "receipt",
     ]),
     ("Messages", &["message", "reminder", "inbox", "reply", "replies", "notice"]),
-    ("Releases and CI", &[
+    ("Releases", &[
         "release", "merge queue", "ci", "install", "update", "changelog", "publish",
         "publication",
         "build", "gate", "runner", "journey",
     ]),
-    ("Memory and search", &["memory", "recall", "search", "index", "briefing", "lesson"]),
+    ("Memory", &["memory", "recall", "search", "index", "briefing", "lesson"]),
     ("Slack and Cloud", &["slack", "violet", "cloud", "sync", "pairing"]),
     ("Safety", &[
         "permission", "operator-authenticated", "operator-policy", "security", "secret",
@@ -2873,6 +2877,23 @@ fn count_issues_in_source(source: &str) -> usize {
         .count()
 }
 
+/// The change map's Total in an existing source; 0 for a v1 issue map.
+fn count_changes_in_source(source: &str) -> usize {
+    let map = source
+        .lines()
+        .skip_while(|line| !line.starts_with("## Change map"))
+        .take_while(|line| !line.starts_with("## Release at a glance"))
+        .collect::<Vec<_>>();
+    if !map.iter().any(|line| line.starts_with("| Area | Changes |")) {
+        return 0;
+    }
+    map.iter()
+        .find_map(|line| line.strip_prefix("| Total | "))
+        .and_then(|rest| rest.split('|').next())
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 fn date_from_timestamp(value: &str) -> Option<String> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -3686,7 +3707,7 @@ Was: reports lacked evidence. Now: reports include verification evidence.
                 .iter()
                 .map(|area| (area.area.as_str(), area.changes))
                 .collect::<Vec<_>>(),
-            vec![("Commander", 1), ("Sessions", 2), ("Tasks and merges", 1)]
+            vec![("Commander", 1), ("Sessions", 2), ("Tasks", 1)]
         );
         assert!(areas.iter().all(|area| area.changes > 0));
 

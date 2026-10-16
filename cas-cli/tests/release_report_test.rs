@@ -184,7 +184,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| Sessions | 1 | Worker report improvements |"));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
-    assert!(source.contains("| Releases and CI | 1 | Simpler install |"));
+    assert!(source.contains("| Releases | 1 | Simpler install |"));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| GitHub issues closed | 2 |"));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
@@ -213,6 +213,8 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
         .clone();
     let second: Value = serde_json::from_slice(&second).unwrap();
     assert_eq!(second["source_written"], false);
+    assert_eq!(second["change_count"], 2);
+    assert_eq!(second["issue_count"], 2);
     assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
     assert_eq!(fs::read_to_string(&html_path).unwrap(), html);
 }
@@ -409,7 +411,7 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
             .iter()
             .map(|area| area["area"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Tasks and merges"]
+        vec!["Tasks"]
     );
     assert!(
         !result["warnings"]
@@ -424,9 +426,9 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     assert!(source.contains("Published 9 September 2026 · 16:51 UTC"));
     assert!(source.contains("The release is ready to inspect."));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
-    assert!(source.contains("areas: [\"Tasks and merges\"]"));
+    assert!(source.contains("areas: [\"Tasks\"]"));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
-    assert!(source.contains("| Tasks and merges | 1 |"));
+    assert!(source.contains("| Tasks | 1 |"));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("[#767](https://github.com/example/project/issues/767)"));
     assert!(user_section.contains("### Release reports"));

@@ -1430,7 +1430,9 @@ pub(crate) mod tests {
         assert_eq!(outcome.status, IntegrationStatus::Configured);
         for path in [CLAUDE_SKILL, CURSOR_SKILL, CLAUDE_QUERIES] {
             let skill = fs::read_to_string(repo.path().join(path)).unwrap();
+            // pin: generated instructions must route agents through the installed CLI.
             assert!(skill.contains("neonctl"), "{path}: {skill}");
+            // pin: generated instructions cannot reference the removed Neon MCP.
             assert!(!skill.contains("mcp__neon") && !skill.contains("mcp-neon"), "{path}: {skill}");
         }
         let payload = parse_keep_payload(&fs::read_to_string(repo.path().join(CLAUDE_SKILL)).unwrap()).unwrap();

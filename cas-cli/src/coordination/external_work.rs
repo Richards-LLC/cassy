@@ -542,8 +542,23 @@ impl HttpCloudCoordinationPort {
         }
     }
 
-    pub(crate) fn get(&self, _path: &str, _query: &[(&str, &str)], _timeout: Duration) -> Result<Value, RemoteError> {
-        Err(RemoteError::unavailable("coordination GET is not implemented"))
+    pub(crate) fn get(&self, path: &str, query: &[(&str, &str)], timeout: Duration) -> Result<Value, RemoteError> {
+        if timeout.is_zero() || timeout > CALL_REMOTE_BUDGET {
+            return Err(RemoteError::unavailable("invalid bounded coordination GET budget"));
+        }
+        let mut request = ureq::get(&format!("{}{path}", self.endpoint))
+            .timeout(timeout)
+            .set("Authorization", &format!("Bearer {}", self.token));
+        for (name, value) in query { request = request.query(name, value); }
+        match request.call() {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => Self::decode_response(response),
+            Err(ureq::Error::Transport(error)) => {
+                // Never include the token or provider body in transport diagnostics.
+                let message = format!("coordination GET {path} unreachable: {}", error.kind());
+                let timed_out = error.to_string().to_ascii_lowercase().contains("timed out");
+                Err(RemoteError { message, timed_out })
+            }
+        }
     }
 
     fn decode_response(response: ureq::Response) -> Result<Value, RemoteError> {

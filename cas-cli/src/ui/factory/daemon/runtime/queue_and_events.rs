@@ -10663,6 +10663,10 @@ mod tests {
             .conversation_history("provision-test", "*", None, 20)
             .unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(
+            queue.message_delivery_report(rows[0].id).unwrap().unwrap().stage,
+            DeliveryStage::Selected
+        );
         assert!(
             queue
                 .queued_prompt(rows[0].id)
@@ -10713,6 +10717,10 @@ mod tests {
             .iter()
             .find(|row| row.prompt.contains("cas-orphan"))
             .unwrap();
+        assert_eq!(
+            queue.message_delivery_report(orphan.id).unwrap().unwrap().stage,
+            DeliveryStage::Selected
+        );
         assert!(
             queue
                 .queued_prompt(orphan.id)

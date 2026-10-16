@@ -76,10 +76,13 @@ The receipt's `flv2_receipts` rows hold the two receipt budgets from spec §7 (`
 An agent whose `cas serve` failed is not counted as live. A serve that exits during boot is restarted, up to `--boot-retries` times (2 by default). Each restart is recorded in `agent_boot_failures`, so a boot bug stays visible rather than thinning the load; cas-30e3 is one such bug. Writer rates compare as a multiset.
 
 Each row also records:
+
 - the binary path, its SHA-256 and its version;
 - the configured and live agents;
 - the writer rates and the pressure profile;
-- the host's 1-minute load range and CPU count. These are reference-host receipts, not merge gates. The factory hosts are shared, so read a receipt next to its load average and the `no_pressure` control. The factory loop v2 receipt command is:
+- the host's 1-minute load range and CPU count.
+
+These are reference-host receipts, not merge gates. The factory hosts are shared, so read a receipt next to its load average and the `no_pressure` control. The factory loop v2 receipt command is:
 
 ```bash
 python3 -I scripts/many-agent-load.py --cas-bin <candidate> --label flv2-<sha> \

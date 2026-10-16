@@ -89,7 +89,8 @@ pub(crate) fn is_ended(root: &Path, agent: &Agent) -> bool {
         &agent.id,
         agent.cc_session_id.as_deref().unwrap_or(&agent.id),
     )
-    .exists()
+    .try_exists()
+    .unwrap_or(true)
 }
 
 fn paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {

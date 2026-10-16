@@ -786,3 +786,96 @@ async fn cas_4ac8_session_end_is_local_and_next_start_drains_after_restart() {
         2
     );
 }
+
+#[tokio::test]
+async fn cas_4ac8_heartbeat_without_owned_agent_drains_without_resurrection() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    session_start(&daemon, "ending-heartbeat", "ending").await;
+    daemon.await_cloud_presence().await;
+    Mock::given(method("POST"))
+        .and(path("/api/agents/ending-heartbeat/shutdown"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"released_locks":0})))
+        .with_priority(1)
+        .expect(1)
+        .mount(&fx._server)
+        .await;
+    let root = fx.cas_root.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::hooks::handlers::handle_session_end(
+            &crate::hooks::HookInput {
+                session_id: "ending-heartbeat".into(),
+                ..Default::default()
+            },
+            Some(&root),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    daemon
+        .handle_socket_event(DaemonEvent::SessionEnd {
+            session_id: "ending-heartbeat".into(),
+            cc_pid: Some(our_cc_pid()),
+        })
+        .await;
+    assert!(daemon.agent_id.read().await.is_none());
+    heartbeat_tick(&daemon).await;
+    heartbeat_tick(&daemon).await;
+    assert!(daemon.agent_id.read().await.is_none());
+    assert!(
+        crate::store::open_agent_store(&fx.cas_root)
+            .unwrap()
+            .get("ending-heartbeat")
+            .is_err()
+    );
+    assert!(!crate::cloud::peers::presence_line(&fx.cas_root, None).contains("shutdown pending"));
+    let requests = fx._server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/shutdown"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        fx.cloud
+            .state()
+            .registrations
+            .iter()
+            .filter(|body| body["id"] == "ending-heartbeat")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cas_4ac8_session_end_does_not_wait_for_slow_cloud() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    session_start(&daemon, "ending-slow", "ending").await;
+    daemon.await_cloud_presence().await;
+    Mock::given(method("POST"))
+        .and(path("/api/agents/ending-slow/shutdown"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(10)))
+        .with_priority(1)
+        .expect(0)
+        .mount(&fx._server)
+        .await;
+    let root = fx.cas_root.clone();
+    let started = std::time::Instant::now();
+    tokio::task::spawn_blocking(move || {
+        crate::hooks::handlers::handle_session_end(
+            &crate::hooks::HookInput {
+                session_id: "ending-slow".into(),
+                ..Default::default()
+            },
+            Some(&root),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(crate::cloud::peers::presence_line(&fx.cas_root, None).contains("shutdown pending"));
+}

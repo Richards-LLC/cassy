@@ -120,6 +120,31 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
 
+## Cloud cleanup and rate limits
+
+SessionEnd writes an atomic intent under `.cas/cloud_shutdown/` before deleting
+the local agent. Hooks make no HTTP requests. The embedded daemon drains intents
+at session startup and on its off-loop presence heartbeat, including when it has
+no owned active agent. If no daemon starts, cleanup waits for the next daemon.
+Intents are keyed by agent and harness session; registration, heartbeat and
+shutdown share a nonblocking project lease, and ended sessions cannot register
+again. A rebound agent's newer session is preserved.
+
+Shutdown, claim release and peer ACK retry HTTP 429 up to three attempts within
+five seconds (or a caller's shorter budget). `Retry-After` seconds and HTTP dates
+are respected; absent or invalid values use 200 ms then 400 ms backoff. A delay
+outside the HTTP budget returns a named rate-limit failure. Durable shutdown
+intents and the mailbox poller preserve longer server delays across later passes;
+mailbox health remains current while waiting for that scheduled retry.
+
+Presence and worker status show pending cleanup and its cause even after the
+agent row is gone. After 24 hours a failed intent expires, remains visible for
+operator inspection, and stops retrying. Inspect `.cas/cloud_shutdown/` alongside
+Cloud presence before removing an expired record; removing it does not perform
+shutdown. Successful intents stop appearing in health immediately and retain a
+session fence until their 24-hour retention ends. Intents contain no tokens or
+arbitrary agent metadata.
+
 ## Project issue repository reads
 
 `cas config get issues.repo` returns the stored project tracker, or resolves an

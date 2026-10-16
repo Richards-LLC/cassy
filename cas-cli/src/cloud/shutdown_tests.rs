@@ -97,6 +97,15 @@ async fn cas_4ac8_drain_retries_fallback_and_completed_intent_fences_old_session
     let mut old = Agent::new("ended".into(), "same".into());
     old.cc_session_id = Some("old".into());
     assert!(is_ended(&root, &old));
+    let coordinator = client(&server.uri());
+    assert_eq!(
+        crate::cloud::presence::tick(&coordinator, &root, &old, Utc::now()),
+        crate::cloud::presence::TickAction::Waiting
+    );
+    assert_eq!(
+        crate::cloud::presence::register_now(&coordinator, &root, &old, Utc::now()).state,
+        crate::cloud::presence::PresenceState::Failing
+    );
     old.cc_session_id = Some("new".into());
     assert!(!is_ended(&root, &old));
     let requests = server.received_requests().await.unwrap();
@@ -130,4 +139,28 @@ async fn cas_4ac8_drain_respects_lease_and_rebound_identity() {
     drain(&root, &client(&endpoint), Utc::now()).unwrap();
     assert!(health(&root, Utc::now()).is_empty());
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn cas_4ac8_shutdown_health_footer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    enqueue(root, "retired-agent", "session", "http://example.invalid").unwrap();
+    let file = path(root, "retired-agent", "session");
+    let mut intent = read(&file).unwrap();
+    intent.cause = "Shutdown: rate limited (429)".into();
+    write(&file, &intent, false).unwrap();
+    let pending = health(root, Utc::now());
+    let expired = health(root, Utc::now() + chrono::Duration::hours(25));
+    assert!(pending.contains("pending 1, expired 0"));
+    assert!(pending.contains("Retry: automatic"));
+    assert!(expired.contains("pending 0, expired 1"));
+    assert!(expired.contains("ls .cas/cloud_shutdown"));
+    assert!(
+        pending
+            .lines()
+            .chain(expired.lines())
+            .all(|line| line.chars().count() <= 72)
+    );
+    eprintln!("CLEANUP_HEALTH_BEGIN\n{pending}{expired}CLEANUP_HEALTH_END");
 }

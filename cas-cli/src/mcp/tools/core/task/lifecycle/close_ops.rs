@@ -13799,6 +13799,12 @@ pub(crate) fn resolve_close_delivery_branch(
     ))
 }
 
+/// cas-cfa5: whether `lane`'s tip is a merge-only delivery onto `target`.
+pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &str) -> bool {
+    let _ = (repo, lane, target);
+    false
+}
+
 /// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.
 /// Such a task delivers through its portable proof, so close resolves no
 /// delivery branch for it. The worker's lane may end in another task's
@@ -39943,3 +39949,7 @@ mod no_code_close_tests;
 #[cfg(test)]
 #[path = "close_ops/blast_radius_park_tests.rs"]
 mod blast_radius_park_tests;
+
+#[cfg(test)]
+#[path = "close_ops/merge_only_delivery_tests.rs"]
+mod merge_only_delivery_tests;

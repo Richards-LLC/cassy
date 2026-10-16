@@ -27050,6 +27050,16 @@ mod merge_state_gate_tests {
         checker: &str,
         setup: impl FnOnce(&std::path::Path) -> (String, String),
     ) -> EpicCloseRun {
+        run_epic_close_fixture_cas_7e91e(children, checker, setup, None).await
+    }
+
+    #[cfg(unix)]
+    async fn run_epic_close_fixture_cas_7e91e(
+        children: usize,
+        checker: &str,
+        setup: impl FnOnce(&std::path::Path) -> (String, String),
+        ci: Option<(&str, bool)>,
+    ) -> EpicCloseRun {
         use crate::mcp::CasService;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -27076,6 +27086,18 @@ mod merge_state_gate_tests {
         git(p, &["branch", "-D", "factory/worker"]);
         let (epic_branch, epic_notes) = setup(p);
         git(p, &["checkout", "-q", "main"]);
+        if let Some((gh_body, _)) = ci {
+            let origin = rev_parse_local(p, "origin/main");
+            let fake_gh = env.home().join("gh");
+            crate::test_paths::warm_stub(&fake_gh, gh_body);
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+            // Keep all Git operations on the local bare fixture while the
+            // provider identity remains the explicit GitHub origin.
+            let bare = _bare.path().to_str().unwrap();
+            git(p, &["config", &format!("url.{bare}.insteadOf"), "https://github.com/acme/epic"]);
+            git(p, &["config", "remote.origin.url", "https://github.com/acme/epic"]);
+            assert_eq!(origin, rev_parse_local(p, "origin/main"));
+        }
 
         let cas_dir = p.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -27143,7 +27165,7 @@ mod merge_state_gate_tests {
         let request = serde_json::from_value(serde_json::json!({
             "action": "close",
             "id": epic.id,
-            "supervisor_override": true,
+            "supervisor_override": ci.is_none_or(|(_, override_requested)| override_requested),
             "reason": "inspected every terminal child delivery against main",
             "stranded_branch_override": "inspected every child lane: each factory branch and anchor is deleted locally and on origin after its delivery shipped",
         }))
@@ -27159,12 +27181,78 @@ mod merge_state_gate_tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let text = format!("{text}\nRequests: {}", std::fs::read_to_string(p.join("gh-requests.log")).unwrap_or_default());
         EpicCloseRun {
             is_error: response.is_error == Some(true),
             text,
             elapsed,
             task: store.get(&epic.id).unwrap(),
         }
+    }
+
+
+    // Real close-handler controls: the epic tip is an ancestor of main, so
+    // CI must belong to origin/main itself, never the old epic tip.
+    #[cfg(unix)]
+    async fn landed_epic_ci_close_cas_7e91e(queue: &str, checks: &str, override_requested: bool) -> EpicCloseRun {
+        let gh = format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> gh-requests.log
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api graphql') printf '%s\n' '{queue}' ;;
+'api --method')
+  expected="repos/acme/epic/commits/$(git rev-parse origin/main)/check-runs"
+  [ "$4" = "$expected" ] || exit 97
+  printf '%s\n' '{checks}' ;;
+*) exit 97 ;;
+esac
+"#);
+        run_epic_close_fixture_cas_7e91e(0, "#!/bin/sh\ncat >/dev/null\n", |p| {
+            git(p, &["branch", "epic/landed", "main"]);
+            std::fs::write(p.join("delivery.js"), "export const delivered = true;\n").unwrap();
+            git(p, &["add", "delivery.js"]);
+            git(p, &["commit", "-q", "-m", "main integration"]);
+            git(p, &["push", "-q", "origin", "main"]);
+            ("epic/landed".into(), String::new())
+        }, Some((&gh, override_requested))).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_close_requires_exact_main_ci_without_queue_cas_7e91e() {
+        for checks in [
+            r#"{"check_runs":[]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"cancelled"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"startup_failure"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"skipped"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"queued","conclusion":null}]}"#,
+        ] {
+            let run = landed_epic_ci_close_cas_7e91e(r#"{"data":{"repository":{"mergeQueue":null}}}"#, checks, false).await;
+            assert!(run.is_error, "untested main must be refused: {}", run.text);
+            assert_ne!(run.task.status, TaskStatus::Closed, "{}", run.text);
+            assert!(run.text.contains("EPIC CI REQUIRED") && run.text.contains("supervisor_override=true"), "{}", run.text);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_close_green_main_and_queue_controls_cas_7e91e() {
+        let green = landed_epic_ci_close_cas_7e91e(r#"{"data":{"repository":{"mergeQueue":null}}}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"success"}]}"#, false).await;
+        assert!(!green.is_error, "{}", green.text);
+        assert_eq!(green.task.status, TaskStatus::Closed, "{}", green.text);
+        assert!(green.text.contains("/check-runs"), "{}", green.text);
+        assert!(green.task.notes.contains("CI") && green.task.notes.contains("origin/main"), "{}", green.task.notes);
+
+        let queued = landed_epic_ci_close_cas_7e91e(r#"{"data":{"repository":{"mergeQueue":{"id":"queue"}}}}"#, r#"{"check_runs":[]}"#, false).await;
+        assert!(!queued.is_error, "{}", queued.text);
+        assert_eq!(queued.task.status, TaskStatus::Closed);
+        assert!(!queued.text.contains("/check-runs"), "queue proof must not add a CI run or lookup: {}", queued.text);
+
+        let overridden = landed_epic_ci_close_cas_7e91e(r#"{"data":{"repository":{"mergeQueue":null}}}"#, r#"{"check_runs":[]}"#, true).await;
+        assert!(!overridden.is_error, "{}", overridden.text);
+        assert_eq!(overridden.task.status, TaskStatus::Closed);
+        assert!(overridden.task.notes.contains("EPIC CI REQUIRED"), "override must audit refusal: {}", overridden.task.notes);
     }
 
     /// A surface checker that resolves at once and requires a real target.

@@ -392,3 +392,52 @@ async fn cas_3f90_oversized_event_retains_whole_body_transport() {
             .is_some()
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3f90_lifecycle_action_has_one_submit_and_no_duplicate_relay() {
+    if !fixture_child("cas_3f90_lifecycle_action_has_one_submit_and_no_duplicate_relay") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let tasks = crate::store::open_task_store_local(daemon.app.cas_dir()).unwrap();
+    let mut task = cas_types::Task::new("cas-blocked".into(), "needs a supervisor decision".into());
+    task.status = cas_types::TaskStatus::Blocked;
+    tasks.add(&task).unwrap();
+    let body = format!(
+        "<task-lifecycle transition=\"task_blocked\" task_id=\"{}\" old=\"in_progress\" new=\"blocked\" actor=\"worker\" notification_id=\"124\" occurrence=\"{}\">Need a decision before proceeding.</task-lifecycle>",
+        task.id,
+        task.updated_at.to_rfc3339()
+    );
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let id = match queue
+        .enqueue_idempotent(
+            "lifecycle-wake:124",
+            "supervisor",
+            &body,
+            Some(&daemon.session_name),
+            None,
+            None,
+            "blocked",
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .unwrap()
+    {
+        cas_store::EnqueueIdempotentResult::Created(id) => id,
+        _ => panic!("fresh row"),
+    };
+    daemon.process_prompt_queue().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert!(typed.contains(&body), "{typed:?}");
+    assert_eq!(typed.matches('\r').count(), 1, "one lifecycle turn");
+    assert!(teams_messages(&daemon).is_empty());
+    assert_eq!(
+        queue
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .wake_attempt,
+        cas_store::WakeAttempt::Fired
+    );
+}

@@ -1949,6 +1949,8 @@ fn cas_bf890_peer_messages_lead_and_fifteen_notices_fold_into_one_digest_row() {
         repo: "github.com/acme/gabber-studio".into(),
         in_reply_to: Some("pm-1".into()),
         kind: None,
+        // A reply from another project of the same user (cas-2a5a).
+        scope: crate::cloud::peer_mailbox::PeerScope::User,
     });
     let cloud_body = format!("{envelope}\nPEER-CLOUD: OK, you take it. See docs/how.md");
     let cloud = store.enqueue_with_session("calm-owl-75", "supervisor", &cloud_body, SESSION).unwrap();

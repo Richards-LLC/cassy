@@ -432,6 +432,20 @@ async function enrollReplyBrowser(reader: import("@playwright/test").Page, cloud
   return inbox;
 }
 
+// Opt-in delivery captures reuse the journey rather than adding a QA-only test.
+async function captureReply(reader: import("@playwright/test").Page, name: string, html = false) {
+  const root = process.env.QA_REPLY_ARTIFACTS;
+  if (!root) return;
+  const { mkdir, readFile, writeFile } = await import("node:fs/promises");
+  await mkdir(root, { recursive: true });
+  await reader.screenshot({ path: `${root}/${name}.png` });
+  if (html) {
+    const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+    const dialog = await reader.locator("#operator-inbox-dialog").evaluate(el => el.outerHTML);
+    await writeFile(`${root}/${name}.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reply permission</title><style>${css}</style></head><body>${dialog}</body></html>`);
+  }
+}
+
 test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (cas-874b)", journeyPart, async ({ page, journey, browser }) => {
   const cloud = await replyUpgradeCloud();
   await routeOperatorCloud(page.context(), cloud);
@@ -446,10 +460,12 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
       await expect(inbox.getByText("Keep this conversation.", { exact: true })).toBeVisible();
       await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+      await captureReply(page, "M01-read-only", true);
       readerId = [...cloud.devices.values()].find(d => d.label === "Reader phone")!.id;
       await inbox.getByRole("button", { name: "Ask to reply", exact: true }).press("Enter");
       await expect(inbox.getByText("Waiting for the account owner to allow replies. Your messages stay here.", { exact: true })).toBeVisible();
       expect(cloud.devices.get(readerId)!.scopes).toEqual([]);
+      await captureReply(page, "M02-pending");
     });
     const owner = await peer.newPage();
     await owner.clock.install({ time: journeyNow() });
@@ -459,6 +475,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       const ownerInbox = await enrollReplyBrowser(owner, cloud, "Owner desktop", true);
       const requests = ownerInbox.getByRole("region", { name: "Reply requests", exact: true });
       await expect(requests.getByText(/Reader phone.*asks to reply to soundwave · amber-fox-29/)).toBeVisible({ timeout: 15_000 });
+      await captureReply(owner, "M03-owner", true);
       await requests.getByRole("button", { name: /Allow Reader phone/ }).press("Enter");
       await expect(ownerInbox.getByText("Replying allowed for Reader phone.", { exact: true })).toBeVisible();
       expect(cloud.devices.get(readerId)!.scopes).toEqual([{ hub_id: HUB, project_id: PROJECT, session_id: sessionId, operations: ["operator_message"] }]);
@@ -469,6 +486,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await reply.fill("Thanks, I can reply now.");
       await inbox.getByRole("button", { name: "Queue reply", exact: true }).press("Enter");
       await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();
+      await captureReply(page, "M04-replied");
       expect(cloud.commands.size).toBe(1);
       expect(cloud.devices.size).toBe(2);
     });
@@ -479,6 +497,21 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await expect(inbox.getByText("Keep this conversation.", { exact: true })).toBeVisible();
       await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();
       await expect(inbox.getByRole("textbox", { name: /Reply — soundwave/ })).toBeVisible();
+      await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toMatchAriaSnapshot('- button "Queue reply"');
+      await captureReply(page, "M05-reloaded");
+      if (process.env.QA_REPLY_ARTIFACTS) {
+        for (const [name, query, media] of [
+          ["forced-colors", "(forced-colors: active)", { forcedColors: "active" }],
+          ["reduced-motion", "(prefers-reduced-motion: reduce)", { reducedMotion: "reduce" }],
+          ["contrast-more", "(prefers-contrast: more)", { contrast: "more" }],
+        ] as const) {
+          await page.emulateMedia(Object.assign({ forcedColors: null, reducedMotion: null, contrast: null }, media));
+          expect(await page.evaluate(q => matchMedia(q).matches, query)).toBe(true);
+          await expect(inbox.getByRole("textbox", { name: /Reply — soundwave/ })).toBeVisible();
+          await captureReply(page, `a11y-${name}`);
+        }
+        await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null });
+      }
       expect(cloud.devices.get(readerId)!.generation).toBe(2n);
       expect(cloud.log.filter(r => r.method === "POST" && r.path === "/api/operator/enrollments")).toHaveLength(2);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -502,6 +535,7 @@ test("HUB-J19 Ask to reply names denial and expiry without granting permission (
       await ownerInbox.getByRole("button", { name: /Deny Denied phone/ }).click();
       await expect(inbox.getByText("The owner denied this reply request. This browser is still read-only.", { exact: true })).toBeVisible({ timeout: 15_000 });
       await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+      await captureReply(page, "F01-denied");
     });
     await journey.stage("An expired request is shown honestly after a reload", async () => {
       await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
@@ -512,6 +546,7 @@ test("HUB-J19 Ask to reply names denial and expiry without granting permission (
       await page.reload(); await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
       await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
       await expect(inbox.getByText("This reply request expired. This browser is still read-only.", { exact: true })).toBeVisible();
+      await captureReply(page, "F02-expired");
       await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toBeVisible();
       await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
     });
@@ -527,5 +562,6 @@ test("HUB-J19 unshipped Cloud never offers Ask to reply (cas-874b)", journeyPart
     await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toHaveCount(0);
     await expect(inbox.getByText(/This browser can read this conversation but not reply/)).toBeVisible();
     expect(cloud.log.some(r => r.path.includes("reply-grant-requests"))).toBe(false);
+    await captureReply(page, "F03-unshipped");
   });
 });

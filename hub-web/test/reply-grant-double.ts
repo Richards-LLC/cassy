@@ -33,7 +33,7 @@ export class ReplyGrantDouble {
     let body: Record<string, unknown>;
     try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { return failure(400, "invalid_request"); }
     if (!body || body.wire_version !== 1) return failure(400, "invalid_request");
-    const digest = JSON.stringify(body);
+    const digest = JSON.stringify(body, Object.keys(body).sort());
     if (method === "POST" && path === "/api/operator/reply-grant-requests") {
       const id = String(body.request_id ?? "");
       if (!UUID.test(id) || !caller.capabilities.includes("feed:read")) return failure(400, "invalid_request");

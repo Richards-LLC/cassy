@@ -1,6 +1,6 @@
 // Proposed Cloud #174 contract. Dormant until the existing introspection route
 // advertises the complete wire version; no speculative production endpoints.
-import { decimal, list, OperatorWireError, record, str, type CommandScope, type OperatorClient } from "./wire";
+import { decimal, list, OperatorWireError, record, str, type OperatorClient } from "./wire";
 
 export const REPLY_UPGRADE_FEATURE = "reply-grant-upgrade-v1";
 export interface ReplyTarget { hubId: string; projectId: string; sessionId: string }
@@ -13,10 +13,6 @@ export interface ReplyRequest {
 }
 export interface ReplyGrantsSnapshot { supported: boolean; owner: boolean; deviceId: string | null; requests: ReplyRequest[] }
 
-export function replyScopeCovers(scopes: readonly CommandScope[], target: ReplyTarget): boolean {
-  return scopes.some(s => s.hub_id === target.hubId && s.project_id === target.projectId &&
-    (s.session_id === null || s.session_id === target.sessionId) && s.operations.includes("operator_message"));
-}
 function receipt(value: unknown): ReplyRequest {
   const r = record(value, "reply_request");
   const result = Object.fromEntries(["request_id", "device_id", "device_label", "origin", "hub_id", "project_id", "session_id", "created_at", "expires_at"].map(k => [k, str(r[k], k)]));

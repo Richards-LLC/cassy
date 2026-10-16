@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
 import { OperatorCloudDouble } from "../../test/operator-cloud-double";
 import { OperatorInboxController } from "./controller";
 import { MemoryInboxStore } from "./store";
 import { exportPublicKey, generateKeyPair } from "./hpke";
+import { OperatorWireError } from "./wire";
 
 const PAGE_ORIGIN = "https://hub.petrastella.io";
 
@@ -10,9 +12,9 @@ function controller(cloud: OperatorCloudDouble, store = new MemoryInboxStore(), 
   return new OperatorInboxController({ origin: cloud.baseUrl, store, pageOrigin: PAGE_ORIGIN, fetch: cloud.fetchFor(PAGE_ORIGIN), locks });
 }
 
-async function signIn(cloud: OperatorCloudDouble, inbox: OperatorInboxController, capabilities?: string[]) {
+async function signIn(cloud: OperatorCloudDouble, inbox: OperatorInboxController, capabilities?: string[], label = "phone") {
   await inbox.load();
-  const state = await inbox.beginSignIn("phone");
+  const state = await inbox.beginSignIn(label);
   if (state.kind !== "awaiting_approval") throw new Error("expected a code");
   expect(await inbox.pollSignIn()).toBe(5000);
   await cloud.approve(state.userCode, capabilities ? { capabilities } : {});
@@ -229,4 +231,119 @@ describe("operator inbox controller", () => {
     expect((await inbox.snapshot()).events).toHaveLength(0);
     expect(cloud.log.some((entry) => entry.path.startsWith("/api/operator/feed?"))).toBe(false);
   });
+});
+
+const target = { hubId: "hub", projectId: "project", sessionId: `s_${createHash("sha256").update("amber-fox-29").digest("base64url")}` };
+async function replySetup() {
+  const cloud = new OperatorCloudDouble();
+  cloud.replyGrants.enabled = true;
+  const key = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  await cloud.enrollMachine("hub", ["project"], new Uint8Array(await crypto.subtle.exportKey("raw", key.publicKey)), "soundwave");
+  const enroll = async (name: string, owner = false) => {
+    const store = new MemoryInboxStore();
+    const inbox = controller(cloud, store);
+    await signIn(cloud, inbox, owner ? ["feed:read", "account:manage"] : undefined, name);
+    return { inbox, store };
+  };
+  return { cloud, enroll };
+}
+
+describe("Cloud reply grant upgrades (proposal #174)", () => {
+
+
+
+  it("owner approves one request, reader can queue a reply without enrolling again", async () => {
+    const { cloud, enroll } = await replySetup();
+    const reader = await enroll("reader"); const owner = await enroll("owner", true);
+    await reader.inbox.runOnce(); await owner.inbox.runOnce();
+    await cloud.appendSessionEvent({ ...target, plaintext: { message: "retained" } });
+    await reader.inbox.runOnce();
+    const before = reader.store.identity!;
+    const history = await reader.store.events(before.accountId, before.feedGeneration);
+    const id = before.deviceId;
+    const request = await reader.inbox.askToReply(target);
+    // A read-only caller cannot use the owner decision route.
+    await expect(reader.inbox.client.request({ method: "POST", path: `/api/operator/reply-grant-requests/${request.request_id}/decision`, auth: "grant", body: { wire_version: 1, decision_id: crypto.randomUUID(), decision: "approve", expected_grant_generation: "1" } })).rejects.toMatchObject({ status: 403 });
+    await owner.inbox.runOnce();
+    expect((await owner.inbox.snapshot()).replyGrants!.requests).toHaveLength(1);
+    await owner.inbox.decideReplyRequest(request.request_id, "approve");
+    await reader.inbox.runOnce();
+    const command = await reader.inbox.queueMessage({ ...target, machineId: [...cloud.machines.keys()][0], sessionName: "amber-fox-29" }, "Now I can reply");
+    expect(command.state).toBe("pending_machine");
+    expect(reader.store.identity!.deviceId).toBe(id);
+    expect(reader.store.identity!.signingKey).toBe(before.signingKey);
+    expect(reader.store.identity!.encryption).toBe(before.encryption);
+    expect(await reader.store.events(before.accountId, before.feedGeneration)).toEqual(history);
+    expect(cloud.devices.size).toBe(2);
+  });
+
+
+
+  it("retries lost create and approval responses with identical bodies and no second upgrade", async () => {
+    const { cloud, enroll } = await replySetup();
+    const reader = await enroll("reader"); const owner = await enroll("owner", true);
+    await reader.inbox.runOnce(); await owner.inbox.runOnce();
+    for (const inbox of [reader.inbox, owner.inbox]) {
+      const original = inbox.client.request.bind(inbox.client); let dropped = false;
+      vi.spyOn(inbox.client, "request").mockImplementation(async options => {
+        const response = await original(options);
+        if (!dropped && options.method === "POST" && options.path.includes("reply-grant-requests")) {
+          dropped = true; throw new OperatorWireError(0, "network_unavailable", {}, null);
+        }
+        return response;
+      });
+    }
+    await expect(reader.inbox.askToReply(target)).rejects.toMatchObject({ code: "network_unavailable" });
+    const request = await reader.inbox.askToReply(target);
+    expect(cloud.replyGrants.requests.size).toBe(1);
+    await owner.inbox.runOnce();
+    await expect(owner.inbox.decideReplyRequest(request.request_id, "approve")).rejects.toMatchObject({ code: "network_unavailable" });
+    await owner.inbox.decideReplyRequest(request.request_id, "approve");
+    expect(cloud.devices.get(reader.store.identity!.deviceId)!.generation).toBe(2n);
+  });
+
+  it("refuses an unrelated concurrent grant change without removing permissions", async () => {
+    const { cloud, enroll } = await replySetup();
+    const reader = await enroll("reader"); const owner = await enroll("owner", true);
+    await reader.inbox.runOnce(); await owner.inbox.runOnce();
+    const request = await reader.inbox.askToReply(target);
+    await owner.inbox.runOnce();
+    const device = cloud.devices.get(reader.store.identity!.deviceId)!;
+    device.generation++; device.capabilities.push("account:manage");
+    await expect(owner.inbox.decideReplyRequest(request.request_id, "approve")).rejects.toMatchObject({ code: "reply_grant_generation_conflict" });
+    expect(device.capabilities).toContain("account:manage");
+    expect(device.scopes).toEqual([]);
+    expect(cloud.replyGrants.requests.get(request.request_id)!.status).toBe("pending");
+  });
+
+  it("does not adopt a new grant when durable storage fails", async () => {
+    const { cloud, enroll } = await replySetup(); const { inbox, store } = await enroll("reader");
+    await inbox.runOnce();
+    const device = cloud.devices.get(store.identity!.deviceId)!;
+    device.generation++;
+    device.scopes.push({ hub_id: "hub", project_id: "project", session_id: target.sessionId, operations: ["operator_message"] });
+    const save = vi.spyOn(store, "saveIdentity").mockRejectedValueOnce(new Error("quota"));
+    await inbox.runOnce();
+    expect(inbox.commandScopes()).toEqual([]);
+    expect(inbox.client.credential!.generation).toBe("1");
+    save.mockRestore(); await inbox.runOnce();
+    expect(inbox.commandScopes()).toEqual(device.scopes);
+  });
+
+  it("never resurrects an identity from an introspection response after sign-out", async () => {
+    const { enroll } = await replySetup(); const { inbox, store } = await enroll("reader");
+    const original = inbox.client.request.bind(inbox.client);
+    let release!: () => void; let entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(inbox.client, "request").mockImplementation(async options => {
+      const response = await original(options);
+      if (options.path === "/api/operator/grants/me") { entered(); await held; }
+      return response;
+    });
+    const refresh = inbox.refreshReplyGrants(); await started; await inbox.signOut(); release(); await refresh;
+    expect(store.identity).toBeNull(); expect(inbox.client.credential).toBeNull();
+    expect(inbox.current().kind).toBe("signed_out");
+  });
+
 });

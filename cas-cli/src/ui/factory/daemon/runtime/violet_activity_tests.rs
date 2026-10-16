@@ -270,6 +270,58 @@ fn cas_639c_peer_start_and_interleaved_ticks_preserve_both_sessions_watches() {
     assert!(saved.active().any(|w| w.factory_session == "second"));
 }
 
+#[test]
+fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let original = owner.book().watches[0].clone();
+    let mut claimant = fx.wake("claimant", at(20));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
+    let report = claimant.poll_once(&relay, &fx.queue, true, at(30));
+    assert_eq!((report.wakes, report.admitted), (1, 1));
+    let rows = fx.wakes();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.factory_session.as_deref() == Some("owner")));
+    assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), Some(AckOutcome::Admitted));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(saved.watches.iter().find(|w| w.factory_session == "owner"), Some(&original));
+
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 90, 80, "U3"));
+    claimant.poll_once(&relay, &fx.queue, true, at(95));
+    assert_eq!(fx.wakes().last().unwrap().factory_session.as_deref(), Some("claimant"));
+}
+
+#[test]
+fn cas_639c_wake_started_before_login_claims_after_credentials_are_saved() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_USER_CLOUD_JSON", env.home().join("cloud.json"));
+    crate::cloud::CloudConfig::default().save_user().unwrap();
+    let runtime = VioletWakeRuntime::start(&root, "login-session", "supervisor")
+        .expect("the daemon needs a runtime before login so later ticks can recover");
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let cloud = crate::cloud::CloudConfig {
+        endpoint: format!("http://{}", server.server_addr()),
+        token: Some("cas-639c-fixture-cloud-token".into()),
+        ..Default::default()
+    };
+    cloud.save_user().unwrap();
+    let response = std::thread::spawn(move || {
+        let request = server.recv_timeout(Duration::from_secs(15)).unwrap().unwrap();
+        assert_eq!(request.url(), "/api/violet/activity/claim");
+        assert!(request.headers().iter().any(|header| header.field.equiv("Authorization") && header.value.as_str() == "Bearer cas-639c-fixture-cloud-token"));
+        request.respond(tiny_http::Response::from_string(r#"{"events":[],"denied":[]}"#)).unwrap();
+    });
+    let (report, _, _) = runtime.tick_blocking();
+    response.join().unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(WatchBook::read(&WatchBook::path(&root)).unwrap().relay.last_ok_at.is_some());
+}
+
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the
 /// daemon restarts, the lease expires and Cloud redelivers: the event is
 /// acknowledged again with no second wake.

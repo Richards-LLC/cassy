@@ -16,3 +16,4 @@ mod reopen_atomicity;
 mod verification_flow;
 
 mod integration_batch;
+mod close_proof_claims;

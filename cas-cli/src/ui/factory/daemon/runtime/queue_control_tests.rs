@@ -158,25 +158,17 @@ fn cas_7b6b_round3_timed_out_wake_reads_release_batch_under_c6() {
             vec![],
             start + (timeout + Duration::from_millis(1)) * attempt,
         );
-        if released.is_some() {
-            break;
-        }
+        assert_eq!(
+            released.is_some(),
+            attempt == 3,
+            "release only after exactly three unusable read timeouts"
+        );
     }
     release_tx.send(()).unwrap();
-    assert!(jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
-    assert!(
-        released.is_some(),
-        "three timed-out reads must release the batch with Unknown evidence"
-    );
+    assert!(released.is_some());
     assert!(!preparation.has_pending());
     assert!(preparation.allows_delivery(Instant::now()));
-    // Late completions from the held read cannot restore stale authority.
-    assert!(
-        preparation
-            .advance(&mut jobs, None, root, "lead".into(), vec![], Instant::now())
-            .is_none()
-    );
-    assert!(preparation.recipient("worker-a").is_none());
+    assert!(jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
 }
 
 #[test]

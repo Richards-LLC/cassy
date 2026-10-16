@@ -206,6 +206,9 @@ pub fn heartbeat_metadata(
     }
     metadata.insert(META_FOCUS.into(), focus.unwrap_or_default().into());
     metadata.insert(META_BRANCH.into(), branch.unwrap_or_default().into());
+    for key in ["clone_path", "scratch_root", "scratch_scope", "peer_prs_v1", "peer_splits_v1"] {
+        metadata.insert(key.into(), agent.metadata.get(key).cloned().unwrap_or_default().into());
+    }
     if let Some(session) = agent.factory_session.as_deref().filter(|s| !s.is_empty()) {
         metadata.insert(META_FACTORY_SESSION.into(), session.into());
     }
@@ -295,8 +298,9 @@ fn register_with_shutdown(
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
     let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT);
+    let published_agent = super::peers_detail::presence_agent(cas_root, agent);
     let record =
-        match coordinator.register_with_presence(agent, focus.as_deref(), branch.as_deref()) {
+        match coordinator.register_with_presence(&published_agent, focus.as_deref(), branch.as_deref()) {
             Ok(_) => PresenceRecord {
                 agent_id: agent.id.clone(),
                 state: PresenceState::Registered,
@@ -423,7 +427,8 @@ pub(crate) fn tick_with_shutdown(
     }
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
-    let metadata = heartbeat_metadata(coordinator, agent, focus.as_deref(), branch.as_deref());
+    let published_agent = super::peers_detail::presence_agent(cas_root, agent);
+    let metadata = heartbeat_metadata(coordinator, &published_agent, focus.as_deref(), branch.as_deref());
     let heartbeat = {
         let _lease = match super::shutdown::presence_lease(cas_root) {
             Ok(Some(lease)) => lease,

@@ -4,6 +4,48 @@ use serde_json::json;
 
 const REPO: &str = "github.com/acme/widgets";
 
+#[test]
+fn cas_cd42_board_exposes_claim_owned_epic_target_roots_and_unknown_prs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut epic = crate::types::Task::new("cas-epic".into(), "Epic lane".into());
+    epic.task_type = crate::types::TaskType::Epic;
+    epic.branch = Some("epic/lane".into());
+    tasks.add(&epic).unwrap();
+    let mut owner = agent("sup", "supervisor", "lane", "alpha", REPO, 1);
+    owner
+        .metadata
+        .insert("clone_path".into(), "/alpha/worktree".into());
+    owner
+        .metadata
+        .insert("scratch_root".into(), "/alpha/scratch".into());
+    let agents = vec![
+        owner,
+        agent("remote", "supervisor", "lane", "beta", REPO, 400),
+    ];
+    let locks = vec![lease("cas-epic", "sup", LeaseStatus::Active, 600)];
+    let details = assemble_peer_details(
+        peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        Utc::now(),
+    );
+    let data = serde_json::to_value(&details).unwrap();
+    assert_eq!(data[0]["worktree_root"], "/alpha/worktree");
+    assert_eq!(data[0]["scratch_root"], "/alpha/scratch");
+    assert_eq!(data[0]["epics"][0]["task_id"], "cas-epic");
+    assert_eq!(data[0]["epics"][0]["target_branch"], "epic/lane");
+    assert_eq!(data[0]["epics"][0]["owner"], "sup");
+    assert_eq!(data[0]["prs_status"]["state"], "unavailable");
+    assert!(data[0]["prs"].as_array().unwrap().is_empty());
+    assert_eq!(data[1]["observations_status"]["state"], "stale");
+    assert!(data[1]["observations_status"]["observed_at"].is_string());
+}
+
 fn agent(id: &str, role: &str, session: &str, machine: &str, repo: &str, age: i64) -> AgentInfo {
     serde_json::from_value(json!({
         "id": id, "name": id, "agent_type": "worker", "status": "active",
@@ -122,11 +164,13 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
+        limitations: Vec::new(),
+        observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
-        epic_splits_message: String::new(),
+        epic_splits_status: ObservationStatus::at("ready", Some(Utc::now()), None),
         canonical_id: Some(REPO.into()),
         status: "ready".into(),
         detail: true,
@@ -205,11 +249,13 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        limitations: Vec::new(),
+        observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
-        epic_splits_message: String::new(),
+        epic_splits_status: ObservationStatus::at("ready", Some(Utc::now()), None),
         canonical_id: Some(REPO.into()),
         detail: true,
         status: "ready".into(),
@@ -304,11 +350,13 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
     ];
     let report = PeerReport {
+        limitations: Vec::new(),
+        observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
-        epic_splits_message: String::new(),
+        epic_splits_status: ObservationStatus::at("ready", Some(Utc::now()), None),
         canonical_id: Some(REPO.into()),
         detail: true,
         status: "ready".into(),
@@ -348,4 +396,343 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
     assert_eq!(claims[0]["agent_id"], owner_id);
     assert_eq!(claims[0]["task_id"], "cas-local");
     assert_eq!(claims[0]["lock_key"], local_key);
+}
+
+#[test]
+fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let now = Utc::now();
+    let observed = now - Duration::seconds(400);
+    let mut epic = crate::types::Task::new("cas-epic".into(), "Shared epic".into());
+    epic.task_type = crate::types::TaskType::Epic;
+    epic.branch = Some("epic/target".into());
+    tasks.add(&epic).unwrap();
+    let mut parked = crate::types::Task::new("cas-parked".into(), "Parked work".into());
+    parked.status = crate::types::TaskStatus::AwaitingMerge;
+    parked.assignee = Some("worker-a".into());
+    parked.deliverables.parked_branch = Some("factory/worker-a".into());
+    parked.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    parked.deliverables.work_target = Some(crate::types::WorkTarget {
+        repo_selector: "project:widgets".into(),
+        target_branch: "epic/target".into(),
+    });
+    tasks.add(&parked).unwrap();
+    let mut unlinked = parked.clone();
+    unlinked.id = "cas-unlinked".into();
+    tasks.add(&unlinked).unwrap();
+    tasks
+        .add_dependency(&crate::types::Dependency::new(
+            parked.id.clone(),
+            epic.id.clone(),
+            crate::types::DependencyType::ParentChild,
+        ))
+        .unwrap();
+    let prs = vec![
+        PeerPr {
+            url: Some("https://github.com/acme/widgets/pull/42".into()),
+            head_sha: "b".repeat(40),
+            branch: "factory/worker-a".into(),
+            number: 42,
+            state: "OPEN".into(),
+            in_merge_queue: true,
+        },
+        PeerPr {
+            url: Some("https://github.com/acme/widgets/pull/43".into()),
+            head_sha: "c".repeat(40),
+            branch: "epic/target".into(),
+            number: 43,
+            state: "OPEN".into(),
+            in_merge_queue: false,
+        },
+    ];
+    cas_store::insert_epic_split(
+        &root,
+        &cas_store::EpicSplit {
+            id: "split-lanes".into(),
+            epic_id: "cas-epic".into(),
+            local_agent_id: "sup-a".into(),
+            peer_agent_id: "sup-b".into(),
+            peer_name: "sup-b".into(),
+            peer_machine: "beta".into(),
+            direction: cas_store::SplitDirection::Outgoing,
+            state: cas_store::SplitState::Accepted,
+            mine: vec!["cas-parked".into()],
+            theirs: vec!["cas-unlinked".into()],
+            reason: None,
+            message_id: None,
+            expires_at: now + Duration::hours(1),
+            created_at: now,
+            decided_at: Some(now),
+        },
+    )
+    .unwrap();
+    save_pr_snapshot(&root, prs, observed);
+    let mut agents = vec![
+        agent("sup-a", "supervisor", "same", "alpha", REPO, 1),
+        agent("sup-b", "supervisor", "same", "beta", REPO, 400),
+        agent("worker-a", "worker", "same", "alpha", REPO, 1),
+        agent("worker-b", "worker", "same", "beta", REPO, 1),
+        agent("private", "supervisor", "private", "gamma", REPO, 1),
+    ];
+    let mut local = crate::types::Agent::new("sup-a".into(), "sup-a".into());
+    local.role = crate::types::AgentRole::Supervisor;
+    local.metadata = agents[0].metadata.clone();
+    local
+        .metadata
+        .insert("clone_path".into(), "/alpha/worktree".into());
+    let published = presence_agent(&root, &local);
+    // Exercise the production presence metadata path, not a second serializer.
+    let coordinator = super::super::CloudCoordinator::new(super::super::CloudConfig {
+        token: Some("test-token".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let metadata = super::super::presence::heartbeat_metadata(
+        &coordinator,
+        &published,
+        Some("cas-epic"),
+        Some("epic/target"),
+    );
+    for (key, value) in metadata {
+        agents[0]
+            .metadata
+            .insert(key, value.as_str().unwrap().into());
+    }
+    agents[4].user_id = Some("other-user".into());
+    agents[4].metadata.insert(
+        work::PR_META.into(),
+        published.metadata[work::PR_META].clone(),
+    );
+    let locks = vec![
+        lease("cas-epic", "sup-a", LeaseStatus::Active, 600),
+        lease("cas-secret", "private", LeaseStatus::Active, 600),
+    ];
+    let details = assemble_peer_details(
+        peers::repo_peers(&agents, REPO, &[], None, now),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        now,
+    );
+    let a = details.iter().find(|d| d.owner == "sup-a").unwrap();
+    assert_eq!(a.work.epics[0].owner.as_deref(), Some("sup-a"));
+    assert_eq!(a.work.splits_status.state, "ready");
+    assert_eq!(a.work.splits[0].id, "split-lanes");
+    assert_eq!(
+        a.work.splits[0].target_branch.as_deref(),
+        Some("epic/target")
+    );
+    assert_eq!(a.work.splits[0].mine, ["cas-parked"]);
+    assert!(
+        a.work
+            .tasks
+            .iter()
+            .any(|t| t.task_id == "cas-unlinked" && t.owner.is_none()),
+        "parking releases claims, but a unique recorded assignment remains an observation"
+    );
+    assert_eq!(a.work.tasks[0].assignee.as_deref(), Some("worker-a"));
+    assert!(
+        a.work.tasks[0].owner.is_none(),
+        "assignment and PR activity must not fabricate ownership"
+    );
+    assert_eq!(a.work.prs_status.state, "stale");
+    assert_eq!(
+        a.work.prs_status.observed_at,
+        Some(observed),
+        "heartbeat must not refresh the PR observation time"
+    );
+    assert_eq!(
+        a.work.tasks[0].pr.as_ref().unwrap().head_sha,
+        "b".repeat(40)
+    );
+    for kind in [
+        "awaiting_merge",
+        "parked_delivery",
+        "open_epic_pr",
+        "merge_queue",
+    ] {
+        assert!(
+            a.work.waiting_merges.iter().any(|w| w.kind == kind),
+            "missing {kind}"
+        );
+    }
+    assert_eq!(
+        a.workers
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect::<Vec<_>>(),
+        ["worker-a"]
+    );
+    let parked_head = a
+        .work
+        .waiting_merges
+        .iter()
+        .find(|w| w.kind == "parked_delivery")
+        .unwrap();
+    assert_eq!(
+        parked_head.head_sha.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    let queue_head = a
+        .work
+        .waiting_merges
+        .iter()
+        .find(|w| w.kind == "merge_queue")
+        .unwrap();
+    assert_eq!(
+        queue_head.head_sha.as_deref(),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+    assert_eq!(queue_head.observed_at, Some(observed));
+    let b = details.iter().find(|d| d.owner == "sup-b").unwrap();
+    assert_eq!(b.work.observations_status.state, "stale");
+    assert_eq!(b.work.prs_status.state, "unavailable");
+    assert_eq!(b.workers[0].machine, "beta");
+    let private = details.iter().find(|d| d.owner == "private").unwrap();
+    assert_eq!(private.work.claims_status.state, "private");
+    assert_eq!(private.work.tasks_status.state, "private");
+    assert!(private.claims.is_empty() && private.work.prs.is_empty());
+    assert!(
+        !serde_json::to_string(private)
+            .unwrap()
+            .contains("cas-secret")
+    );
+    assert!(
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .is_empty(),
+        "remote inventory must not register local agents"
+    );
+    let mut report = PeerReport::new(&root, None, true);
+    report.peers = details;
+    report.canonical_id = Some(REPO.into());
+    report.cloud_presence_message.clear();
+    report.mailbox_status.clear();
+    let text = render_peer_report(&report, 80, true);
+    for expected in [
+        "Owner sup-a",
+        "private work",
+        "PRs stale at",
+        "PRs unavailable at",
+        "/alpha/worktree",
+        "Head bbbbb",
+        "open_epic_pr",
+        "merge_queue",
+        "Read-only:",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    assert!(!text.contains("Slack") && !text.contains("cas-secret"));
+}
+
+#[test]
+fn cas_cd42_pr_cache_is_bounded_and_corrupt_metadata_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let now = Utc::now();
+    let prs = (0..101)
+        .map(|number| PeerPr {
+            url: Some("x".repeat(1000)),
+            head_sha: "a".repeat(40),
+            branch: format!("factory/{number}"),
+            number,
+            state: "OPEN".into(),
+            in_merge_queue: false,
+        })
+        .collect();
+    save_pr_snapshot(&root, prs, now);
+    let bytes = std::fs::read(root.join("peer-pr-observations.json")).unwrap();
+    assert!(bytes.len() <= 32 * 1024);
+    let snapshot: work::PrSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert!(snapshot.truncated && !snapshot.prs.is_empty() && snapshot.prs.len() < 100);
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    for bad in ["{broken".to_string(), "x".repeat(32 * 1024 + 1)] {
+        let mut supervisor = agent("sup", "supervisor", "lane", "alpha", REPO, 1);
+        supervisor.metadata.insert(work::PR_META.into(), bad);
+        let agents = vec![supervisor];
+        let details = assemble_peer_details(
+            peers::repo_peers(&agents, REPO, &[], None, now),
+            &agents,
+            &[],
+            &[],
+            tasks.as_ref(),
+            Some("test-user"),
+            now,
+        );
+        assert_eq!(details[0].work.prs_status.state, "unavailable");
+        assert!(details[0].work.prs.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_registry_writes() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let supervisor = agent("remote", "supervisor", "remote-lane", "beta", REPO, 1);
+    Mock::given(method("GET"))
+        .and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents": [supervisor, agent("remote-worker", "worker", "remote-lane", "beta", REPO, 1)]})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("claims offline"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    let (report, text) = tokio::task::spawn_blocking(move || {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[project]\ncanonical_id = {REPO:?}\n"),
+        )
+        .unwrap();
+        super::super::CloudConfig {
+            endpoint,
+            token: Some("fixture-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let report = discover_peer_report(&root, None, true, None).unwrap();
+        assert!(
+            crate::store::open_agent_store(&root)
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .is_empty()
+        );
+        let text = render_peer_report(&report, 80, true);
+        (serde_json::to_value(report).unwrap(), text)
+    })
+    .await
+    .unwrap();
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["peers"][0]["claims_status"]["state"], "unavailable");
+    assert!(report["peers"][0]["claims_status"]["observed_at"].is_string());
+    assert!(text.starts_with("[WARN] 1 peer supervisor"));
+    assert!(text.contains("Claims unavailable at") && text.contains("claims offline"));
+    assert!(!text.contains("Claims  0"));
+    assert!(
+        text.contains("Tasks unknown") && !text.contains("Tasks none"),
+        "{text}"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
 }

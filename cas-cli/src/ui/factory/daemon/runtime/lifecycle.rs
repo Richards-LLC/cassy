@@ -3367,6 +3367,12 @@ impl FactoryDaemon {
                             &previously_queued,
                             &previously_armed,
                         )?;
+                        // Reuse this existing bounded background read. Presence
+                        // publishes the local snapshot; the control loop does
+                        // no inventory I/O and adds no GitHub request.
+                        crate::cloud::peers_detail::save_pr_snapshot(
+                            &watch_cas_dir, std::mem::take(&mut queue_poll.observed_prs), chrono::Utc::now(),
+                        );
                         // cas-fd0a: name each ejection's failing job for the
                         // wake. GitHub calls stay on this blocking task
                         // (GH #1165).

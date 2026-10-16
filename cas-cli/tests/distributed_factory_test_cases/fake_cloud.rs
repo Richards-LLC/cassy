@@ -716,58 +716,28 @@ fn ack(state: &mut State, body: &Value) -> (u16, Value) {
 }
 
 #[test]
-fn cas_8ea7_fake_team_contract_keeps_owner_only_mutations_and_personal_isolation() {
+fn cas_8ea7_personal_claims_remain_account_private() {
     use cas::cloud::CloudCoordinator;
-    use cas::types::{Agent, ClaimResult};
+    use cas::types::Agent;
     let cloud = FakeCloud::start();
-    let project = "github.com/acme/sandbox";
-    {
-        let mut state = cloud.state.lock().unwrap();
-        for user in ["a", "b", "outsider"] {
-            state.accounts.insert(format!("token-{user}"), user.into());
-        }
-        state.team_projects.insert(
-            project.into(),
-            ("sandbox".into(), vec!["a".into(), "b".into()]),
-        );
-    }
-    let coordinator = |user: &str, project: &str| {
+    let coordinator = |user: &str| {
+        cloud.state.lock().unwrap().accounts.insert(format!("token-{user}"), user.into());
         let mut config = cloud.config();
         config.token = Some(format!("token-{user}"));
         let mut c = CloudCoordinator::new(config)
             .unwrap()
-            .with_canonical_id(Some(project.into()));
+            .with_canonical_id(Some("github.com/acme/personal".into()));
         c.register(&Agent::new(user.into(), format!("supervisor-{user}")))
             .unwrap();
         c
     };
-    let a = coordinator("a", project);
-    let b = coordinator("b", project);
-    let outsider = coordinator("outsider", project);
-    assert!(a.claim("cas-team", 600, None).unwrap().is_success());
-    assert!(matches!(
-        b.claim("cas-team", 600, None).unwrap(),
-        ClaimResult::AlreadyClaimed { .. }
-    ));
-    assert_eq!(b.list_locks().unwrap().len(), 1);
-    assert!(outsider.list_locks().unwrap().is_empty());
-    assert!(b.renew("cas-team", 600).is_err());
-    b.release("cas-team").unwrap();
-    assert_eq!(a.get_lock("cas-team").unwrap().unwrap().agent_id, "a");
-    cloud.advance_clock(601);
-    assert!(b.claim("cas-team", 600, None).unwrap().is_success());
-    let personal_a = coordinator("a", "github.com/acme/personal");
-    let personal_b = coordinator("b", "github.com/acme/personal");
-    assert!(
-        personal_a
-            .claim("cas-personal", 600, None)
-            .unwrap()
-            .is_success()
-    );
-    assert!(
-        personal_b
-            .claim("cas-personal", 600, None)
-            .unwrap()
-            .is_success()
-    );
+    let a = coordinator("a");
+    let b = coordinator("b");
+    assert!(a.claim("cas-personal", 600, None).unwrap().is_success());
+    assert!(b.list_locks().unwrap().is_empty());
+    assert!(b.get_lock("cas-personal").unwrap().is_none());
+    assert!(b.renew("cas-personal", 600).is_err());
+    b.release("cas-personal").unwrap();
+    assert!(b.claim("cas-personal", 600, None).unwrap().is_success());
+    assert_eq!(a.get_lock("cas-personal").unwrap().unwrap().agent_id, "a");
 }

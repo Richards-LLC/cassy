@@ -13,6 +13,7 @@ use crate::error::CasError;
 use crate::types::{Entry, Rule, Skill};
 
 mod knowledge;
+mod entry_identity;
 pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };

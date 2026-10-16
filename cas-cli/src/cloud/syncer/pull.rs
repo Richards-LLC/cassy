@@ -2097,6 +2097,9 @@ impl CloudSyncer {
             };
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            let remote_entry = self.prepare_pulled_entry(
+                store, remote_entry, remote_updated_at, current_project_id, None, row_origin.as_deref(),
+            )?;
             let remote_entry_id = remote_entry.id.clone();
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
@@ -2109,7 +2112,9 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
-                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision)
+                        && id == &remote_entry_id
+                    {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
@@ -3250,6 +3255,9 @@ impl CloudSyncer {
             };
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            let remote_entry = self.prepare_pulled_entry(
+                store, remote_entry, remote_updated_at, current_project_id, Some(team_id), row_origin.as_deref(),
+            )?;
             let remote_entry_id = remote_entry.id.clone();
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
@@ -3262,7 +3270,9 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
-                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision)
+                        && id == &remote_entry_id
+                    {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }

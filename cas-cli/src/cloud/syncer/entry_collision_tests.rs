@@ -169,6 +169,71 @@ async fn cas_25eb1_pull_preserves_distinct_legacy_memories_and_replays_once() {
                 .unwrap(),
             None
         );
+        f.syncer.queue.mark_synced(queued[0].id).unwrap();
+        f.pull().unwrap();
+        assert!(
+            f.syncer.queue.list_all(20).unwrap().is_empty(),
+            "an acknowledged recovery must not enqueue again on replay"
+        );
+        let mut edited = b.clone();
+        edited.content = "checkout B's updated memory".into();
+        f.respond(&edited).await;
+        f.pull().unwrap();
+        assert_eq!(
+            f.entries.get(&recovered_id).unwrap().content,
+            edited.content
+        );
+        assert_eq!(
+            f.entries.list().unwrap().len(),
+            2,
+            "mutable content must not change the recovery ID"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_25eb1_archived_incumbent_and_occupied_recovery_are_preserved() {
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        let (a, b) = legacy_pair();
+        let f = Fixture::new(team, &a, &b).await;
+        f.entries.archive(&a.id).unwrap();
+        f.pull().unwrap();
+        assert_eq!(f.entries.get_archived(&a.id).unwrap().content, a.content);
+        assert_eq!(f.entries.list().unwrap().len(), 1);
+
+        let f = Fixture::new(team, &a, &b).await;
+        let mut blocker = Entry::new(
+            super::entry_identity::recovery_id(&b),
+            "occupied recovery".into(),
+        );
+        blocker.created = a.created;
+        f.entries.add(&blocker).unwrap();
+        let error = f.pull().unwrap_err().to_string();
+        assert!(error.contains("belongs to another creation"), "{error}");
+        assert_eq!(f.entries.get(&a.id).unwrap().content, a.content);
+        assert_eq!(f.entries.get(&blocker.id).unwrap().content, blocker.content);
+        assert!(f.syncer.queue.list_all(20).unwrap().is_empty());
+        assert!(
+            f.syncer
+                .queue
+                .get_metadata("last_pull_at")
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_25eb1_unattributed_collision_is_preserved_without_republishing() {
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        let (a, mut b) = legacy_pair();
+        b.origin_project = None;
+        let f = Fixture::new(team, &a, &b).await;
+        f.pull().unwrap();
+        assert_eq!(f.entries.list().unwrap().len(), 2);
+        assert!(f.syncer.queue.list_all(20).unwrap().is_empty());
     }
 }
 

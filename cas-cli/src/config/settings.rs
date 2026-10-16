@@ -568,6 +568,60 @@ impl Default for OrchestrationConfig {
     }
 }
 
+/// Resource thresholds for the spawn and capped-build admission guard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BuildGuardConfig {
+    /// Fallback load / CPU count ceiling when CPU PSI is unavailable.
+    pub max_load_ratio: f64,
+    /// Maximum CPU `some avg10` stall time, as a percentage.
+    pub max_cpu_pressure_percent: f64,
+    /// Maximum memory `some avg10` stall time, as a percentage.
+    pub max_memory_pressure_percent: f64,
+    /// Minimum MemAvailable; zero disables only this memory floor.
+    pub min_available_memory_gib: u32,
+}
+
+impl Default for BuildGuardConfig {
+    fn default() -> Self {
+        Self {
+            max_load_ratio: 1.0,
+            max_cpu_pressure_percent: 90.0,
+            max_memory_pressure_percent: 10.0,
+            min_available_memory_gib: 2,
+        }
+    }
+}
+
+impl BuildGuardConfig {
+    /// Hand-edited TOML can bypass the setter; invalid limits use defaults.
+    pub(crate) fn effective(&self) -> Self {
+        let mut limits = self.clone();
+        let defaults = Self::default();
+        if !limits.max_load_ratio.is_finite() || limits.max_load_ratio <= 0.0 {
+            limits.max_load_ratio = defaults.max_load_ratio;
+        }
+        for (limit, default) in [
+            (
+                &mut limits.max_cpu_pressure_percent,
+                defaults.max_cpu_pressure_percent,
+            ),
+            (
+                &mut limits.max_memory_pressure_percent,
+                defaults.max_memory_pressure_percent,
+            ),
+        ] {
+            if !limit.is_finite() || !(0.0..=100.0).contains(limit) {
+                *limit = default;
+            }
+        }
+        if limits.min_available_memory_gib > 65536 {
+            limits.min_available_memory_gib = defaults.min_available_memory_gib;
+        }
+        limits
+    }
+}
+
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
@@ -675,10 +729,14 @@ pub struct FactoryConfig {
 
     /// Maximum number of workers allowed to build concurrently on this host.
     /// Worker compile checks and targeted tests hold OS slot locks under this hard cap.
-    /// `spawn_workers` additionally applies a soft load/concurrency guard;
+    /// `spawn_workers` additionally applies a soft resource/concurrency guard;
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
+
+    /// Host pressure and load fallback thresholds for build admission.
+    #[serde(default)]
+    pub build_guard: BuildGuardConfig,
 
     /// Per-build systemd MemoryHigh in GiB. 0 reserves half of host RAM
     /// across max_concurrent_builders (bounded to 256 MiB..16 GiB per build).
@@ -1018,6 +1076,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,
             render_max_fps: default_render_max_fps(),
             render_unfocused_fps: default_render_unfocused_fps(),

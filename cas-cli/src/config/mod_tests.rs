@@ -963,6 +963,10 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.commander_mirror_enabled", "false", "false"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.build_guard.max_load_ratio", "2", "2.0"),
+        ("factory.build_guard.max_cpu_pressure_percent", "85.5", "85.5"),
+        ("factory.build_guard.max_memory_pressure_percent", "5.5", "5.5"),
+        ("factory.build_guard.min_available_memory_gib", "4", "4"),
         ("factory.worker_memory_high_gib", "6", "6"),
         ("factory.render_max_fps", "12", "12"),
         ("factory.render_unfocused_fps", "3", "3"),
@@ -1526,4 +1530,21 @@ fn cas_940c_worker_mcp_config_roundtrip_and_invalid_rejection() {
     }
     // pin: persisted TOML must reject modes outside the two operator-facing values.
     assert!(toml::from_str::<Config>("[factory.claude]\nworker_mcp='all'").is_err());
+}
+
+#[test]
+fn cas_2d63_build_guard_rejects_invalid_limits_without_mutating_config() {
+    let mut config = Config::default();
+    for (key, values) in [
+        ("factory.build_guard.max_load_ratio", &["0", "-1", "NaN", "inf"][..]),
+        ("factory.build_guard.max_cpu_pressure_percent", &["-1", "101", "NaN"][..]),
+        ("factory.build_guard.max_memory_pressure_percent", &["-1", "101", "inf"][..]),
+        ("factory.build_guard.min_available_memory_gib", &["-1", "65537"][..]),
+    ] {
+        let before = config.get(key);
+        for value in values {
+            assert!(config.set(key, value).is_err(), "{key}={value}");
+            assert_eq!(config.get(key), before);
+        }
+    }
 }

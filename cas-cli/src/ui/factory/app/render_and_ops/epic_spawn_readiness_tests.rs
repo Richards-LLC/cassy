@@ -537,7 +537,7 @@ fn cas_bfa1_round3_live_epic_preferred_over_terminal_duplicate_lane() {
         let mut old = tasks.get("cas-round2-epic").unwrap();
         old.id = "cas-old-lane".into();
         old.status = cas_types::TaskStatus::Closed;
-        old.priority = cas_types::Priority::P0;
+        old.priority = cas_types::Priority::CRITICAL;
         tasks.add(&old).unwrap();
         f.advance_parent();
         let prep = f.prepare().expect("live lane owner must beat a terminal record");

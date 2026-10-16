@@ -422,59 +422,86 @@ impl WorktreeManager {
     /// worker for later salvage. Callers who need to force-remove a dirty
     /// tree should use [`WorktreeManager::remove_worker`] with `force = true`.
     pub fn attempt_remove_worker(&mut self, worker_name: &str) -> WorktreeResult<RemoveOutcome> {
-        let mut worktree = match self.workers.remove(worker_name) {
-            Some(wt) => wt,
-            None => return Ok(RemoveOutcome::NotTracked),
+        let Some(plan) = self.worker_removal_plan(worker_name) else {
+            return Ok(RemoveOutcome::NotTracked);
         };
-        let repo_root = self.worker_repo_root(worker_name);
-        let git = self.worker_git(worker_name);
+        let outcome = remove_worker_worktree_io(&plan);
+        if matches!(outcome, Ok(RemoveOutcome::Removed)) {
+            self.forget_worker(worker_name);
+        }
+        outcome
+    }
 
-        if worktree.path.exists() {
-            // cas-df97: live external symlinks block regardless of dirty
-            // state — this is the actual production path
-            // (finalize_worker_worktree) that the reported incident went
-            // through.
-            let links = self.inbound_symlinks(&worktree.path, &repo_root);
-            if !links.is_empty() {
-                let warning = ExternalSymlinkWarning {
-                    worker_name: worker_name.to_string(),
-                    path: worktree.path.clone(),
-                    links,
-                };
-                self.workers.insert(worker_name.to_string(), worktree);
-                return Ok(RemoveOutcome::ExternalSymlinksBlocked(warning));
-            }
+    /// cas-58a3: what removing `worker_name`'s worktree needs, read from
+    /// memory only, so the I/O ([`remove_worker_worktree_io`]) can run off
+    /// the daemon loop. `None` when the worker is not tracked.
+    pub fn worker_removal_plan(&self, worker_name: &str) -> Option<WorkerRemovalPlan> {
+        let worktree = self.workers.get(worker_name)?.clone();
+        Some(WorkerRemovalPlan {
+            worker_name: worker_name.to_string(),
+            worktree,
+            repo_root: self.worker_repo_root(worker_name),
+        })
+    }
 
-            // cas-2ffe (GH #915): a worker that just died can leave the tree
-            // mid-write (an index.lock, a half-written .git file). A failed
-            // `git status` is no evidence of a clean tree, so the tree is kept
-            // and tracked, and the caller reports the failure.
-            let file_count = match git.uncommitted_file_count(&worktree.path) {
-                Ok(count) => count,
-                Err(error) => {
-                    self.workers.insert(worker_name.to_string(), worktree);
-                    return Err(error.into());
-                }
-            };
-            if file_count > 0 {
-                let warning = DirtyWorktreeWarning {
-                    worker_name: worker_name.to_string(),
-                    path: worktree.path.clone(),
-                    file_count,
-                };
-                self.workers.insert(worker_name.to_string(), worktree);
-                return Ok(RemoveOutcome::DirtyDeferred(warning));
-            }
+    /// cas-58a3: drop a worker whose worktree [`remove_worker_worktree_io`]
+    /// removed from this manager's tracking.
+    pub fn forget_worker(&mut self, worker_name: &str) {
+        self.workers.remove(worker_name);
+        self.worker_repo_roots.remove(worker_name);
+    }
+}
 
-            git.remove_worktree(&worktree.path, false)?;
+/// cas-58a3: one worker's worktree as [`WorktreeManager::attempt_remove_worker`]
+/// sees it.
+#[derive(Debug, Clone)]
+pub struct WorkerRemovalPlan {
+    pub worker_name: String,
+    pub worktree: Worktree,
+    pub repo_root: PathBuf,
+}
+
+/// cas-58a3: the I/O of [`WorktreeManager::attempt_remove_worker`]. A clean
+/// tree is removed and its branch deleted best effort; a tree with live
+/// external symlinks or uncommitted files is kept and described. The caller
+/// forgets the worker only on [`RemoveOutcome::Removed`].
+pub fn remove_worker_worktree_io(plan: &WorkerRemovalPlan) -> WorktreeResult<RemoveOutcome> {
+    let worktree = &plan.worktree;
+    let git = GitOperations::new(plan.repo_root.clone());
+    if worktree.path.exists() {
+        // cas-df97: live external symlinks block regardless of dirty
+        // state — this is the actual production path
+        // (finalize_worker_worktree) that the reported incident went
+        // through.
+        let mut links = scan_external_symlinks_into(&worktree.path);
+        links.extend(scan_project_node_modules_symlinks_into(
+            &worktree.path,
+            &plan.repo_root,
+        ));
+        if !links.is_empty() {
+            return Ok(RemoveOutcome::ExternalSymlinksBlocked(ExternalSymlinkWarning {
+                worker_name: plan.worker_name.clone(),
+                path: worktree.path.clone(),
+                links,
+            }));
         }
 
-        let _ = git.delete_branch(&worktree.branch, true);
+        // cas-2ffe (GH #915): a worker that just died can leave the tree
+        // mid-write (an index.lock, a half-written .git file). A failed
+        // `git status` is no evidence of a clean tree, so the tree is kept
+        // and tracked, and the caller reports the failure.
+        let file_count = git.uncommitted_file_count(&worktree.path)?;
+        if file_count > 0 {
+            return Ok(RemoveOutcome::DirtyDeferred(DirtyWorktreeWarning {
+                worker_name: plan.worker_name.clone(),
+                path: worktree.path.clone(),
+                file_count,
+            }));
+        }
 
-        worktree.mark_abandoned();
-        worktree.mark_removed();
-        self.worker_repo_roots.remove(worker_name);
-
-        Ok(RemoveOutcome::Removed)
+        git.remove_worktree(&worktree.path, false)?;
     }
+
+    let _ = git.delete_branch(&worktree.branch, true);
+    Ok(RemoveOutcome::Removed)
 }

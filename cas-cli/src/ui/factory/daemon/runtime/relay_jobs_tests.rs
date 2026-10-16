@@ -840,6 +840,7 @@ async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
             None,
             crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
             Some(at),
+            None,
         );
         assert_eq!(
             cas_store::lane_guard::thread_violations(),
@@ -905,6 +906,7 @@ async fn cas_ff42_a_panicked_death_record_does_not_hold_its_exit_forever() {
         None,
         crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
         Some(at),
+        None,
     );
     let deadline = Instant::now() + Duration::from_secs(30);
     while !daemon.recent_worker_exits.is_empty() {
@@ -912,5 +914,170 @@ async fn cas_ff42_a_panicked_death_record_does_not_hold_its_exit_forever() {
         assert!(Instant::now() < deadline, "the exit stayed recording: {:?}", daemon.recent_worker_exits);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    settle_relays(&mut daemon).await;
+}
+
+/// cas-58a3: the whole worker-exit path writes nothing inside the loop's
+/// enforced PTY exchange (C6): the stale mark and death record, the reap and
+/// worktree check, and the boot-time spawn notice all run as jobs. The exit is
+/// then recorded, cleaned and relayed in that order.
+#[tokio::test]
+async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.queue_jobs.store(&cas_dir).unwrap();
+    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.spawn_verifications.insert(
+        "relay-worker".to_string(),
+        super::super::SpawnVerification {
+            request_id: Some(7),
+            launched_at: Instant::now(),
+            registered_at: None,
+            task_id: None,
+            launched_wall: std::time::SystemTime::now(),
+        },
+    );
+    let progress = super::loop_watchdog::LoopProgress::new();
+    {
+        let lane = super::loop_watchdog::enforced_daemon_step(
+            &progress,
+            super::loop_watchdog::LoopPhase::ClientInput,
+        );
+        let store_free = cas_store::wait_budget::forbid_store_access();
+        let before = cas_store::lane_guard::thread_violations();
+        let store_before = cas_store::wait_budget::store_access_violations();
+        daemon
+            .handle_worker_crash("relay-worker", Some(1), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            cas_store::lane_guard::thread_violations(),
+            before,
+            "the exit path ran blocking work in the enforced step: {:?}",
+            cas_store::lane_guard::last_thread_violation()
+        );
+        assert_eq!(
+            cas_store::wait_budget::store_access_violations(),
+            store_before,
+            "the exit path touched the store in the enforced step: {:?}",
+            cas_store::wait_budget::last_store_access_violation()
+        );
+        drop(store_free);
+        drop(lane);
+    }
+    assert!(!daemon.app.worker_names().iter().any(|name| name == "relay-worker"));
+    settle_relays(&mut daemon).await;
+    let exit = &daemon.recent_worker_exits[0];
+    assert!(!exit.recording, "recorded and cleaned");
+    assert!(exit.death.is_some(), "the death was recorded off the loop");
+    let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert_eq!(agent.status, cas_types::AgentStatus::Stale);
+    let row = crate::store::open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .peek_all(10)
+        .unwrap()
+        .into_iter()
+        .any(|row| row.prompt.contains("relay-worker"));
+    assert!(row, "the boot-time spawn notice was written off the loop");
+}
+
+/// cas-58a3: recorded, then crashed, then relayed. While the crashed
+/// worker's cleanup still runs, its exit stays recording and is not relayed.
+#[tokio::test]
+async fn cas_58a3_an_exit_waits_for_its_crash_cleanup_before_it_is_relayed() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.relay_jobs.crash_cleanup_override = Some(|_| {
+        std::thread::sleep(Duration::from_millis(400));
+        crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome { worktree: None }
+    });
+    daemon.app.add_worker_name_for_test("relay-worker");
+    // Dated at the crash, after the worker registered, as production does.
+    let at = chrono::Utc::now();
+    daemon.recent_worker_exits.push(super::ObservedWorkerExit {
+        at,
+        worker: "relay-worker".into(),
+        status: "exited with code 1".into(),
+        death: None,
+        recording: true,
+    });
+    let cleanup = daemon.app.mark_worker_crashed_in_memory("relay-worker");
+    daemon.mark_registered_worker_stale(
+        "relay-worker",
+        "exited with code 1",
+        None,
+        crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+        Some(at),
+        Some(cleanup),
+    );
+    let cleanup_key = super::queue_and_events::worker_crash_cleanup_key("relay-worker", at);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !daemon.relay_jobs.writing(&cleanup_key) {
+        daemon.relay_correlated_worker_deaths();
+        assert!(Instant::now() < deadline, "the cleanup never started");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    daemon.relay_correlated_worker_deaths();
+    let exit = &daemon.recent_worker_exits[0];
+    assert!(exit.death.is_some(), "recorded first");
+    assert!(exit.recording, "still cleaning, so not ready");
+    assert!(
+        !daemon.relay_jobs.writing(&super::queue_and_events::death_group_key(
+            &daemon.recent_worker_exits
+        )),
+        "not relayed while its cleanup runs"
+    );
+    while !daemon.recent_worker_exits.is_empty() {
+        daemon.relay_correlated_worker_deaths();
+        assert!(Instant::now() < deadline, "the exit was never relayed");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    settle_relays(&mut daemon).await;
+}
+
+/// cas-58a3 N1: a death group's result handled before a death record's
+/// result in the same drained batch must not settle that record's exit as
+/// vanished (take() frees the whole batch's keys before applying them).
+#[tokio::test]
+async fn cas_58a3_a_same_batch_record_is_not_mistaken_for_a_vanished_one() {
+    use super::relay_jobs::RelayOutput;
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+    daemon.recent_worker_exits.push(super::ObservedWorkerExit {
+        at,
+        worker: "relay-worker".into(),
+        status: "exited with code 1".into(),
+        death: None,
+        recording: true,
+    });
+    // First in the batch: a death group's report, whose settle advances.
+    assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, "earlier-group", None, || {
+        RelayOutput::DeathsRelayed { group: Vec::new(), done: true }
+    }));
+    // Second: this exit's death record.
+    let record_key = super::queue_and_events::worker_death_record_key("relay-worker", at);
+    assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, &record_key, None, move || {
+        RelayOutput::WorkerDeathRecorded {
+            worker: "relay-worker".into(),
+            at: Some(at),
+            death: None,
+            cleanup: None,
+        }
+    }));
+    // Both finish before one drain takes them as a single batch.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let group_key = super::queue_and_events::death_group_key(&daemon.recent_worker_exits);
+    daemon.drain_relay_jobs();
+    assert!(
+        !daemon.relay_jobs.writing(&group_key),
+        "the exit was relayed mid-batch as if its record had vanished"
+    );
+    assert_eq!(
+        daemon.recent_worker_exits.len(),
+        1,
+        "the exit is still held: nothing relayed it before its record applied"
+    );
+    assert!(!daemon.recent_worker_exits[0].recording, "the record itself settled it");
     settle_relays(&mut daemon).await;
 }

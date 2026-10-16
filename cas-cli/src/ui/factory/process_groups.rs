@@ -373,6 +373,39 @@ pub(crate) async fn reap(
     cas_root: &Path,
     record: &TrackedProcessGroup,
 ) -> io::Result<ReapOutcome> {
+    if let Some(outcome) = reap_signal(cas_root, record)? {
+        return Ok(outcome);
+    }
+    for _ in 0..REAP_POLLS {
+        if let Some(outcome) = reap_poll(cas_root, record)? {
+            return Ok(outcome);
+        }
+        tokio::time::sleep(REAP_POLL_INTERVAL).await;
+    }
+    Err(reap_survived(record))
+}
+
+/// cas-58a3: [`reap`] for a thread with no async runtime (a daemon job
+/// lane). The same signal and the same bounded wait, with a thread sleep.
+pub(crate) fn reap_blocking(cas_root: &Path, record: &TrackedProcessGroup) -> io::Result<ReapOutcome> {
+    if let Some(outcome) = reap_signal(cas_root, record)? {
+        return Ok(outcome);
+    }
+    for _ in 0..REAP_POLLS {
+        if let Some(outcome) = reap_poll(cas_root, record)? {
+            return Ok(outcome);
+        }
+        std::thread::sleep(REAP_POLL_INTERVAL);
+    }
+    Err(reap_survived(record))
+}
+
+const REAP_POLLS: usize = 20;
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Kill the cgroup and signal the group. `Some` when the reap is already
+/// decided without waiting.
+fn reap_signal(cas_root: &Path, record: &TrackedProcessGroup) -> io::Result<Option<ReapOutcome>> {
     // cas-99f5 (GH #86): kill the cgroup FIRST, before any process-group
     // identity check can short-circuit.
     //
@@ -387,11 +420,11 @@ pub(crate) async fn reap(
         GroupIdentity::Original => {}
         GroupIdentity::Gone => {
             untrack(cas_root, record.pgid)?;
-            return Ok(ReapOutcome::AlreadyGone);
+            return Ok(Some(ReapOutcome::AlreadyGone));
         }
         GroupIdentity::FingerprintMismatch => {
             untrack(cas_root, record.pgid)?;
-            return Ok(ReapOutcome::FingerprintMismatch);
+            return Ok(Some(ReapOutcome::FingerprintMismatch));
         }
         GroupIdentity::Unverifiable => {
             return Err(io::Error::new(
@@ -425,18 +458,23 @@ pub(crate) async fn reap(
         ));
     }
 
-    for _ in 0..20 {
-        if !is_live(record) {
-            untrack(cas_root, record.pgid)?;
-            return Ok(ReapOutcome::Reaped);
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    Ok(None)
+}
 
-    Err(io::Error::other(format!(
+/// One wait check after the signal: the group is gone (and untracked).
+fn reap_poll(cas_root: &Path, record: &TrackedProcessGroup) -> io::Result<Option<ReapOutcome>> {
+    if is_live(record) {
+        return Ok(None);
+    }
+    untrack(cas_root, record.pgid)?;
+    Ok(Some(ReapOutcome::Reaped))
+}
+
+fn reap_survived(record: &TrackedProcessGroup) -> io::Error {
+    io::Error::other(format!(
         "process group {} still exists after SIGKILL",
         record.pgid
-    )))
+    ))
 }
 
 #[cfg(test)]

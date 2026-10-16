@@ -1177,6 +1177,85 @@ fn cleanup_cancelled_spawn_worktree_with_manager(
     Ok(true)
 }
 
+/// cas-58a3: what a crashed worker's off-loop cleanup needs.
+#[derive(Debug, Clone)]
+pub struct CrashCleanup {
+    pub cas_dir: std::path::PathBuf,
+    pub factory_session: Option<String>,
+    pub worker: String,
+    /// The worker's tracked worktree, if any; reclaimed only when it holds no
+    /// open task and is clean.
+    pub worktree: Option<crate::worktree::WorkerRemovalPlan>,
+}
+
+/// cas-58a3: what the off-loop crash cleanup did to the worktree. `None` when
+/// it was left alone (open tasks, or none tracked).
+#[derive(Debug)]
+pub struct CrashCleanupOutcome {
+    pub worktree: Option<crate::worktree::WorktreeResult<RemoveOutcome>>,
+}
+
+/// cas-58a3: the I/O half of [`FactoryApp::mark_worker_crashed`], for a job
+/// lane. The interactive leader may have exited while a long-lived child
+/// remains in its process group: reap the durable group before the lane is
+/// eligible for respawn. Then reclaim the worktree only when all of the
+/// worker's tasks are Closed (the supervisor has moved on) and the tree is
+/// clean; by default it is preserved for respawn.
+pub fn crash_cleanup_io(cleanup: &CrashCleanup) -> CrashCleanupOutcome {
+    let name = cleanup.worker.as_str();
+    if let Some(record) = crate::ui::factory::process_groups::list(&cleanup.cas_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|record| {
+            record.worker_name == name
+                && cleanup
+                    .factory_session
+                    .as_deref()
+                    .is_none_or(|session| record.factory_session == session)
+        })
+    {
+        if let Err(error) = crate::ui::factory::process_groups::reap_blocking(&cleanup.cas_dir, &record) {
+            tracing::warn!(
+                worker = %name,
+                pgid = record.pgid,
+                error = %error,
+                "crashed worker process group survived reap; retaining GC record"
+            );
+        }
+    }
+
+    let Some(plan) = cleanup.worktree.as_ref() else {
+        return CrashCleanupOutcome { worktree: None };
+    };
+    let Ok(agent_store) = open_agent_store(&cleanup.cas_dir) else {
+        return CrashCleanupOutcome { worktree: None };
+    };
+    let Some(agent_id) = agent_store
+        .list(None)
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|a| a.name == name).map(|a| a.id))
+    else {
+        return CrashCleanupOutcome { worktree: None };
+    };
+    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) {
+        return CrashCleanupOutcome { worktree: None };
+    }
+    let outcome = crate::worktree::remove_worker_worktree_io(plan);
+    if let Ok(RemoveOutcome::DirtyDeferred(warning)) = &outcome
+        && let Err(e) = flag_agent_dirty_on_shutdown(
+            agent_store.as_ref(),
+            &agent_id,
+            &warning.path,
+            warning.file_count,
+        )
+    {
+        tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
+    }
+    CrashCleanupOutcome {
+        worktree: Some(outcome),
+    }
+}
+
 /// Stamp `dirty_on_shutdown=true` (plus path + file count) onto the agent
 /// record so the daemon reaper (Unit 3) can later salvage and reclaim the
 /// orphaned worktree. Returns error only on store-level failures.
@@ -2749,30 +2828,17 @@ impl FactoryApp {
     /// AND the tree is clean — in that case we reclaim it the same way graceful
     /// shutdown would. Dirty trees are always preserved and flagged for salvage.
     pub async fn mark_worker_crashed(&mut self, name: &str) {
-        // The interactive leader may have exited while a long-lived child
-        // remains in its process group. Reap the durable group before making
-        // this lane eligible for respawn.
-        if let Some(record) = crate::ui::factory::process_groups::list(self.cas_dir())
-            .unwrap_or_default()
-            .into_iter()
-            .find(|record| {
-                record.worker_name == name
-                    && self
-                        .factory_session()
-                        .is_none_or(|session| record.factory_session == session)
-            })
-        {
-            match crate::ui::factory::process_groups::reap(self.cas_dir(), &record).await {
-                Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    worker = %name,
-                    pgid = record.pgid,
-                    error = %error,
-                    "crashed worker process group survived reap; retaining GC record"
-                ),
-            }
-        }
+        let cleanup = self.mark_worker_crashed_in_memory(name);
+        let outcome = crash_cleanup_io(&cleanup);
+        self.apply_crash_cleanup(name, outcome);
+    }
 
+    /// cas-58a3: the loop half of [`Self::mark_worker_crashed`]. It drops the
+    /// worker from the roster, event detector, pane grid and layout, and
+    /// returns what [`crash_cleanup_io`] needs: the process-group reap and the
+    /// worktree reclaim check, which must not run inside the daemon loop's
+    /// enforced PTY exchange (C6).
+    pub fn mark_worker_crashed_in_memory(&mut self, name: &str) -> CrashCleanup {
         // Remove from worker tracking
         self.worker_names.retain(|n| n != name);
 
@@ -2785,21 +2851,6 @@ impl FactoryApp {
         // Ensure selected tab is still valid
         self.clamp_selected_worker_tab();
 
-        // Determine if this crashed worker can have its worktree reclaimed.
-        // Default: preserve for respawn. Only reclaim when all assigned tasks
-        // are Closed (supervisor has moved on) AND tree is clean.
-        let cas_dir = self.cas_dir().to_path_buf();
-        if let Ok(agent_store) = open_agent_store(&cas_dir) {
-            if let Ok(agents) = agent_store.list(None) {
-                if let Some(agent) = agents.iter().find(|a| a.name == name) {
-                    let agent_id = agent.id.clone();
-                    if !worker_has_open_tasks(&cas_dir, &agent_id) {
-                        self.finalize_worker_worktree(&agent_store, &agent_id, name);
-                    }
-                }
-            }
-        }
-
         // Sync pane sizes to adjust layout
         let _ = self.sync_pane_sizes();
 
@@ -2808,6 +2859,61 @@ impl FactoryApp {
             "factory_worker_crashed",
             vec![("workers_remaining", &workers_remaining)],
         );
+        CrashCleanup {
+            cas_dir: self.cas_dir().to_path_buf(),
+            factory_session: self.factory_session().map(str::to_string),
+            worker: name.to_string(),
+            worktree: self
+                .worktree_manager
+                .as_ref()
+                .and_then(|manager| manager.worker_removal_plan(name)),
+        }
+    }
+
+    /// cas-58a3: the loop half after [`crash_cleanup_io`] reports: forget a
+    /// reclaimed worktree, and surface a preserved or failed one.
+    pub fn apply_crash_cleanup(&mut self, name: &str, outcome: CrashCleanupOutcome) {
+        match outcome.worktree {
+            None | Some(Ok(RemoveOutcome::NotTracked)) => {}
+            Some(Ok(RemoveOutcome::Removed)) => {
+                if let Some(manager) = self.worktree_manager.as_mut() {
+                    manager.forget_worker(name);
+                }
+            }
+            Some(Err(error)) => {
+                self.set_error(format!("Worker '{name}' worktree cleanup failed: {error}"));
+            }
+            Some(Ok(RemoveOutcome::DirtyDeferred(warning))) => {
+                self.set_error(format!(
+                    "Worker '{}' shut down with {} uncommitted file{} at {} — worktree preserved for salvage",
+                    warning.worker_name,
+                    warning.file_count,
+                    if warning.file_count == 1 { "" } else { "s" },
+                    warning.path.display(),
+                ));
+            }
+            Some(Ok(RemoveOutcome::ExternalSymlinksBlocked(warning))) => {
+                // cas-df97: live external symlinks (e.g. dotfiles a
+                // stow/install step pointed at this worktree by mistake)
+                // resolve into it — removing the directory would leave every
+                // one dangling. Preserve the worktree and name every
+                // offending link so it's fixable without spelunking.
+                let links_desc = warning
+                    .links
+                    .iter()
+                    .map(|l| format!("{} -> {}", l.link.display(), l.target.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.set_error(format!(
+                    "Worker '{}' shut down but worktree at {} has {} live external symlink{} pointing into it — worktree preserved, NOT removed: {}",
+                    warning.worker_name,
+                    warning.path.display(),
+                    warning.links.len(),
+                    if warning.links.len() == 1 { "" } else { "s" },
+                    links_desc,
+                ));
+            }
+        }
     }
 
     /// Respawn a crashed worker

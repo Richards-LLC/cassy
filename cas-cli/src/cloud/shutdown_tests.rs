@@ -416,3 +416,75 @@ fn cas_4ac8_round4_intent_owns_incarnation_even_before_enqueue_time() {
     assert!(!is_ended(temp.path(), &resumed).unwrap());
     assert!(is_ended(temp.path(), &old).unwrap());
 }
+
+#[test]
+fn cas_4ac8_round5_listing_failure_without_session_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(DIR), "unavailable listing").unwrap();
+    let mut automatic = ended_agent("automatic", "old");
+    automatic.cc_session_id = None;
+    assert!(is_ended(temp.path(), &automatic).is_err(), "unknown session cannot disprove an older incarnation fence without listing");
+}
+
+#[test]
+fn cas_4ac8_round5_stale_supersede_does_not_recreate_retired_intent() {
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(env.home()).unwrap();
+    enqueue(&root, "retired", "same", "http://example.invalid").unwrap();
+    let file = path(&root, "retired", "same");
+    let mut old = read(&file).unwrap();
+    old.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    write(&file, &old, false).unwrap();
+    let mut snapshot = Snapshot::load(&root);
+    retain_expired(&root, &file, &old).unwrap();
+    let mut resumed = ended_agent("retired", "same");
+    resumed.registered_at = Utc::now();
+    open_agent_store(&root).unwrap().register(&resumed).unwrap();
+    drain_snapshot(&root, &client("http://example.invalid"), Utc::now(), &mut snapshot).unwrap();
+    assert!(!file.exists(), "a stale supersession pass must not resurrect expired work");
+}
+
+#[test]
+fn cas_4ac8_round5_stale_supersede_preserves_peer_completion() {
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(env.home()).unwrap();
+    enqueue(&root, "completed-peer", "same", "http://example.invalid").unwrap();
+    let file = path(&root, "completed-peer", "same");
+    let mut snapshot = Snapshot::load(&root);
+    let mut completed = read(&file).unwrap();
+    completed.completed_at = Some(Utc::now());
+    completed.cause = "completed by peer".into();
+    write(&file, &completed, false).unwrap();
+    let mut resumed = ended_agent("completed-peer", "same");
+    resumed.registered_at = Utc::now();
+    open_agent_store(&root).unwrap().register(&resumed).unwrap();
+    drain_snapshot(&root, &client("http://example.invalid"), Utc::now(), &mut snapshot).unwrap();
+    let after = read(&file).unwrap();
+    assert_eq!(after.completed_at, completed.completed_at);
+    assert_eq!(after.cause, completed.cause);
+}
+
+#[tokio::test]
+async fn cas_4ac8_round5_inflight_retry_preserves_superseded_completion() {
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(env.home()).unwrap();
+    let server = MockServer::start().await;
+    enqueue(&root, "inflight", "same", &server.uri()).unwrap();
+    let file = path(&root, "inflight", "same");
+    let peer_file = file.clone();
+    let peer_cause = "superseded during HTTP".to_string();
+    let cause = peer_cause.clone();
+    Mock::given(method("POST")).and(http_path("/api/agents/inflight/shutdown"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut completed = read(&peer_file).unwrap();
+            completed.completed_at = Some(Utc::now());
+            completed.cause = cause.clone();
+            write(&peer_file, &completed, false).unwrap();
+            ResponseTemplate::new(429).insert_header("Retry-After", "600")
+        }).expect(1).mount(&server).await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || drain(&root, &client(&endpoint), Utc::now()).unwrap()).await.unwrap();
+    let after = read(&file).unwrap();
+    assert!(after.completed_at.is_some(), "retry must not overwrite concurrent supersession");
+    assert_eq!(after.cause, peer_cause);
+}

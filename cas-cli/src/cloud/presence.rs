@@ -713,3 +713,54 @@ mod tests {
         assert_eq!(checked_out_branch(dir.path()), None, "not a checkout");
     }
 }
+
+#[cfg(test)]
+mod round5_tests {
+    use super::*;
+    use crate::store::init_cas_dir;
+    use crate::test_support::TestEnvGuard;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::any;
+
+    async fn late_fence(mode: &str) {
+        let env = TestEnvGuard::temp_home();
+        let root = init_cas_dir(env.home()).unwrap();
+        let server = MockServer::start().await;
+        Mock::given(any()).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server).await;
+        let mut agent = Agent::new("late-fence".into(), "late-fence".into());
+        agent.cc_session_id = Some("same".into());
+        let now = Utc::now();
+        if mode == "heartbeat" {
+            save(&root, &PresenceRecord {
+                agent_id: agent.id.clone(), state: PresenceState::Registered, cause: None, failures: 0,
+                last_attempt_at: now, registered_at: Some(now), next_retry_at: None, focus: None, branch: None,
+            });
+        }
+        let mut snapshot = super::super::shutdown::Snapshot::load(&root);
+        super::super::shutdown::enqueue(&root, &agent, "same", &server.uri()).unwrap();
+        let endpoint = server.uri();
+        let mode = mode.to_string();
+        let (action, record) = tokio::task::spawn_blocking(move || {
+            let client = CloudCoordinator::new(CloudConfig {endpoint, token: Some("test-token".into()), ..Default::default()}).unwrap();
+            if mode == "register" {
+                (None, Some(register_with_shutdown(&client, &root, &agent, now, &mut snapshot)))
+            } else {
+                (Some(tick_with_shutdown(&client, &root, &agent, now, &mut snapshot)), None)
+            }
+        }).await.unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty(), "stale snapshot must not resurrect Cloud presence");
+        if let Some(action) = action { assert_eq!(action, TickAction::Waiting); }
+        if let Some(record) = record {
+            assert_eq!(record.state, PresenceState::Failing);
+            assert!(record.cause.unwrap().contains("session ended"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_4ac8_round5_late_fence_blocks_first_registration() { late_fence("tick").await; }
+    #[tokio::test]
+    async fn cas_4ac8_round5_late_fence_blocks_heartbeat() { late_fence("heartbeat").await; }
+    #[tokio::test]
+    async fn cas_4ac8_round5_late_fence_blocks_direct_registration() { late_fence("register").await; }
+}

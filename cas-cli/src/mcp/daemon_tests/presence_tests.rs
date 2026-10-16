@@ -1131,3 +1131,13 @@ async fn cas_4ac8_round4_delete_failure_preserves_interruption_note() {
     assert!(agents.list_agent_leases(id).unwrap().is_empty());
     assert!(tasks.get(&task.id).unwrap().notes.contains("INTERRUPTED"), "released work needs its interruption note even if row deletion fails");
 }
+
+#[tokio::test]
+async fn cas_4ac8_round4_unicode_session_start_and_heartbeat_complete() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    let id = "ééé中-session";
+    session_start(&daemon, id, "unicode-session").await;
+    heartbeat_tick(&daemon).await;
+    assert!(fx.cloud.state().agents.contains_key(id));
+    assert_eq!(fx.cloud.state().heartbeats.len(), 1);
+}

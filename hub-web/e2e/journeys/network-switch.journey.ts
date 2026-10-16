@@ -693,6 +693,40 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
   });
 });
 
+// cas-9846 (G03): a reload while the whole machine is unreachable used to read
+// "0 conversations" for seconds, with no sign of the held message. The last
+// known catalog and the last conversation now show before the machine answers.
+test("HUB-J12 network switch: a reload while the machine is unreachable reopens the last conversation at once (cas-9846)", journeyPart, async ({ page, journey }) => {
+  const { hub, clock, header, held } = await connected(page);
+  const bubble = (text: string) => page.getByRole("log").locator(".bub").filter({ hasText: text });
+  await journey.stage("The whole machine drops and a message waits", async () => {
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toHaveText(" · Reconnecting");
+    await sendNow(page, "Keep this through the reload");
+    await expect(held).toHaveCount(1);
+    expect(sentTimes(hub, "Keep this through the reload")).toBe(0);
+  });
+  await journey.stage("Reload while the whole machine is unreachable", async () => {
+    await page.reload();
+    // Within a second, before the machine answers: the conversation it last
+    // knew, open, with its held message; never "0 conversations".
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible({ timeout: 1_000 });
+    await expect(bubble("Keep this through the reload")).toBeVisible({ timeout: 1_000 });
+    await expect(held).toHaveCount(1, { timeout: 1_000 });
+    await expect(page.getByText(/\b0 conversations\b/)).toHaveCount(0);
+    expect(sentTimes(hub, "Keep this through the reload")).toBe(0);
+  });
+  await journey.stage("The machine answers: the same conversation attaches and the message goes once", async () => {
+    const next = hub.nextSend();
+    await hub.up("atlas");
+    await clock.advance(10_000);
+    expect((await next).text).toBe("Keep this through the reload");
+    await expect(header).toHaveText(" · Live");
+    await clock.advance(30_000);
+    expect(sentTimes(hub, "Keep this through the reload")).toBe(1);
+  });
+});
+
 // cas-0e14 (journey F29): a code re-pair requests only the default scopes, so
 // a browser that could start sessions loses that. The dialog says so before
 // the code is made, with the command whose link would keep it, and once the

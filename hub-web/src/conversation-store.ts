@@ -1,3 +1,4 @@
+import type { HubSession } from "./types";
 /**
  * Per-conversation state that must survive a reload or a same-tab navigation
  * (cas-7752 drafts; cas-e7b1 messages that have not been confirmed). Each
@@ -344,5 +345,59 @@ export function readMarkStore(storage: StorageLike | undefined): {
   return {
     load: () => store.entries(),
     save: (conversation, mark) => { store.set(conversation, mark); },
+  };
+}
+
+const LIVENESS = new Set(["live", "stale_metadata", "missing_endpoint"]);
+
+/** One cached catalog row, narrowed to the fields a hub sends (never the browser-only `unreachable`). */
+export function validCachedSession(raw: unknown): HubSession | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const row = raw as Record<string, unknown>;
+  const text = (key: string) => (typeof row[key] === "string" ? (row[key] as string) : undefined);
+  const name = text("name");
+  const supervisor = text("supervisor");
+  const liveness = text("liveness");
+  if (!name || supervisor === undefined || !liveness || !LIVENESS.has(liveness)) return undefined;
+  if (!Array.isArray(row.workers) || !row.workers.every((worker) => typeof worker === "string")) return undefined;
+  const session: HubSession = { name, supervisor, workers: [...(row.workers as string[])], liveness: liveness as HubSession["liveness"] };
+  for (const key of ["project_dir", "epic_id", "last_activity_at", "last_activity", "started_at", "cloud_project_id"] as const) {
+    const value = text(key);
+    if (value !== undefined) session[key] = value;
+  }
+  if (typeof row.ws_port === "number" && Number.isInteger(row.ws_port)) session.ws_port = row.ws_port;
+  if (row.dormant === true) session.dormant = true;
+  return session;
+}
+
+/**
+ * cas-9846: each machine's last session catalog, so a reload while the
+ * machine is unreachable shows its conversations (and opens the last one)
+ * at once instead of "0 conversations" until it answers. Keyed
+ * `<machine>:catalog`, so removing or revoking the machine's pairing purges
+ * it with every other conversation namespace.
+ */
+export function catalogCacheStore(storage: StorageLike | undefined): {
+  load(machineId: string): HubSession[] | undefined;
+  save(machineId: string, sessions: readonly HubSession[]): void;
+} {
+  const store = new ConversationStore<HubSession[]>(
+    storage,
+    "catalog",
+    (raw) => {
+      if (!Array.isArray(raw)) return undefined;
+      const rows = raw.map(validCachedSession);
+      return rows.every((row) => row !== undefined) ? (rows as HubSession[]) : undefined;
+    },
+    { maxConversations: 20, maxValueChars: 64_000 },
+  );
+  const key = (machineId: string) => `${machineId}:catalog`;
+  return {
+    load: (machineId) => store.get(key(machineId)),
+    save: (machineId, sessions) => {
+      const rows = sessions.map(validCachedSession).filter((row): row is HubSession => row !== undefined);
+      if (rows.length) store.set(key(machineId), rows);
+      else store.delete(key(machineId));
+    },
   };
 }

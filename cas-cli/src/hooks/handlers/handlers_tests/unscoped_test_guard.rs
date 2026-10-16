@@ -557,30 +557,17 @@ fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
     let out = handle_pre_tool_use(&codex_payload("call_nested", command), Some(&root)).unwrap();
     let stdout = serde_json::to_value(&out).unwrap();
     assert_eq!(codex_effective_command(&stdout, command), None, "{stdout}");
-}
 
-#[test]
-fn prepared_cargo_route_preserves_original_and_rewritten_cli_denials_cas_2c8e() {
-    let project = tempfile::tempdir().unwrap();
-    let root = project.path().join(".cas");
-    std::fs::create_dir(&root).unwrap();
-    let _env = crate::test_support::TestEnvGuard::with_vars(&[
-        ("CAS_HOOK_HARNESS", "codex"),
-        ("CAS_CLONE_PATH", project.path().to_str().unwrap()),
-    ]);
-    // Both commands still pass through the existing operator-owned CLI deny
-    // policy; constructing the route before IO must not approve either one.
+    // Early route selection still checks operator denials against both the
+    // original Cargo command and the actual replacement executable.
     let executable = std::env::current_exe().unwrap();
-    let runner_cli = executable.file_name().unwrap().to_str().unwrap();
-    for denied in ["cargo", runner_cli] {
+    for denied in ["cargo", executable.file_name().unwrap().to_str().unwrap()] {
         let mut config = crate::config::Config::default();
         config.factory.get_or_insert_with(Default::default).worker_denied_clis = vec![denied.into()];
         config.save(&root).unwrap();
-        let mut call = input("cargo check -p cas --tests", "worker");
-        call.cwd = project.path().to_string_lossy().into_owned();
-        let output = handle_pre_tool_use(&call, Some(&root)).unwrap();
-        let reason = deny_reason(&output).unwrap_or_else(|| panic!("{denied} must be denied: {output:?}"));
-        assert!(reason.contains(denied), "{reason}");
-        assert!(serde_json::to_value(output).unwrap()["hookSpecificOutput"]["updatedInput"].is_null());
+        let command = "cargo check -p cas --tests";
+        let output = handle_pre_tool_use(&codex_payload("call_denied", command), Some(&root)).unwrap();
+        assert!(deny_reason(&output).is_some_and(|reason| reason.contains(denied)), "{output:?}");
+        assert_eq!(codex_effective_command(&serde_json::to_value(output).unwrap(), command), None);
     }
 }

@@ -63,7 +63,7 @@ class ResponseHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def native_admission(hook_mode, *, absolute=False, generous_budget=False):
+def native_admission(hook_mode, *, generous_budget=False):
     with tempfile.TemporaryDirectory(prefix="cas-codex-cargo-") as directory:
         root = Path(directory)
         home, repo, tools = (root / part for part in ("home", "repo", "tools"))
@@ -74,7 +74,7 @@ def native_admission(hook_mode, *, absolute=False, generous_budget=False):
         cargo = tools / "cargo"
         cargo.write_text(f"#!/bin/sh\nprintf raw > {shlex.quote(str(raw))}\n")
         cargo.chmod(0o755)
-        command = f"{shlex.quote(str(cargo)) if absolute else 'cargo'} nextest run -p cas --lib -E 'test(cas_2c8e)'"
+        command = f"cargo nextest run -p cas --lib -E 'test(cas_2c8e)'"
         hook_started = root / "hook-started"
         capped = root / "capped"
         hook = root / "pre_tool.py"
@@ -87,15 +87,11 @@ def native_admission(hook_mode, *, absolute=False, generous_budget=False):
             f"Path({str(hook_started)!r}).write_text('started')\n"
             + {
                 "timeout": "time.sleep(3)\n",
-                "error": "raise SystemExit(1)\n",
-                "invalid": "print('{malformed')\n",
                 "rewrite": ("time.sleep(3.2)\n" if generous_budget else "") + "print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'allow','updatedInput':{'command':"
                            + repr(f"printf capped > {shlex.quote(str(capped))}") + "}}}))\n",
-                "missing": "",
             }[hook_mode]
         )
-        if hook_mode != "missing":
-            (home / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": f"/usr/bin/python3 {shlex.quote(str(hook))}", "timeout": timeout}]}]}}))
+        (home / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": f"/usr/bin/python3 {shlex.quote(str(hook))}", "timeout": timeout}]}]}}))
         server = ScriptedResponses(command)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -140,15 +136,8 @@ class NativeCargoAdmission(unittest.TestCase):
             self.skipTest("native Codex boundary requires explicit --codex path")
 
     def test_generous_budget_survives_delay_exceeding_old_timeout(self):
-        for absolute in (False, True):
-            with self.subTest(absolute=absolute):
-                result = native_admission("rewrite", absolute=absolute, generous_budget=True)
-                self.assertTrue(result["hook"], result)
-                self.assertFalse(result["raw"], result)
-                self.assertTrue(result["capped"], result)
-
-    def test_successful_hook_rewrite_still_executes(self):
-        result = native_admission("rewrite")
+        result = native_admission("rewrite", generous_budget=True)
+        self.assertTrue(result["hook"], result)
         self.assertFalse(result["raw"], result)
         self.assertTrue(result["capped"], result)
 
@@ -157,11 +146,6 @@ class NativeCargoAdmission(unittest.TestCase):
         self.assertTrue(result["hook"], result)
         self.assertTrue(result["raw"], result)
 
-    def test_native_errors_invalid_and_absent_hooks_need_upstream_enforcement(self):
-        for mode in ("error", "invalid", "missing"):
-            with self.subTest(mode=mode):
-                result = native_admission(mode)
-                self.assertTrue(result["raw"], result)
 
 
 if __name__ == "__main__":

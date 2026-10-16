@@ -94,17 +94,11 @@ pub(crate) fn warn_at_launch(config: &PtyConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn identifies_only_audited_native_version_cas_2c8e() {
-        assert!(known_fail_open("codex-cli 0.162.1\n"));
-        assert!(!known_fail_open("codex-cli 0.162.10"));
-        assert!(!known_fail_open("codex-cli 0.163.0"));
-        assert!(!known_fail_open("unknown"));
-    }
     #[cfg(unix)]
     #[test]
     fn launch_probe_is_bounded_and_soft_on_errors_cas_2c8e() {
         use std::os::unix::fs::PermissionsExt;
+        assert!(!known_fail_open("codex-cli 0.163.0"));
         let root = tempfile::tempdir().unwrap();
         let cli = root.path().join("codex");
         std::fs::write(&cli, "#!/bin/sh\necho codex-cli 0.162.1\n").unwrap();

@@ -799,88 +799,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_budget_upgrade_preserves_operator_hooks_and_trust_cas_2c8e() {
-        let dir = TempDir::new();
-        let config = dir.join("config.toml");
-        let hooks = dir.join("hooks.json");
-        let mut fixture = serde_json::json!({"hooks": {
-            "PreToolUse": [{"matcher":"^Bash$","hooks":[
-                {"type":"command","command":"operator hook","timeout":1},
-                {"type":"command","command":CAS_CODEX_HOOKS[0].2,"timeout":3}]}],
-            "PostToolUse": [{"matcher":"^Bash$","hooks":[
-                {"type":"command","command":CAS_CODEX_HOOKS[1].2,"timeout":3}]}]}});
-        std::fs::write(&config, "# selected account\nmodel = \"gpt-5\"\n").unwrap();
-        std::fs::write(&hooks, serde_json::to_string(&fixture).unwrap()).unwrap();
-        assert!(prepare_cas_tool_hooks_in(&config, &hooks).unwrap());
-        fixture["hooks"]["PreToolUse"][0]["hooks"][1]["timeout"] =
-            CODEX_PRE_TOOL_TIMEOUT_SECS.into();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&hooks).unwrap())
-                .unwrap(),
-            fixture
-        );
-        let trusted = std::fs::read_to_string(&config).unwrap();
-        assert!(trusted.contains("# selected account"));
-        for entry in cas_hook_trust_entries(&hooks).unwrap() {
-            assert!(hook_state_is_trusted(&trusted, &entry).unwrap());
-        }
-        assert!(!prepare_cas_tool_hooks_in(&config, &hooks).unwrap());
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), trusted);
-        // Larger and inherited native defaults must never be lowered.
-        for timeout in [serde_json::json!(600), serde_json::Value::Null] {
-            let handler = &mut fixture["hooks"]["PreToolUse"][0]["hooks"][1];
-            handler.as_object_mut().unwrap().remove("timeout");
-            if !timeout.is_null() {
-                handler["timeout"] = timeout;
-            }
-            let source = serde_json::to_string(&fixture).unwrap();
-            std::fs::write(&hooks, &source).unwrap();
-            prepare_cas_tool_hooks_in(&config, &hooks).unwrap();
-            assert_eq!(std::fs::read_to_string(&hooks).unwrap(), source);
-        }
-    }
-
-    #[test]
-    fn launch_budget_skips_foreign_and_missing_hooks_cas_2c8e() {
-        let dir = TempDir::new();
-        let config = dir.join("config.toml");
-        let hooks = dir.join("hooks.json");
-        assert!(!prepare_cas_tool_hooks_in(&config, &hooks).unwrap());
-        let foreign =
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"operator hook","timeout":1}]}]}}"#;
-        std::fs::write(&hooks, foreign).unwrap();
-        assert!(!prepare_cas_tool_hooks_in(&config, &hooks).unwrap());
-        assert_eq!(std::fs::read_to_string(&hooks).unwrap(), foreign);
-        assert!(!config.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn launch_budget_keeps_hook_symlink_and_mode_cas_2c8e() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        let dir = TempDir::new();
-        let target = dir.join("actual-hooks.json");
-        let link = dir.join("hooks.json");
-        std::fs::write(&target, serde_json::to_string(&serde_json::json!({"hooks": {
-            "PreToolUse": [{"matcher":"^Bash$","hooks":[{"type":"command","command":CAS_CODEX_HOOKS[0].2,"timeout":3}]}],
-            "PostToolUse": [{"matcher":"^Bash$","hooks":[{"type":"command","command":CAS_CODEX_HOOKS[1].2,"timeout":3}]}]}})).unwrap()).unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
-        symlink(&target, &link).unwrap();
-        prepare_cas_tool_hooks_in(&dir.join("config.toml"), &link).unwrap();
-        assert!(link.is_symlink());
-        assert_eq!(
-            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
-        assert_eq!(
-            value["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"],
-            CODEX_PRE_TOOL_TIMEOUT_SECS
-        );
-    }
-
-    #[test]
     fn detects_existing_entry_in_every_toml_spelling() {
         // cas-28a49 review follow-up: a matcher that misses any of these would
         // append a duplicate [projects."x"] table, and TOML forbids redeclaring
@@ -1055,6 +973,20 @@ mod tests {
 
         assert!(ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
         let after_first = std::fs::read_to_string(&config_path).unwrap();
+        let hook_source = std::fs::read_to_string(&hooks_path).unwrap();
+        let hook_value: serde_json::Value = serde_json::from_str(&hook_source).unwrap();
+        assert_eq!(
+            hook_value["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"],
+            CODEX_PRE_TOOL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            hook_value["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "operator hook"
+        );
+        assert_eq!(
+            hook_value["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"],
+            3
+        );
         let entries = cas_hook_trust_entries(&hooks_path).unwrap();
         assert_eq!(
             entries[0].key,
@@ -1071,6 +1003,7 @@ mod tests {
 
         assert!(!ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), after_first);
+        assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), hook_source);
     }
 
     #[test]

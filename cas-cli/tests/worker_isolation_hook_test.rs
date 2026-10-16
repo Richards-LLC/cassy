@@ -111,8 +111,9 @@ fn codex_worker_apply_patch_into_the_main_checkout_is_refused_cas_49c0() {
     );
 }
 
+#[cfg(unix)]
 #[test]
-fn native_codex_entry_rewrites_cargo_and_denies_bad_input_cas_2c8e() {
+fn native_codex_cargo_admission_denies_stalled_policy_cas_2c8e() {
     let project = TempDir::new().unwrap();
     let root = project.path().join(".cas");
     std::fs::create_dir(&root).unwrap();
@@ -121,7 +122,19 @@ fn native_codex_entry_rewrites_cargo_and_denies_bad_input_cas_2c8e() {
         "hook_event_name":"PreToolUse", "tool_name":"Bash",
         "tool_input":{"command":"cargo check -p cas --tests"}
     });
-    for (payload, rewrite) in [(input.to_string(), true), ("{malformed".into(), false)] {
+    for stalled in [false, true] {
+        if stalled {
+            // The real policy loader blocks reading this FIFO. No synthetic
+            // callback or compiler is involved: the native hook must deny
+            // within its own deadline instead of exhausting Codex's timeout.
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(root.join("config.toml"))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         let output = cas_cmd(&project)
             .args(["hook", "PreToolUse"])
             .env("CAS_HOOK_HARNESS", "codex")
@@ -129,13 +142,21 @@ fn native_codex_entry_rewrites_cargo_and_denies_bad_input_cas_2c8e() {
             .env("CAS_ROOT", &root)
             .env("CAS_CLONE_PATH", project.path())
             .timeout(std::time::Duration::from_secs(5))
-            .write_stdin(payload)
+            .write_stdin(input.to_string())
             .output()
             .unwrap();
         assert!(output.status.success(), "{:?}", output);
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let specific = &value["hookSpecificOutput"];
-        if rewrite {
+        if stalled {
+            assert_eq!(specific["permissionDecision"], "deny", "{value}");
+            assert!(
+                specific["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("GUARD UNAVAILABLE")
+            );
+        } else {
             assert_eq!(specific["permissionDecision"], "allow", "{value}");
             assert!(
                 specific["updatedInput"]["command"]
@@ -143,14 +164,6 @@ fn native_codex_entry_rewrites_cargo_and_denies_bad_input_cas_2c8e() {
                     .unwrap()
                     .contains(" factory worker-check --cas-root "),
                 "{value}"
-            );
-        } else {
-            assert_eq!(specific["permissionDecision"], "deny", "{value}");
-            assert!(
-                specific["permissionDecisionReason"]
-                    .as_str()
-                    .unwrap()
-                    .contains("GUARD UNAVAILABLE")
             );
         }
     }

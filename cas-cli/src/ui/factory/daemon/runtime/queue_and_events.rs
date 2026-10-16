@@ -19717,3 +19717,7 @@ mod supervisor_notice_wake_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "queue_control_tests.rs"]
+mod queue_control_tests;

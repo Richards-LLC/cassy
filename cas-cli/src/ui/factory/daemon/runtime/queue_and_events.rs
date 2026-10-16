@@ -8322,6 +8322,7 @@ impl FactoryDaemon {
                     );
                 }
                 if !claims_back {
+                    self.queue_jobs.carry_claimed_row(queued.clone(), facts.clone());
                     continue;
                 }
                 let mut tally =
@@ -8450,8 +8451,13 @@ impl FactoryDaemon {
                     &queued.target,
                 ) {
                     super::prompt_queue_jobs::ClaimStep::Claimed(token) => token,
-                    super::prompt_queue_jobs::ClaimStep::Waiting
-                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
+                    super::prompt_queue_jobs::ClaimStep::Waiting => {
+                        // A claimed row is not selectable again; its next
+                        // pass comes from the carry once the claim is back.
+                        self.queue_jobs.carry_claimed_row(queued.clone(), facts.clone());
+                        continue;
+                    }
+                    super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
                 };
                 let inject_generation = match self.queue_jobs.admit_claimed(
                     self.app.cas_dir(),

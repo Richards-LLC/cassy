@@ -852,6 +852,10 @@ pub(crate) struct QueueJobs {
     claims: HashMap<(i64, String), ClaimState>,
     /// Rows a claim job's QA retarget moved, until control forgets them.
     claim_retargeted: Vec<i64>,
+    /// Rows waiting for their claim jobs, with their snapshot facts.
+    carried: HashMap<i64, (cas_store::QueuedPrompt, super::queue_and_events::RowFacts)>,
+    /// The roster of the last selection, for batches of carried rows.
+    last_roster: Option<(Vec<cas_types::Agent>, HashSet<String>)>,
     /// When the current or last QueueSelect was submitted.
     select_submitted_at: Instant,
     /// Mirror results collected, current or stale (tests).
@@ -914,6 +918,8 @@ impl QueueJobs {
             stamp_landed_at: HashMap::new(),
             claims: HashMap::new(),
             claim_retargeted: Vec::new(),
+            carried: HashMap::new(),
+            last_roster: None,
             select_submitted_at: Instant::now(),
             #[cfg(test)]
             mirror_results_seen: 0,
@@ -1906,9 +1912,83 @@ impl QueueJobs {
     }
 
     pub(crate) fn take_selection(&mut self) -> Option<QueueSelection> {
-        let mut selection = self.selection.take()?;
+        let Some(mut selection) = self.selection.take() else {
+            return self.take_claimed_batch();
+        };
         selection.submitted_at = Some(self.select_submitted_at);
+        self.last_roster = Some((
+            selection.registered_agents.clone(),
+            selection.native_agents.clone(),
+        ));
+        // Rows whose claims are back join the batch (a claimed row is not
+        // selectable again, spec §4.5 rule 1).
+        let ready = self.take_claim_ready_rows();
+        for (row, facts) in ready {
+            if selection.rows.iter().any(|selected| selected.id == row.id) {
+                continue;
+            }
+            selection.facts.insert(row.id, facts);
+            selection.rows.push(row);
+        }
         Some(selection)
+    }
+
+    /// Carry `row` until its claim job comes back: a claimed row is no
+    /// longer selectable, so its second phase is delivered from here
+    /// (cas-786a6, H3).
+    pub(crate) fn carry_claimed_row(
+        &mut self,
+        row: cas_store::QueuedPrompt,
+        facts: super::queue_and_events::RowFacts,
+    ) {
+        self.carried.insert(row.id, (row, facts));
+    }
+
+    /// Carried rows whose every claim job is back, removed from the carry.
+    /// Rows with no claim left (expired) are dropped: they are selectable.
+    fn take_claim_ready_rows(&mut self) -> Vec<(cas_store::QueuedPrompt, super::queue_and_events::RowFacts)> {
+        let claims = &self.claims;
+        let mut ready = Vec::new();
+        self.carried.retain(|id, (row, facts)| {
+            let mut any = false;
+            let mut pending = false;
+            for ((claim_row, _), state) in claims {
+                if claim_row == id {
+                    any = true;
+                    pending |= matches!(state, ClaimState::Pending(_));
+                }
+            }
+            if !any {
+                return false;
+            }
+            if pending {
+                return true;
+            }
+            ready.push((row.clone(), facts.clone()));
+            false
+        });
+        ready.sort_by_key(|(row, _)| row.id);
+        ready
+    }
+
+    /// A batch of only the carried rows whose claims came back, delivered
+    /// against the last selection's roster.
+    fn take_claimed_batch(&mut self) -> Option<QueueSelection> {
+        let (registered_agents, native_agents) = self.last_roster.clone()?;
+        let ready = self.take_claim_ready_rows();
+        if ready.is_empty() {
+            return None;
+        }
+        let mut batch = QueueSelection {
+            registered_agents,
+            native_agents,
+            ..QueueSelection::default()
+        };
+        for (row, facts) in ready {
+            batch.facts.insert(row.id, facts);
+            batch.rows.push(row);
+        }
+        Some(batch)
     }
 
     /// Whether any stamp has been submitted and not landed or deferred.

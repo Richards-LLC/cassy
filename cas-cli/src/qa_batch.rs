@@ -234,11 +234,16 @@ pub(crate) fn satisfying_receipt(
             || receipt.project_id != project
             || receipt.task_heads.get(&task.id) != Some(&anchor)
             || ancestor(repo, &anchor, head) != Some(true)
-            || ancestor(repo, head, &receipt.staging_sha) != Some(true)
+            || ancestor(repo, &anchor, &receipt.staging_sha) != Some(true)
+            || !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
+                || (ancestor(repo, &receipt.staging_sha, head) == Some(true)
+                    && ancestor(repo, head, &target_tip) == Some(true)))
             || ancestor(repo, &receipt.staging_sha, &target_tip) != Some(true)
         {
             continue;
         }
+        // A post-review integration receipt may be later than staging. The
+        // immutable task anchor, rather than that umbrella merge, binds QA.
         let Ok((artifact, _)) = validate_ledger(
             root,
             &receipt.ledger_artifact_id,

@@ -1132,6 +1132,7 @@ mod tests {
             ("factory.worker_denied_clis", ""),
             ("factory.worker_denied_mcp_tools", ""),
             ("qa.evidence_gate", "false"),
+            ("qa.mode", "batch"),
             ("release.claude_account_allowlist", "agent@example.com"),
         ] {
             assert!(is_operator_only_config_key(key), "{key}");

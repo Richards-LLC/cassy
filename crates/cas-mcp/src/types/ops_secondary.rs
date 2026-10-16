@@ -357,7 +357,7 @@ pub struct SystemRequest {
 pub struct VerificationRequest {
     /// PASS tasks covered by one staging walk; duplicates are collapsed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "batch_receipt: task IDs that passed the staging walk")]
+    #[schemars(description = "batch_receipt: 1 to 500 PASS task IDs; duplicates collapse")]
     pub task_ids: Option<Vec<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]

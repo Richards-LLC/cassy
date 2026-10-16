@@ -42,6 +42,8 @@ artifact's size and SHA-256. It stores an immutable receipt with project,
 recorder, time, staging commit, ledger binding and deduplicated task anchors.
 `task_ids` is the supervisor's PASS attestation; the runtime does not infer a
 deployed walkthrough from Git ancestry or parse PASS claims from ledger prose.
+Supply 1 to 500 entries per receipt; duplicate IDs collapse. Larger batches
+can use multiple receipts.
 
 Each listed task can then close without a per-task `qa-bundle:` note or an
 automatic independent pass. `verification action=qa_status task_id=<id>`

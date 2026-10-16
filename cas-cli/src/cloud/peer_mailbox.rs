@@ -44,6 +44,8 @@ pub const LEASE_SECS: u32 = 120;
 const RETIREMENT_LOOKBACK_DAYS: i64 = 7;
 /// Keep current recipients independent of bounded historical recovery work.
 const RETIRED_RECIPIENT_MAX: usize = 100;
+const RETIREMENT_CAP_WARNING: &str =
+    "retired peer recipients capped at 100; older addresses were not checked";
 
 /// One outbound peer message (`POST /api/peer-messages`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,10 +500,7 @@ fn retired_recipients(cas_root: &Path, session: &str) -> Result<RecipientHistory
         .map_err(|e| e.to_string())?;
     let mut history = RecipientHistory::default();
     if events.len() > RETIRED_RECIPIENT_MAX {
-        history.warning = Some(
-            "recent retired peer identity history is capped; older addresses were not checked"
-                .into(),
-        );
+        history.warning = Some(RETIREMENT_CAP_WARNING.into());
     }
     for event in events {
         if event.entity_type != crate::types::EventEntityType::Agent {
@@ -584,11 +583,7 @@ fn recipient_routes<'a>(
     live: &[&'a crate::types::Agent],
     retired: &[RetiredRecipient],
     session: &str,
-) -> (
-    BTreeMap<String, &'a crate::types::Agent>,
-    Vec<String>,
-    Vec<String>,
-) {
+) -> (BTreeMap<String, &'a crate::types::Agent>, Vec<String>) {
     let live_ids: BTreeSet<_> = live.iter().map(|a| a.id.as_str()).collect();
     let mut routes: BTreeMap<_, _> = live
         .iter()
@@ -596,8 +591,7 @@ fn recipient_routes<'a>(
         .filter(|a| a.factory_session.as_deref() == Some(session))
         .map(|a| (a.id.clone(), a))
         .collect();
-    let mut errors = BTreeSet::new();
-    let mut warnings = Vec::new();
+    let mut warnings = BTreeSet::new();
     let rows = all
         .iter()
         .filter(|a| !live_ids.contains(a.id.as_str()))
@@ -656,15 +650,12 @@ fn recipient_routes<'a>(
                 if retired_count < RETIRED_RECIPIENT_MAX {
                     routes.insert(old.id, *successor);
                     retired_count += 1;
-                } else if warnings.is_empty() {
-                    warnings.push(
-                        "retired peer recipients capped at 100; older addresses were not checked"
-                            .into(),
-                    );
+                } else {
+                    warnings.insert(RETIREMENT_CAP_WARNING.into());
                 }
             }
             many if many.len() > 1 => {
-                errors.insert(format!(
+                warnings.insert(format!(
                     "ambiguous live successors for {}@{} in factory {}: {}",
                     old.name,
                     machine,
@@ -678,7 +669,7 @@ fn recipient_routes<'a>(
             _ => {}
         }
     }
-    (routes, errors.into_iter().collect(), warnings)
+    (routes, warnings.into_iter().collect())
 }
 
 /// What one delivery tick did.
@@ -786,9 +777,7 @@ fn deliver_claimed_with_history(
             .push("no live supervisor in this factory session".into());
         return report;
     }
-    let (routes, errors, warnings) =
-        recipient_routes(&all, &live, &history.verified, factory_session);
-    report.errors.extend(errors);
+    let (routes, warnings) = recipient_routes(&all, &live, &history.verified, factory_session);
     report.warnings.extend(warnings);
     if let Some(warning) = &history.warning {
         report.warnings.push(warning.clone());
@@ -798,11 +787,39 @@ fn deliver_claimed_with_history(
         .filter(|a| a.factory_session.as_deref() == Some(factory_session))
         .count();
     let retired_count = routes.len().saturating_sub(current_count);
+    // Untyped retirement evidence can authorize feedback only when its name
+    // belongs to exactly one live named factory in this project. It cannot
+    // establish a lineage between competing factories.
+    let mut live_factories: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for agent in &live {
+        if let Some(session) = agent
+            .factory_session
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            live_factories
+                .entry(agent.name.to_ascii_lowercase())
+                .or_default()
+                .insert(session);
+        }
+    }
+    let now = chrono::Utc::now();
+    let since = now - chrono::Duration::days(RETIREMENT_LOOKBACK_DAYS);
     let mut candidates: Vec<_> = history
         .unverified
         .iter()
         .filter(|old| !all.iter().any(|a| a.id == old.id) && !routes.contains_key(&old.id))
+        .filter(|old| old.retired_at >= since && old.retired_at <= now)
         .filter_map(|old| {
+            let name = old.name.to_ascii_lowercase();
+            let factories = live_factories.get(&name)?;
+            if factories.len() != 1 {
+                report.warnings.push(format!(
+                    "legacy peer feedback skipped for {name}: competing live factories {}; address left unclaimed; resend to a current supervisor ID",
+                    factories.iter().copied().collect::<Vec<_>>().join(", ")
+                ));
+                return None;
+            }
             live.iter()
                 .copied()
                 .filter(|a| {
@@ -813,9 +830,6 @@ fn deliver_claimed_with_history(
                 .map(|author| (old, author))
         })
         .collect();
-    let now = chrono::Utc::now();
-    let since = now - chrono::Duration::days(RETIREMENT_LOOKBACK_DAYS);
-    candidates.retain(|(old, _)| old.retired_at >= since && old.retired_at <= now);
     candidates.sort_by(|(a, _), (b, _)| {
         b.retired_at
             .cmp(&a.retired_at)
@@ -827,13 +841,13 @@ fn deliver_claimed_with_history(
             continue;
         }
         if retired_count + inspections.len() >= RETIRED_RECIPIENT_MAX {
-            report.warnings.push(
-                "retired peer recipients capped at 100; older addresses were not checked".into(),
-            );
+            report.warnings.push(RETIREMENT_CAP_WARNING.into());
             break;
         }
         inspections.insert(old.id.clone(), author);
     }
+    report.warnings.sort();
+    report.warnings.dedup();
     let recipient_ids: Vec<_> = routes.keys().chain(inspections.keys()).cloned().collect();
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())

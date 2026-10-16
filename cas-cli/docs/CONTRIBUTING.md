@@ -205,7 +205,10 @@ address, message-target ambiguity lists distinct agent IDs that can be used as
 explicit targets. Legacy deleted rows without retirement identity cannot be
 safely recovered from a name alone. Their bodies are not admitted; the daemon
 sends an idempotent reply asking the sender to resend to the current supervisor
-ID, then rejects the original. If feedback fails, the original remains unacked
+ID, then rejects the original. This feedback-only fallback requires exactly
+one live named factory with that supervisor name in the project. Competing
+same-name factories leave legacy addresses unclaimed and warn instead.
+If feedback fails, the original remains unacked
 for retry. Retirement recovery uses a seven-day window and at most 100 retired
 recipients per tick, separately from current recipients. History lookup failure
 or truncation is a mailbox warning; current verified addresses keep receiving.

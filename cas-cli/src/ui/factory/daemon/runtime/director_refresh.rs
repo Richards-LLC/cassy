@@ -647,7 +647,7 @@ impl DirectorRefresh {
         let mut request: DeliveryRequest = app.delivery_request(&events);
         // cas-3b16: the liveness scan (agent store, transcripts, `/proc`)
         // runs beside the read on the blocking lane, not on the read lane.
-        let liveness: Option<crate::ui::factory::app::IdleLivenessRequest> = None;
+        let liveness = request.take_idle_liveness();
         let hook = self.hook.clone();
         #[cfg(test)]
         let stale_reads = self.stale_delivery_reads.clone();

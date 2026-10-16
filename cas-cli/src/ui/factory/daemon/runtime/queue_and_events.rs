@@ -9957,7 +9957,7 @@ impl FactoryDaemon {
         self.reminder_scan_generation += 1;
         // cas-3b16 (C2 review round 2, L2): edges are consumed once, so a
         // pass carrying them keeps a copy in case the runtime refuses it.
-        let refused_fallback: Option<ReminderScanInput> = None;
+        let refused_fallback = carries_edges.then(|| scan.clone());
         let submitted = self.queue_jobs.submit_external(
             super::factory_jobs::reminder_scan_spec(carries_edges, self.reminder_scan_generation),
             move || {

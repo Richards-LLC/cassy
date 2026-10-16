@@ -506,7 +506,7 @@ impl FactoryApp {
                 // otherwise a just-written hold leaks one more WorkerIdle
                 // event before unrelated database activity occurs.
                 // cas-3b16: read with the snapshot, off the loop.
-                timed("worker holds", || self.apply_session_metadata_worker_holds());
+                timed("worker holds", || self.apply_snapshot_worker_holds());
                 return Ok(timed("supervisor stall", || self.detect_supervisor_stall())
                     .into_iter()
                     .collect());
@@ -522,7 +522,7 @@ impl FactoryApp {
         // Sync session_id → pane_name mappings from agent store
         timed("session mappings", || self.sync_session_mappings());
         timed("epic focus", || self.apply_session_metadata_focus());
-        timed("worker holds", || self.apply_session_metadata_worker_holds());
+        timed("worker holds", || self.apply_snapshot_worker_holds());
 
         // cas-e98e AC3: drop phantom worker panes when registry says the
         // worker is no longer supervision-live.

@@ -1762,6 +1762,10 @@ impl DirectorEventDetector {
                 // cas-3b16: no IO on the loop. The snapshot job read the
                 // fingerprint; one it has not read yet counts as unchanged
                 // until the next snapshot.
+                Some(path) if self.deferred_health_probes => self
+                    .observed_transcript_fingerprints
+                    .get(path)
+                    .is_none_or(|observed| !transcript_written_since(cached.fingerprint, *observed)),
                 Some(path) => stall_transcript_fingerprint(path) == cached.fingerprint,
             };
             if now < cached.next_probe_at && unchanged { return Some(cached.confirmed); }

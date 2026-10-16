@@ -3544,7 +3544,7 @@ impl FactoryDaemon {
         // share one key and finish in submission order, and a batch with
         // nothing to re-check reads nothing.
         if !prompts.is_empty()
-            && (false
+            && (refresh.has_pending_deliverability()
                 || prompts
                     .iter()
                     .any(crate::ui::factory::app::prompt_needs_fresh_recheck))

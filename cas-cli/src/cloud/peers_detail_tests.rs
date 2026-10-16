@@ -657,7 +657,7 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
     let supervisor = agent("remote", "supervisor", "remote-lane", "beta", REPO, 1);
     Mock::given(method("GET"))
         .and(path("/api/agents"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents": [supervisor]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents": [supervisor, agent("remote-worker", "worker", "remote-lane", "beta", REPO, 1)]})))
         .expect(2)
         .mount(&server)
         .await;
@@ -702,6 +702,7 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
     assert!(text.starts_with("[WARN] 1 peer supervisor"));
     assert!(text.contains("Claims unavailable at") && text.contains("claims offline"));
     assert!(!text.contains("Claims  0"));
+    assert!(text.contains("Tasks unknown") && !text.contains("Tasks none"), "{text}");
     assert!(
         server
             .received_requests()

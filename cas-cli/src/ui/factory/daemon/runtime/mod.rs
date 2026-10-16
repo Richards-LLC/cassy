@@ -27,6 +27,8 @@ mod output;
 pub(super) mod pane_size;
 #[cfg(test)]
 mod provisioning_tests;
+#[cfg(test)]
+mod reminder_wake_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod render_scheduler;

@@ -1080,11 +1080,17 @@ pub(crate) fn preferred_worker_registration<'a>(
 ) -> Option<&'a cas_types::Agent> {
     use cas_types::AgentStatus;
     let rank = |status| if status == AgentStatus::Active { 0 } else { 1 };
-    agents.iter()
-        .filter(|agent| agent.name == worker_name
-            && matches!(agent.status, AgentStatus::Active | AgentStatus::Stale))
-        .min_by(|a, b| rank(a.status).cmp(&rank(b.status))
-            .then_with(|| b.registered_at.cmp(&a.registered_at)))
+    agents
+        .iter()
+        .filter(|agent| {
+            agent.name == worker_name
+                && matches!(agent.status, AgentStatus::Active | AgentStatus::Stale)
+        })
+        .min_by(|a, b| {
+            rank(a.status)
+                .cmp(&rank(b.status))
+                .then_with(|| b.registered_at.cmp(&a.registered_at))
+        })
 }
 
 /// Resolve `(pid, clone_path, session_id, transcript_path)` for a worker by

@@ -995,8 +995,12 @@ impl QueueJobs {
 
     /// A finished job is waiting to be applied.
     pub(crate) fn has_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire) || self.selection.is_some()
-            || self.external.iter().any(|result| result.kind == super::queue_control_jobs::WAKE_GATE_READ)
+        self.ready.load(Ordering::Acquire)
+            || self.selection.is_some()
+            || self
+                .external
+                .iter()
+                .any(|result| result.kind == super::queue_control_jobs::WAKE_GATE_READ)
     }
 
     pub(crate) fn config(&mut self, cas_dir: &Path) -> Arc<crate::config::Config> {
@@ -2384,6 +2388,11 @@ fn log_prune(report: &PruneReport) {
 #[path = "prompt_queue_jobs_tests.rs"]
 pub(super) mod tests;
 
-pub(crate) fn job_thread_spawn_queue(cas_dir: &Path) -> anyhow::Result<Arc<dyn cas_store::SpawnQueueStore>> {
-    job_thread_store("spawn", cas_dir, |root| Ok(crate::store::open_spawn_queue_store(root)?))
+pub(crate) fn job_thread_spawn_queue(
+    cas_dir: &Path,
+) -> anyhow::Result<Arc<dyn cas_store::SpawnQueueStore>> {
+    job_thread_store("spawn", cas_dir, |root| {
+        Ok(crate::store::open_spawn_queue_store(root)?)
+    })
 }
+

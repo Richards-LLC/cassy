@@ -6281,8 +6281,12 @@ impl FactoryDaemon {
     /// spoof-by-naming the stamp exists to remove.
     fn wake_sender_for(&self, origin: Option<&cas_store::QueueOrigin>) -> WakeSender {
         let resolved = match origin {
-            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) =>
-                self.queue_jobs.prompt_preparation.agents().iter().find(|agent| agent.id == *agent_id),
+            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => self
+                .queue_jobs
+                .prompt_preparation
+                .agents()
+                .iter()
+                .find(|agent| agent.id == *agent_id),
             _ => None,
         };
         Self::wake_sender_from_origin(origin, resolved)
@@ -6622,7 +6626,10 @@ impl FactoryDaemon {
         if !name.eq_ignore_ascii_case(self.app.supervisor_name()) {
             return None;
         }
-        self.queue_jobs.prompt_preparation.recipient(worker).map(|inputs| inputs.wait)
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(worker)
+            .map(|inputs| inputs.wait)
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -6720,23 +6727,45 @@ impl FactoryDaemon {
         PaneWakeState {
             composer_dirty: self.app.mux.pane_composer_dirty(pane),
             ready_for_injection: self.app.mux.pane_ready_for_injection(pane),
-            silent_for: self.pane_silent_since.get(pane).map(|since| since.elapsed()),
+            silent_for: self
+                .pane_silent_since
+                .get(pane)
+                .map(|since| since.elapsed()),
             tool_call: self.prepared_tool_call_evidence(pane),
         }
     }
     fn prepared_tool_call_evidence(&self, pane: &str) -> ToolCallEvidence {
-        self.queue_jobs.prompt_preparation.recipient(pane).map(|inputs| inputs.tool_call)
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)
+            .map(|inputs| inputs.tool_call)
             .unwrap_or(ToolCallEvidence::Unknown)
     }
-    fn prepared_turn_completion_after(&self, pane: &str, after: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.queue_jobs.prompt_preparation.recipient(pane)?.latest.completion.as_ref()
-            .filter(|completion| completion.at > after).map(|completion| completion.at)
+    fn prepared_turn_completion_after(
+        &self,
+        pane: &str,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)?
+            .latest
+            .completion
+            .as_ref()
+            .filter(|completion| completion.at > after)
+            .map(|completion| completion.at)
     }
     fn prepared_mid_turn(&self, pane: &str) -> Option<bool> {
-        self.queue_jobs.prompt_preparation.recipient(pane)?.mid_turn()
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)?
+            .mid_turn()
     }
     fn prepared_wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
-        self.queue_jobs.prompt_preparation.recipient(pane).map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)
+            .map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
             .unwrap_or_default()
     }
 
@@ -7735,17 +7764,27 @@ impl FactoryDaemon {
         self.queue_jobs.apply_completions();
         self.queue_jobs.expire_injects(&cas_dir, Instant::now());
         self.queue_jobs.expire_claims(&cas_dir, Instant::now());
-        let raw = if self.queue_jobs.prompt_preparation.has_pending() { None }
-            else { self.next_unprepared_queue_selection() };
+        let raw = if self.queue_jobs.prompt_preparation.has_pending() {
+            None
+        } else {
+            self.next_unprepared_queue_selection()
+        };
         let mut preparation = std::mem::take(&mut self.queue_jobs.prompt_preparation);
-        let ready = preparation.advance(&mut self.queue_jobs, raw,
-            self.app.cas_dir().to_path_buf(), self.app.supervisor_name().to_string(),
-            self.app.worker_names().to_vec(), Instant::now());
+        let ready = preparation.advance(
+            &mut self.queue_jobs,
+            raw,
+            self.app.cas_dir().to_path_buf(),
+            self.app.supervisor_name().to_string(),
+            self.app.worker_names().to_vec(),
+            Instant::now(),
+        );
         self.queue_jobs.prompt_preparation = preparation;
         ready
     }
 
-    fn next_unprepared_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
+    fn next_unprepared_queue_selection(
+        &mut self,
+    ) -> Option<super::prompt_queue_jobs::QueueSelection> {
         let cas_dir = self.app.cas_dir().to_path_buf();
         if let Some(selection) = self.queue_jobs.take_selection() {
             return Some(selection);
@@ -7763,14 +7802,15 @@ impl FactoryDaemon {
             operator_replies: !self.ws_clients.is_empty(),
             adopt_operator_notices: !self.shutdown.load(std::sync::atomic::Ordering::SeqCst),
         };
-        self.queue_jobs.submit_select(request, |request, generation| {
-            let selection = run_queue_select(request, generation);
-            if selection.is_err() {
-                // A broken handle is reopened on the next selection.
-                super::prompt_queue_jobs::forget_job_thread_stores(&request.cas_dir);
-            }
-            selection
-        });
+        self.queue_jobs
+            .submit_select(request, |request, generation| {
+                let selection = run_queue_select(request, generation);
+                if selection.is_err() {
+                    // A broken handle is reopened on the next selection.
+                    super::prompt_queue_jobs::forget_job_thread_stores(&request.cas_dir);
+                }
+                selection
+            });
         self.queue_jobs.apply_completions();
         self.queue_jobs.take_selection()
     }
@@ -9655,8 +9695,9 @@ impl FactoryDaemon {
     /// processed one-per-tick in the main loop.
     pub(super) fn enqueue_spawn_requests(&mut self) -> anyhow::Result<()> {
         let now = Instant::now();
-        let scan_stalls = self.last_spawn_queue_stall_scan.is_none_or(|last|
-            now.saturating_duration_since(last) >= SPAWN_QUEUE_STALL_SCAN_INTERVAL);
+        let scan_stalls = self.last_spawn_queue_stall_scan.is_none_or(|last| {
+            now.saturating_duration_since(last) >= SPAWN_QUEUE_STALL_SCAN_INTERVAL
+        });
         let request = super::queue_control_jobs::SpawnPollRequest {
             cas_dir: self.app.cas_dir().to_path_buf(),
             session: self.session_name.clone(),
@@ -9671,8 +9712,12 @@ impl FactoryDaemon {
         };
         let ready = ingress.take_ready();
         self.queue_jobs.spawn_ingress = ingress;
-        if submitted && scan_stalls { self.last_spawn_queue_stall_scan = Some(now); }
-        let Some(batch) = ready else { return Ok(()); };
+        if submitted && scan_stalls {
+            self.last_spawn_queue_stall_scan = Some(now);
+        }
+        let Some(batch) = ready else {
+            return Ok(());
+        };
         let batch = batch.map_err(|error| anyhow::anyhow!("{error}"))?;
         for (id, _) in batch.stalled {
             self.reported_stalled_spawn_requests.insert(id);

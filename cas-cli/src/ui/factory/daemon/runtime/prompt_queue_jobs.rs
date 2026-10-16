@@ -2381,7 +2381,7 @@ fn log_prune(report: &PruneReport) {
 
 #[cfg(test)]
 #[path = "prompt_queue_jobs_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 pub(crate) fn job_thread_spawn_queue(cas_dir: &Path) -> anyhow::Result<Arc<dyn cas_store::SpawnQueueStore>> {
     job_thread_store("spawn", cas_dir, |root| Ok(crate::store::open_spawn_queue_store(root)?))

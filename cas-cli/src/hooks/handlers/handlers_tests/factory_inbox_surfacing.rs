@@ -54,6 +54,33 @@ fn store_at(dir: &TempDir) -> SqlitePromptQueueStore {
     store
 }
 
+#[test]
+fn cas_1485_supervisor_hooks_never_render_a_closed_task_merge_relay() {
+    let mut env = TestEnvGuard::temp_home();
+    supervisor_env(&mut env);
+    for tool_boundary in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let store = store_at(&temp);
+        let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
+        let mut task = Task::new("cas-1485-hook".into(), "finished lane".into());
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.add(&task).unwrap();
+        let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id, chrono::Utc::now().to_rfc3339());
+        let id = store.enqueue_with_session("lifecycle-wake:17717", "supervisor", &body, SESSION).unwrap();
+        task.status = TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let hook = input("supervisor");
+        let surfaced = if tool_boundary {
+            let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget)
+        } else {
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
+        };
+        assert!(!surfaced.as_deref().is_some_and(|text| text.contains(&body)), "stale merge action surfaced: {surfaced:?}");
+        assert_eq!(store.message_delivery_report(id).unwrap().unwrap().pending_reason, Some(cas_store::PendingReason::SupersededStale));
+    }
+}
+
 /// The receipt ledger is the authoritative answer to whether a particular
 /// recipient alias has seen a row.  Check it without draining: a drain would
 /// create the very receipt this wiring test needs to prove already exists.

@@ -8909,6 +8909,42 @@ mod tests {
     }
 
     #[test]
+    fn cas_1485_terminal_task_relay_never_surfaces_through_any_atomic_drain() {
+        for status in [TaskStatus::Closed, TaskStatus::Cancelled] {
+            for path in ["unseen", "without_transport", "delivered_after", "wake_named", "poll_repeat", "inbox"] {
+                let (temp, store) = create_test_store();
+                let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+                tasks.init().unwrap();
+                let mut task = Task::new("cas-1485-terminal".into(), "relay target".into());
+                task.status = TaskStatus::AwaitingMerge;
+                tasks.add(&task).unwrap();
+                let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id, Utc::now().to_rfc3339());
+                let id = store.enqueue_with_session("lifecycle-wake:17717", "supervisor", &body, "session").unwrap();
+                let turn_start = Utc::now() - chrono::Duration::minutes(1);
+                if path == "poll_repeat" {
+                    assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
+                } else if path == "delivered_after" {
+                    store.mark_transport_delivered(id).unwrap();
+                }
+                task.status = status;
+                tasks.update(&task).unwrap();
+                let rows = match path {
+                    "unseen" => store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap(),
+                    "without_transport" => store.surface_unseen_for_recipient_without_transport_delivery("supervisor", Some("session"), 10).unwrap(),
+                    "delivered_after" => store.surface_unseen_for_recipient_delivered_after("supervisor", Some("session"), 10, turn_start).unwrap(),
+                    "wake_named" => store.surface_wake_named_for_recipient("supervisor", Some("session"), &[id]).unwrap(),
+                    "poll_repeat" => store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::PolledBefore(Utc::now() + chrono::Duration::seconds(1)), 10, HOOK_SURFACE_BUDGET_CHARS).unwrap().rows,
+                    _ => store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap(),
+                };
+                assert!(rows.is_empty(), "{status} lifecycle payload must not surface via {path}");
+                let report = store.message_delivery_report(id).unwrap().unwrap();
+                assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale), "{path}");
+                assert!(report.pending_detail.as_deref().is_some_and(|detail| detail.contains(&task.id)), "{path}");
+            }
+        }
+    }
+
+    #[test]
     fn cas_4e19_writable_queue_open_removes_empty_diagnostic_decoy() {
         let (temp, store) = create_test_store();
         let prompt = "real queued message";

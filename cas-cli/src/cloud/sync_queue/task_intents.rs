@@ -547,6 +547,21 @@ impl SyncQueue {
                     (tx, Some(lease))
                 }
             };
+            // The pending list was read before the entity lease was claimed.
+            // Its live owner may have completed (or cancelled) this exact
+            // intent and retired its receipt in that gap. A missing snapshot
+            // is already handled, not unclassified revision evidence. Check
+            // under the write transaction/lease, and never retire a newer
+            // intent for the same entity on behalf of this stale snapshot.
+            if mode == TaskSyncFulfillMode::Reconcile
+                && !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_sync_intents WHERE id = ?1 AND mutation_id = ?2 AND entity_id = ?3)",
+                    params![intent.id, intent.mutation_id, intent.entity_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return Ok(TaskSyncFulfillResult::Superseded);
+            }
             let revision = match classify_task_sync_intent(&tx, intent)? {
                 TaskSyncIntentClass::Superseded => {
                     retire_task_sync_evidence(&tx, &intent.entity_id)?;

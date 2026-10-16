@@ -869,6 +869,33 @@ mod tests {
         assert_eq!(pending[0].entity_id, expected.id);
     }
 
+    #[test]
+    fn cas_30e3_retired_snapshot_never_retires_a_newer_degraded_intent() {
+        let (temp, store) = create_test_store();
+        let mut task = Task::new("cas-30e3-newer-intent".into(), "first committed body".into());
+        let old = store.stage_upsert(&task, "create_atomic", None, None).unwrap();
+        store.inner.create_atomic_with_mutation_receipt(&task, &[], None, None, &old.mutation_id).unwrap();
+        assert_eq!(store.fulfill_upsert(&old).unwrap(), TaskSyncFulfillResult::Fulfilled);
+        install_task_enqueue_failure(temp.path(), "");
+        task.title = "newer committed body".into();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        let newer = store.queue.pending_task_sync_intents().unwrap();
+        assert_eq!(newer.len(), 1);
+        assert_ne!(newer[0].mutation_id, old.mutation_id);
+
+        assert_eq!(store.fulfill_upsert_after_validation(&old, TaskSyncFulfillMode::Reconcile,
+            || panic!("retired snapshot must not reach validation")).unwrap(), TaskSyncFulfillResult::Superseded);
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap(), newer,
+            "a stale recovery snapshot must leave newer durable evidence intact");
+        remove_task_enqueue_failure(temp.path());
+        assert_eq!(store.reconcile_pending_task_sync().unwrap(), TaskSyncReconcileOutcome::Clean);
+        assert!(store.queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        let queued: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(queued.title, task.title);
+    }
+
     /// cas-d5c8 (GH #921): the MCP task write paths (create, update, note,
     /// close, cancel) complete while other agents keep committing writes, the
     /// shape of a 4-6 worker factory session. Before the fix, staging the sync

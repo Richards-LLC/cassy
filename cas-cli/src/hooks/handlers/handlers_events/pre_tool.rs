@@ -4233,9 +4233,12 @@ fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
     match wrapper {
         "timeout" => &["-s", "--signal", "-k", "--kill-after"],
         "nice" => &["-n", "--adjustment"],
+        // cas-b7b2: GNU `--eof`, `--max-lines` and `--replace` take an
+        // optional value that can only be attached (`--replace=X`); as bare
+        // words they are flags, and the next word is the command.
         "xargs" => &[
             "-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args", "--max-procs",
-            "--delimiter", "--arg-file", "--max-lines", "--replace", "--eof",
+            "--delimiter", "--arg-file", "--max-chars", "--process-slot-var",
         ],
         "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
         "ionice" => &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata"],
@@ -4312,7 +4315,21 @@ fn operator_policy_command_textual(command: &str) -> bool {
         return false;
     }
     let statements = shell_statement_words(command);
-    statements.is_empty() || !statements.iter().all(|words| read_only_statement(words))
+    statements.is_empty()
+        || !statements
+            .iter()
+            .all(|words| !runs_substitution(words) && read_only_statement(words))
+}
+
+/// cas-b7b2: a word that runs a command when the shell expands it: `$(…)`,
+/// backticks, or process substitution. A read-only command with such an
+/// argument still runs whatever is inside it, so the statement is not read
+/// only. Quoting is not inspected: a single-quoted `$(` is refused too, which
+/// costs a rare search and never admits a run.
+fn runs_substitution(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|word| word.contains("$(") || word.contains('`') || word.contains("<(") || word.contains(">("))
 }
 
 /// A statement that only reads or prints: it cannot change the policy by
@@ -4320,13 +4337,26 @@ fn operator_policy_command_textual(command: &str) -> bool {
 /// non-read-only statement).
 fn read_only_statement(words: &[String]) -> bool {
     let Some(index) = unwrapped_command_index(words) else {
-        return true;
+        // cas-b7b2: a statement of bare assignments changes the environment
+        // later statements run with (PATH, or anything under `set -a`).
+        return !words.iter().any(|word| {
+            word.split_once('=')
+                .is_some_and(|(name, _)| is_shell_variable_name(name))
+        });
     };
     let args = &words[index + 1..];
     match shell_word_basename(&words[index]) {
         "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "cat" | "less" | "more" | "head"
         | "tail" | "wc" | "sort" | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd"
-        | "true" | "false" | "test" | "[" | "set" => true,
+        | "true" | "false" | "test" | "[" => true,
+        // cas-b7b2: `set` is read-only unless it turns on allexport, which
+        // exports every later assignment.
+        "set" => !args.iter().any(|arg| {
+            arg == "allexport"
+                || ((arg.starts_with('-') || arg.starts_with('+'))
+                    && !arg.starts_with("--")
+                    && arg[1..].contains('a'))
+        }),
         "git" => args
             .iter()
             .find(|arg| !arg.starts_with('-'))
@@ -4337,8 +4367,142 @@ fn read_only_statement(words: &[String]) -> bool {
             args.get(at + 1)
                 .is_some_and(|sub| matches!(sub.as_str(), "get" | "describe" | "list" | "search" | "docs"))
         }),
+        // cas-b7b2: searches that cas-1768 QA found refused, judged by
+        // POSITIVE allowlists that fail closed. No environment assignment or
+        // env/sudo-style prefix may precede them: awk and find read
+        // environment that can load programs. gh is never admitted here: a
+        // configured pager, browser or alias can run a command from what
+        // looks like `gh <noun> view`, and that cannot be proved from the
+        // statement text.
+        // Security round 2: only as a direct invocation. Under xargs the
+        // hook cannot see the arguments stdin supplies (a find expression,
+        // or the awk program in replace mode).
+        "awk" | "gawk" | "mawk" | "nawk" => index == 0 && read_only_awk(args),
+        "find" => index == 0 && read_only_find(args),
+        "jq" => index == 0 && read_only_jq(args),
         _ => false,
     }
+}
+
+/// cas-b7b2: a jq run with only known flags (security round 2, L1). Module
+/// search paths, program and data files, and positional-argument modes fail
+/// closed. jq has no way to run a command or write a file itself.
+fn read_only_jq(args: &[String]) -> bool {
+    const FLAGS: &[&str] = &[
+        "-r", "-j", "-c", "-n", "-s", "-e", "-S", "-C", "-M", "-a", "-R", "--raw-output",
+        "--join-output", "--compact-output", "--null-input", "--slurp", "--exit-status",
+        "--sort-keys", "--color-output", "--monochrome-output", "--ascii-output",
+        "--raw-input", "--tab", "--stream", "--seq",
+    ];
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        let word = word.as_str();
+        index += match word {
+            "--indent" => 2,
+            "--arg" | "--argjson" => 3,
+            "--" => break,
+            _ if FLAGS.contains(&word) => 1,
+            // Combined short flags such as `-rc`.
+            _ if word.len() > 2
+                && word.starts_with('-')
+                && !word.starts_with("--")
+                && word[1..].chars().all(|flag| "rjcnseSCMaR".contains(flag)) =>
+            {
+                1
+            }
+            _ if word.starts_with('-') => return false,
+            _ => 1,
+        };
+    }
+    true
+}
+
+/// cas-b7b2: an awk run that only reads and prints, by a POSITIVE
+/// allowlist. Options: only `-F SEP` and `-v NAME=VALUE` (or their attached
+/// forms) before the program; any other option, long option or dialect flag
+/// (program files, includes, `-W`, `-e`, in-place) fails closed. Exactly one
+/// program, given inline, with no construct that can run a command, read or
+/// write outside the input, or load code: `system`, `|`, `<`, `>`,
+/// `getline`, `@` directives. Operands after it are input files; a dash
+/// operand other than `-` (stdin) fails closed.
+fn read_only_awk(args: &[String]) -> bool {
+    let mut index = 0;
+    let program = loop {
+        let Some(word) = args.get(index) else {
+            return false;
+        };
+        match word.as_str() {
+            "-F" | "-v" => index += 2,
+            "--" => {
+                index += 1;
+                break args.get(index);
+            }
+            option if (option.starts_with("-F") || option.starts_with("-v")) && option.len() > 2 => {
+                index += 1
+            }
+            option if option.starts_with('-') => return false,
+            _ => break Some(word),
+        }
+    };
+    let Some(program) = program else {
+        return false;
+    };
+    const IO_CONSTRUCTS: &[&str] = &["system", "|", "<", ">", "getline", "@"];
+    !IO_CONSTRUCTS.iter().any(|construct| program.contains(construct))
+        && args[index + 1..]
+            .iter()
+            .all(|operand| operand == "-" || !operand.starts_with('-'))
+}
+
+/// cas-b7b2: a find that only lists, by a POSITIVE allowlist of options,
+/// tests and output actions. Start paths come first; every later word must
+/// be a recognised expression token or the value of one. Anything else
+/// (actions that run, delete or write files, debug or file-list options)
+/// fails closed.
+fn read_only_find(args: &[String]) -> bool {
+    const LEADING_OPTIONS: &[&str] = &["-L", "-H", "-P"];
+    const BARE: &[&str] = &[
+        "!", "(", ")", ",", "-not", "-o", "-or", "-a", "-and", "-print", "-print0", "-prune",
+        "-depth", "-xdev", "-mount", "-empty", "-readable", "-writable", "-executable",
+        "-nouser", "-nogroup", "-true", "-false", "-quit", "-ls", "-follow", "-daystart",
+        "-noleaf", "-ignore_readdir_race", "-noignore_readdir_race",
+    ];
+    const WITH_VALUE: &[&str] = &[
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname",
+        "-ilname", "-regex", "-iregex", "-regextype", "-type", "-xtype", "-maxdepth",
+        "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
+        "-newer", "-anewer", "-cnewer", "-user", "-group", "-uid", "-gid", "-perm",
+        "-links", "-inum", "-samefile", "-used", "-printf", "-fstype",
+    ];
+    let mut words = args.iter().peekable();
+    while let Some(word) = words.peek() {
+        if LEADING_OPTIONS.contains(&word.as_str()) {
+            words.next();
+        } else {
+            break;
+        }
+    }
+    // Start paths: plain words before the first expression token.
+    while words
+        .peek()
+        .is_some_and(|word| !word.starts_with('-') && !BARE.contains(&word.as_str()))
+    {
+        words.next();
+    }
+    while let Some(word) = words.next() {
+        let word = word.as_str();
+        if BARE.contains(&word) {
+            continue;
+        }
+        if WITH_VALUE.contains(&word) {
+            if words.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// cas-1b94: refusal for an agent's Bash `cas mcp add|remove|import` that
@@ -5961,6 +6125,142 @@ mod workspace_contract_tests {
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
         }
+    }
+
+    /// cas-b7b2: read-only searches that merely mention grant-write are
+    /// allowed (cas-1768 QA round 2, Normal F01), while every way of RUNNING a
+    /// policy command through the same tools stays refused. Security review
+    /// round 1: awk and find are judged by POSITIVE allowlists that fail
+    /// closed, and gh is never admitted (a configured pager, browser or alias
+    /// can run a command from what looks like a read).
+    #[test]
+    fn cas_b7b2_read_only_searches_pass_and_disguised_invocations_do_not() {
+        for allowed in [
+            // QA forms 1 and 2.
+            "awk '/grant-write/' docs/operator-policy.md",
+            "find docs cas-cli/src -name '*.md' | xargs grep -n grant-write",
+            // QA form 3, narrowed: gh cannot be proved built-in, so the issue
+            // text is searched from a saved file.
+            "grep -n grant-write artifacts/issue-1182.txt",
+            // Neighbours.
+            "awk -F: -v want=revoke-write '$0 ~ want {print FILENAME, NR}' CHANGELOG.md",
+            "awk -F'\t' '/grant-write/ {print $1}' -",
+            "find . -name '*grant-write*' -print",
+            "find -L docs -type f -iname '*.md' -newer CHANGELOG.md -print0 | xargs -0 grep -l revoke-write",
+            "find . -maxdepth 2 \\( -name '*.md' -o -name '*.rs' \\) -printf '%p\\n' | xargs grep -l grant-write",
+            "jq '.grant_write_events' artifacts/report.json | grep grant-write",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+        for command in [
+            // gh: never admitted in this path.
+            "gh issue view 1182 --repo Richards-LLC/cassy | grep grant-write",
+            "gh pr list --search grant-write",
+            "gh search issues grant-write",
+            "GH_PAGER=sh gh issue view 1182 | grep grant-write",
+            // awk: unknown or dialect options, program sources, environment.
+            "awk --source 'BEGIN{}' '/grant-write/' f",
+            "gawk --include lib '/grant-write/' f",
+            "gawk -i inplace '/grant-write/' f",
+            "awk -f grant-write.awk f",
+            "awk -e '/grant-write/' f",
+            "mawk -W exec x grant-write",
+            "awk -E x.awk grant-write",
+            "AWKPATH=/tmp awk '/grant-write/' f",
+            "env AWKLIBPATH=/tmp gawk '/grant-write/' f",
+            "awk '@load \"x\"; /grant-write/' f",
+            "awk '@include \"x\"; /grant-write/' f",
+            "awk '/grant-write/' -f x",
+            // awk: program constructs that run, read or write outside input.
+            "awk 'BEGIN{system(\"cas config grant-write --task t --path /x\")}'",
+            "awk '{c = \"cas config \" \"grant-write\"; print | c}' f",
+            "awk 'BEGIN{\"cas config grant-write\" | getline x}'",
+            "awk '/grant-write/ {print > \"/tmp/run.sh\"}' f",
+            "awk '/grant-write/ {getline line < \"/etc/x\"}' f",
+            "awk '/grant-write/' f | sh",
+            // find: anything outside the positive list.
+            "find . -name x -exec cas config grant-write --task t --path /x \\;",
+            "find . -name grant-write -execdir sh -c x \\;",
+            "find . -name grant-write -delete",
+            "find . -name grant-write -ok rm {} \\;",
+            "find . -name grant-write -okdir rm {} \\;",
+            "find . -name grant-write -fprint /tmp/out",
+            "find . -name grant-write -fls /tmp/out",
+            "find . -name grant-write -fprintf /tmp/out x",
+            "find -D exec . -name grant-write",
+            "find . -files0-from list -name grant-write",
+            "find . -name grant-write -newer x -o -some-new-action",
+            "POSIXLY_CORRECT=1 find . -name grant-write",
+            // xargs children, shells, substitution.
+            "find . -name grant-write | xargs cas config grant-write --task t --path",
+            "find . -print0 | xargs -0 sh -c 'cas config grant-write --task t --path \"$1\"' _",
+            "find . -name x | xargs env AWKPATH=/tmp awk '/grant-write/'",
+            "jq -r '.[\"grant-write\"]' f.json | sh",
+            "AWKPATH=/x jq . f | grep grant-write | bash",
+            "grep \"$(cas config grant-write --task t --path /x)\" notes.md",
+            "grep `cas config revoke-write --task t` notes.md",
+            "cat <(cas config grant-write --task t --path /x)",
+            "sed -i 's/x/y/' grant-write.md",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
+        }
+    }
+
+    /// cas-b7b2 security round 2: xargs supplies arguments the hook cannot
+    /// see, so awk, find and jq are read-only only when invoked directly; the
+    /// xargs unwrapper reads GNU optional-argument long options as flags; a
+    /// bare assignment or an allexport `set` is not read-only; jq takes only
+    /// known flags.
+    #[test]
+    fn cas_b7b2_xargs_cannot_supply_what_the_hook_cannot_see() {
+        for allowed in [
+            "find docs cas-cli/src -name '*.md' | xargs grep -n grant-write",
+            "awk '/grant-write/' docs/operator-policy.md",
+            "jq -r --arg want grant-write '.[] | select(.name == $want)' events.json",
+            "set -euo pipefail; grep -rn grant-write docs",
+            "set -e; grep -rn revoke-write docs",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+        let commands = [
+            // H1: the find expression arrives on stdin.
+            // (The catch-all only judges commands that name a policy word.)
+            "printf 'grant-write' | xargs find docs",
+            "grep -l grant-write docs/* | xargs find",
+            // H2: replace mode makes the awk program a placeholder.
+            "printf 'x' | xargs -I{} awk {} docs/grant-write.md",
+            "printf 'x' | xargs -i awk {} grant-write.md",
+            // L2: an arg file feeding awk, and awk or jq under any xargs.
+            "xargs -a list.txt awk '/grant-write/'",
+            "xargs -a list.txt awk 'BEGIN{system(\"cas config grant-write\")}'",
+            "find . -name '*.json' | xargs jq . | grep grant-write",
+            // L2: jq with an environment assignment.
+            "AWKPATH=/x jq . f | grep grant-write",
+            // M1: optional-argument long options take no separate value.
+            "printf 'x' | xargs --replace sh grep grant-write",
+            "printf 'x' | xargs --eof sh grep grant-write",
+            "printf 'x' | xargs --max-lines sh grep grant-write",
+            // M2: bare assignments and allexport.
+            "PATH=/tmp/evil; grep grant-write docs",
+            "set -a; grep grant-write docs",
+            "set -o allexport; grep revoke-write docs",
+            "set -ea; grep grant-write docs",
+            // L1: jq takes only known flags.
+            "jq -L /tmp/mods 'import \"x\" as x; .' f | grep grant-write",
+            "jq --rawfile x /etc/shadow -n '$x' | grep grant-write",
+            "jq -f prog.jq f | grep grant-write",
+        ];
+        // Collect every leak so one run shows the whole gap.
+        let admitted: Vec<&str> = commands
+            .into_iter()
+            .filter(|command| {
+                !operator_policy_command_denial(command)
+                    .is_some_and(|denial| denial.contains("OPERATOR-ONLY"))
+            })
+            .collect();
+        assert!(admitted.is_empty(), "must be refused: {admitted:#?}");
     }
 
     /// cas-3c26: an agent cannot change the role environment its own commands

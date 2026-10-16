@@ -3671,6 +3671,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cas_569f_supported_session_names_reach_both_role_launches() {
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name");
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "0");
+        env.set("CAS_FACTORY_NICE_WORKER", "0");
+        for (role, name) in [("worker", "worker-569f"), ("supervisor", "supervisor-569f")] {
+            let config = PtyConfig::claude(
+                name,
+                role,
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(
+                config.args.windows(2).any(|pair| pair == ["--name", name]),
+                "{role} must pass its supported display name: {:?}",
+                config.args
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_pty_config_claude() {
         let _env = TestEnvGuard::new();
         let config = PtyConfig::claude(

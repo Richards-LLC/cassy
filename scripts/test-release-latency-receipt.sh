@@ -3,15 +3,17 @@
 #
 # The latency number is the claim GH #449 is closed on, so the script that
 # produces it must be provably unable to flatter a release: it measures from
-# the FIRST run of the tag (not a rerun), and it records an overrun without blocking
-# the remaining work for an already-published release.
+# the FIRST matching tag or main run (not a rerun), and it records an overrun
+# without blocking the remaining work for an already-published release.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 receipt="$script_dir/release-latency-receipt.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin"
+mkdir -p "$tmp/bin" "$tmp/artifacts"
+export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
+unset CAS_RELEASE_TRAIN_RUN_DIR CAS_RELEASE_RUN_DIR
 
 pass=0
 fail=0
@@ -35,7 +37,24 @@ case "$1 $2" in
     printf '%s\n' "$FAKE_PUBLISHED_AT"
     ;;
   "api repos"*)
-    cat "${FAKE_RUNS_JSON:?}"
+    printf '%s\n' "$*" >>"${FAKE_GH_LOG:-/dev/null}"
+    case "$2" in
+      */commits/*/pulls)
+        cat "${FAKE_PR_JSON:?}"
+        ;;
+      */commits/*)
+        printf '%s\n' "${FAKE_RELEASE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+        ;;
+      *event=merge_group*)
+        cat "${FAKE_MERGE_GROUP_RUNS_JSON:-${FAKE_EMPTY_RUNS_JSON:?}}"
+        ;;
+      *branch=main*)
+        cat "${FAKE_MAIN_RUNS_JSON:-${FAKE_RUNS_JSON:?}}"
+        ;;
+      *)
+        cat "${FAKE_RUNS_JSON:?}"
+        ;;
+    esac
     ;;
   *) echo "unexpected fake gh invocation: $*" >&2; exit 2 ;;
 esac
@@ -43,6 +62,14 @@ EOF
 chmod +x "$tmp/bin/gh"
 export GH_BIN="$tmp/bin/gh"
 export RELEASE_REPO=Richards-LLC/cassy
+export FAKE_GH_LOG="$tmp/gh.log"
+export FAKE_RELEASE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export FAKE_EMPTY_RUNS_JSON="$tmp/empty-runs.json"
+printf '{"workflow_runs":[]}\n' >"$FAKE_EMPTY_RUNS_JSON"
+cat >"$tmp/pr.json" <<EOF
+[{"number":1206,"base":{"ref":"main"},"merged_at":"2026-10-15T15:47:18Z","merge_commit_sha":"$FAKE_RELEASE_SHA"}]
+EOF
+export FAKE_PR_JSON="$tmp/pr.json"
 
 # Two runs for the tag: the original push and a later rerun. Measuring from
 # the rerun would understate the latency an operator actually experienced.
@@ -57,8 +84,132 @@ export FAKE_RUNS_JSON="$tmp/runs.json"
 out="$(FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z "$receipt" v3.4.0)"
 expect_field "$out" PUBLISH_LATENCY_SECONDS 250 'latency is measured from the first run of the tag'
 expect_field "$out" TAG_RUN_ID 111 'receipt names the original tag run, not a rerun'
+expect_field "$out" PUBLISH_START_KIND tag-push 'legacy releases identify their tag-push endpoint'
+expect_field "$out" PUBLISH_RUN_ID 111 'generic receipt names the original tag workflow run'
 expect_field "$out" BUDGET_SECONDS 600 'default budget is the ten-minute target'
 expect_field "$out" WITHIN_BUDGET true 'a fast release reports within budget'
+
+# A current release is triggered by the version commit landing on main; the
+# workflow creates the tag later. Resolve the tag to its commit, then locate
+# the successful merge-queue CI run for the PR's merged tree.
+empty_runs="$FAKE_EMPTY_RUNS_JSON"
+main_runs="$tmp/main-runs.json"
+cat >"$main_runs" <<'EOF'
+{"workflow_runs":[
+  {"id":700,"event":"push","head_branch":"main","head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","created_at":"2026-10-15T15:40:00Z"},
+  {"id":901,"event":"push","head_branch":"main","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-10-15T15:47:21Z"},
+  {"id":902,"event":"push","head_branch":"main","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-10-15T15:55:00Z"}]}
+EOF
+merge_group_runs="$tmp/merge-group-runs.json"
+cat >"$merge_group_runs" <<'EOF'
+{"workflow_runs":[
+  {"id":800,"name":"CI","event":"merge_group","status":"completed","conclusion":"success","head_branch":"gh-readonly-queue/main/pr-1206-wrong","head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","updated_at":"2026-10-15T15:40:00Z"},
+  {"id":801,"name":"Release Prebuild","event":"merge_group","status":"completed","conclusion":"success","head_branch":"gh-readonly-queue/main/pr-1206-sample","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updated_at":"2026-10-15T15:46:00Z"},
+  {"id":802,"name":"CI","event":"merge_group","status":"completed","conclusion":"failure","head_branch":"gh-readonly-queue/main/pr-1206-sample","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updated_at":"2026-10-15T15:46:30Z"},
+  {"id":803,"name":"CI","event":"merge_group","status":"completed","conclusion":"success","head_branch":"gh-readonly-queue/main/pr-1206-sample","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updated_at":"2026-10-15T15:47:08Z"},
+  {"id":804,"name":"CI","event":"merge_group","status":"completed","conclusion":"success","head_branch":"gh-readonly-queue/main/pr-1206-sample","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updated_at":"2026-10-15T15:47:25Z"}]}
+EOF
+main_run_dir="$tmp/artifacts/v3.55.0-latency"
+out="$(FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
+    FAKE_MERGE_GROUP_RUNS_JSON="$merge_group_runs" \
+    FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
+    "$receipt" v3.55.0)"
+expect_field "$out" PUBLISH_START_KIND gate-green 'main-push release uses authoritative merge-queue green'
+expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:08Z 'green timing starts at the successful merge-queue CI completion'
+expect_field "$out" GATE_GREEN_EPOCH 1792079228 'receipt records the authoritative gate-green epoch'
+expect_field "$out" GATE_GREEN_RUN_ID 803 'receipt identifies the successful merge-queue CI run'
+expect_field "$out" MAIN_LANDED_EPOCH 1792079238 'receipt separately records the PR main landing'
+expect_field "$out" MAIN_PUSH_RUN_ID 901 'main-push receipt names the first exact-SHA run'
+expect_field "$out" PUBLISH_RUN_ID 901 'generic receipt identifies the selected publication run'
+expect_field "$out" PUBLISH_LATENCY_SECONDS 626 'green-to-published timing matches the v3.55 measured interval'
+if grep -q '^TAG_PUSHED_AT=' <<<"$out" || grep -q '^TAG_RUN_ID=' <<<"$out"; then
+    bad 'main-push time is not mislabeled as a tag push'
+else
+    ok 'main-push time is not mislabeled as a tag push'
+fi
+expect_field "$(cat "$main_run_dir/release-latency.receipt")" PUBLISH_LATENCY_SECONDS 626 \
+    'standalone measurement writes the report receipt under the release artifact root'
+if [[ "$(cat "$main_run_dir/gate.green.epoch")" == 1792079228 && \
+      "$(cat "$main_run_dir/main.landed.epoch")" == 1792079238 ]]; then
+    ok 'standalone measurement persists both authoritative endpoint epochs'
+else
+    bad 'standalone measurement did not persist the endpoint epochs'
+fi
+latency_draft="$tmp/main-latency-draft.md"
+cat >"$latency_draft" <<'EOF'
+```text
+*Live on production — User — Cassy v3.55.0*
+Was: timing was missing → Now: timing is recorded.
+```
+
+```text
+• *User update* — Was: no timing. Now: the release start is shown.
+```
+
+```text
+*Live on production — Dev — Cassy v3.55.0*
+Was: timing was missing → Now: timing is recorded.
+```
+
+```text
+• *Developer update* — Was: no timing. Now: the release start is shown.
+```
+EOF
+python3 "$script_dir/release-train-announce.py" --record-latency v3.55.0 \
+    "$main_run_dir/release-latency.receipt" "$latency_draft"
+grep -qF 'Green to published: 626s' "$latency_draft" \
+    && ok 'announcement draft labels authoritative gate-green timing accurately' \
+    || bad 'announcement draft did not label gate-green timing'
+
+# Older releases may not have a merge_group CI run. Use the merged PR time as
+# an explicit main-to-published fallback and do not manufacture gate-green.
+rm -f "$main_run_dir/gate.green.epoch"
+out="$(FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
+    FAKE_MERGE_GROUP_RUNS_JSON="$empty_runs" \
+    FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
+    "$receipt" v3.55.0)"
+expect_field "$out" PUBLISH_START_KIND main-landed 'missing merge-queue evidence selects the main-landing fallback'
+expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:18Z 'fallback endpoint is the merged PR timestamp'
+expect_field "$out" MAIN_LANDED_EPOCH 1792079238 'fallback receipt records main landing epoch'
+expect_field "$out" PUBLISH_LATENCY_SECONDS 616 'fallback matches the hand-measured main-to-published interval'
+if grep -q '^GATE_GREEN_EPOCH=' <<<"$out"; then
+    bad 'fallback leaves gate-green unset when merge-queue evidence is absent'
+else
+    ok 'fallback leaves gate-green unset when merge-queue evidence is absent'
+fi
+if [[ -e "$main_run_dir/gate.green.epoch" && ! -e "$main_run_dir/main.landed.epoch" ]]; then
+    bad 'fallback wrote a gate-green artifact instead of main-landing evidence'
+elif [[ ! -e "$main_run_dir/gate.green.epoch" && "$(cat "$main_run_dir/main.landed.epoch")" == 1792079238 ]]; then
+    ok 'fallback persists only the main-landing endpoint file'
+else
+    bad 'fallback endpoint files disagree with the main-landing measurement'
+fi
+python3 "$script_dir/release-train-announce.py" --record-latency v3.55.0 \
+    "$main_run_dir/release-latency.receipt" "$latency_draft"
+grep -qF 'Main to published: 616s' "$latency_draft" \
+    && ok 'announcement draft labels main-landing fallback accurately' \
+    || bad 'announcement draft did not label main-landing timing'
+legacy_receipt="$tmp/legacy-latency.receipt"
+cat >"$legacy_receipt" <<'EOF'
+TAG=v3.4.0
+TAG_PUSHED_AT=2026-08-20T12:00:00Z
+PUBLISHED_AT=2026-08-20T12:04:10Z
+PUBLISH_LATENCY_SECONDS=250
+BUDGET_SECONDS=600
+WITHIN_BUDGET=true
+INTERVENTIONS=0
+EOF
+python3 "$script_dir/release-train-announce.py" --record-latency v3.4.0 \
+    "$legacy_receipt" "$latency_draft"
+grep -qF 'Tag to published: 250s' "$latency_draft" \
+    && ok 'announcement draft remains compatible with legacy tag receipts' \
+    || bad 'legacy tag timing was not preserved'
+grep -qF 'actions/workflows/release.yml/runs?branch=main&event=push&head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&per_page=100' "$FAKE_GH_LOG" \
+    && ok 'main-push lookup uses the release workflow main/push endpoint' \
+    || bad 'main-push lookup did not use the release workflow main/push endpoint'
+grep -qF 'actions/runs?event=merge_group&head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&per_page=100' "$FAKE_GH_LOG" \
+    && ok 'main-push lookup uses the merged release SHA to find merge-queue CI' \
+    || bad 'main-push lookup did not query merge-queue CI by the release SHA'
 
 # Release-train hand-off and intervention metrics come from the run directory,
 # not from GitHub's tag workflow timestamps. A manual targeted gate is one
@@ -214,7 +365,7 @@ for scenario in missing invalid reversed; do
         invalid) printf '{"workflow_runs":[{"id":111,"created_at":"not-a-time"}]}' >"$tmp/bad-runs.json" ;;
         reversed) cp "$tmp/runs.json" "$tmp/bad-runs.json"; published=2026-08-20T11:59:59Z ;;
     esac
-    if FAKE_RUNS_JSON="$tmp/bad-runs.json" FAKE_PUBLISHED_AT="$published" \
+    if FAKE_RUNS_JSON="$tmp/bad-runs.json" FAKE_MAIN_RUNS_JSON="$empty_runs" FAKE_PUBLISHED_AT="$published" \
         "$receipt" v3.4.0 >"$tmp/bad.out" 2>"$tmp/bad.err"; then
         bad "$scenario latency measurement passed"
     elif [[ ! -s "$tmp/bad.out" ]]; then

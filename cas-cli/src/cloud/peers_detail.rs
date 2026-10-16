@@ -45,7 +45,7 @@ pub struct PeerDetail {
     pub project_id: Option<String>,
     pub claims_visibility: ClaimsVisibility,
     pub branch: Option<String>,
-    /// Includes supervisor and worker claims, even if a worker is stale.
+    /// Active, unexpired claims held by live supervisors and workers.
     pub claims: Vec<PeerClaim>,
     /// Live workers only, within the peer's machine and factory session.
     pub workers: Vec<PeerWorker>,
@@ -229,6 +229,10 @@ pub fn assemble_peer_details(
                 .iter()
                 .filter(|_| visibility == ClaimsVisibility::SameAccount)
                 .filter(|lock| lock.status == LeaseStatus::Active && lock.expires_at > now)
+                .filter(|lock| agents.iter().find(|agent| agent.id == lock.agent_id)
+                    .is_some_and(|agent| agent.status != "shutdown"
+                        && ((now - lock.renewed_at).num_seconds() <= peers::PEER_LIVE_SECS
+                            || heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS))))
                 .filter(|lock| {
                     lock.agent_id == supervisor.agent_id
                         || members.iter().any(|m| m.id == lock.agent_id)

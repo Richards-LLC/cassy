@@ -57,7 +57,10 @@ fn cas_559c_details_enforce_repo_machine_session_liveness_and_active_leases() {
             1,
         ),
     ];
+    let mut lapsed = lease("cas-lapsed", "stale", LeaseStatus::Active, 600);
+    lapsed.renewed_at = Utc::now() - chrono::Duration::seconds(301);
     let locks = vec![
+        lapsed,
         lease("cas-running", "worker", LeaseStatus::Active, 600),
         lease("cas-held", "sup", LeaseStatus::Active, 600),
         lease("cas-stale", "stale", LeaseStatus::Active, 600),

@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.57.0] - 2026-10-15
+
 ### Fixed — upgrades keep Violet working across Claude profiles (cas-678d)
 
 - `cas update` migrates the Violet registration in every Claude and Codex

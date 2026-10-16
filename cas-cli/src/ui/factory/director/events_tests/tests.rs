@@ -3580,3 +3580,71 @@ fn cold_stall_confirmation_backs_off_real_probes_between_ticks() {
     }
     assert_eq!(detector.stall_probe_count, 1, "cold workers must not scan /proc and reopen stores on every pass");
 }
+
+/// spec-4c5b §7 gate test (C2, cas-223f): with health probes deferred to the
+/// jobs runtime, N detector passes over a stuck worker ask for one
+/// `WorkerHealthProbe` per cas-7156 backoff step (5, 10, 20, 40, 60 s), never
+/// a second one while the first is still running, and the stall fires from
+/// the probe's verdict once it lands. Fake clock: one pass per second, each
+/// probe takes two passes.
+#[test]
+fn flv2_worker_health_probe_single_flight() {
+    let root = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "a",
+        "stuck-worker",
+        "cas-stuck",
+        0,
+        Some(900),
+        now,
+    ));
+    let mut detector = DirectorEventDetector::new(vec!["stuck-worker".into()], "supervisor".into());
+    detector.set_cas_root(root.path().into());
+    detector.set_stall_threshold_secs(300);
+    detector.set_deferred_health_probes(true);
+    detector.initialize(&data);
+    let tick = std::time::Instant::now();
+
+    let mut probed_at = Vec::new();
+    let mut running: Option<(i64, WorkerHealthRequest)> = None;
+    let mut stalled_at = None;
+    for second in 0..=100i64 {
+        if let Some((asked, request)) = running.take() {
+            if second >= asked + 2 {
+                detector.apply_worker_health_report(WorkerHealthReport::verdict(&request, true));
+            } else {
+                running = Some((asked, request));
+            }
+        }
+        let at = now + chrono::Duration::seconds(second);
+        data.agents[0].last_heartbeat = Some(at);
+        let events =
+            detector.detect_changes_at(&data, None, tick + Duration::from_secs(second as u64), at);
+        if stalled_at.is_none()
+            && events
+                .iter()
+                .any(|e| matches!(e, DirectorEvent::WorkerStalled { escalate: false, .. }))
+        {
+            stalled_at = Some(second);
+        }
+        let mut requests = detector.take_worker_health_requests();
+        assert!(requests.len() <= 1, "one probe per worker and task at {second}s: {requests:?}");
+        if let Some(request) = requests.pop() {
+            assert!(
+                running.is_none(),
+                "a second probe was asked for at {second}s while one was still running"
+            );
+            assert_eq!((request.worker.as_str(), request.task.as_str()), ("stuck-worker", "cas-stuck"));
+            probed_at.push(second);
+            running = Some((second, request));
+        }
+    }
+    assert_eq!(probed_at, vec![0, 5, 15, 35, 75], "one probe per backoff step");
+    assert_eq!(
+        stalled_at,
+        Some(2),
+        "undecided while the first probe runs; the stall fires when its verdict lands"
+    );
+    assert_eq!(detector.stall_probe_count, 0, "no probe ran on the detector's thread");
+}

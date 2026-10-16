@@ -94,11 +94,125 @@ pub fn defer_qa_batch_evidence(root: &Path, task: &str, head: &str) -> Result<()
 }
 
 pub fn has_qa_batch_deferral(root: &Path, task: &str) -> Result<bool> {
-    let conn = connection(root)?;
+    // Default/per-task closes inspect old debt too. Do not install batch
+    // tables or write anything when checking a legacy database with no debt.
+    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
     let guard = crate::shared_db::lock_connection(&conn)?;
+    let exists: bool = guard.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_batch_deferrals')",
+        [], |row| row.get(0))?;
+    if !exists {
+        return Ok(false);
+    }
     Ok(guard.query_row(
         "SELECT EXISTS(SELECT 1 FROM qa_batch_deferrals WHERE task_id=?1)",
         [task],
         |row| row.get(0),
     )?)
+}
+
+pub fn qa_batch_receipts_for_task(
+    root: &Path,
+    project: &str,
+    task: &str,
+) -> Result<Vec<QaBatchReceipt>> {
+    Ok(list_qa_batch_receipts(root, project)?
+        .into_iter()
+        .filter(|receipt| receipt.task_heads.contains_key(task))
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(id: &str, project: &str, tasks: &[&str]) -> QaBatchReceipt {
+        QaBatchReceipt {
+            schema_version: 1,
+            id: id.into(),
+            project_id: project.into(),
+            ledger_artifact_id: "art-ledger".into(),
+            ledger_path: "/ledger.md".into(),
+            ledger_sha256: "a".repeat(64),
+            ledger_size_bytes: 4,
+            staging_sha: "b".repeat(40),
+            recorder_agent_id: "supervisor".into(),
+            recorded_at: Utc::now().to_rfc3339(),
+            task_heads: tasks
+                .iter()
+                .map(|id| ((*id).into(), "c".repeat(40)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn qa_batch_store_receipts_are_insert_only_cas_d697() {
+        let root = tempfile::tempdir().unwrap();
+        let original = receipt("qab-1", "project", &["cas-one"]);
+        record_qa_batch_receipt(root.path(), &original).unwrap();
+        let mut correction = original.clone();
+        correction.staging_sha = "d".repeat(40);
+        assert!(record_qa_batch_receipt(root.path(), &correction).is_err());
+        assert_eq!(
+            list_qa_batch_receipts(root.path(), "project").unwrap(),
+            vec![original]
+        );
+    }
+
+    #[test]
+    fn qa_batch_store_lookup_scopes_project_and_task_cas_d697() {
+        let root = tempfile::tempdir().unwrap();
+        let first = receipt("qab-1", "project", &["cas-one", "cas-two"]);
+        let second = receipt("qab-2", "project", &["cas-two"]);
+        let foreign = receipt("qab-3", "other", &["cas-one"]);
+        for receipt in [&first, &second, &foreign] {
+            record_qa_batch_receipt(root.path(), receipt).unwrap();
+        }
+        assert_eq!(
+            qa_batch_receipts_for_task(root.path(), "project", "cas-one").unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            qa_batch_receipts_for_task(root.path(), "project", "cas-two")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            qa_batch_receipts_for_task(root.path(), "project", "cas-missing")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            qa_batch_receipts_for_task(root.path(), "other", "cas-one").unwrap(),
+            vec![foreign]
+        );
+    }
+
+    #[test]
+    fn qa_batch_store_debt_lookup_is_read_only_and_task_bound_cas_d697() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!has_qa_batch_deferral(root.path(), "cas-one").unwrap());
+        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'qa_batch_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "default lookup must not create batch tables");
+        defer_qa_batch_evidence(root.path(), "cas-one", "first-head").unwrap();
+        defer_qa_batch_evidence(root.path(), "cas-one", "new-head").unwrap();
+        assert!(has_qa_batch_deferral(root.path(), "cas-one").unwrap());
+        assert!(!has_qa_batch_deferral(root.path(), "cas-two").unwrap());
+        let head: String = conn
+            .query_row(
+                "SELECT delivered_head FROM qa_batch_deferrals WHERE task_id='cas-one'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(head, "new-head");
+    }
 }

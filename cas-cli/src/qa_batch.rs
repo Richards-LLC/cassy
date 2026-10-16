@@ -38,8 +38,22 @@ pub(crate) fn ancestor(repo: &Path, from: &str, to: &str) -> Option<bool> {
     }
 }
 
-pub(crate) fn target_tip(repo: &Path, target: &str) -> Option<String> {
-    commit(repo, &format!("origin/{target}")).or_else(|| commit(repo, target))
+pub(crate) fn integration_state(repo: &Path, head: &str, target: &str) -> Option<bool> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::commit_is_merged_into_parent;
+    // Share the actual merge gate's local OR origin authority. A stale
+    // remote-tracking ref cannot turn integrated code back into a deferral.
+    if commit_is_merged_into_parent(repo, head, target) {
+        return Some(true);
+    }
+    let tips: Vec<_> = [target.to_string(), format!("origin/{target}")]
+        .iter()
+        .filter_map(|target| commit(repo, target))
+        .collect();
+    if tips.is_empty() || tips.iter().any(|tip| ancestor(repo, head, tip).is_none()) {
+        None
+    } else {
+        Some(false)
+    }
 }
 
 /// Use exactly close's target inheritance and repository resolver.
@@ -176,14 +190,12 @@ pub(crate) fn prepare_receipt(
             .and_then(|head| commit(&repo, head))
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
-        let tip =
-            target_tip(&repo, &target).ok_or_else(|| format!("target {target} is unresolved"))?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {
             return Err(format!(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
             ));
         }
-        if ancestor(&repo, &staging, &tip) != Some(true) {
+        if integration_state(&repo, &staging, &target) != Some(true) {
             return Err(format!(
                 "staging_sha is not on task {id}'s configured target {target}"
             ));
@@ -225,10 +237,8 @@ pub(crate) fn satisfying_receipt(
     else {
         return Ok(None);
     };
-    let Some(target_tip) = target_tip(repo, target) else {
-        return Ok(None);
-    };
-    let receipts = cas_store::list_qa_batch_receipts(root, &project).map_err(|e| e.to_string())?;
+    let receipts = cas_store::qa_batch_receipts_for_task(root, &project, &task.id)
+        .map_err(|e| e.to_string())?;
     for receipt in receipts {
         if receipt.schema_version != 1
             || receipt.project_id != project
@@ -237,8 +247,8 @@ pub(crate) fn satisfying_receipt(
             || ancestor(repo, &anchor, &receipt.staging_sha) != Some(true)
             || !(ancestor(repo, head, &receipt.staging_sha) == Some(true)
                 || (ancestor(repo, &receipt.staging_sha, head) == Some(true)
-                    && ancestor(repo, head, &target_tip) == Some(true)))
-            || ancestor(repo, &receipt.staging_sha, &target_tip) != Some(true)
+                    && integration_state(repo, head, target) == Some(true)))
+            || integration_state(repo, &receipt.staging_sha, target) != Some(true)
         {
             continue;
         }
@@ -258,4 +268,62 @@ pub(crate) fn satisfying_receipt(
         }
     }
     Ok(None)
+}
+
+pub(crate) fn covering_pass(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    head: &str,
+) -> Result<Option<cas_types::QaPass>, String> {
+    let Some(anchor) = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .and_then(|a| commit(repo, a))
+    else {
+        return Ok(None);
+    };
+    if ancestor(repo, &anchor, head) != Some(true)
+        || (head != anchor && integration_state(repo, head, target) != Some(true))
+    {
+        return Ok(None);
+    }
+    Ok(cas_store::satisfying_qa_passes(root, &task.id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|pass| {
+            pass.state == cas_types::QaPassState::Passed
+                && commit(repo, &pass.bound_head).as_deref() == Some(anchor.as_str())
+        }))
+}
+
+pub(crate) fn debt_refusal(task: &str) -> String {
+    format!(
+        "QA EVIDENCE REJECTED: {task} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close"
+    )
+}
+
+/// Final transition guard, independent of QA mode, classification, merge
+/// outcome and whether the earlier optional evidence gate was reached.
+pub(crate) fn ensure_deferred_close(
+    root: &Path,
+    task: &Task,
+    receipt: Option<&str>,
+) -> Result<(), String> {
+    if !cas_store::has_qa_batch_deferral(root, &task.id).map_err(|e| e.to_string())? {
+        return Ok(());
+    }
+    let (repo, target) = task_context(root, task)?;
+    let head = receipt
+        .or(task.deliverables.factory_branch_anchor.as_deref())
+        .and_then(|head| commit(&repo, head))
+        .ok_or_else(|| debt_refusal(&task.id))?;
+    if satisfying_receipt(root, task, &repo, &target, &head)?.is_some()
+        || covering_pass(root, task, &repo, &target, &head)?.is_some()
+    {
+        return Ok(());
+    }
+    Err(debt_refusal(&task.id))
 }

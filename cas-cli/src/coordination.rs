@@ -14,8 +14,12 @@ mod tests {
             "accept_claim",
         ] {
             assert!(
-                cas_mcp::actions::COORDINATION_ACTIONS.contains(&action),
-                "coordination action {action} is missing"
+                cas_mcp::actions::FACTORY_ACTIONS.contains(&action),
+                "factory action {action} is missing"
+            );
+            assert!(
+                !cas_mcp::actions::COORDINATION_ACTIONS.contains(&action),
+                "coordination must not publish supervisor-only action {action}"
             );
         }
     }

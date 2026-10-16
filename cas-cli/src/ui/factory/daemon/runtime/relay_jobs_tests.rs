@@ -132,6 +132,7 @@ async fn c4491f_correlated_deaths_relay_writes_nothing_on_the_loop() {
                 worker: worker.into(),
                 status: "exit 1".into(),
                 death: None,
+                recording: false,
             });
     }
     {
@@ -638,6 +639,7 @@ async fn cas_26c8_a_retrying_group_does_not_hold_back_a_later_death() {
         worker: worker.into(),
         status: "exit 1".into(),
         death: None,
+        recording: false,
     };
     daemon.recent_worker_exits = vec![exit("stuck-a", 0), exit("stuck-b", 500), exit("lone-c", 20_000)];
 
@@ -651,4 +653,77 @@ async fn cas_26c8_a_retrying_group_does_not_hold_back_a_later_death() {
     daemon.relay_correlated_worker_deaths();
     settle_relays(&mut daemon).await;
     assert_eq!(daemon.recent_worker_exits.len(), 2, "the group is retried, not dropped");
+}
+
+/// cas-ff42 C6: exit handling runs inside the loop's enforced PTY-exchange
+/// step. The crash-time stale mark and death record are written on the store
+/// worker, so the step stays clean; the exit waits, recording, until they
+/// report.
+#[tokio::test]
+async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.queue_jobs.store(&cas_dir).unwrap();
+    let at = chrono::Utc::now();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    {
+        let lane = super::loop_watchdog::enforced_daemon_step(
+            &progress,
+            super::loop_watchdog::LoopPhase::ClientInput,
+        );
+        let store_free = cas_store::wait_budget::forbid_store_access();
+        let before = cas_store::lane_guard::thread_violations();
+        daemon.recent_worker_exits.push(super::ObservedWorkerExit {
+            at,
+            worker: "relay-worker".into(),
+            status: "exited with code 1".into(),
+            death: None,
+            recording: true,
+        });
+        daemon.mark_registered_worker_stale(
+            "relay-worker",
+            "exited with code 1",
+            None,
+            crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+            Some(at),
+        );
+        assert_eq!(
+            cas_store::lane_guard::thread_violations(),
+            before,
+            "the stale mark ran blocking work in the enforced step: {:?}",
+            cas_store::lane_guard::last_thread_violation()
+        );
+        drop(store_free);
+        drop(lane);
+    }
+    settle_relays(&mut daemon).await;
+    let exit = &daemon.recent_worker_exits[0];
+    assert!(!exit.recording, "the record reported");
+    assert!(exit.death.is_some(), "the death was recorded on the store worker");
+    let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert_eq!(agent.status, cas_types::AgentStatus::Stale, "the registration is stale");
+}
+
+/// cas-ff42 C6 control: the old shape, writing the death record inline in
+/// the enforced step, trips the lane guard. This is what makes the test above
+/// a real proof rather than a guard that never fires.
+#[tokio::test]
+#[should_panic]
+async fn cas_ff42_inline_death_record_trips_the_enforced_step() {
+    let (_dir, cas_dir) = project_with_worker();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    let _lane = super::loop_watchdog::enforced_daemon_step(
+        &progress,
+        super::loop_watchdog::LoopPhase::ClientInput,
+    );
+    let _store_free = cas_store::wait_budget::forbid_store_access();
+    super::queue_and_events::record_worker_death_io(
+        &cas_dir,
+        "provision-test",
+        "relay-worker",
+        Some("w-1"),
+        "exited with code 1",
+        None,
+        crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+    );
 }

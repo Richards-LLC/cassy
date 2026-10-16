@@ -122,6 +122,16 @@ pub(crate) enum RelayOutput {
     DeathSweepRead {
         folded: Vec<(i64, serde_json::Value)>,
         deaths: Vec<crate::mcp::tools::service::orphan_recovery::UnstampedWorkerDeath>,
+        /// cas-ff42 L3: rows that just aged out of the sweep.
+        given_up: Vec<super::queue_and_events::GivenUpDeath>,
+    },
+    /// cas-ff42 C6: an exited worker's stale mark and death record were
+    /// written on the store worker. `at` names its exit in the correlation
+    /// window, if it waits there.
+    WorkerDeathRecorded {
+        worker: String,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        death: Option<super::queue_and_events::DeferredWorkerDeath>,
     },
     /// cas-26c8: one swept relay was (re)injected, or found already handled.
     DeathSweepWritten,
@@ -162,6 +172,9 @@ pub(crate) struct RelayJobs {
     pub(crate) timeout_override: Option<Duration>,
     /// Test hook (cas-26c8): relay a death group with this instead of
     /// `relay_death_group_io`, e.g. to make a group keep asking for a retry.
+    /// cas-ff42 L3: recorded-death rows the sweep already reported giving
+    /// up on, so each is warned about once.
+    pub(crate) death_sweep_given_up: std::collections::HashSet<i64>,
     #[cfg(test)]
     pub(crate) death_group_override:
         Option<fn(&std::path::Path, &[ObservedWorkerExit], chrono::Duration) -> bool>,

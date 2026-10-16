@@ -119,6 +119,7 @@
         "agent_type",
         "all",
         "allow_trunk",
+        "artifacts",
         "branch",
         "cleanup",
         "clear",

@@ -10748,7 +10748,7 @@ mod tests {
             "ending".into(),
             cas_types::AgentRole::Supervisor,
         );
-        ending.factory_session = Some("ended-session".into());
+        ending.factory_session = Some(daemon.session_name.clone());
         crate::store::open_agent_store(&root)
             .unwrap()
             .register(&ending)
@@ -10759,6 +10759,10 @@ mod tests {
         epic.epic_verification_owner = Some(ending.id.clone());
         tasks.add(&epic).unwrap();
         crate::supervisor_notices::orphan_epics(&root, &ending).unwrap();
+        daemon.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        daemon.process_operator_replies(queue.as_ref()).unwrap();
+        assert_eq!(queue.conversation_history("provision-test", "*", None, 20).unwrap().len(), 1, "a shutting-down daemon leaves adoption to another daemon");
+        daemon.shutdown.store(false, std::sync::atomic::Ordering::SeqCst);
         daemon.process_operator_replies(queue.as_ref()).unwrap();
         let rows = queue
             .conversation_history("provision-test", "*", None, 20)
@@ -10793,6 +10797,12 @@ mod tests {
                 .processed_at
                 .is_some()
         );
+        let sq = crate::store::open_supervisor_queue_store(&root).unwrap();
+        let broken = sq.notify("operator", "supervisor_notice", "{", cas_store::NotificationPriority::High).unwrap();
+        let valid = queue.enqueue_with_session("supervisor", "operator", &crate::supervisor_notices::operator_prompt("ordinary reply", "reply").unwrap(), "provision-test").unwrap();
+        daemon.process_operator_replies(queue.as_ref()).unwrap();
+        assert_eq!(queue.message_delivery_report(valid).unwrap().unwrap().stage, DeliveryStage::Selected, "an adoption failure cannot block ordinary Commander replies");
+        sq.ack(broken).unwrap();
     }
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, WORKER_DEATH_TAIL_MAX_CHARS, append_spawn_audit, append_spawn_audit_line,

@@ -3,6 +3,84 @@ use crate::store::{open_agent_store, open_prompt_queue_store, open_task_store};
 use cas_types::{Agent, AgentRole, AgentStatus, Task};
 
 #[test]
+fn cas_5c2c_round2_sessionless_owner_receives_lifecycle() {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecyclePushResult, LifecycleTransition, emit_task_lifecycle_transition,
+        prepare_task_lifecycle_outbox,
+    };
+    let home = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[
+        ("HOME", home.path().to_str().unwrap()),
+        ("CAS_FACTORY_SESSION", "unstamped-owner-session"),
+    ]);
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    let owner = Agent::new_with_role(
+        "sole-owner".into(),
+        "sole-owner".into(),
+        AgentRole::Supervisor,
+    );
+    agents.register(&owner).unwrap();
+    let prepared = prepare_task_lifecycle_outbox(
+        agents.as_ref(),
+        "cas-sessionless",
+        "Sessionless",
+        cas_types::TaskStatus::Open,
+        cas_types::TaskStatus::InProgress,
+        "worker",
+        None,
+        LifecycleTransition::Started,
+        "once",
+    );
+    assert!(
+        prepared.is_some(),
+        "GH1171: the sole live sessionless supervisor owns this transition"
+    );
+    let sq = crate::store::open_supervisor_queue_store(&root).unwrap();
+    let pq = open_prompt_queue_store(&root).unwrap();
+    let result = emit_task_lifecycle_transition(
+        sq.as_ref(),
+        Some(pq.as_ref()),
+        agents.as_ref(),
+        "cas-sessionless",
+        "Sessionless",
+        cas_types::TaskStatus::Open,
+        cas_types::TaskStatus::InProgress,
+        "worker",
+        None,
+        LifecycleTransition::Started,
+        "once",
+    )
+    .unwrap();
+    assert!(matches!(result, LifecyclePushResult::Enqueued { .. }));
+    assert_eq!(pq.peek_all(10).unwrap()[0].target, owner.name);
+    assert!(sq.peek("operator", 10).unwrap().is_empty());
+    agents
+        .register(&Agent::new_with_role(
+            "second-owner".into(),
+            "second-owner".into(),
+            AgentRole::Supervisor,
+        ))
+        .unwrap();
+    assert!(
+        prepare_task_lifecycle_outbox(
+            agents.as_ref(),
+            "cas-ambiguous",
+            "Ambiguous",
+            cas_types::TaskStatus::Open,
+            cas_types::TaskStatus::InProgress,
+            "worker",
+            None,
+            LifecycleTransition::Started,
+            "once",
+        )
+        .is_none(),
+        "multiple sessionless supervisors remain ambiguous"
+    );
+}
+
+#[test]
 fn ct2_p3_dead_owner_notice_rerouted() {
     let _env =
         crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "ended-session")]);

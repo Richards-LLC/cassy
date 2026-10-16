@@ -11,6 +11,7 @@ use rmcp::handler::server::wrapper::Parameters;
 async fn cas_b8e8_close_proof_claims_need_a_receipt() {
     let mut env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut env);
+    let unified = cas::mcp::CasService::new(service.clone(), None);
     let root = temp.path().join(".cas");
     std::fs::write(
         root.join("config.toml"),
@@ -52,18 +53,13 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         .map(|reason| (*reason, true))
         .chain(accepted.iter().map(|reason| (*reason, false)));
     for (reason, rejected) in cases {
-        let created = service
-            .cas_task_create(Parameters(
-                serde_json::from_value(serde_json::json!({
-                    "title": "Proof claim boundary", "priority": 2,
-                    "task_type": "task", "risk": "none",
-                    // One project, one fresh task per reason: same title by design.
-                    "confirm_warning": true
-                }))
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
+        // One project, one fresh task per reason: the same title by design.
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "create", "title": "Proof claim boundary", "priority": 2,
+            "task_type": "task", "risk": "none", "confirm_warning": true
+        }))
+        .unwrap();
+        let created = unified.task(Parameters(request)).await.unwrap();
         let id = extract_task_id(&extract_text(created)).unwrap().to_string();
         service
             .cas_task_start(Parameters(IdRequest { id: id.clone() }))

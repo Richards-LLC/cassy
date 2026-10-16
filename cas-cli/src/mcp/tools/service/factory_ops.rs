@@ -6796,10 +6796,13 @@ impl CasService {
                 };
                 match claimed {
                     Ok(Some(Acquire::PeerHolds(hold))) => {
-                        crate::supervisor_notices::remote_focus_conflict(
+                        drop(crate::supervisor_notices::remote_focus_conflict(
                             &cas_root, &agent, &epic, &hold,
-                        ).await;
-                        hold.shared_epic_note(&epic, &crate::mcp::tools::core::guidance::caller_prefix())
+                        ));
+                        hold.shared_epic_note(
+                            &epic,
+                            &crate::mcp::tools::core::guidance::caller_prefix(),
+                        )
                     }
                     Ok(Some(Acquire::Unavailable(why))) | Err(why) => format!(
                         "\n\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}), so whether a session on another machine already works {epic} could not be checked.",

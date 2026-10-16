@@ -6,7 +6,8 @@ fn cas_5c2c_review_orphan_resume_and_same_name_successor() {
     let root = crate::store::init_cas_dir(temp.path()).unwrap();
     let agents = open_agent_store(&root).unwrap();
     let tasks = open_task_store(&root).unwrap();
-    let mut ending = Agent::new_with_role("ending-id".into(), "owner".into(), AgentRole::Supervisor);
+    let mut ending =
+        Agent::new_with_role("ending-id".into(), "owner".into(), AgentRole::Supervisor);
     ending.factory_session = Some("ended-session".into());
     agents.register(&ending).unwrap();
     let mut epic = cas_types::Task::new("cas-owned".into(), "Owned".into());
@@ -19,17 +20,32 @@ fn cas_5c2c_review_orphan_resume_and_same_name_successor() {
     tasks.update(&epic).unwrap();
     orphan_epics(&root, &ending).unwrap();
     let sq = open_supervisor_queue_store(&root).unwrap();
-    assert_eq!(sq.peek("operator", 10).unwrap().len(), 2, "a resumed same-id owner's second end is a distinct occurrence");
+    assert_eq!(
+        sq.peek("operator", 10).unwrap().len(),
+        2,
+        "a resumed same-id owner's second end is a distinct occurrence"
+    );
     orphan_epics(&root, &ending).unwrap();
-    assert_eq!(sq.peek("operator", 10).unwrap().len(), 2, "ownership already cleared is idempotent");
-    let mut successor = Agent::new_with_role("successor-id".into(), ending.name.clone(), AgentRole::Supervisor);
+    assert_eq!(
+        sq.peek("operator", 10).unwrap().len(),
+        2,
+        "ownership already cleared is idempotent"
+    );
+    let mut successor = Agent::new_with_role(
+        "successor-id".into(),
+        ending.name.clone(),
+        AgentRole::Supervisor,
+    );
     successor.registered_at = ending.registered_at + chrono::Duration::seconds(1);
     successor.factory_session = Some("successor-session".into());
     agents.register(&successor).unwrap();
     epic.epic_verification_owner = Some(ending.name.clone());
     tasks.update(&epic).unwrap();
     orphan_epics(&root, &ending).unwrap();
-    assert_eq!(tasks.get(&epic.id).unwrap().epic_verification_owner, Some(ending.name));
+    assert_eq!(
+        tasks.get(&epic.id).unwrap().epic_verification_owner,
+        Some(ending.name)
+    );
 }
 
 #[tokio::test]
@@ -69,12 +85,22 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
         .and(path("/api/peer-messages"))
         .respond_with(
             ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(100))
                 .set_body_json(serde_json::json!({"id":"pm-conflict","status":"queued"})),
         )
         .mount(&server)
         .await;
-    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold).await;
-    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold).await;
+    let start = std::time::Instant::now();
+    let delivery = remote_focus_conflict(&root, &sender.id, "cas-remote", &hold);
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(50),
+        "focus dispatch must not wait for HTTP"
+    );
+    delivery.await.unwrap();
+    hold.expires_at = hold.expires_at.map(|at| at + chrono::Duration::minutes(1));
+    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold)
+        .await
+        .unwrap();
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         requests.len(),
@@ -105,7 +131,10 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
         .respond_with(ResponseTemplate::new(503))
         .mount(&server)
         .await;
-    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold).await;
+    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold)
+        .await
+        .unwrap();
+    adopt_operator_notices(&root, "sender-session").unwrap();
     let rows = open_prompt_queue_store(&root)
         .unwrap()
         .peek_all(10)
@@ -113,21 +142,29 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].target, "operator");
     assert_eq!(rows[0].factory_session.as_deref(), Some("sender-session"));
-    assert!(is_action_envelope(&rows[0].prompt));
+    let payload: crate::ui::factory::OperatorReplyPayload =
+        serde_json::from_str(&rows[0].prompt).unwrap();
+    assert_eq!(payload.schema_version, 2);
     assert!(rows[0].prompt.contains("cas-remote") && rows[0].prompt.contains("503"));
-    // A renewed claim is a new episode even when its holder is unchanged.
+    // Renewing the same holder is still the same conflict episode.
     hold.expires_at = hold.expires_at.map(|at| at + chrono::Duration::minutes(1));
-    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold).await;
+    remote_focus_conflict(&root, &sender.id, "cas-remote", &hold)
+        .await
+        .unwrap();
+    adopt_operator_notices(&root, "sender-session").unwrap();
     assert_eq!(
         open_prompt_queue_store(&root)
             .unwrap()
             .peek_all(10)
             .unwrap()
             .len(),
-        2
+        1
     );
     hold.live = Some(false);
-    remote_focus_conflict(&root, &sender.id, "cas-stale", &hold).await;
+    remote_focus_conflict(&root, &sender.id, "cas-stale", &hold)
+        .await
+        .unwrap();
+    adopt_operator_notices(&root, "sender-session").unwrap();
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         2,
@@ -139,7 +176,7 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
             .peek_all(10)
             .unwrap()
             .len(),
-        3
+        2
     );
 }
 

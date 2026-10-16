@@ -99,6 +99,12 @@ pub(crate) fn enqueue(
             id
         }
     };
+    // The ending owner may have no live daemon. Keep operator notices in the
+    // durable project outbox until a connected daemon adopts its own session.
+    if recipient.id == "operator" {
+        crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(root);
+        return Ok(());
+    }
     let body = format!(
         "<cas-supervisor-notice kind=\"{kind}\" notification_id=\"{id}\">\n{detail}\n</cas-supervisor-notice>"
     );
@@ -117,6 +123,68 @@ pub(crate) fn enqueue(
     Ok(())
 }
 
+pub(crate) fn operator_prompt(
+    message: &str,
+    summary: &str,
+) -> Result<String, crate::error::CasError> {
+    Ok(serde_json::to_string(
+        &crate::ui::factory::OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message: message.to_string(),
+            summary: summary.to_string(),
+            device_id: "*".into(),
+            operator_label: None,
+            kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            attachments: Vec::new(),
+            reply_to_session: None,
+        },
+    )?)
+}
+
+/// Called by a daemon with a connected Commander, without network or discovery.
+/// Global idempotency admits one destination even if two daemons race. A crash
+/// before the stamps simply retries the same prompt row.
+pub(crate) fn adopt_operator_notices(
+    root: &Path,
+    session: &str,
+) -> Result<(), crate::error::CasError> {
+    let sq = open_supervisor_queue_store(root)?;
+    let pq = open_prompt_queue_store(root)?;
+    for notice in sq
+        .list_pending("operator")?
+        .into_iter()
+        .filter(|n| n.event_type == "supervisor_notice" && n.prompt_delivered_at.is_none())
+        .take(10)
+    {
+        let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
+        let Some(kind) = payload.get("kind").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(detail) = payload.get("detail").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if kind == "epic_orphaned"
+            && payload.get("factory_session").and_then(|v| v.as_str()) == Some(session)
+        {
+            continue;
+        }
+        pq.enqueue_idempotent(
+            &format!("supervisor-notice:{}", notice.id),
+            "operator",
+            &operator_prompt(detail, kind)?,
+            Some(session),
+            Some(kind),
+            Some(NotificationPriority::High),
+            &format!("supervisor-notice-operator:{}", notice.id),
+            Some(&QueueOrigin::Daemon),
+        )?;
+        sq.mark_prompt_delivered(notice.id)?;
+        sq.ack(notice.id)?;
+    }
+    Ok(())
+}
+
 /// Explicit orphaning avoids assigning a peer new work without its acceptance.
 /// Queue the notice before clearing ownership or deleting the ending identity.
 pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::error::CasError> {
@@ -124,6 +192,11 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
         return Ok(());
     }
     let tasks = open_task_store(root)?;
+    let agents = open_agent_store(root)?.list(None)?;
+    let named_owner = agents
+        .iter()
+        .filter(|a| a.role == AgentRole::Supervisor && a.name == ending.name)
+        .max_by_key(|a| a.registered_at);
     let mut owned: Vec<_> = tasks
         .list(None)?
         .into_iter()
@@ -131,7 +204,10 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
         .filter(|task| {
             task.epic_verification_owner
                 .as_deref()
-                .is_some_and(|owner| owner == ending.id || owner == ending.name)
+                .is_some_and(|owner| {
+                    owner == ending.id
+                        || (owner == ending.name && named_owner.is_some_and(|a| a.id == ending.id))
+                })
         })
         .collect();
     if owned.is_empty() {
@@ -147,14 +223,15 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
         "ORPHANED epics {ids}: supervisor {} ({}) ended. Ownership is cleared; a live supervisor must explicitly adopt these epics.",
         ending.name, ending.id
     );
-    let agents = open_agent_store(root)?.list(None)?;
+    let occurrence =
+        serde_json::json!([ending.id, ids, chrono::Utc::now().to_rfc3339()]).to_string();
     for peer in agents.iter().filter(|a| a.id != ending.id && is_live(a)) {
         enqueue(
             root,
             &Recipient::agent(peer),
             "epic_orphaned",
             &detail,
-            &ending.id,
+            &occurrence,
         )?;
     }
     enqueue(
@@ -162,7 +239,7 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
         &Recipient::operator(ending.factory_session.as_deref().unwrap_or(&ending.id)),
         "epic_orphaned",
         &detail,
-        &ending.id,
+        &occurrence,
     )?;
     for task in &mut owned {
         task.epic_verification_owner = None;
@@ -263,18 +340,13 @@ pub(crate) fn integration_overlap(
             format!(
                 "{}:{}:{}",
                 focused.id,
-                focused.updated_at.to_rfc3339(),
+                focused.epic_verification_owner.as_deref().unwrap_or(""),
                 lane.target_branch
             ),
-            format!(
-                "{}:{}:{}",
-                other.id,
-                other.updated_at.to_rfc3339(),
-                other_lane.target_branch
-            ),
+            format!("{}:{}:{}", other.id, owner, other_lane.target_branch),
         ];
         lanes.sort();
-        let occurrence = format!("{}:{}", lanes[0], lanes[1]);
+        let occurrence = serde_json::json!([lane.repo_selector, lanes]).to_string();
         enqueue(root, &first, "integration_conflict", &detail, &occurrence)?;
         enqueue(root, &second, "integration_conflict", &detail, &occurrence)?;
     }
@@ -284,7 +356,22 @@ pub(crate) fn integration_overlap(
 /// The claim event already supplied the remote holder and its liveness. No
 /// additional discovery is done on a daemon tick or SessionEnd. HTTP is bounded
 /// by MAILBOX_TIMEOUT and runs on a blocking task, outside the factory loop.
-pub(crate) async fn remote_focus_conflict(
+pub(crate) fn remote_focus_conflict(
+    root: &Path,
+    sender: &str,
+    epic: &str,
+    hold: &crate::cloud::peer_claims::PeerHold,
+) -> tokio::task::JoinHandle<()> {
+    let root = root.to_path_buf();
+    let sender = sender.to_string();
+    let epic = epic.to_string();
+    let hold = hold.clone();
+    tokio::spawn(async move {
+        remote_focus_conflict_delivery(&root, &sender, &epic, &hold).await;
+    })
+}
+
+async fn remote_focus_conflict_delivery(
     root: &Path,
     sender: &str,
     epic: &str,
@@ -292,15 +379,7 @@ pub(crate) async fn remote_focus_conflict(
 ) {
     use crate::cloud::peer_mailbox::{PeerMailbox, PeerSend, http_mailbox};
     use sha2::{Digest, Sha256};
-    let label = format!(
-        "{}:{}:{}:{}",
-        sender,
-        epic,
-        hold.agent_id,
-        hold.expires_at
-            .map(|at| at.to_rfc3339())
-            .unwrap_or_default()
-    );
+    let label = serde_json::json!([sender, epic, hold.agent_id]).to_string();
     let detail = format!(
         "Epic focus conflict: supervisor {sender} also focused {epic}, held by {}. Coordinate ownership and integration lanes before proceeding.",
         hold.describe()
@@ -310,47 +389,37 @@ pub(crate) async fn remote_focus_conflict(
     let hold = hold.clone();
     let body = detail.clone();
     let event = label.clone();
-    let result = tokio::time::timeout(
-        crate::cloud::peer_mailbox::MAILBOX_TIMEOUT + std::time::Duration::from_secs(2),
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            if hold.live != Some(true) || hold.is_expired(chrono::Utc::now()) {
-                return Err("remote focus holder is not confirmed live".into());
-            }
-            let project = crate::cloud::resolve_canonical_id(&root_owned)
-                .ok_or("project identity unavailable")?;
-            let mailbox = http_mailbox(&root_owned).ok_or("Cassy Cloud mailbox unavailable")?;
-            let key = format!(
-                "focus-conflict:{:x}",
-                Sha256::digest(format!(
-                    "{project}:{event}:{}",
-                    hold.expires_at
-                        .map(|at| at.to_rfc3339())
-                        .unwrap_or_default()
-                ))
-            );
-            mailbox
-                .send(&PeerSend {
-                    project_id: project,
-                    sender_agent_id: sender_id,
-                    recipient_agent_id: hold.agent_id,
-                    body: crate::cloud::peer_mailbox::attach_message_intent(
-                        &body,
-                        Some("ask"),
-                        false,
-                    ),
-                    summary: Some("epic focus conflict".into()),
-                    in_reply_to: None,
-                    dedupe_key: key,
-                })
-                .map(|_| ())
-        }),
-    )
+    // The HTTP client's timeout bounds this background work. Await the actual
+    // send result: an outer timeout cannot cancel spawn_blocking and would
+    // permit a late peer success after an operator fallback.
+    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if hold.live != Some(true) || hold.is_expired(chrono::Utc::now()) {
+            return Err("remote focus holder is not confirmed live".into());
+        }
+        let project = crate::cloud::resolve_canonical_id(&root_owned)
+            .ok_or("project identity unavailable")?;
+        let mailbox = http_mailbox(&root_owned).ok_or("Cassy Cloud mailbox unavailable")?;
+        let key = format!(
+            "focus-conflict:{:x}",
+            Sha256::digest(serde_json::json!([project, event]).to_string())
+        );
+        mailbox
+            .send(&PeerSend {
+                project_id: project,
+                sender_agent_id: sender_id,
+                recipient_agent_id: hold.agent_id,
+                body: crate::cloud::peer_mailbox::attach_message_intent(&body, Some("ask"), false),
+                summary: Some("epic focus conflict".into()),
+                in_reply_to: None,
+                dedupe_key: key,
+            })
+            .map(|_| ())
+    })
     .await;
     let failure = match result {
-        Ok(Ok(Ok(()))) => return,
-        Ok(Ok(Err(error))) => error,
-        Ok(Err(error)) => error.to_string(),
-        Err(_) => "remote focus notice timed out".to_string(),
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(error) => error.to_string(),
     };
     let agents = open_agent_store(root)
         .ok()

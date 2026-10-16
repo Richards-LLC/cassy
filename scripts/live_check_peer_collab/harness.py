@@ -29,6 +29,7 @@ locally and over ssh.
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -563,9 +564,17 @@ def cmd_queue_find(args):
     for row in rows:
         record = dict(zip(wanted, row))
         prompt = record.pop("prompt", "")
-        body = prompt.split("\n\n", 1)[-1].encode()
-        record["peer_body_sha256"] = hashlib.sha256(body).hexdigest()
-        record["peer_body_bytes"] = len(body)
+        # Only over-cap probes define a body digest: their first and last
+        # complete lines are the unique probe token. Routing may contain blank
+        # lines, so it cannot delimit the measured body.
+        if args.token.startswith("live-overcap-"):
+            markers = list(re.finditer(r"(?m)^" + re.escape(args.token) + r"$", prompt))
+            if len(markers) == 2:
+                body = prompt[markers[0].start():markers[1].end()].encode()
+                record["peer_body_sha256"] = hashlib.sha256(body).hexdigest()
+                record["peer_body_bytes"] = len(body)
+            else:
+                record["peer_body_error"] = "missing or ambiguous over-cap probe markers"
         result.append(record)
     print(json.dumps({"ok": True, "rows": result}))
 

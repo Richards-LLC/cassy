@@ -6055,6 +6055,7 @@ impl FactoryDaemon {
         if self.ws_clients.is_empty() {
             return Ok(());
         }
+        crate::supervisor_notices::adopt_operator_notices(self.app.cas_dir(), &self.session_name)?;
         let replies = queue.peek_operator_replies(&self.session_name, 10)?;
         for queued in replies {
             // `*` is the deliberate v2 fallback when no verified Commander
@@ -10612,33 +10613,87 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 mod tests {
     #[tokio::test]
     async fn cas_5c2c_review_operator_fallback_is_consumed_and_acknowledged() {
-        use futures_util::StreamExt;
         use crate::ui::factory::daemon::WsConnection;
+        use futures_util::StreamExt;
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "provision-test")]);
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let mut daemon = super::super::provisioning_tests::daemon(&root);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
         let (server, _) = listener.accept().await.unwrap();
-        let (sink, stream) = WebSocketStream::from_raw_socket(server, Role::Server, None).await.split();
+        let (sink, stream) = WebSocketStream::from_raw_socket(server, Role::Server, None)
+            .await
+            .split();
         let _client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-        daemon.ws_clients.insert(0, WsConnection { sink, stream, pane_sizes: Default::default(), relay_trusted: true });
-        crate::store::open_task_store(&root).unwrap().add(&Task::new("cas-ejected".into(), "Ejected".into())).unwrap();
-        assert!(matches!(super::super::lifecycle::enqueue_merge_queue_ejection_relay(&root, "cas-ejected", "", 42, Some(7), "once", None), super::super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }));
+        daemon.ws_clients.insert(
+            0,
+            WsConnection {
+                sink,
+                stream,
+                pane_sizes: Default::default(),
+                relay_trusted: true,
+            },
+        );
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&Task::new("cas-ejected".into(), "Ejected".into()))
+            .unwrap();
+        assert!(matches!(
+            super::super::lifecycle::enqueue_merge_queue_ejection_relay(
+                &root,
+                "cas-ejected",
+                "",
+                42,
+                Some(7),
+                "once",
+                None
+            ),
+            super::super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         daemon.process_operator_replies(queue.as_ref()).unwrap();
-        let rows = queue.conversation_history("provision-test", "*", None, 20).unwrap();
+        let rows = queue
+            .conversation_history("provision-test", "*", None, 20)
+            .unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(queue.queued_prompt(rows[0].id).unwrap().unwrap().processed_at.is_none(), "consumer must select, not drop, the notice");
-        let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&rows[0].prompt).unwrap();
+        assert!(
+            queue
+                .queued_prompt(rows[0].id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none(),
+            "consumer must select, not drop, the notice"
+        );
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&rows[0].prompt).unwrap();
         assert!(payload.message.contains("cas-ejected"));
         daemon.acknowledge_operator_reply(rows[0].id, "*").unwrap();
-        assert!(queue.queued_prompt(rows[0].id).unwrap().unwrap().processed_at.is_some());
-        let mut ending = cas_types::Agent::new_with_role("ending".into(), "ending".into(), cas_types::AgentRole::Supervisor);
+        assert!(
+            queue
+                .queued_prompt(rows[0].id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
+        let mut ending = cas_types::Agent::new_with_role(
+            "ending".into(),
+            "ending".into(),
+            cas_types::AgentRole::Supervisor,
+        );
         ending.factory_session = Some("ended-session".into());
-        crate::store::open_agent_store(&root).unwrap().register(&ending).unwrap();
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .register(&ending)
+            .unwrap();
         let tasks = crate::store::open_task_store(&root).unwrap();
         let mut epic = Task::new("cas-orphan".into(), "Orphan".into());
         epic.task_type = cas_types::TaskType::Epic;
@@ -10646,12 +10701,35 @@ mod tests {
         tasks.add(&epic).unwrap();
         crate::supervisor_notices::orphan_epics(&root, &ending).unwrap();
         daemon.process_operator_replies(queue.as_ref()).unwrap();
-        let rows = queue.conversation_history("provision-test", "*", None, 20).unwrap();
-        assert_eq!(rows.len(), 2, "a live daemon adopts the peerless orphan notice");
-        let orphan = rows.iter().find(|row| row.prompt.contains("cas-orphan")).unwrap();
-        assert!(queue.queued_prompt(orphan.id).unwrap().unwrap().processed_at.is_none());
+        let rows = queue
+            .conversation_history("provision-test", "*", None, 20)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "a live daemon adopts the peerless orphan notice"
+        );
+        let orphan = rows
+            .iter()
+            .find(|row| row.prompt.contains("cas-orphan"))
+            .unwrap();
+        assert!(
+            queue
+                .queued_prompt(orphan.id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none()
+        );
         daemon.acknowledge_operator_reply(orphan.id, "*").unwrap();
-        assert!(queue.queued_prompt(orphan.id).unwrap().unwrap().processed_at.is_some());
+        assert!(
+            queue
+                .queued_prompt(orphan.id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
     }
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, WORKER_DEATH_TAIL_MAX_CHARS, append_spawn_audit, append_spawn_audit_line,
@@ -18359,9 +18437,44 @@ mod supervisor_notice_wake_tests {
     #[test]
     fn owner_notices_wake_only_with_daemon_authority() {
         let body = "<cas-supervisor-notice kind=\"epic_orphaned\" notification_id=\"42\">\nAdopt cas-epic.\n</cas-supervisor-notice>";
-        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon, "owner", "supervisor-notice:42", body), Some(SupervisorWakeClass::Blocker));
-        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Unattributed, "owner", "supervisor-notice:42", body), None);
-        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Registered { role: cas_types::AgentRole::Worker, name: "worker".into() }, "owner", "supervisor-notice:42", body), None);
-        assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon, "owner", "supervisor-notice:42", "ordinary text"), None);
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon,
+                "owner",
+                "supervisor-notice:42",
+                body
+            ),
+            Some(SupervisorWakeClass::Blocker)
+        );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Unattributed,
+                "owner",
+                "supervisor-notice:42",
+                body
+            ),
+            None
+        );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Registered {
+                    role: cas_types::AgentRole::Worker,
+                    name: "worker".into()
+                },
+                "owner",
+                "supervisor-notice:42",
+                body
+            ),
+            None
+        );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon,
+                "owner",
+                "supervisor-notice:42",
+                "ordinary text"
+            ),
+            None
+        );
     }
 }

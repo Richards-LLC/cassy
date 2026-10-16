@@ -353,7 +353,11 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         return WorkerAttentionRelayOutcome::Pending;
     };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
-    let kind = if worker.is_empty() { "Epic PR" } else { "Delivery PR" };
+    let kind = if worker.is_empty() {
+        "Epic PR"
+    } else {
+        "Delivery PR"
+    };
     let mut detail = match failed_run_id {
         Some(run_id) => format!(
             "{kind} #{pr_number} for {task_id} left the merge queue after failed merge_group run {run_id}."
@@ -416,6 +420,14 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
     );
+    let supervisor_body = if supervisor.id == "operator" {
+        match crate::supervisor_notices::operator_prompt(&supervisor_body, "merge queue ejected") {
+            Ok(body) => body,
+            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+        }
+    } else {
+        supervisor_body
+    };
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if prompt_queue.enqueue_idempotent(
         &source,
@@ -1003,6 +1015,12 @@ fn enqueue_worker_attention_relay_detail_with_key(
     // supervisor are a blocker, not routine: idle workers burn wall clock.
     if kind == "supervisor_stalled" {
         body = crate::prompt_revalidation::attach_blocker_envelope(&body, "ready work", task_id);
+    }
+    if supervisor.id == "operator" {
+        body = match crate::supervisor_notices::operator_prompt(&body, kind) {
+            Ok(body) => body,
+            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+        };
     }
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if let Err(error) = prompt_queue.enqueue_idempotent(
@@ -1678,10 +1696,16 @@ mod worker_attention_tests {
             enqueue_worker_attention_relay(&cas_dir, &event),
             WorkerAttentionRelayOutcome::Persisted { .. }
         ));
-        let initial = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        let initial = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].target, "operator");
-        assert_eq!(initial[0].factory_session.as_deref(), Some("recovery-unknown"));
+        assert_eq!(
+            initial[0].factory_session.as_deref(),
+            Some("recovery-unknown")
+        );
         register_supervisor(&cas_dir, "recovery-unknown");
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         let mut supervisor = agents.get("supervisor-id").unwrap();
@@ -1702,11 +1726,7 @@ mod worker_attention_tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target, "operator");
-        assert!(
-            rows[0]
-                .prompt
-                .contains("`factory action=worker_status`")
-        );
+        assert!(rows[0].prompt.contains("`factory action=worker_status`"));
         assert!(!rows[0].prompt.contains("mcp__"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }

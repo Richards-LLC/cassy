@@ -600,7 +600,11 @@ pub fn resolve_worker_supervisor(
     }
     let sessionless_live: Vec<cas_types::Agent> = supervisors
         .into_iter()
-        .filter(|a| a.factory_session.as_deref().is_none_or(|s| s.trim().is_empty()))
+        .filter(|a| {
+            a.factory_session
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+        })
         .filter(|a| crate::supervisor_notices::is_live(a))
         .collect();
     if sessionless_live.len() == 1 {
@@ -628,18 +632,32 @@ fn lifecycle_notice_owner(
     agents: &dyn AgentStore,
     session: Option<&str>,
 ) -> Option<(OwningSupervisor, crate::supervisor_notices::Recipient)> {
-    // Non-factory task writes have never generated operator notices.
-    if session.is_none() && resolve_worker_supervisor(agents, session).is_none() {
-        return None;
-    }
-    let recipient = resolve_notice_recipient(agents, session);
-    Some((
-        OwningSupervisor {
-            agent_id: recipient.id.clone(),
-            name: recipient.name.clone(),
-        },
-        recipient,
-    ))
+    lifecycle_owner_or_successor(agents, session, None)
+}
+
+fn lifecycle_owner_or_successor(
+    agents: &dyn AgentStore,
+    session: Option<&str>,
+    saved_name: Option<&str>,
+) -> Option<(OwningSupervisor, crate::supervisor_notices::Recipient)> {
+    let owner = resolve_owning_supervisor(agents, session).or_else(|| {
+        let registered = agents.list(None).ok()?;
+        let name = saved_name
+            .map(str::to_string)
+            .or_else(|| session.and_then(session_metadata_supervisor_name))
+            .or_else(|| {
+                registered
+                    .iter()
+                    .filter(|a| {
+                        a.role == AgentRole::Supervisor && a.factory_session.as_deref() == session
+                    })
+                    .max_by_key(|a| a.registered_at)
+                    .map(|a| a.name.clone())
+            })?;
+        best_supervisor(registered.into_iter().filter(|a| a.name == name).collect())
+    })?;
+    let recipient = crate::supervisor_notices::Recipient::agent(&agents.get(&owner.agent_id).ok()?);
+    Some((owner, recipient))
 }
 
 /// The supervisor name a factory session's metadata file records, if any.
@@ -1263,13 +1281,20 @@ fn deliver_lifecycle_outbox_row_with_agents(
     // A pending durable row may outlive its saved destination. Resolve again
     // immediately before admitting the prompt, including legacy outbox rows.
     let recipient = match agents {
-        Some(agents) => Some(crate::supervisor_notices::resolve(
-            &agents
-                .list(None)
-                .map_err(|e| format!("lifecycle recipient registry unavailable: {e}"))?,
-            payload.get("supervisor_name").and_then(|v| v.as_str()),
-            factory_session,
-        )),
+        Some(agents) => Some(
+            lifecycle_owner_or_successor(
+                agents,
+                factory_session,
+                payload.get("supervisor_name").and_then(|v| v.as_str()),
+            )
+            .map(|(_, recipient)| recipient)
+            .ok_or_else(|| {
+                format!(
+                    "lifecycle owner unavailable id={} (row left pending)",
+                    notification.id
+                )
+            })?,
+        ),
         None => None,
     };
     deliver_prompt_for_notification(
@@ -1468,7 +1493,9 @@ impl CasCore {
             .map_err(|e| format!("supervisor_queue open: {e}"))?;
         let pq = open_prompt_queue_store(&self.cas_root)
             .map_err(|e| format!("prompt_queue open: {e}"))?;
-        let agents = self.open_agent_store().map_err(|e| format!("agent registry open: {e}"))?;
+        let agents = self
+            .open_agent_store()
+            .map_err(|e| format!("agent registry open: {e}"))?;
         drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 100)
     }
 }

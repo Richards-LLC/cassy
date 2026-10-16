@@ -101,15 +101,18 @@ impl GitOperations {
         if branch.starts_with("origin/") {
             return Ok(branch.into());
         }
-        let local = self
-            .resolve_commit(branch)
-            .ok_or_else(|| format!("could not resolve recorded parent '{branch}'"))?;
+        let local = self.resolve_commit(branch);
         let remote_ref = format!(
             "origin/{}",
             branch.strip_prefix("refs/heads/").unwrap_or(branch)
         );
         let Some(remote) = self.resolve_commit(&remote_ref) else {
-            return Ok(branch.into());
+            return local
+                .map(|_| branch.into())
+                .ok_or_else(|| format!("could not resolve recorded parent '{branch}'"));
+        };
+        let Some(local) = local else {
+            return Ok(remote_ref);
         };
         if local == remote {
             return Ok(branch.into());
@@ -233,11 +236,8 @@ impl GitOperations {
                 }
             }
         } else {
-            self.create_branch_from(branch, &base_sha)
-                .map_err(|e| e.to_string())?;
-            receipts.push(format!(
-                "created local '{branch}' from base '{}' at {}",
-                base_ref, base_sha
+            return Err(format!(
+                "'{branch}' doesn't resolve locally or on origin; refusing to recreate a deleted epic lane from base '{base_ref}'"
             ));
         }
         let tip = self

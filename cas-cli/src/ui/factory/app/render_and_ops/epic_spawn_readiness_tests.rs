@@ -123,38 +123,7 @@ pub(super) fn with_fixture(check: impl FnOnce(&mut Fixture)) {
     );
     metadata.pinned_epic_id = Some(epic.id);
     std::fs::write(path, serde_json::to_string(&metadata).unwrap()).unwrap();
-    let manager = WorktreeManager::new(
-        &repo,
-        WorktreeConfig {
-            enabled: true,
-            base_path: repo.join(".cas/worktrees").to_string_lossy().into(),
-            branch_prefix: "factory/".into(),
-            auto_merge: false,
-            cleanup_on_close: false,
-            promote_entries_on_merge: false,
-        },
-    )
-    .unwrap();
-    let app = FactoryApp::from_init_result(
-        root.clone(),
-        Mux::new(40, 120),
-        Some(manager),
-        DirectorData::load_fast(&root).unwrap(),
-        "supervisor".into(),
-        Vec::new(),
-        crate::ui::factory::notification::NotifyConfig::default(),
-        false,
-        AutoPromptConfig::default(),
-        cas_mux::SupervisorCli::Claude,
-        cas_mux::SupervisorCli::Claude,
-        120,
-        40,
-        false,
-        None,
-        None,
-        repo.clone(),
-    )
-    .unwrap();
+    let app = make_app(&repo, &root);
     check(&mut Fixture {
         repo,
         origin,
@@ -270,7 +239,15 @@ fn cas_bfa1_spawn_closed_or_deleted_epic_is_not_republished() {
         let result = f
             .app
             .prepare_worker_spawn(Some("round2-worker"), true, None);
-        assert!(result.is_err(), "closed pinned epic must refuse");
+        let error = result
+            .err()
+            .expect("closed pinned epic must refuse")
+            .to_string();
+        assert!(
+            error.contains("pinned epic cas-round2-epic is closed")
+                && error.contains("no lane was republished"),
+            "{error}"
+        );
         assert!(
             git(
                 &f.origin,
@@ -299,9 +276,14 @@ fn cas_bfa1_spawn_closed_or_deleted_epic_is_not_republished() {
         let result = f
             .app
             .prepare_worker_spawn(Some("round2-worker"), true, None);
+        let error = result
+            .err()
+            .expect("deleted pinned lane must refuse")
+            .to_string();
         assert!(
-            result.is_err(),
-            "deleted pinned lane must not be recreated from trunk"
+            error.contains("spawn base 'epic/round2' doesn't resolve")
+                && error.contains("refusing to recreate a deleted epic lane from trunk"),
+            "{error}"
         );
         assert!(
             git(
@@ -377,7 +359,9 @@ fn cas_bfa1_spawn_network_observation_is_reused() {
 fn cas_bfa1_real_spawn_notices_deduplicate_within_session() {
     for kind in ["UNVERIFIED", "PRESERVED", "UNPUBLISHED", "LOCAL-ONLY"] {
         with_fixture(|f| {
-            if kind == "LOCAL-ONLY" { git(&f.repo, &["remote", "remove", "origin"]); }
+            if kind == "LOCAL-ONLY" {
+                git(&f.repo, &["remote", "remove", "origin"]);
+            }
             if kind == "UNVERIFIED" {
                 f.offline();
             }
@@ -483,13 +467,26 @@ fn cas_bfa1_round3_adopted_and_targetless_lanes_keep_diverged_history() {
                 git(&f.repo, &["checkout", "epic/round2"]);
                 commit(&f.repo, "adopted-work");
                 let tip = git(&f.repo, &["rev-parse", "HEAD"]);
-                if published { git(&f.repo, &["push", "origin", "epic/round2"]); }
+                if published {
+                    git(&f.repo, &["push", "origin", "epic/round2"]);
+                }
                 git(&f.repo, &["checkout", "main"]);
                 f.advance_parent();
-                let prep = f.prepare().expect("self-target and target-less lanes have no parent refresh");
+                let prep = f
+                    .prepare()
+                    .expect("self-target and target-less lanes have no parent refresh");
                 let work = prep.worktree_info.unwrap();
                 assert_eq!(work.parent_branch, "epic/round2");
-                assert_eq!(git(&f.repo, &["rev-parse", work.base_ref.as_deref().unwrap_or(&work.parent_branch)]), tip);
+                assert_eq!(
+                    git(
+                        &f.repo,
+                        &[
+                            "rev-parse",
+                            work.base_ref.as_deref().unwrap_or(&work.parent_branch)
+                        ]
+                    ),
+                    tip
+                );
                 assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), tip);
                 assert_eq!(git(&f.repo, &["rev-parse", "main"]), f.base);
             });
@@ -506,7 +503,11 @@ fn cas_bfa1_round3_remote_only_recorded_parent_is_usable() {
         git(&f.repo, &["branch", "-D", "release-parent"]);
         let tasks = open_task_store_cached(&f.root).unwrap();
         let mut epic = tasks.get("cas-round2-epic").unwrap();
-        epic.deliverables.work_target.as_mut().unwrap().target_branch = "release-parent".into();
+        epic.deliverables
+            .work_target
+            .as_mut()
+            .unwrap()
+            .target_branch = "release-parent".into();
         tasks.update(&epic).unwrap();
         let prep = f.prepare().expect("origin-only parent is authoritative");
         assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
@@ -523,10 +524,28 @@ fn cas_bfa1_round3_cancelled_epic_is_terminal() {
         epic.status = cas_types::TaskStatus::Cancelled;
         tasks.update(&epic).unwrap();
         for task in [None, Some("cas-round2-child")] {
-            let error = f.app.prepare_worker_spawn(Some("round2-worker"), true, task).err().expect("cancelled epic must refuse").to_string();
-            assert!(error.contains("cancelled") && error.contains("no lane was republished"), "{error}");
+            let error = f
+                .app
+                .prepare_worker_spawn(Some("round2-worker"), true, task)
+                .err()
+                .expect("cancelled epic must refuse")
+                .to_string();
+            assert!(
+                error.contains("cancelled") && error.contains("no lane was republished"),
+                "{error}"
+            );
         }
-        assert!(git(&f.origin, &["for-each-ref", "--format=%(refname)", "refs/heads/epic/round2"]).is_empty());
+        assert!(
+            git(
+                &f.origin,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/epic/round2"
+                ]
+            )
+            .is_empty()
+        );
     });
 }
 
@@ -540,8 +559,134 @@ fn cas_bfa1_round3_live_epic_preferred_over_terminal_duplicate_lane() {
         old.priority = cas_types::Priority::CRITICAL;
         tasks.add(&old).unwrap();
         f.advance_parent();
-        let prep = f.prepare().expect("live lane owner must beat a terminal record");
+        let prep = f
+            .prepare()
+            .expect("live lane owner must beat a terminal record");
         assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
         assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.base);
+    });
+}
+
+// These adapters only construct persisted inputs and invoke the real spawn
+// preparation path; ancestry and parent selection remain production code.
+fn make_app(repo: &Path, root: &Path) -> FactoryApp {
+    let manager = WorktreeManager::new(
+        &repo,
+        WorktreeConfig {
+            enabled: true,
+            base_path: repo.join(".cas/worktrees").to_string_lossy().into(),
+            branch_prefix: "factory/".into(),
+            auto_merge: false,
+            cleanup_on_close: false,
+            promote_entries_on_merge: false,
+        },
+    )
+    .unwrap();
+    FactoryApp::from_init_result(
+        root.to_path_buf(),
+        Mux::new(40, 120),
+        Some(manager),
+        DirectorData::load_fast(&root).unwrap(),
+        "supervisor".into(),
+        Vec::new(),
+        crate::ui::factory::notification::NotifyConfig::default(),
+        false,
+        AutoPromptConfig::default(),
+        cas_mux::SupervisorCli::Claude,
+        cas_mux::SupervisorCli::Claude,
+        120,
+        40,
+        false,
+        None,
+        None,
+        repo.to_path_buf(),
+    )
+    .unwrap()
+}
+
+pub(super) fn prepare_existing_task(
+    repo: &Path,
+    root: &Path,
+    task: &str,
+) -> anyhow::Result<WorkerSpawnPrep> {
+    make_app(repo, root).prepare_worker_spawn(Some("legacy-path-worker"), true, Some(task))
+}
+
+pub(super) fn prepare_recorded_lane(
+    repo: &Path,
+    branch: &str,
+    parent: &str,
+) -> Result<Option<String>, String> {
+    let root = crate::store::init_cas_dir(repo).map_err(|e| e.to_string())?;
+    std::fs::write(
+        root.join("config.toml"),
+        "[project]\ncanonical_id = \"legacy-spawn-test\"\n",
+    )
+    .unwrap();
+    let tasks = open_task_store_cached(&root).map_err(|e| e.to_string())?;
+    let mut epic = cas_types::Task::new("cas-legacy-lane".into(), "Recorded lane".into());
+    epic.task_type = cas_types::TaskType::Epic;
+    epic.branch = Some(branch.into());
+    epic.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector: "project:legacy-spawn-test".into(),
+        target_branch: parent.into(),
+    });
+    tasks.add(&epic).map_err(|e| e.to_string())?;
+    let mut child = cas_types::Task::new("cas-legacy-child".into(), "Targeted child".into());
+    child.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector: "project:legacy-spawn-test".into(),
+        target_branch: branch.into(),
+    });
+    tasks.add(&child).map_err(|e| e.to_string())?;
+    let prep = prepare_existing_task(repo, &root, &child.id).map_err(|e| e.to_string())?;
+    Ok((!prep.warnings.is_empty()).then(|| prep.warnings.join("\n")))
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_bfa1_round3_seen_remote_with_failed_fetch_is_unverified_not_deleted() {
+    use std::os::unix::fs::PermissionsExt;
+    with_fixture(|f| {
+        git(&f.repo, &["push", "origin", "epic/round2"]);
+        git(&f.repo, &["branch", "-D", "epic/round2"]);
+        let script = f.repo.parent().unwrap().join("upload-pack.sh");
+        let counter = f.repo.parent().unwrap().join("upload-pack-count");
+        // Real local Git transport: ls-remote sees the lane, its subsequent
+        // fetch fails, and no fallback may label that uncertainty a deletion.
+        std::fs::write(&script, format!(
+            "#!/bin/sh\nn=0\n[ ! -f '{0}' ] || n=$(cat '{0}')\nn=$((n + 1))\necho $n > '{0}'\n[ $n -ne 2 ] || exit 1\nexec git-upload-pack \"$@\"\n", counter.display()
+        )).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &f.repo,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                script.to_str().unwrap(),
+            ],
+        );
+        let error = f
+            .app
+            .prepare_worker_spawn(Some("round2-worker"), true, None)
+            .err()
+            .expect("missing local lane with unverified origin must refuse")
+            .to_string();
+        assert!(
+            error.contains("EPIC BRANCH UNVERIFIED") && error.contains("no lane was recreated"),
+            "{error}"
+        );
+        assert!(!error.contains("deleted epic lane"), "{error}");
+        assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.old);
+        assert!(
+            git(
+                &f.repo,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/epic/round2"
+                ]
+            )
+            .is_empty()
+        );
     });
 }

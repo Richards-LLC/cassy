@@ -391,10 +391,9 @@ pub(crate) fn focus_epic(
             epic.task_type
         )));
     }
-    if epic.status == TaskStatus::Closed {
+    if epic.is_terminal() {
         return Err(OperationError::Invalid(format!(
-            "focus_epic: task {epic_id} is Closed. \
-             Closed epics cannot be pinned as the active factory focus.",
+            "focus_epic: task {epic_id} is {}. Terminal epics cannot be pinned as the active factory focus.", epic.status,
         )));
     }
 

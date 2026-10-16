@@ -995,21 +995,13 @@ fn checkout_ref_for_spawn_base_observed(
 /// not be cut from an unpublished operator commit. A genuinely split
 /// epic/parent history is also refused because the worker must not inherit a
 /// base known to omit target history.
-#[cfg(test)]
-fn fast_forward_epic_base_from_parent(
-    repo_root: &std::path::Path, epic_branch: &str, parent_branch: &str,
-) -> Result<Option<String>, String> {
-    let parent_ref = freshest_nondivergent_ref(repo_root, parent_branch)?;
-    refresh_epic_base_from_parent(repo_root, epic_branch, parent_branch, &parent_ref, true)
-}
-
 fn refresh_epic_base_from_parent(
     repo_root: &std::path::Path, epic_branch: &str, parent_branch: &str,
     parent_ref: &str, publish_existing: bool,
 ) -> Result<Option<String>, String> {
     if epic_branch == parent_branch
         || !ref_exists(repo_root, epic_branch)
-        || !ref_exists(repo_root, parent_branch)
+        || !ref_exists(repo_root, parent_ref)
     {
         return Ok(None);
     }
@@ -1169,49 +1161,6 @@ fn epic_base_refresh_refusal(error: &str) -> String {
     )
 }
 
-/// Choose the shared parent ref without silently picking an unpublished local
-/// side of a local/remote split. A fetched remote that strictly contains the
-/// local ref is the freshest safe parent; an equal remote is authoritative;
-/// an ahead local ref and a true split must be reconciled before a worker can
-/// inherit either one.
-#[cfg(test)]
-fn freshest_nondivergent_ref(repo_root: &std::path::Path, branch: &str) -> Result<String, String> {
-    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
-    if !branch.starts_with("origin/") { let _ = git.fetch_branch(branch.strip_prefix("refs/heads/").unwrap_or(branch)); }
-    git.shared_parent_ref(branch)
-}
-
-/// Locate the epic whose recorded branch is the resolved spawn base, then
-/// return that epic's declared parent. This is deliberately branch-oriented:
-/// a task-level WorkTarget can resolve directly to an *outer* epic branch,
-/// leaving no task-epic id in [`SpawnBaseSource`] even though that base itself
-/// has a parent that must be refreshed before a worker is cut.
-#[cfg(test)]
-fn recorded_epic_parent_branch_for_resolved_base(
-    cas_dir: &std::path::Path,
-    resolved_base: &str,
-) -> Option<(String, String)> {
-    let store = open_task_store_cached(cas_dir).ok()?;
-    store
-        .list(None)
-        .ok()?
-        .into_iter()
-        .filter(|task| task.task_type == cas_types::TaskType::Epic)
-        .find_map(|epic| {
-            let epic_branch = epic.branch?.trim().to_string();
-            if epic_branch.is_empty() || epic_branch != resolved_base {
-                return None;
-            }
-            let parent_branch = epic
-                .deliverables
-                .work_target
-                .as_ref()
-                .map(|target| target.target_branch.trim())
-                .filter(|branch| !branch.is_empty())?
-                .to_string();
-            Some((epic_branch, parent_branch))
-        })
-}
 
 #[cfg(test)]
 fn cleanup_cancelled_spawn_worktree_with_manager(
@@ -1845,7 +1794,7 @@ impl WorkerSpawnContext {
                     if self.task_id.is_none() && let Some(id) = focus.epic_id.as_deref() {
                         let store = open_task_store_cached(&self.cas_dir)?;
                         match store.get(id) {
-                            Ok(epic) if epic.status == cas_types::TaskStatus::Closed => anyhow::bail!("spawn refused: pinned epic {id} is closed; no lane was republished"),
+                            Ok(epic) if epic.is_terminal() => anyhow::bail!("spawn refused: pinned epic {id} is {}; no lane was republished", epic.status),
                             Err(_) => anyhow::bail!("spawn refused: pinned epic {id} no longer exists; no lane was republished"),
                             _ => {},
                         }
@@ -1933,21 +1882,27 @@ impl WorkerSpawnContext {
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
-                let store = open_task_store_cached(&self.cas_dir)?;
-                let recorded_epic = store.list(None)?.into_iter().find(|task|
-                    task.task_type == cas_types::TaskType::Epic && task.branch.as_deref() == Some(parent_branch.as_str())
-                );
+                let recorded_epic = cas_store::SqliteTaskStore::open(&self.cas_dir)?
+                    .epic_for_branch(&parent_branch)?;
                 let managed_epic = parent_branch.starts_with("epic/") && recorded_epic.is_some();
-                if let Some(epic) = &recorded_epic && epic.status == cas_types::TaskStatus::Closed {
-                    anyhow::bail!("spawn refused: epic {} is closed; no lane was republished", epic.id);
+                if let Some(epic) = &recorded_epic && epic.is_terminal() {
+                    anyhow::bail!("spawn refused: epic {} is {}; no lane was republished", epic.id, epic.status);
                 }
                 if managed_epic {
-                    let parent = recorded_epic.as_ref().and_then(|epic| epic.deliverables.work_target.as_ref())
-                        .map(|target| target.target_branch.clone()).filter(|parent| parent != &parent_branch)
-                        .unwrap_or_else(|| configured_trunk.clone());
+                    // Adopted self-target lanes and legacy target-less epics have
+                    // no recorded parent to refresh. Trunk is only a publication
+                    // base for a verified absent origin, never a divergence gate.
+                    let refresh_parent = recorded_epic.as_ref()
+                        .and_then(|epic| epic.deliverables.work_target.as_ref())
+                        .map(|target| target.target_branch.trim())
+                        .filter(|parent| !parent.is_empty() && *parent != parent_branch);
+                    let parent = refresh_parent.unwrap_or(&configured_trunk);
                     let observation = spawn_git.observe_epic_publication(&parent_branch, &parent);
                     let existing_remote = matches!(observation.remote, Ok(Some(true)));
                     if !ref_exists(&repo_root, &parent_branch) && !existing_remote {
+                        if let Err(error) = &observation.remote {
+                            anyhow::bail!("EPIC BRANCH UNVERIFIED: '{parent_branch}' cannot be prepared because origin could not be verified: {error}; no lane was recreated");
+                        }
                         anyhow::bail!("spawn base '{parent_branch}' doesn't resolve; refusing to recreate a deleted epic lane from trunk");
                     }
                     // Reconcile a verified existing epic once before preparing from
@@ -1958,20 +1913,22 @@ impl WorkerSpawnContext {
                         if let Some(notice) = readiness.notice { notices.push(notice); }
                         !readiness.can_refresh_parent
                     } else { false };
-                    let parent_ref = spawn_git.shared_parent_ref(&parent)
-                        .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
-                    if preserve {
-                        // Remote divergence forbids moving either side, but local
-                        // ancestry validation still uses the fetched/cached parent.
-                        let ahead = spawn_git.commits_behind(&parent_ref, &parent_branch)?;
-                        let behind = spawn_git.commits_behind(&parent_branch, &parent_ref)?;
-                        if ahead > 0 && behind > 0 {
-                            anyhow::bail!("{}", epic_base_refresh_refusal(&format!("epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed")));
+                    if let Some(parent) = refresh_parent {
+                        let parent_ref = spawn_git.shared_parent_ref(&parent)
+                            .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
+                        if preserve {
+                            // Remote divergence forbids moving either side, but local
+                            // ancestry validation still uses the fetched/cached parent.
+                            let ahead = spawn_git.commits_behind(&parent_ref, &parent_branch)?;
+                            let behind = spawn_git.commits_behind(&parent_branch, &parent_ref)?;
+                            if ahead > 0 && behind > 0 {
+                                anyhow::bail!("{}", epic_base_refresh_refusal(&format!("epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed")));
+                            }
+                        } else if let Some(notice) = refresh_epic_base_from_parent(
+                            &repo_root, &parent_branch, &parent, &parent_ref, existing_remote,
+                        ).map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))? {
+                            notices.push(notice);
                         }
-                    } else if let Some(notice) = refresh_epic_base_from_parent(
-                        &repo_root, &parent_branch, &parent, &parent_ref, existing_remote,
-                    ).map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))? {
-                        notices.push(notice);
                     }
                     if !existing_remote {
                         match spawn_git.ensure_epic_published_observed(&parent_branch, &parent, &observation) {
@@ -4825,7 +4782,7 @@ mod spawn_base_tests {
         );
         let parent_tip = head_sha(&origin, "main");
 
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect("clean ancestry must be safe to fast-forward")
             .expect("the stale epic base must be refreshed");
         assert!(notice.contains("EPIC BASE FAST-FORWARDED"), "{notice}");
@@ -4923,7 +4880,7 @@ mod spawn_base_tests {
         let epic_tip = head_sha(&repo, "epic/behind");
         assert_ne!(local_parent_tip, remote_parent_tip);
 
-        let error = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect_err("an unpublished local parent must refuse epic refresh");
         assert!(error.contains("ahead of shared 'origin/main'"), "{error}");
         assert!(error.contains("unpublished local parent"), "{error}");
@@ -4946,7 +4903,7 @@ mod spawn_base_tests {
         commit(&repo, "parent-advance.txt", "parent advanced locally");
         let parent_tip = head_sha(&repo, "main");
 
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect("a remote-less checkout can still refresh its local epic base")
             .expect("the local refresh must be reported");
         assert!(notice.contains("LOCAL-ONLY"), "{notice}");
@@ -5005,7 +4962,7 @@ mod spawn_base_tests {
 
         commit(&repo, "parent-advance.txt", "parent advanced locally");
         let parent_tip = head_sha(&repo, "main");
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .unwrap()
             .unwrap();
 
@@ -5069,7 +5026,7 @@ mod spawn_base_tests {
         commit(&origin, "parent-advance.txt", "parent advanced upstream");
         let parent_tip = head_sha(&origin, "main");
 
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect("a rejected publish must retain the safe local refresh")
             .expect("the unpublished refresh must be reported");
         assert!(notice.contains("UNPUBLISHED"), "{notice}");
@@ -5188,15 +5145,11 @@ mod spawn_base_tests {
         let (base, source) = resolve_spawn_base(&task_base, None, "main");
         assert_eq!(base, "epic/outer");
         assert!(matches!(source, SpawnBaseSource::WorkTarget { .. }));
-        let (epic_branch, recorded_parent) =
-            recorded_epic_parent_branch_for_resolved_base(&cas_dir, &base)
-                .expect("the resolved WorkTarget branch belongs to the outer epic");
-        assert_eq!(epic_branch, base);
-        assert_eq!(recorded_parent, "main");
-
-        let notice = fast_forward_epic_base_from_parent(&repo, &epic_branch, &recorded_parent)
-            .expect("the strictly-behind outer epic must fast-forward")
-            .expect("the refresh must be reported");
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"test\"\n").unwrap();
+        let prepared = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, "cas-child")
+            .expect("the strictly-behind outer epic must prepare through production");
+        assert_eq!(prepared.worktree_info.as_ref().unwrap().parent_branch, "epic/outer");
+        let notice = prepared.warnings.join("\n");
         assert!(notice.contains("EPIC BASE FAST-FORWARDED"), "{notice}");
         assert!(notice.contains("pushed to origin"), "{notice}");
         assert_eq!(head_sha(&repo, "epic/outer"), parent_tip);
@@ -5254,7 +5207,7 @@ mod spawn_base_tests {
             .unwrap();
         commit(&repo, "parent-only.txt", "parent-only work");
 
-        let error = fast_forward_epic_base_from_parent(&repo, "epic/diverged", "main")
+        let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/diverged", "main")
             .expect_err("divergent epic/parent history cannot be fast-forwarded");
         assert!(error.contains("have diverged"), "{error}");
         let refusal = epic_base_refresh_refusal(&error);
@@ -5287,16 +5240,23 @@ mod spawn_base_tests {
         for offline in [false, true] {
             super::spawn_readiness_tests::with_fixture(|fixture| {
                 let tasks = open_task_store_cached(&fixture.root).unwrap();
+                super::spawn_readiness_tests::git(&fixture.repo, &["branch", "-m", "epic/round2", "epic/diverged-support"]);
+                let mut epic = tasks.get("cas-round2-epic").unwrap();
+                epic.branch = Some("epic/diverged-support".into());
+                tasks.update(&epic).unwrap();
                 let mut child = tasks.get("cas-round2-child").unwrap();
                 child.execution_note = Some("no-code".into());
                 tasks.update(&child).unwrap();
-                super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "epic/round2"]);
+                super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "epic/diverged-support"]);
                 super::spawn_readiness_tests::commit(&fixture.repo, "epic-only");
+                let tip = super::spawn_readiness_tests::git(&fixture.repo, &["rev-parse", "epic/diverged-support"]);
                 super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "main"]);
                 fixture.advance_parent();
                 if offline { fixture.offline(); }
                 let error = fixture.prepare().err().expect("diverged no-code epic must refuse").to_string();
                 assert!(error.contains("EPIC BASE REFRESH REFUSED") && error.contains("have diverged"), "{error}");
+                assert!(error.contains("epic/diverged-support") && error.contains("main"), "{error}");
+                assert_eq!(super::spawn_readiness_tests::git(&fixture.repo, &["rev-parse", "epic/diverged-support"]), tip);
                 assert!(!fixture.repo.join(".cas/worktrees/round2-worker").exists());
             });
         }

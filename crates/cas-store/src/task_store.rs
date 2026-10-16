@@ -231,6 +231,24 @@ impl SqliteTaskStore {
         })
     }
 
+    /// Find one recorded epic lane, preferring a live owner over historical
+    /// terminal rows. Spawn does not decode the project's whole task backlog.
+    pub fn epic_for_branch(&self, branch: &str) -> Result<Option<Task>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, title, description, design, acceptance_criteria, notes,
+             status, priority, task_type, assignee, labels, created_at, updated_at,
+             closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
+             pending_verification, pending_worktree_merge, epic_verification_owner, team_id,
+             deliverables, demo_statement, execution_note, share, depth, terminal_outcome,
+             origin_project, delivery_mode, risk, proof_targets, door
+             FROM tasks WHERE branch = ? AND task_type = 'epic'
+             ORDER BY CASE WHEN status IN ('closed', 'cancelled') THEN 1 ELSE 0 END,
+                      updated_at DESC, id LIMIT 1",
+        )?;
+        Ok(stmt.query_row(params![branch], Self::task_from_row).optional()?)
+    }
+
     fn update_checked(
         &self,
         task: &Task,

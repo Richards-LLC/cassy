@@ -193,9 +193,22 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
     with_fixture(|repo, origin, root, _| {
         git(repo, &["branch", "-D", "epic/unpublished"]);
         let receipt = focus(root);
-        assert!(receipt.contains("refusing to recreate a deleted epic lane"), "{receipt}");
+        assert!(
+            receipt.contains("refusing to recreate a deleted epic lane"),
+            "{receipt}"
+        );
         for path in [repo, origin] {
-            assert!(git(path, &["for-each-ref", "--format=%(refname)", "refs/heads/epic/unpublished"]).is_empty());
+            assert!(
+                git(
+                    path,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/heads/epic/unpublished"
+                    ]
+                )
+                .is_empty()
+            );
         }
     });
 }
@@ -272,6 +285,45 @@ fn cas_bfa1_failed_base_fetch_does_not_publish_local_fallback() {
                 ]
             )
             .is_empty()
+        );
+    });
+}
+
+#[test]
+fn cas_bfa1_round3_focus_refuses_cancelled_epic() {
+    with_fixture(|repo, origin, root, _| {
+        let tasks = crate::store::open_task_store(root).unwrap();
+        let mut epic = tasks.get("cas-unpublished").unwrap();
+        epic.status = cas_types::TaskStatus::Cancelled;
+        tasks.update(&epic).unwrap();
+        let error = focus_epic(
+            root,
+            "publication-test",
+            FocusEpic::Pin {
+                epic_id: "cas-unpublished",
+                delivery_mode: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("is cancelled") && error.contains("Terminal epics cannot be pinned"),
+            "{error}"
+        );
+        assert!(
+            git(
+                origin,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/epic/unpublished"
+                ]
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            git(repo, &["rev-parse", "epic/unpublished"]),
+            git(repo, &["rev-parse", "main~1"])
         );
     });
 }

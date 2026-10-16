@@ -4312,7 +4312,21 @@ fn operator_policy_command_textual(command: &str) -> bool {
         return false;
     }
     let statements = shell_statement_words(command);
-    statements.is_empty() || !statements.iter().all(|words| read_only_statement(words))
+    statements.is_empty()
+        || !statements
+            .iter()
+            .all(|words| !runs_substitution(words) && read_only_statement(words))
+}
+
+/// cas-b7b2: a word that runs a command when the shell expands it: `$(…)`,
+/// backticks, or process substitution. A read-only command with such an
+/// argument still runs whatever is inside it, so the statement is not read
+/// only. Quoting is not inspected: a single-quoted `$(` is refused too, which
+/// costs a rare search and never admits a run.
+fn runs_substitution(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|word| word.contains("$(") || word.contains('`') || word.contains("<(") || word.contains(">("))
 }
 
 /// A statement that only reads or prints: it cannot change the policy by
@@ -4337,7 +4351,65 @@ fn read_only_statement(words: &[String]) -> bool {
             args.get(at + 1)
                 .is_some_and(|sub| matches!(sub.as_str(), "get" | "describe" | "list" | "search" | "docs"))
         }),
+        // cas-b7b2: searches that cas-1768 QA found refused.
+        "awk" | "gawk" | "mawk" | "nawk" => read_only_awk(args),
+        "find" => read_only_find(args),
+        "gh" => read_only_gh(args),
+        "jq" => true,
         _ => false,
+    }
+}
+
+/// cas-b7b2: an awk run that only reads and prints. Refused: an in-place
+/// edit (`-i inplace`, `--inplace`), a program read from a file (`-f`,
+/// `--file`, `-E`, `--exec`, whose text is not visible here), and any
+/// program text that can run a command or write a file (`system`, a `|`
+/// pipe in or out, `getline`, an output redirection `>`).
+fn read_only_awk(args: &[String]) -> bool {
+    let options_ok = args.iter().all(|arg| {
+        let arg = arg.as_str();
+        !(arg == "-i"
+            || arg.starts_with("-i")
+            || arg.starts_with("--include")
+            || arg.starts_with("--inplace")
+            || arg == "-f"
+            || arg.starts_with("-f")
+            || arg.starts_with("--file")
+            || arg == "-E"
+            || arg.starts_with("--exec"))
+    });
+    options_ok
+        && !args.iter().any(|arg| {
+            arg.contains("system")
+                || arg.contains('|')
+                || arg.contains("getline")
+                || arg.contains('>')
+        })
+}
+
+/// cas-b7b2: a find that only lists. Refused: every action that runs a
+/// command, deletes or writes a file.
+fn read_only_find(args: &[String]) -> bool {
+    !args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-fprint" | "-fprint0"
+                | "-fprintf" | "-fls"
+        )
+    })
+}
+
+/// cas-b7b2: a gh subcommand that only reads: `gh <noun> view|list|status|
+/// diff|checks` and `gh search …`. `gh api` (any method), edits, comments,
+/// merges and every other verb stay refused.
+fn read_only_gh(args: &[String]) -> bool {
+    let mut positionals = args.iter().filter(|arg| !arg.starts_with('-'));
+    match positionals.next().map(String::as_str) {
+        Some("search") => true,
+        Some("api") | None => false,
+        Some(_) => positionals.next().is_some_and(|verb| {
+            matches!(verb.as_str(), "view" | "list" | "status" | "diff" | "checks")
+        }),
     }
 }
 

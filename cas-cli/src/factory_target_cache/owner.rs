@@ -210,13 +210,16 @@ pub(crate) fn for_retirement(cas_root: &Path, worktree: &Path) -> io::Result<Opt
 
 fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lease>> {
     let worktree = worktree.canonicalize()?;
-    let target = worktree.join("target");
+    // cas-3f93: `[factory] scratch_root` may place the target off-checkout.
+    let target = crate::factory_scratch::worker_target_dir(&worktree);
+    let relocated = crate::factory_scratch::is_relocated(&worktree, &target);
     if fs::symlink_metadata(&target)
         .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
     {
         return Err(io::Error::other("private target must be a real directory"));
     }
-    if create && !target.exists() && !target_is_ignored(&worktree)? {
+    // A relocated target is outside the checkout, so Git never sees it.
+    if create && !relocated && !target.exists() && !target_is_ignored(&worktree)? {
         tracing::warn!(worktree = %worktree.display(), "worker target is not ignored; using legacy output without ownership; retirement disabled");
         return Ok(None);
     }
@@ -241,6 +244,9 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
         });
     }
     let fresh = if create {
+        if let Some(parent) = target.parent().filter(|_| relocated) {
+            fs::create_dir_all(parent)?;
+        }
         match fs::DirBuilder::new().mode(0o700).create(&target) {
             Ok(()) => true,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
@@ -277,7 +283,8 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
         marker.write_all(record.generation.as_bytes())?;
         marker.sync_all()?;
         fs::File::open(&target)?.sync_all()?;
-        fs::File::open(&worktree)?.sync_all()?;
+        // The directory holding the target entry: the checkout when in-tree.
+        fs::File::open(target.parent().unwrap_or(&worktree))?.sync_all()?;
         // Durable external provenance exists before any build data is written.
         write_record(&record_path, &record)?;
     }

@@ -1449,6 +1449,39 @@ usable targets and `CAS_FACTORY_DISABLE_TARGET_SEED=1` bypass seeding, while
 all spawn paths still apply the disk floor. Seeding normally hardlinks artifacts;
 the floor reserves space for subsequent worker writes and builds.
 
+#### Scratch root for worker build output
+
+`factory.scratch_root` (unset by default) moves regenerable worker build output
+to a scratch drive, for example `cas config set factory.scratch_root /mnt/rewind/cas`.
+The value must be an absolute path. Once it is set, each project gets its own
+`<scratch_root>/<project-key>/` directory, where the key is the
+`<name>-<sha256>` label the durable artifacts root uses:
+
+- Each managed worker (`.cas/worktrees/<name>`) builds into
+  `<scratch_root>/<project-key>/targets/<name>`. The spawn environment's
+  `CARGO_TARGET_DIR`, the capped worker check, target seeding, ownership
+  leases, parking and retirement all resolve this same path. Sources stay in
+  the checkout, and the main checkout and lane previews keep their in-tree
+  `target/`.
+- Published baselines live in `<scratch_root>/<project-key>/build-cache`.
+  `scripts/refresh-worker-build-cache.sh` reads the key through `cas config get`
+  and prints `Worker build-cache root:`, and the release host update reads that
+  line to find the root.
+- Seeding hard-links from the baseline into the target, so both must be on one
+  filesystem. If their device ids differ, the seed is refused before anything is
+  written, the spawn reports why, and Cargo builds privately. The baseline is
+  never copied.
+- The `factory.spawn_min_free_gib` floor checks the scratch filesystem first,
+  then the checkout's. Factory launch also checks the scratch filesystem's
+  watermark.
+
+When the root is unset, every path stays as it was: `<worktree>/target` and
+`.cas/build-cache`. Running workers keep their current target. They move only
+when they respawn, and live targets are never moved. Run the refresh script
+after you change the root, so new workers have a baseline to seed from.
+`gc_report`/`gc_cleanup` still inventory only in-tree targets. Retirement and
+park-time pruning cover relocated worker targets.
+
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
 `--remap-path-prefix`). Supervisor and CI builds keep sccache enabled for when

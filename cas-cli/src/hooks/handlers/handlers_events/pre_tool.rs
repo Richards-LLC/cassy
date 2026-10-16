@@ -2477,19 +2477,45 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
 /// Return shell statements with heredoc bodies and comments removed. Quoted
 /// arguments remain one word, so a formatter name in a script string cannot be
 /// mistaken for the executable command.
+///
+/// cas-b7a1: a `$(…)` that is an argument of a resolved command does not end
+/// that command. Its body is a statement of its own, and the words after its
+/// `)` stay in the enclosing statement (`echo $(cat f) sed -i x c` runs `echo`).
+/// A substitution that may become the command (first word, after an
+/// assignment or a wrapper such as `env` or `timeout`), a group or subshell,
+/// and an unmatched `)` (a `case` pattern) still end the statement as before.
 pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     let shell_command = shell_command_without_heredoc_bodies(command);
     let tokens = factory_shell_tokens(&shell_command);
     let mut statements = Vec::new();
-    let mut words = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    // One entry per open `(`: the enclosing statement an argument
+    // substitution returns to, or `None` when `)` starts a new statement.
+    let mut open: Vec<Option<Vec<String>>> = Vec::new();
     for token in tokens {
         match token {
             ShellToken::Word(word) => words.push(word),
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                let argument_substitution = words.last().is_some_and(|word| word.ends_with('$'))
+                    && unwrapped_command_index(&words).is_some_and(|index| index + 1 < words.len());
+                if argument_substitution {
+                    open.push(Some(std::mem::take(&mut words)));
+                } else {
+                    if !words.is_empty() {
+                        statements.push(std::mem::take(&mut words));
+                    }
+                    open.push(None);
+                }
+            }
+            ShellToken::Operator(')') => {
+                if !words.is_empty() {
+                    statements.push(std::mem::take(&mut words));
+                }
+                if let Some(Some(enclosing)) = open.pop() {
+                    words = enclosing;
+                }
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
                 if !words.is_empty() {
                     statements.push(std::mem::take(&mut words));
                 }
@@ -2499,6 +2525,12 @@ pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     }
     if !words.is_empty() {
         statements.push(words);
+    }
+    // An unclosed argument substitution still reports its enclosing words.
+    for enclosing in open.into_iter().flatten().rev() {
+        if !enclosing.is_empty() {
+            statements.push(enclosing);
+        }
     }
     statements
 }
@@ -6363,6 +6395,96 @@ mod workspace_contract_tests {
             let (decision, reason) = decide(command);
             assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
             assert!(reason.contains("CASSY CONFIG"), "`{command}`: {reason}");
+        }
+    }
+
+    /// cas-b7a1: the shared statement splitter keeps an argument
+    /// substitution's trailing words in the command that owns them, so data
+    /// after `echo $(…)` is never an in-place edit. A substitution in command
+    /// position, or after a wrapper whose command it may become, still ends
+    /// the statement as before.
+    #[test]
+    fn cas_b7a1_statement_words_continue_after_an_argument_substitution() {
+        let words = |command: &str| shell_statement_words(command);
+        assert_eq!(
+            words("echo $(cat f) sed -i x config.toml"),
+            vec![vec!["cat", "f"], vec!["echo", "$", "sed", "-i", "x", "config.toml"]]
+        );
+        assert_eq!(
+            words("echo $(cat $(ls src)) sed -i x c"),
+            vec![vec!["ls", "src"], vec!["cat", "$"], vec!["echo", "$", "sed", "-i", "x", "c"]]
+        );
+        for (command, edit) in [
+            ("$(true) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("X=$(cat f) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("env $(cat f) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("timeout $(cat t) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("(cd src) ; sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("case a in a) sed -i x c ;; esac", vec!["sed", "-i", "x", "c"]),
+        ] {
+            assert!(
+                words(command).contains(&edit.iter().map(|word| word.to_string()).collect()),
+                "`{command}` keeps `sed` as its own statement: {:?}",
+                words(command)
+            );
+        }
+    }
+
+    /// cas-b7a1: through the real PreToolUse, data after an argument
+    /// substitution is not an in-place config edit; real in-place edits stay
+    /// refused, including inside `$()` and after a command-position
+    /// substitution.
+    #[cfg(unix)]
+    #[test]
+    fn cas_b7a1_argument_substitution_data_is_not_an_in_place_config_edit() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/b7a1");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/lively-puma-3");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-b7a1");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "lively-puma-3");
+        env.set("CAS_CLONE_PATH", &worktree);
+        let decide = |command: &str| -> (String, String) {
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()),
+                ..bash_input(command, &worktree)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        for command in [
+            "echo $(cat src/new.rs) sed -i x ../../config.toml",
+            "printf '%s\\n' $(cat src/new.rs) perl -pi -e x ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert!(
+                decision != "deny",
+                "read-only `{command}` must be allowed: {decision} {reason}"
+            );
+        }
+        for command in [
+            "sed -i x ../../config.toml",
+            "echo $(sed -i x ../../config.toml)",
+            "$(true) sed -i x ../../config.toml",
+            "X=$(cat src/new.rs) sed -i x ../../config.toml",
+            "env $(cat src/new.rs) sed -i x ../../config.toml",
+            "echo $(cat src/new.rs); sed -i x ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert_eq!(decision, "deny", "`{command}` edits the config and stays refused: {reason}");
         }
     }
 

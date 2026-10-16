@@ -2759,7 +2759,14 @@ impl CasService {
         // P1.6: the send result is a compact current-stage receipt. The
         // detailed delivery report stays available through message_status;
         // only actionable exceptions expand the send result.
-        let send_report = queue.message_delivery_report(message_id).ok().flatten();
+        // cas-d5ab: with a daemon listening, give it its first pass so a busy
+        // recipient's deferral is named at send time, not 50 ms later.
+        let daemon_listening = cas_factory::notify_socket_path(&self.inner.cas_root).exists();
+        let send_report = if daemon_listening && target_is_registered && !urgent && !duplicate_suppressed {
+            wait_for_send_outcome(&*queue, message_id).await
+        } else {
+            queue.message_delivery_report(message_id).ok().flatten()
+        };
         let delivery_stage = send_report
             .as_ref()
             .map(|report| report.stage)
@@ -2795,11 +2802,19 @@ impl CasService {
             )
         } else {
             match delivery_stage {
+                // cas-d5ab (P1.6): name the deferral and where it surfaces.
                 cas_store::DeliveryStage::Gated => format!(
-                    "queued #{message_id} → {resolved_target} (gated)\n\
-                     Delivery is gated: {report_detail}. Check message_status\
-                     notification_id={message_id} for changes.\
-                     {supervisor_copy_suffix}"
+                    "deferred #{message_id} → {resolved_target}: {}{supervisor_copy_suffix}",
+                    deferral_reason(
+                        send_report.as_ref().and_then(|report| report.wake_attempt_detail.as_deref()),
+                        send_report.as_ref().and_then(|report| report.pending_detail.as_deref()),
+                        resolved_target_cli == Some(cas_mux::SupervisorCli::Claude),
+                    )
+                ),
+                cas_store::DeliveryStage::Delivered
+                | cas_store::DeliveryStage::AssumedSeen
+                | cas_store::DeliveryStage::Confirmed => format!(
+                    "delivered #{message_id} → {resolved_target} ({stage_text}){supervisor_copy_suffix}"
                 ),
                 cas_store::DeliveryStage::Dropped | cas_store::DeliveryStage::Abandoned => {
                     format!(
@@ -3743,9 +3758,67 @@ fn pending_deadline_narrative(
 }
 
 /// cas-d5ab (P1.6): the one-line reason a gated send names.
+///
+/// A Claude recipient sees a held message at its next tool call or turn start
+/// (cas-a1ed); a PTY recipient gets it typed when its pane is free.
 fn deferral_reason(wake_detail: Option<&str>, pending_detail: Option<&str>, claude_recipient: bool) -> String {
-    let _ = (wake_detail, pending_detail, claude_recipient);
-    String::new()
+    let detail = [wake_detail, pending_detail]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let why = if detail.contains("tool call in flight") {
+        "recipient mid tool call".to_string()
+    } else if detail.contains("not been silent long enough") || detail.contains("pane busy") {
+        "recipient busy".to_string()
+    } else if detail.contains("unsubmitted draft") || detail.contains("composer") {
+        "operator is typing in the recipient's pane".to_string()
+    } else if detail.contains("not ready for injection") {
+        "recipient pane not ready yet".to_string()
+    } else if detail.contains("wake slot") {
+        "another wake went first this pass".to_string()
+    } else {
+        wake_detail
+            .or(pending_detail)
+            .map(|detail| detail.trim_start_matches("wake_declined_by_policy: ").to_string())
+            .unwrap_or_else(|| "held by the wake gate".to_string())
+    };
+    let surfaces = if claude_recipient {
+        "surfaces at its next tool call or turn start"
+    } else {
+        "delivered when its pane is free"
+    };
+    format!("{why}; {surfaces}")
+}
+
+/// cas-d5ab (P1.6): how long a send waits for the daemon's first decision on
+/// its row. The daemon decides within tens of milliseconds of the notify.
+const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_millis(1000);
+const SEND_OUTCOME_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Whether the daemon has decided a fresh row: handed it over or held it.
+/// The wake attempt is stamped before the hold, so it is not the signal.
+fn send_outcome_settled(report: &cas_store::MessageDeliveryReport) -> bool {
+    !matches!(
+        report.stage,
+        cas_store::DeliveryStage::Enqueued | cas_store::DeliveryStage::Selected
+    )
+}
+
+/// The row's report once the daemon has decided it, or the last report seen
+/// when the settle window ends first.
+async fn wait_for_send_outcome(
+    queue: &dyn cas_store::PromptQueueStore,
+    message_id: i64,
+) -> Option<cas_store::MessageDeliveryReport> {
+    let deadline = tokio::time::Instant::now() + SEND_OUTCOME_SETTLE;
+    loop {
+        let report = queue.message_delivery_report(message_id).ok().flatten();
+        if report.as_ref().is_none_or(send_outcome_settled) || tokio::time::Instant::now() >= deadline {
+            return report;
+        }
+        tokio::time::sleep(SEND_OUTCOME_POLL).await;
+    }
 }
 
 /// Which `factory_session` a queued row must carry (cas-15f2).

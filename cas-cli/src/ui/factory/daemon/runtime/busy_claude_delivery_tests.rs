@@ -170,7 +170,8 @@ async fn ct2_p2_gate_decline_counts_as_activity() {
     // A task in progress whose last recorded activity is 30 minutes old.
     let mut task = cas_types::Task::new("cas-busy".into(), "long build".into());
     task.status = cas_types::TaskStatus::InProgress;
-    task.assignee = Some(worker.id.clone());
+    // Task assignees are agent names.
+    task.assignee = Some(WORKER.into());
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let mut note = cas_types::Event::new(
         cas_types::EventType::TaskNoteAdded,

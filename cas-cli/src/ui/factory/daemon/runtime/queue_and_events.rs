@@ -2092,13 +2092,30 @@ fn withdraw_resumed_stall_nudge(
 /// Persist a declined worker wake unless an observed open call pauses its budget.
 /// cas-d5ab (spec P2.3): the worker activity a wake-gate decline is evidence
 /// of, if any.
+///
+/// Only a decline that shows the recipient working counts: a tool call in
+/// flight, or a pane that has not gone quiet. An operator draft, an unready
+/// pane or a taken wake slot say nothing about the worker.
 pub(crate) fn gate_decline_activity(
     decision: WakeDecision,
     tool_call: ToolCallEvidence,
 ) -> Option<&'static str> {
-    let _ = (decision, tool_call);
-    None
+    if decision.allowed {
+        return None;
+    }
+    if tool_call == ToolCallEvidence::InFlight || decision.reason.contains("tool call in flight") {
+        return Some("tool call in flight");
+    }
+    decision
+        .reason
+        .contains("not been silent long enough")
+        .then_some("pane not silent")
 }
+
+/// cas-d5ab: the least spacing of gate-decline activity events per worker.
+/// The stall threshold is minutes, so one event a minute keeps the detector
+/// current without writing an event on every declined pass.
+const GATE_ACTIVITY_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
@@ -6181,6 +6198,56 @@ impl FactoryDaemon {
     }
 
     /// Process prompt queue
+    /// cas-d5ab (spec P2.3): record a busy-recipient wake-gate decline as
+    /// the worker's activity, through cas-7156's per-worker recorder, so the
+    /// stall detector does not call a working worker stalled.
+    fn record_gate_decline_activity(
+        &mut self,
+        target: &str,
+        decision: WakeDecision,
+        tool_call: ToolCallEvidence,
+        agents: &[cas_types::Agent],
+    ) {
+        let Some(reason) = gate_decline_activity(decision, tool_call) else {
+            return;
+        };
+        if self
+            .gate_activity_recorded_at
+            .get(target)
+            .is_some_and(|at| at.elapsed() < GATE_ACTIVITY_MIN_INTERVAL)
+        {
+            return;
+        }
+        let Some(worker) = agents
+            .iter()
+            .filter(|agent| {
+                agent.name == target
+                    && agent.role == cas_types::AgentRole::Worker
+                    && agent.status != cas_types::AgentStatus::Shutdown
+            })
+            .max_by_key(|agent| agent.registered_at)
+        else {
+            return;
+        };
+        match cas_factory::director::record_worker_activity(
+            self.app.cas_dir(),
+            &worker.id,
+            "wake_gate",
+            reason,
+        ) {
+            Ok(()) => {
+                self.gate_activity_recorded_at
+                    .insert(target.to_string(), Instant::now());
+            }
+            Err(error) => tracing::debug!(
+                target: "cas::coordination",
+                worker = %target,
+                %error,
+                "cas-d5ab: could not record gate-decline activity"
+            ),
+        }
+    }
+
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         let Some(selection) = self.next_queue_selection() else {
             return Ok(());
@@ -6868,6 +6935,12 @@ impl FactoryDaemon {
                 }
                 let pane = self.pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
+                    self.record_gate_decline_activity(
+                        &queued.target,
+                        WakeDecision::deny(reason),
+                        pane.tool_call,
+                        current_agents,
+                    );
                     let decline = queue.record_pending_reason(queued.id,
                         cas_store::PendingReason::GatedNotReady, Some(reason))
                         .and_then(|()| record_worker_wake_decline(queue.as_ref(), queued.id,
@@ -8016,6 +8089,13 @@ impl FactoryDaemon {
                             &queued.prompt,
                         )
                     {
+                        // cas-d5ab: a busy recipient is a working one.
+                        self.record_gate_decline_activity(
+                            &pane_target,
+                            wake_decision,
+                            pane_state.tool_call,
+                            current_agents,
+                        );
                         // cas-d9a8: persist the OUTCOME KIND alongside the
                         // reason so `message_status` separates "this was never
                         // a wake" from "this was eligible and refused".

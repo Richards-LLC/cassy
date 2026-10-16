@@ -67,6 +67,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         normal_delivery_probes: HashMap::new(),
         last_pane_output_bytes: HashMap::new(),
         pane_silent_since: HashMap::new(),
+        gate_activity_recorded_at: HashMap::new(),
         last_prompt_poison_sweep: Some(Instant::now()),
         resumed_epic_ids: std::collections::HashSet::new(),
         spawn_started_at: None,

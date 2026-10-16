@@ -110,6 +110,20 @@ Peer mailbox: receiving.
 `cas peers --detail` (or `--peer <name>`, and `--json`) prints the same view
 from a shell.
 
+A supervisor also sees its live peers when its session starts, including
+after `/clear`. The block reads the same snapshot as `cas peers`:
+
+```text
+## Live peer supervisors on this repo (Cassy Cloud)
+- qa7e32-b-b251eb on soundwave: heartbeat 13s ago, focus cas-3775, 3 claimed tasks
+2 stale (seen in the last 24h, not live)
+Their claims and work: `cas peers --detail`. Coordinate before taking the same tasks.
+```
+
+There is no block when no peer is live, when the project does not use Cassy
+Cloud, or for workers. If the cloud does not answer within 3 seconds, the
+block is one line saying the peers are unknown, never that there are none.
+
 ### 2. Message and reply
 
 From `soundwave`, address the peer by the name and machine peers showed:

@@ -7578,6 +7578,44 @@ mod workspace_contract_tests {
         }
     }
 
+    #[test]
+    fn cas_e460_real_pre_tool_resolves_effective_cwd_and_nested_shell_writes() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/worker-e460");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(cas_root.join("operator")).unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-e460");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "worker-e460");
+        env.set("CAS_CLONE_PATH", &worktree);
+        for (command, denied) in [
+            ("cd ../../operator && printf x > write-policy.toml", true),
+            ("cd ../.. && printf x > config.toml", true),
+            ("sh -c 'printf x > ../../operator/write-policy.toml'", true),
+            ("bash -c 'cd ../.. && printf x > config.toml'", true),
+            ("(cd ../.. && printf x > config.toml)", true),
+            ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", true),
+            ("sh -c \"$UNKNOWN_SCRIPT\"", true),
+            ("cd src && printf x > new.rs", false),
+            ("sh -c 'printf x > src/new.rs'", false),
+            ("(cd src && printf x > new.rs); printf x > local.rs", false),
+            ("cd ../.. && cat config.toml", false),
+        ] {
+            let input = HookInput { hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()), ..bash_input(command, &worktree) };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
+            assert_eq!(decision == "deny", denied, "{command}: {value}");
+        }
+    }
+
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
     /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
     /// pid and session files) under ~/.cas; the supervisor may also clear

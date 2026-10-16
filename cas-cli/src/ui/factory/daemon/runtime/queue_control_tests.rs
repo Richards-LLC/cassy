@@ -570,7 +570,10 @@ fn dequeued_fixture() -> (tempfile::TempDir, FactoryDaemon, i64) {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(temp.path()).unwrap();
     let mut daemon = super::super::provisioning_tests::daemon(&root);
-    let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(false);
+    // cas-44528: gated, so the poll cannot finish inside
+    // enqueue_spawn_requests; its trailing collect would hand the batch to
+    // control, and these tests are about a completion control has not taken.
+    let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(true);
     daemon.queue_jobs = super::super::prompt_queue_jobs::tests::jobs_on(&writer);
     let queue = crate::store::open_spawn_queue_store(&root).unwrap();
     let id = queue
@@ -584,10 +587,15 @@ fn dequeued_fixture() -> (tempfile::TempDir, FactoryDaemon, i64) {
         )
         .unwrap();
     daemon.enqueue_spawn_requests().unwrap();
+    writer.open();
     settle_until(|| !writer.ran().is_empty());
     assert!(
         queue.peek(10).unwrap().is_empty(),
         "fixture must cross the destructive poll"
+    );
+    assert!(
+        daemon.pending_spawns.is_empty(),
+        "fixture must leave the dequeued batch unconsumed by control"
     );
     (temp, daemon, id)
 }

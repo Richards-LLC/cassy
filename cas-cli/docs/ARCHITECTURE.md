@@ -230,7 +230,10 @@ The memory identity paths are:
   Sync/status and doctor warn; `cas cloud conflicts --json` exposes both copies.
 - Missing/null `created` deserializes to a reserved year-1 UTC sentinel in typed
   Entry/SQLite storage. It never proves a shared birth and is omitted on JSON
-  serialization, so an edit/push does not invent an immutable identity.
+  serialization, so an edit/push does not invent an immutable identity. Human
+  memory date text labels it `unknown`; search provenance uses a null creation
+  date, and chronological lists keep undated rows last in either direction.
+  Date-based retrieval/decay ignores the placeholder as creation evidence.
 - SQLite stores IDs verbatim, `SearchIndex::index_entry` indexes them verbatim,
   memory MCP resolution uses the full store key, and `SyncingEntryStore` queues
   edits under that same key. Personal/team push transports those queued IDs.

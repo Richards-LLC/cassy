@@ -65,7 +65,9 @@ pub fn filter_entries_by_time(entries: Vec<Entry>, period: &TimePeriod) -> Vec<E
             // 1. Created within period, OR
             // 2. Valid during period (using valid_from/valid_until), OR
             // 3. No validity bounds and created before period end
-            if period.contains(&e.created) {
+            if e.known_creation()
+                .is_some_and(|created| period.contains(&created))
+            {
                 return true;
             }
 
@@ -79,7 +81,10 @@ pub fn filter_entries_by_time(entries: Vec<Entry>, period: &TimePeriod) -> Vec<E
                 }
             } else {
                 // No explicit validity - check if created before and no end date
-                if e.created <= period.end && e.valid_until.is_none() {
+                if e.known_creation()
+                    .is_some_and(|created| created <= period.end)
+                    && e.valid_until.is_none()
+                {
                     return true;
                 }
             }

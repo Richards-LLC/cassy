@@ -470,6 +470,8 @@ mod legacy_creation_tests {
         ] {
             let entry: Entry = serde_json::from_value(raw).unwrap();
             assert!(!entry.has_known_creation());
+            assert!(entry.known_creation().is_none());
+            assert_eq!(entry.format_created("%Y-%m-%d"), "unknown");
             let encoded = serde_json::to_value(&entry).unwrap();
             assert!(encoded.get("created").is_none());
             let restored: Entry = serde_json::from_value(encoded).unwrap();
@@ -479,6 +481,11 @@ mod legacy_creation_tests {
         let restored: Entry =
             serde_json::from_value(serde_json::to_value(&known).unwrap()).unwrap();
         assert!(restored.has_known_creation());
+        assert_eq!(restored.known_creation(), Some(known.created));
+        assert_eq!(
+            restored.format_created("%Y-%m-%d"),
+            known.created.format("%Y-%m-%d").to_string()
+        );
         assert_eq!(restored.created, known.created);
         assert!(
             serde_json::from_value::<Entry>(serde_json::json!({

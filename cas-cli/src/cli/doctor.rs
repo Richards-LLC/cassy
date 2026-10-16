@@ -6614,6 +6614,7 @@ mod tests {
         let check = memory_fold_conflict_check(temp.path()).unwrap();
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.starts_with("1 folded memory id(s)"));
+        assert!(!check.message.contains("0001-01-01"));
         assert!(check.message.contains("cas cloud conflicts --json"));
     }
 

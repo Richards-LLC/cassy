@@ -12,6 +12,19 @@ impl Entry {
         !super::is_unknown_created(&self.created)
     }
 
+    /// Actual creation time, excluding the local unknown-birth placeholder.
+    pub fn known_creation(&self) -> Option<DateTime<Utc>> {
+        self.has_known_creation().then_some(self.created)
+    }
+
+    /// Format a birth for people without presenting a storage placeholder as a date.
+    pub fn format_created(&self, format: &str) -> String {
+        self.known_creation().map_or_else(
+            || "unknown".to_string(),
+            |created| created.format(format).to_string(),
+        )
+    }
+
     /// Mint a memory identity independent of the checkout and its counters.
     /// Existing IDs remain opaque strings; no legacy rows are rewritten.
     pub fn generate_id() -> String {
@@ -343,7 +356,10 @@ impl Entry {
     ///
     /// Returns a value between 0.0 and 1.0 representing how "recallable" this memory is
     pub fn retrievability(&self) -> f32 {
-        let reference_time = self.last_accessed.unwrap_or(self.created);
+        let Some(reference_time) = self.last_accessed.or_else(|| self.known_creation()) else {
+            // Unknown age supplies no recency evidence, rather than a fake date.
+            return 0.0;
+        };
         let days_since = Utc::now().signed_duration_since(reference_time).num_hours() as f32 / 24.0;
 
         // Stability affects how slowly the memory decays

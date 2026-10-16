@@ -3561,7 +3561,8 @@ mod tests {
             json!({
                 "id": "p-malformed-created",
                 "project_id": "cas-src",
-                "content": "legacy entry without its creation timestamp",
+                "content": "legacy entry with a malformed creation timestamp",
+                "created": 42,
             }),
             "entry",
         )
@@ -3569,7 +3570,7 @@ mod tests {
 
         assert!(error.contains("entry deserialize error"), "{error}");
         assert!(error.contains("id=p-malformed-created"), "{error}");
-        assert!(error.contains("missing field `created`"), "{error}");
+        assert!(error.contains("invalid type"), "{error}");
     }
 
     #[test]

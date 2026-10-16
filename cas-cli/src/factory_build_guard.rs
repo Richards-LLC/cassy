@@ -27,6 +27,12 @@ pub(crate) struct BuildGuardSnapshot {
 impl BuildGuardSnapshot {
     /// A spawn is refused when it would leave more builders than configured,
     /// or when the host's one-minute load is already above CPU capacity.
+    fn with_host(mut self, proc_root: &Path, _config: &FactoryConfig) -> Self {
+        self.load_1m = std::fs::read_to_string(proc_root.join("loadavg")).ok()
+            .and_then(|text| text.split_whitespace().next()?.parse().ok());
+        self
+    }
+
     pub(crate) fn violations(&self) -> Vec<String> {
         self.admission_violations(false)
     }
@@ -232,12 +238,12 @@ pub(crate) fn inspect_for_task(
     }
     evaluate_for_task(
         cpu_count,
-        one_minute_load(),
+        None,
         live_cargo_worker_count(cas_root),
         requested_workers,
         config.max_concurrent_builders,
         task,
-    )
+    ).with_host(Path::new("/proc"), config)
 }
 
 fn build_guard_disabled_override() -> bool {
@@ -286,18 +292,6 @@ fn format_load(load: Option<f64>) -> String {
     load.map_or_else(|| "unknown".to_string(), |value| format!("{value:.2}"))
 }
 
-#[cfg(target_os = "linux")]
-fn one_minute_load() -> Option<f64> {
-    std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|contents| contents.split_whitespace().next()?.parse().ok())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn one_minute_load() -> Option<f64> {
-    None
-}
-
 /// Count distinct worker cwd roots with a live `cargo` process. A worker can
 /// have more than one cargo child during a nested command, so counting pids
 /// would overstate builder concurrency. Read failures are ignored: an
@@ -342,6 +336,50 @@ fn live_cargo_worker_count(_cas_root: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_proc(load: f64, cpu: &str, memory: &str, available_kib: u64) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("pressure")).unwrap();
+        std::fs::write(root.path().join("loadavg"), format!("{load} 0 0 1/1 1\n")).unwrap();
+        std::fs::write(root.path().join("pressure/cpu"), cpu).unwrap();
+        std::fs::write(root.path().join("pressure/memory"), memory).unwrap();
+        std::fs::write(root.path().join("meminfo"), format!("MemAvailable: {available_kib} kB\n")).unwrap();
+        root
+    }
+
+    #[test]
+    fn cas_2d63_admission_uses_proc_pressure_and_preserves_builder_cap() {
+        for (label, load, cpu, memory, available, allowed) in [
+            ("quiet PSI, noisy load", 64.0, "some avg10=2.5 avg60=1 total=42", "some avg10=0.1", 8*1024*1024, true),
+            ("CPU contention", 2.0, "some avg10=95.0", "some avg10=0.1", 8*1024*1024, false),
+            ("memory stalls", 2.0, "some avg10=2.5", "some avg10=12.0", 8*1024*1024, false),
+            ("low available memory", 2.0, "some avg10=2.5", "some avg10=0.1", 1024*1024, false),
+            ("PSI unavailable", 64.0, "", "", 8*1024*1024, false),
+            ("invalid PSI", 64.0, "some avg10=NaN", "some avg10=0.1", 8*1024*1024, false),
+        ] {
+            let proc = fake_proc(load, cpu, memory, available);
+            let snapshot = evaluate(32, None, 0, 1, 4).with_host(proc.path(), &FactoryConfig::default());
+            assert_eq!(snapshot.violations().is_empty(), allowed, "{label}: {:?}", snapshot.violations());
+            if allowed {
+                let crowded = BuildGuardSnapshot { live_cargo_workers: 4, ..snapshot };
+                assert!(crowded.admission_violations(true).iter().any(|v| v.contains("max_concurrent_builders")));
+            } else if matches!(label, "memory stalls" | "low available memory") {
+                assert!(!snapshot.admission_violations(true).is_empty(), "continuation must recheck memory: {label}");
+            }
+        }
+    }
+
+    #[test]
+    fn cas_2d63_load_fallback_honors_registered_configuration() {
+        let proc = fake_proc(48.0, "", "", 8*1024*1024);
+        let mut config = crate::config::Config::default();
+        config.set("factory.build_guard.max_load_ratio", "2").unwrap();
+        let relaxed = evaluate(32, None, 0, 1, 4).with_host(proc.path(), &config.factory());
+        assert!(relaxed.violations().is_empty(), "{:?}", relaxed.violations());
+        config.set("factory.build_guard.max_load_ratio", "1").unwrap();
+        let normal = evaluate(32, None, 0, 1, 4).with_host(proc.path(), &config.factory());
+        assert!(!normal.violations().is_empty());
+    }
 
     #[test]
     fn load_above_cpu_refuses_without_force() {

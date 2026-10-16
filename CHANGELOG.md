@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — agent tool calls stay under 2 s while the database is busy (cas-1bc7)
+
+- With 16 agents and another process holding long write transactions, MCP
+  tool-call p99 drops from 2.2 s to 1.9 s. Several calls had been taking
+  the database write lock without writing anything: every prompt-queue open,
+  each inbox poll's stale sweep and its empty unread-message drain, every
+  turn hook's empty drain, and the daemon's Viktor watch expiry. These now
+  read first and take the lock only when they have something to write.
+- A heartbeat and its task- and worktree-lease renewals are now one
+  transaction, as cas-85d9 intended, and take the write lock once instead of
+  three times. If a lease renewal fails, the heartbeat rolls back with it, and
+  a busy retry no longer counts a renewal twice.
+
 ## [3.58.0] - 2026-10-16
 
 ### Fixed — Commander keeps your place when you load earlier turns (cas-100f)

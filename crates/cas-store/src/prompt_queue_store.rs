@@ -1365,12 +1365,24 @@ fn historical_demotions_done() -> &'static Mutex<std::collections::HashSet<Strin
     DONE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// The database a connection serves; `None` for an in-memory database, which
-/// is checked on every open.
+/// The database a connection serves, by canonical path, so two spellings of
+/// one file share a flag; `None` for an in-memory database, which is checked
+/// on every open.
 fn historical_demotion_key(conn: &Connection) -> Option<String> {
-    conn.path()
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
+    let path = conn.path().filter(|path| !path.is_empty())?;
+    Some(
+        std::fs::canonicalize(path)
+            .map(|canonical| canonical.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string()),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: runs between a drain's lock-free probe and its locked
+    /// re-select (cas-1bc7 review).
+    static AFTER_DRAIN_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn historical_demotion_pending(key: Option<&str>) -> bool {
@@ -8849,6 +8861,10 @@ impl SqlitePromptQueueStore {
             };
             if !any_row {
                 return Ok((Vec::new(), Vec::new()));
+            }
+            #[cfg(test)]
+            if let Some(hook) = AFTER_DRAIN_PROBE.with(|hook| hook.borrow_mut().take()) {
+                hook();
             }
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let prompts: Vec<QueuedPrompt> = {
@@ -18429,6 +18445,56 @@ mod cas_1bc7_tests {
         let second = SqlitePromptQueueStore::open(temp.path()).unwrap();
         second.init().unwrap();
         assert_eq!(scans(), Some(1), "later opens of the same database do not scan");
+    }
+
+    /// Review 2a: a row the probe saw but another connection receipted
+    /// before the locked re-select is not handed out (or receipted) again.
+    #[test]
+    fn cas_1bc7_a_row_taken_between_probe_and_lock_is_not_drained_twice() {
+        let (temp, store) = store();
+        let id = store.enqueue("supervisor", "worker-a", "contended").unwrap();
+        let path = temp.path().join("cas.db");
+        AFTER_DRAIN_PROBE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let other = rusqlite::Connection::open(&path).unwrap();
+                other
+                    .execute(
+                        "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
+                         VALUES (?1, 'worker-a', ?2, 'inbox_poll')",
+                        params![id, Utc::now().to_rfc3339()],
+                    )
+                    .unwrap();
+            }));
+        });
+        let drained = store.poll_unseen_for_recipient("worker-a", None, 10).unwrap();
+        assert!(
+            AFTER_DRAIN_PROBE.with(|hook| hook.borrow().is_none()),
+            "the probe saw the row, so the hook ran"
+        );
+        assert!(drained.is_empty(), "the locked re-select sees the other receipt: {drained:?}");
+    }
+
+    /// Review 2b: a stale row the sweep could not reach under a foreign lock
+    /// is swept once the lock is released.
+    #[test]
+    fn cas_1bc7_a_stale_row_is_swept_after_the_lock_is_released() {
+        let (temp, store) = store();
+        let id = store.enqueue("supervisor", "worker-a", "ancient").unwrap();
+        let created = (Utc::now() - chrono::Duration::days(130)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE prompt_queue SET created_at = ? WHERE id = ?", params![created, id])
+            .unwrap();
+        let held = foreign_writer(temp.path());
+        assert!(
+            within_budget(|| store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)).is_err(),
+            "a due row needs the write lock, so the sweep defers"
+        );
+        drop(held);
+        let expired = store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        assert_eq!(expired.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
     }
 
     #[test]

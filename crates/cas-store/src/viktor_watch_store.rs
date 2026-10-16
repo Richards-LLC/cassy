@@ -270,25 +270,28 @@ impl SqliteViktorWatchStore {
     }
 
     pub fn expire_stale(&self) -> Result<usize> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        // cas-1bc7: every serve's daemon runs this on its tick, and an UPDATE
-        // takes the write lock even when nothing is due. Read first.
-        let any_due: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM viktor_thread_watches
-              WHERE status = 'pending' AND datetime(expires_at) <= datetime('now'))",
-            [],
-            |row| row.get(0),
-        )?;
-        if !any_due {
-            return Ok(0);
-        }
-        conn.execute(
-            "UPDATE viktor_thread_watches SET status = 'expired',
-             last_error = COALESCE(last_error, 'watch TTL elapsed')
-             WHERE status = 'pending' AND datetime(expires_at) <= datetime('now')",
-            [],
-        )
-        .map_err(Into::into)
+        // cas-1bc7 review L3: a busy write lock is retried like other writes.
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            // cas-1bc7: every serve's daemon runs this on its tick, and an
+            // UPDATE takes the write lock even when nothing is due. Read first.
+            let any_due: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM viktor_thread_watches
+                  WHERE status = 'pending' AND datetime(expires_at) <= datetime('now'))",
+                [],
+                |row| row.get(0),
+            )?;
+            if !any_due {
+                return Ok(0);
+            }
+            conn.execute(
+                "UPDATE viktor_thread_watches SET status = 'expired',
+                 last_error = COALESCE(last_error, 'watch TTL elapsed')
+                 WHERE status = 'pending' AND datetime(expires_at) <= datetime('now')",
+                [],
+            )
+            .map_err(Into::into)
+        })
     }
 
     pub fn quarantine_for_task(&self, task_id: &str) -> Result<usize> {

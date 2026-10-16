@@ -15,6 +15,7 @@ struct Relay {
     acks: RefCell<Vec<Value>>,
     fail_ack: bool,
     database: Option<std::path::PathBuf>,
+    ack_response: Option<Value>,
 }
 impl ActivityDeliveryPort for Relay {
     fn claim(&self, request: &Value, timeout: Duration) -> Result<Value, RemoteError> {
@@ -42,7 +43,12 @@ impl ActivityDeliveryPort for Relay {
         if self.fail_ack {
             return Err(RemoteError::timeout("lost ack response"));
         }
-        Ok(json!({"schema": CONTRACT_SCHEMA, "code": "completed", "results": []}))
+        Ok(self.ack_response.clone().unwrap_or_else(|| json!({
+            "schema": CONTRACT_SCHEMA, "code": "completed",
+            "results": request["acks"].as_array().unwrap().iter().map(|ack|
+                json!({"delivery_id": ack["delivery_id"], "code": "completed", "status": "admitted"})
+            ).collect::<Vec<_>>()
+        })))
     }
 }
 fn context() -> OperationContext {
@@ -61,6 +67,7 @@ fn cas_c423_duplicate_poll_lost_ack_and_two_readers_keep_one_admission_each() {
         acks: RefCell::new(vec![]),
         fail_ack: true,
         database: Some(root.path().join("cas.db")),
+        ack_response: None,
     };
     let first = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
     assert_eq!(first.admitted, 1, "{first:?}");
@@ -115,6 +122,7 @@ fn cas_c423_failed_sqlite_cursor_commit_never_acks_or_leaks_an_admission() {
         acks: RefCell::new(vec![]),
         fail_ack: false,
         database: Some(root.path().join("cas.db")),
+        ack_response: None,
     };
     let result = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
     assert_eq!(result.admitted, 0);
@@ -142,4 +150,64 @@ fn cas_c423_failed_sqlite_cursor_commit_never_acks_or_leaks_an_admission() {
         (0, 0, 0),
         "one SQLite transaction must roll back all three writes"
     );
+}
+
+#[test]
+fn cas_c423_ack_retries_durable_admission_when_cloud_no_longer_leases_it() {
+    let root = tempfile::tempdir().unwrap();
+    let relay = Relay {
+        response: RefCell::new(claim_fixture()), acks: RefCell::new(vec![]),
+        fail_ack: true, database: Some(root.path().join("cas.db")), ack_response: None,
+    };
+    let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+    let first = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert_eq!(first.created, 1);
+    drop(store);
+    // Cloud committed the first ack, then its response was lost. Admitted rows
+    // are no longer claimable, but the local pending ack still needs settlement.
+    let mut empty = claim_fixture();
+    empty["deliveries"] = json!([]);
+    let relay = Relay {
+        response: RefCell::new(empty), acks: RefCell::new(vec![]),
+        fail_ack: false, database: Some(root.path().join("cas.db")), ack_response: None,
+    };
+    let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+    let resumed = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert!(resumed.errors.is_empty(), "{resumed:?}");
+    assert_eq!(relay.acks.borrow().len(), 1, "retry durable pending ack even without a fresh lease");
+    let db = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+    let (pending, prompts): (i64,i64) = db.query_row(
+        "SELECT (SELECT SUM(ack_pending) FROM violet_admissions), (SELECT COUNT(*) FROM prompt_queue)",
+        [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!((pending,prompts), (0,1));
+    poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert_eq!(relay.acks.borrow().len(), 1, "settled acknowledgement stops retrying");
+}
+
+#[test]
+fn cas_c423_ack_checks_each_delivery_result_and_retains_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let mut claim = claim_fixture();
+    let mut second = claim["deliveries"][0].clone();
+    second["delivery"]["id"] = json!("0000de1b-1111-4111-8111-00000000de1b");
+    second["delivery"]["occurrence_id"] = json!("another-occurrence");
+    claim["deliveries"].as_array_mut().unwrap().push(second);
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/coordination_contract/v1/violet_activity--ack_v2.json"
+    )).unwrap();
+    let relay = Relay {
+        response: RefCell::new(claim), acks: RefCell::new(vec![]), fail_ack: false,
+        database: Some(root.path().join("cas.db")),
+        ack_response: Some(fixture["cases"][0]["response"]["payload"].clone()),
+    };
+    let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+    let report = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert_eq!(report.created, 2);
+    let db = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+    let mut statement = db.prepare("SELECT delivery_id,ack_pending FROM violet_admissions ORDER BY delivery_id").unwrap();
+    let rows: Vec<(String,i64)> = statement.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap()
+        .collect::<Result<_,_>>().unwrap();
+    assert_eq!(rows, vec![("0000de1b-1111-4111-8111-00000000de1b".into(),1),
+        ("0000de2a-1111-4111-8111-00000000de2a".into(),0)]);
+    assert!(report.errors.iter().any(|e|e.contains("stale_generation")), "{report:?}");
 }

@@ -22,7 +22,7 @@ struct Intent {
     agent_id: String,
     session_id: String,
     #[serde(default)]
-    harness_pid: Option<u32>,
+    registered_at: Option<DateTime<Utc>>,
     endpoint: String,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
@@ -81,7 +81,7 @@ pub(crate) fn enqueue(
         &Intent {
             agent_id: agent.id.clone(),
             session_id: session.into(),
-            harness_pid: harness_pid(agent),
+            registered_at: Some(agent.registered_at),
             endpoint: endpoint.into(),
             created_at: now,
             expires_at: now + chrono::Duration::hours(TTL_HOURS),
@@ -94,56 +94,99 @@ pub(crate) fn enqueue(
     )
 }
 
-fn harness_pid(agent: &Agent) -> Option<u32> {
-    // SessionStart records the harness itself; MCP records itself plus its parent.
-    agent.ppid.or(agent.pid)
-}
-
 fn supersedes(intent: &Intent, agent: &Agent) -> bool {
     let session = agent.cc_session_id.as_deref();
     session.is_some_and(|session| session != intent.session_id)
-        || (agent.registered_at > intent.created_at
-            && (session == Some(intent.session_id.as_str())
-                || intent
-                    .harness_pid
-                    .zip(harness_pid(agent))
-                    .is_some_and(|(old, new)| old != new)))
+        || (session == Some(intent.session_id.as_str())
+            && agent.registered_at > intent.registered_at.unwrap_or(intent.created_at))
 }
 
-/// A fresh MCP auto-reinsert is still the ended harness, not a SessionStart.
-/// Include older incarnation files so NULL-session automatic rows cannot escape
-/// their fence just by getting a new registration timestamp.
-pub(crate) fn is_ended(root: &Path, agent: &Agent) -> Result<bool, String> {
-    let session = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-    let direct = [
-        incarnation_path(root, agent, session),
-        path(root, &agent.id, session),
-    ];
-    let mut candidates =
-        paths(root).map_err(|error| format!("shutdown intent unavailable: {error}"))?;
-    candidates.extend(direct.iter().cloned());
-    candidates.sort();
-    candidates.dedup();
-    for file in candidates {
-        match read(&file) {
-            Ok(intent)
-                if intent.agent_id == agent.id
-                    && !supersedes(&intent, agent)
-                    && Utc::now() < intent.expires_at =>
-            {
-                return Ok(true);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) if direct.contains(&file) => {
-                return Err(format!("shutdown intent unavailable: {error}"));
-            }
+/// Parsed once per presence pass, including failures scoped to their file.
+/// A failed directory listing does not take every unrelated agent offline.
+pub(crate) struct Snapshot {
+    files: std::collections::BTreeMap<PathBuf, Result<Intent, String>>,
+    listing_failed: bool,
+}
+
+impl Snapshot {
+    pub(crate) fn load(root: &Path) -> Self {
+        match paths(root) {
+            Ok(files) => Self {
+                files: files
+                    .into_iter()
+                    .filter_map(|file| match read(&file) {
+                        Ok(intent) => Some((file, Ok(intent))),
+                        Err(error) if missing(&error) => None,
+                        Err(error) => Some((file, Err(error.to_string()))),
+                    })
+                    .collect(),
+                listing_failed: false,
+            },
             Err(error) => {
-                tracing::warn!(path=%file.display(), %error, "unreadable cloud shutdown intent")
+                tracing::warn!(%error, "cloud shutdown intent listing unavailable; checking agent fences directly");
+                Self {
+                    files: Default::default(),
+                    listing_failed: true,
+                }
             }
         }
     }
-    Ok(false)
+
+    pub(crate) fn is_ended(
+        &mut self,
+        root: &Path,
+        agent: &Agent,
+        now: DateTime<Utc>,
+    ) -> Result<bool, String> {
+        let session = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+        let direct = [
+            incarnation_path(root, agent, session),
+            path(root, &agent.id, session),
+        ];
+        if self.listing_failed {
+            for file in &direct {
+                if !self.files.contains_key(file) {
+                    match read(file) {
+                        Ok(intent) => {
+                            self.files.insert(file.clone(), Ok(intent));
+                        }
+                        Err(error) if missing(&error) => {}
+                        Err(error) => {
+                            self.files.insert(file.clone(), Err(error.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        for (file, result) in &self.files {
+            match result {
+                Ok(intent)
+                    if intent.agent_id == agent.id
+                        && !supersedes(intent, agent)
+                        && now < intent.expires_at =>
+                {
+                    return Ok(true);
+                }
+                Err(error) if direct.contains(file) => {
+                    return Err(format!("shutdown intent unavailable: {error}"));
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn missing(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// NULL-session automatic reinsertion stays fenced regardless of PID ancestry.
+pub(crate) fn is_ended(root: &Path, agent: &Agent) -> Result<bool, String> {
+    Snapshot::load(root).is_ended(root, agent, Utc::now())
 }
 
 fn json_paths(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -302,29 +345,65 @@ pub(crate) fn drain(
     coordinator: &CloudCoordinator,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    // Completed fences need no store or network lease on every heartbeat.
-    let files: Vec<_> = paths(root)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|file| match read(file) {
-            Ok(intent) if intent.completed_at.is_some() => {
-                if now >= intent.expires_at {
-                    if let Err(error) = std::fs::remove_file(file) {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            tracing::warn!(%error, "could not prune completed shutdown intent");
-                        }
-                    }
-                }
-                false
-            }
-            Ok(_) => true,
+    drain_snapshot(root, coordinator, now, &mut Snapshot::load(root))
+}
+
+pub(crate) fn drain_snapshot(
+    root: &Path,
+    coordinator: &CloudCoordinator,
+    now: DateTime<Utc>,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    // Supersession and completed-fence pruning need no network-work lease.
+    // Only cleanup that is actually due competes with presence readers.
+    let mut due = Vec::new();
+    let mut agents = None;
+    for (file, result) in &mut snapshot.files {
+        let intent = match result {
+            Ok(intent) => intent,
             Err(error) => {
                 tracing::warn!(path=%file.display(), %error, "unreadable cloud shutdown intent");
-                false
+                continue;
             }
-        })
-        .collect();
-    if files.is_empty() {
+        };
+        if intent.completed_at.is_some() {
+            if now >= intent.expires_at {
+                if let Err(error) = std::fs::remove_file(file) {
+                    if !missing(&error) {
+                        tracing::warn!(%error, "could not prune completed shutdown intent");
+                    }
+                }
+            }
+            continue;
+        }
+        if root.join("cas.db").is_file() {
+            if agents.is_none() {
+                agents =
+                    Some(crate::store::open_agent_store(root).map_err(|error| error.to_string())?);
+            }
+            match agents
+                .as_ref()
+                .expect("opened agent store")
+                .get(&intent.agent_id)
+            {
+                Ok(agent) if supersedes(intent, &agent) => {
+                    intent.completed_at = Some(now);
+                    intent.cause = "superseded by a new local registration".into();
+                    write(file, intent, false).map_err(|error| error.to_string())?;
+                    continue;
+                }
+                Ok(_) | Err(cas_store::StoreError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "local session check unavailable before shutdown lease");
+                    continue;
+                }
+            }
+        }
+        if now >= intent.next_retry_at || now >= intent.expires_at {
+            due.push(file.clone());
+        }
+    }
+    if due.is_empty() {
         return Ok(());
     }
     let Some(_lease) = lease(root, true)? else {
@@ -332,7 +411,9 @@ pub(crate) fn drain(
     };
     let deadline = Instant::now() + rate_limit::CLEANUP_BUDGET;
     let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?;
-    for file in files {
+    for file in due {
+        // Revalidate after taking the lease: another daemon may have drained
+        // this due item since the snapshot. Future items are never re-read.
         let mut intent = match read(&file) {
             Ok(intent) => intent,
             Err(error) => {
@@ -368,6 +449,7 @@ pub(crate) fn drain(
             intent.cause = "superseded by a new local registration".into();
         } else if now >= intent.expires_at {
             retain_expired(root, &file, &intent).map_err(|error| error.to_string())?;
+            snapshot.files.remove(&file);
             continue;
         } else if now < intent.next_retry_at {
             continue;
@@ -403,6 +485,7 @@ pub(crate) fn drain(
             }
         }
         write(&file, &intent, false).map_err(|error| error.to_string())?;
+        snapshot.files.insert(file, Ok(intent));
     }
     Ok(())
 }

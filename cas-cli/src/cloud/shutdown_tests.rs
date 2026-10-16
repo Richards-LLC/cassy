@@ -372,3 +372,47 @@ fn cas_4ac8_round4_directory_failure_does_not_fence_unrelated_agent() {
     let agent = ended_agent("unrelated", "live");
     assert!(!is_ended(temp.path(), &agent).expect("unrelated presence must survive a failed intent listing"));
 }
+
+#[test]
+fn cas_4ac8_round4_future_retry_creates_no_lease_or_store() {
+    let temp = tempfile::tempdir().unwrap();
+    enqueue(temp.path(), "cooling-down", "same", "http://example.invalid").unwrap();
+    let file = path(temp.path(), "cooling-down", "same");
+    let mut intent = read(&file).unwrap();
+    intent.next_retry_at = Utc::now() + chrono::Duration::minutes(10);
+    write(&file, &intent, false).unwrap();
+    drain(temp.path(), &client("http://example.invalid"), Utc::now()).unwrap();
+    assert!(!temp.path().join(DIR).join("drain.lock").exists());
+    assert!(!temp.path().join("cas.db").exists());
+    assert!(read(&file).unwrap().completed_at.is_none());
+}
+
+#[test]
+fn cas_4ac8_round4_tick_reuses_parsed_fences_for_multiple_agents() {
+    let temp = tempfile::tempdir().unwrap();
+    for id in ["ended-a", "ended-b"] {
+        enqueue(temp.path(), id, "same", "http://example.invalid").unwrap();
+    }
+    let mut snapshot = Snapshot::load(temp.path());
+    // If the presence paths re-read these JSONs, both calls would fail rather
+    // than observing the valid fences captured for this pass.
+    for id in ["ended-a", "ended-b"] {
+        std::fs::write(path(temp.path(), id, "same"), "corrupt after snapshot").unwrap();
+        let agent = ended_agent(id, "same");
+        assert_eq!(crate::cloud::presence::tick_with_shutdown(
+            &client("http://example.invalid"), temp.path(), &agent, Utc::now(), &mut snapshot),
+            crate::cloud::presence::TickAction::Waiting);
+    }
+}
+
+#[test]
+fn cas_4ac8_round4_intent_owns_incarnation_even_before_enqueue_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = ended_agent("timestamp-bound", "same");
+    super::enqueue(temp.path(), &old, "same", "http://example.invalid").unwrap();
+    let mut resumed = old.clone();
+    // It is newer than the ended incarnation, but predates the cleanup enqueue.
+    resumed.registered_at += chrono::Duration::seconds(1);
+    assert!(!is_ended(temp.path(), &resumed).unwrap());
+    assert!(is_ended(temp.path(), &old).unwrap());
+}

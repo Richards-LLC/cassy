@@ -243,6 +243,22 @@ pub fn register_now(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> PresenceRecord {
+    register_with_shutdown(
+        coordinator,
+        cas_root,
+        agent,
+        now,
+        &mut super::shutdown::Snapshot::load(cas_root),
+    )
+}
+
+fn register_with_shutdown(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+    shutdown: &mut super::shutdown::Snapshot,
+) -> PresenceRecord {
     let _lease = match super::shutdown::presence_lease(cas_root) {
         Ok(Some(lease)) => lease,
         Ok(None) => {
@@ -262,7 +278,7 @@ pub fn register_now(
             );
         }
     };
-    let cause = match super::shutdown::is_ended(cas_root, agent) {
+    let cause = match shutdown.is_ended(cas_root, agent, now) {
         Ok(false) => None,
         Ok(true) => Some("session ended; cloud shutdown pending or completed".into()),
         Err(error) => Some(error),
@@ -338,7 +354,23 @@ pub fn tick(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> TickAction {
-    match super::shutdown::is_ended(cas_root, agent) {
+    tick_with_shutdown(
+        coordinator,
+        cas_root,
+        agent,
+        now,
+        &mut super::shutdown::Snapshot::load(cas_root),
+    )
+}
+
+pub(crate) fn tick_with_shutdown(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+    shutdown: &mut super::shutdown::Snapshot,
+) -> TickAction {
+    match shutdown.is_ended(cas_root, agent, now) {
         Ok(true) => return TickAction::Waiting,
         Ok(false) => {}
         Err(cause) => {
@@ -360,7 +392,7 @@ pub fn tick(
     };
     let Some(record) = load(cas_root, &agent.id) else {
         return outcome(
-            register_now(coordinator, cas_root, agent, now),
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
             TickAction::Registered,
         );
     };
@@ -371,7 +403,7 @@ pub fn tick(
             && record.state == PresenceState::Registered)
     {
         return outcome(
-            register_now(coordinator, cas_root, agent, now),
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
             TickAction::Registered,
         );
     }
@@ -380,7 +412,7 @@ pub fn tick(
             return TickAction::Waiting;
         }
         return outcome(
-            register_now(coordinator, cas_root, agent, now),
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
             TickAction::Registered,
         );
     }
@@ -393,11 +425,6 @@ pub fn tick(
             Ok(None) => return TickAction::Waiting,
             Err(error) => return TickAction::Failed(format!("cloud presence lease: {error}")),
         };
-        match super::shutdown::is_ended(cas_root, agent) {
-            Ok(true) => return TickAction::Waiting,
-            Ok(false) => {}
-            Err(cause) => return TickAction::Failed(cause),
-        }
         coordinator.heartbeat_presence(&agent.id, Some(&metadata))
     };
     match heartbeat {
@@ -416,7 +443,7 @@ pub fn tick(
             TickAction::Heartbeat
         }
         Err(HeartbeatError::NotRegistered { .. }) => outcome(
-            register_now(coordinator, cas_root, agent, now),
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
             TickAction::Reregistered,
         ),
         Err(HeartbeatError::Failed(error)) => {

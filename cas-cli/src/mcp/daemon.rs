@@ -183,7 +183,12 @@ pub(crate) fn queue_stale_factory_worker_shutdown(
         return Ok(None);
     }
     queue
-        .enqueue_shutdown(None, std::slice::from_ref(&agent.name), true, Some(factory_session))
+        .enqueue_shutdown(
+            None,
+            std::slice::from_ref(&agent.name),
+            true,
+            Some(factory_session),
+        )
         .map(Some)
         .map_err(|error| format!("queue factory shutdown: {error}"))
 }
@@ -202,6 +207,7 @@ pub(crate) fn queue_stale_factory_worker_shutdown(
 /// The returned boolean is true when an existing durable worker identity was
 /// refreshed instead of creating a row for the incoming session id.
 pub(crate) fn register_session_start_agent(
+    cas_root: &std::path::Path,
     store: &dyn crate::store::AgentStore,
     session_id: &str,
     agent_name: Option<&str>,
@@ -284,7 +290,20 @@ pub(crate) fn register_session_start_agent(
     }
     apply_factory_worker_metadata(&mut agent, clone_path);
 
-    let persisted = register_with_role_reconciliation(store, &agent, configured_role)?;
+    // A failed delete/shutdown, revive, or automatic upsert can leave an
+    // active row for an ended incarnation. Its status is not a resume receipt.
+    let ended = store.get(&agent.id).ok().is_some_and(|prior| {
+        prior
+            .cc_session_id
+            .as_deref()
+            .is_none_or(|id| id == session_id)
+            && crate::cloud::shutdown::is_ended(cas_root, &prior).unwrap_or(false)
+    });
+    let mut persisted = register_with_role_reconciliation(store, &agent, configured_role)?;
+    if ended {
+        persisted.registered_at = Utc::now();
+        store.update(&persisted)?;
+    }
     Ok((persisted, reused))
 }
 
@@ -518,11 +537,14 @@ impl EmbeddedDaemon {
         let mut slot = self.presence_task.lock().await;
         {
             let mut pending = self.presence_pending.lock().expect("presence pending");
-            if let Some(ids) = pending.as_mut() {
-                ids.insert(agent_id);
+            let running = slot.as_ref().is_some_and(|task| !task.is_finished());
+            let was_pending = pending.is_some();
+            pending.get_or_insert_default().insert(agent_id);
+            if was_pending && running {
                 return;
             }
-            *pending = Some(std::collections::BTreeSet::from([agent_id]));
+            // A failed/panicked pass has a finished handle. Preserve coalesced
+            // ids and start a new worker instead of trusting its abandoned set.
         }
         let cas_root = self.config.cas_root.clone();
         let pending = Arc::clone(&self.presence_pending);
@@ -539,14 +561,28 @@ impl EmbeddedDaemon {
                     }
                     std::mem::take(ids)
                 };
-                if let Err(error) = crate::cloud::shutdown::drain(&cas_root, &coordinator, Utc::now()) {
+                let mut shutdown = crate::cloud::shutdown::Snapshot::load(&cas_root);
+                if let Err(error) = crate::cloud::shutdown::drain_snapshot(
+                    &cas_root,
+                    &coordinator,
+                    Utc::now(),
+                    &mut shutdown,
+                ) {
                     tracing::warn!(%error, "cloud shutdown drain failed");
                 }
                 let Ok(store) = open_agent_store(&cas_root) else { continue; };
                 for agent_id in ids {
-                    let Ok(agent) = store.get(&agent_id) else { continue; };
-                    let short = &agent_id[..8.min(agent_id.len())];
-                    match crate::cloud::presence::tick(&coordinator, &cas_root, &agent, Utc::now()) {
+                    let Ok(agent) = store.get(&agent_id) else {
+                        continue;
+                    };
+                    let short: String = agent_id.chars().take(8).collect();
+                    match crate::cloud::presence::tick_with_shutdown(
+                        &coordinator,
+                        &cas_root,
+                        &agent,
+                        Utc::now(),
+                        &mut shutdown,
+                    ) {
                         crate::cloud::presence::TickAction::Registered => {
                             eprintln!("[Cassy] Cloud registered agent: {short}");
                         }
@@ -1440,7 +1476,10 @@ impl EmbeddedDaemon {
             // tombstones every ledger path missing from it, so handing it a
             // set with no `code://` module sources would cascade-delete every
             // module page the CLI had built (and re-bill them next pass).
-            let symbols = crate::cli::knowledge_symbols_with_limit(&cas_root, crate::cli::KNOWLEDGE_MAX_SYMBOLS);
+            let symbols = crate::cli::knowledge_symbols_with_limit(
+                &cas_root,
+                crate::cli::KNOWLEDGE_MAX_SYMBOLS,
+            );
             let scan = crate::knowledge::scan_sources(&project_root, &symbols.symbols);
             // A source that could not be decoded is named here rather than
             // dropped: its page will be missing from the wiki either way, and a
@@ -1611,7 +1650,9 @@ impl EmbeddedDaemon {
                         result.errors.push(msg);
                     } else {
                         match queue_stale_factory_worker_shutdown(&cas_root, &agent) {
-                            Ok(Some(request_id)) => tracing::warn!(worker = %agent.name, agent_id = %agent.id, request_id, "heartbeat reap queued factory process-tree teardown"),
+                            Ok(Some(request_id)) => {
+                                tracing::warn!(worker = %agent.name, agent_id = %agent.id, request_id, "heartbeat reap queued factory process-tree teardown")
+                            }
                             Ok(None) => {}
                             Err(error) => {
                                 let msg = format!("Failed to queue factory teardown for stale worker {}: {error}", agent.id);
@@ -1835,6 +1876,7 @@ impl EmbeddedDaemon {
         let mut registered_id = None;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             if let Ok((agent, reused)) = register_session_start_agent(
+                &self.config.cas_root,
                 store.as_ref(),
                 &session_id,
                 agent_name.as_deref(),
@@ -1846,7 +1888,7 @@ impl EmbeddedDaemon {
                 eprintln!(
                     "[Cassy] Daemon {} agent: {} (role: {}, ours: {})",
                     if reused { "refreshed" } else { "registered" },
-                    &agent.id[..8.min(agent.id.len())],
+                    agent.id.chars().take(8).collect::<String>(),
                     agent.role,
                     is_our_agent,
                 );
@@ -1865,7 +1907,7 @@ impl EmbeddedDaemon {
                 // stale countdown waiting for the next 30s daemon tick.
                 if let Err(e) = store.heartbeat(&agent.id) {
                     tracing::warn!(
-                        agent_id = %&agent.id[..8.min(agent.id.len())],
+                        agent_id = %agent.id.chars().take(8).collect::<String>(),
                         error = %e,
                         "Immediate post-registration heartbeat failed"
                     );
@@ -1926,7 +1968,7 @@ impl EmbeddedDaemon {
                 if let Ok(Some(agent)) = store.get_by_pid(our_cc_pid) {
                     eprintln!(
                         "[Cassy] Adopted agent by PID match: {} (pid: {})",
-                        &agent.id[..8.min(agent.id.len())],
+                        agent.id.chars().take(8).collect::<String>(),
                         our_cc_pid
                     );
                     // Populate pid_sessions so GetSession queries work
@@ -1943,10 +1985,8 @@ impl EmbeddedDaemon {
             // newest row before liveness checks can reap the old one.
             if let Some(mut id) = self.agent_id.read().await.clone() {
                 if let Ok(agent) = store.get(&id)
-                    && let Some(newest) = crate::daemon::newest_agent_for_identity(
-                        store.as_ref(),
-                        &agent,
-                    )
+                    && let Some(newest) =
+                        crate::daemon::newest_agent_for_identity(store.as_ref(), &agent)
                     && newest.id != id
                 {
                     tracing::info!(

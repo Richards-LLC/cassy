@@ -2153,24 +2153,22 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             .join(".claude/skills/cas-personal/SKILL.md")
             .is_file()
     );
-    // A conflicting managed block is reported before any writer or index change.
-    let conflicted = format!(
-        "{}\n<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->\n",
-        std::fs::read_to_string(&claude).unwrap()
-    );
-    std::fs::write(&claude, &conflicted).unwrap();
-    let index = cas_6718_git(&project, &["ls-files", "--stage"]);
-    let (result, output) =
-        capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
-    result.unwrap();
-    let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
-    assert!(
-        receipt["managed_files"]["conflicts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p == "CLAUDE.md")
-    );
-    assert_eq!(std::fs::read_to_string(&claude).unwrap(), conflicted);
-    assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
+    // Conflicting ignore preferences and malformed blocks leave files/index untouched.
+    for (path, suffix) in [
+        (".gitignore", "\n!/AGENTS.md\n"),
+        ("CLAUDE.md", "\n<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->\n"),
+    ] {
+        let file = project.join(path);
+        let original = std::fs::read_to_string(&file).unwrap();
+        let conflicted = format!("{original}{suffix}");
+        std::fs::write(&file, &conflicted).unwrap();
+        let index = cas_6718_git(&project, &["ls-files", "--stage"]);
+        let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        result.unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        assert!(receipt["managed_files"]["conflicts"].as_array().unwrap().iter().any(|p| p == path), "{receipt}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
+        assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
+        std::fs::write(file, original).unwrap();
+    }
 }

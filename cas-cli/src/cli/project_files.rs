@@ -125,6 +125,15 @@ pub(crate) fn ignored_paths(root: &Path, harnesses: &[SupervisorCli]) -> Vec<Str
         ]
         .map(str::to_string),
     );
+    if harnesses.contains(&SupervisorCli::Codex) {
+        paths.extend(
+            [
+                "/.codex/hooks.toml.cas-lock",
+                "/.codex/config.toml.cas-lock",
+            ]
+            .map(str::to_string),
+        );
+    }
     if harnesses.contains(&SupervisorCli::Claude) {
         paths.insert("/.claude/skills/cas/SKILL.md".into());
     }

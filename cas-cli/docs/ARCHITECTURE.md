@@ -255,7 +255,7 @@ the Cassy authoring checkout retains its tracked rendered fixtures.
 
 | Classification | Files | Ownership boundary |
 | --- | --- | --- |
-| Managed and ignored | Exact installed builtin catalog paths for each enabled harness; `.claude/skills/cas/SKILL.md`; generated store rules in `.claude/rules/cas/`; database skill SKILL.md projections; `.cas/` runtime state; `.env.worktree`; `.fallow/` | Source catalog/store owns the generated file. Untracking keeps its working copy. Retired managed files already pruned from disk are removed from the index. |
+| Managed and ignored | Exact installed builtin catalog paths for each enabled harness; `.claude/skills/cas/SKILL.md`; generated store rules in `.claude/rules/cas/`; database skill SKILL.md projections; `.cas/` runtime state and Codex `hooks.toml.cas-lock` / `config.toml.cas-lock`; `.env.worktree`; `.fallow/` | Source catalog/store owns the generated file. Untracking keeps its working copy. Retired managed files already pruned from disk are removed from the index. |
 | Managed and ignored when purely derived | Root `AGENTS.md` containing only the CAS block, or explicitly generated from CLAUDE.md | An AGENTS.md with project-authored text stays tracked; only its CAS block is owned. |
 | Project tracked | `.gitignore`, `CLAUDE.md`, mixed `AGENTS.md` | Only the delimited Cassy block; surrounding project bytes remain unchanged and unstaged. |
 | Project tracked | `.claude/settings.json`, `.mcp.json`, `.codex/config.toml`, `.codex/hooks.json` | Cassy hook commands, permissions, statusline and MCP entries; project hooks and configuration keys are preserved. |

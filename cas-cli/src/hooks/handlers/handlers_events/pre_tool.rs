@@ -7623,6 +7623,7 @@ mod workspace_contract_tests {
             ("D=../..; false && D=src; cd \"$D\" && printf x > config.toml", true),
             ("false && D=src; cd \"$D\" && printf x > file.txt", true),
             ("CDPATH=../..; cd operator && printf x > write-policy.toml", true),
+            ("CDPATH=../.. cd operator && printf x > write-policy.toml", true),
             ("sh -c 'cd && printf x > new.rs'; HOME=src", true),
             ("CDPATH=../..; cd ./src && printf x > new.rs", false),
             ("sh -c \"$UNKNOWN_SCRIPT\"", true),

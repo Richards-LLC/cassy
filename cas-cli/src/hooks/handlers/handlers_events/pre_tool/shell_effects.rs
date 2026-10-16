@@ -93,6 +93,8 @@ fn collect_script(
                 .or_insert_with(|| vec![value]);
         }
     }
+    let conditional_bindings = tokens.iter().any(|token| matches!(token,
+        ShellToken::Word(word) if matches!(word.as_str(), "if" | "while" | "until" | "for" | "case")));
     let mut alternatives = Vec::new();
     let mut heredocs = shell_heredoc_bodies(script).into_iter();
     let mut scopes = Vec::new();
@@ -103,6 +105,11 @@ fn collect_script(
             None => None,
             _ => continue,
         };
+        let assignment_may_skip = conditional_bindings
+            || matches!(
+                tokens.get(start.wrapping_sub(1)),
+                Some(ShellToken::Operator('&' | '|'))
+            );
         let mut statement = &tokens[start..end];
         start = end + 1;
         while matches!(statement.first(), Some(ShellToken::Word(word))
@@ -178,6 +185,13 @@ fn collect_script(
             }
 
             if name == Some("cd") {
+                let mut cdpath = directory_values.get("CDPATH").cloned().unwrap_or_default();
+                for word in &words[..index.unwrap_or(0)] {
+                    if let Some(value) = word.strip_prefix("CDPATH=") {
+                        cdpath = expand_factory_shell_word(value, &directory_values);
+                    }
+                }
+                let searches_directory = cdpath.iter().any(|value| !value.is_empty());
                 let operands: Vec<_> = args
                     .iter()
                     .filter(|arg| arg.as_str() != "--" && arg.as_str() != "-L")
@@ -195,7 +209,19 @@ fn collect_script(
                 let mut changed = Vec::new();
                 for directory in &dirs {
                     for target in &targets {
-                        let path = if target.contains(['$', '`', '*', '?', '[']) {
+                        let path = if target.contains(['$', '`', '*', '?', '['])
+                            || (searches_directory
+                                && !Path::new(target).is_absolute()
+                                && !target.starts_with('~')
+                                && !target.starts_with("./")
+                                && !target.starts_with("../")
+                                && target != "."
+                                && target != "..")
+                        {
+                            // CDPATH changes how a bare relative operand is
+                            // searched. Require an explicit ./ or absolute
+                            // directory rather than assuming the hook's cwd.
+
                             None
                         } else if target == "~" || target.starts_with("~/") {
                             std::env::var_os("HOME")
@@ -239,7 +265,21 @@ fn collect_script(
                     && is_shell_variable_name(name)
                 {
                     let expanded = expand_factory_shell_word(value, &directory_values);
-                    directory_values.insert(name.into(), expanded);
+                    if assignment_may_skip {
+                        let previous = directory_values
+                            .entry(name.into())
+                            .or_insert_with(|| vec![format!("${name}")]);
+                        for value in expanded {
+                            if !previous.contains(&value) {
+                                previous.push(value);
+                            }
+                        }
+                        if previous.len() > 64 {
+                            *previous = vec![format!("${name}")];
+                        }
+                    } else {
+                        directory_values.insert(name.into(), expanded);
+                    }
                 }
             }
 
@@ -271,7 +311,7 @@ fn collect_script(
                     &payload,
                     statement_dirs,
                     original,
-                    &values,
+                    &directory_values,
                     depth + 1,
                     effects,
                 )?;
@@ -284,6 +324,9 @@ fn collect_script(
         }
         match separator {
             Some('(') => {
+                if scopes.len() >= 8 {
+                    return Err("a shell payload beyond the resolution limit");
+                }
                 scopes.push((dirs.clone(), alternatives.clone(), directory_values.clone()))
             }
             Some(')') => {

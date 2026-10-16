@@ -40,6 +40,7 @@ mod worktree;
 pub mod cloud;
 mod config;
 mod config_tui;
+mod coordination;
 mod device;
 mod doctor;
 // cas-728b: pub(crate) so ui::factory::director::events can reach
@@ -298,6 +299,10 @@ pub enum Commands {
     /// Show this repository's peer supervisors through Cassy Cloud
     Peers(peers::PeersArgs),
 
+    /// Claim, transfer or reconcile ownership of a Slack thread
+    #[command(subcommand)]
+    Coordination(coordination::ExternalWorkCommands),
+
     /// Show local provider rate-limit and credit availability
     Limits(LimitsArgs),
 
@@ -471,6 +476,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Config(_)
         | Commands::Status(_)
         | Commands::Peers(_)
+        | Commands::Coordination(_)
         | Commands::Limits(_)
         | Commands::Accounts(_)
         | Commands::StatusLine(_)
@@ -683,6 +689,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
         Commands::Peers(_) => "peers".to_string(),
+        Commands::Coordination(_) => "coordination".to_string(),
         Commands::Limits(_) => "limits".to_string(),
         Commands::Accounts(_) => "accounts".to_string(),
         Commands::StatusLine(_) => "statusline".to_string(),
@@ -820,6 +827,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         }
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Peers(args) => peers::execute(args, cli, require_cas_root(cas_root)?),
+        Commands::Coordination(command) => coordination::execute(command, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
         Commands::Accounts(args) => accounts::execute(args, cli),
         // cas-e1f4: outside a Cassy project the line still names the account.

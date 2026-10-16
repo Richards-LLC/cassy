@@ -15,6 +15,8 @@ mod claude_profile_test;
 mod cli_test;
 #[path = "../codex_profile_test.rs"]
 mod codex_profile_test;
+#[path = "../coordination_cli_test.rs"]
+mod coordination_cli_test;
 #[path = "../gh701_origin_filter_measurement_test.rs"]
 mod gh701_origin_filter_measurement_test;
 #[path = "../host_registry_isolation_test.rs"]

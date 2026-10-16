@@ -41,6 +41,7 @@ const RELAY_READ_BUDGET: Duration = Duration::from_millis(100);
 const RELAY_WRITE_BUDGET: Duration = Duration::from_millis(100);
 /// cas-58a3: a crashed worker's reap (up to 0.5 s) and worktree check (git).
 const CRASH_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
+const EXTERNAL_WORK_RECONCILE_KEY: &str = "RelayRead:external-work-reconcile";
 
 /// One relay's read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -199,6 +200,8 @@ pub(crate) enum RelayOutput {
         candidates: Vec<cas_store::QueuedPrompt>,
     },
     EscalationWritten(Vec<RelayOperatorAlert>),
+    /// A bounded request-journal reconciliation batch ran on the external lane.
+    ExternalWorkReconciled(Result<usize, String>),
 }
 
 /// A finished relay job: its output, and the generation it ran under.
@@ -351,6 +354,28 @@ impl RelayJobs {
         self.submit(jobs, spec, work)
     }
 
+    /// Reconcile due thread-authority journal rows outside the control loop.
+    /// The service enforces its 8 s total / 5 s per-call budget; one row per
+    /// job keeps the external-lane occupancy bounded by that same limit.
+    pub(crate) fn submit_external_work_reconciliation(
+        &mut self,
+        jobs: &mut QueueJobs,
+        work: impl FnOnce() -> Result<usize, String> + Send + 'static,
+    ) -> bool {
+        if self.in_flight.contains_key(EXTERNAL_WORK_RECONCILE_KEY) {
+            return false;
+        }
+        let spec = JobSpec {
+            kind: RELAY_READ,
+            key: EXTERNAL_WORK_RECONCILE_KEY.to_string(),
+            lane: Lane::External,
+            criticality: Criticality::Refresh,
+            generation: self.next_generation(),
+            budget: crate::coordination::external_work::TOTAL_REMOTE_BUDGET,
+        };
+        self.submit(jobs, spec, move || RelayOutput::ExternalWorkReconciled(work()))
+    }
+
     /// Run `write` on the write lane (the store worker), unless the write
     /// keyed `key` is in flight, or `basis` (the generation of the read the
     /// decision came from) predates that key's last write: such a read may
@@ -453,8 +478,10 @@ impl RelayJobs {
                 }
             }
         }
-        let timeout = self.timeout(RELAY_READ_BUDGET);
+        let read_timeout = self.timeout(RELAY_READ_BUDGET);
+        let external_work_timeout = self.timeout(crate::coordination::external_work::TOTAL_REMOTE_BUDGET);
         self.in_flight.retain(|key, (_, since)| {
+            let timeout = if key == EXTERNAL_WORK_RECONCILE_KEY { external_work_timeout } else { read_timeout };
             let expired = key.starts_with(RELAY_READ) && since.elapsed() >= timeout;
             if expired {
                 tracing::warn!(key = %key, "relay read never reported; reading again next scan");

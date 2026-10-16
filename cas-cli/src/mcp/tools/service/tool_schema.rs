@@ -328,7 +328,8 @@ mod tests {
     }
 
     /// cas-8563b (D2): the two tools sharing `CoordinationRequest` publish
-    /// disjoint action enums, and `coordination` drops the supervisor params.
+    /// disjoint action enums. Slack-thread authority actions and their fields
+    /// stay on the supervisor factory tool, outside the worker-loaded schema.
     #[test]
     fn coordination_and_factory_publish_their_own_actions_and_params() {
         let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
@@ -354,6 +355,17 @@ mod tests {
         assert_eq!(enum_of(&coordination), cas_mcp::actions::COORDINATION_ACTIONS);
         assert_eq!(enum_of(&factory), cas_mcp::actions::FACTORY_ACTIONS);
 
+        for action in cas_mcp::actions::EXTERNAL_WORK_ACTIONS {
+            assert!(
+                !enum_of(&coordination).iter().any(|published| published == action),
+                "coordination still publishes external-work action {action}"
+            );
+            assert!(
+                enum_of(&factory).iter().any(|published| published == action),
+                "factory does not publish external-work action {action}"
+            );
+        }
+
         let coordination_params: Vec<&String> =
             coordination["properties"].as_object().unwrap().keys().collect();
         for param in &coordination_params {
@@ -367,6 +379,30 @@ mod tests {
             assert!(
                 factory["properties"].as_object().unwrap().contains_key(supervisor_only),
                 "factory must publish {supervisor_only}"
+            );
+        }
+        for external_work_param in [
+            "external_ref",
+            "request_id",
+            "resource_id",
+            "handoff_id",
+            "expected_generation",
+            "to_slot_id",
+            "offer_ttl_secs",
+        ] {
+            assert!(
+                !coordination["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(external_work_param),
+                "coordination still publishes external-work parameter {external_work_param}"
+            );
+            assert!(
+                factory["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(external_work_param),
+                "factory does not publish external-work parameter {external_work_param}"
             );
         }
         for messaging in ["message", "summary", "remind_message"] {

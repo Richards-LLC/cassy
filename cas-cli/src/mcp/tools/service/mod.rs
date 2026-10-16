@@ -571,7 +571,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (this repo's supervisors). Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
+        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (this repo's supervisors). Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Slack-thread authority is available through `factory`. Per-action rules are on the parameters they govern."
     )]
     pub async fn coordination(
         &self,
@@ -586,6 +586,15 @@ impl CasService {
             // Aliases are canonicalized above.
             agent if cas_mcp::actions::COORDINATION_ACTIONS.contains(&agent) => {
                 self.coordination_dispatch(req).await
+            }
+            external if cas_mcp::actions::EXTERNAL_WORK_ACTIONS.contains(&external) => {
+                Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Slack-thread authority action `{external}` is available only through the supervisor factory tool: `{}factory action={external}`",
+                        self.inner.guidance_prefix()
+                    ),
+                ))
             }
             moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
                 let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
@@ -604,7 +613,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers may stop only their own servers); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack); Slack-thread authority, authenticated supervisor only (claim, claim_status, release_claim, transfer_claim, accept_claim). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
     )]
     pub async fn factory(
         &self,
@@ -1259,6 +1268,11 @@ impl CasService {
                         "reason",
                     ])
                 }
+                "claim" => Some(&["action", "external_ref", "request_id"]),
+                "claim_status" => Some(&["action", "request_id"]),
+                "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
+                "transfer_claim" => Some(&["action", "resource_id", "expected_generation", "to_slot_id", "offer_ttl_secs", "request_id"]),
+                "accept_claim" => Some(&["action", "handoff_id", "expected_generation", "request_id"]),
                 _ => None,
             };
             if let Some(allowed) = allowed {
@@ -1348,6 +1362,11 @@ impl CasService {
 
                 // cas-e477: read-only peer supervisor discovery.
                 "peers" => this.coordination_peers(req).await,
+
+                // cas-72d3: journaled external Slack-thread authority.
+                "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim" => {
+                    this.external_work(req).await
+                }
 
                 // ---- Disposable database branches (cas-0033) ----
                 "db_branch_create" => this.db_branch_create(&req).await,
@@ -1567,6 +1586,11 @@ impl CasService {
                     | "db_branch_create"
                     | "db_branch_show"
                     | "db_branch_delete"
+                    | "claim"
+                    | "claim_status"
+                    | "release_claim"
+                    | "transfer_claim"
+                    | "accept_claim"
             ) {
                 "factory"
             } else {
@@ -1630,6 +1654,7 @@ pub(crate) mod agent_liveness;
 pub(crate) mod agent_search_system;
 #[cfg(feature = "mcp-proxy")]
 mod artifact_post;
+mod coordination_external_work;
 mod core;
 mod db_branch_ops;
 mod epic_split_ops;

@@ -495,12 +495,40 @@ fn call_shape_surface_comes_from_the_published_action_lists() {
     for moved in ["spawn_workers", "worktree_merge", "epic_status", "server_start"] {
         assert!(!surface.actions["coordination"].contains(moved), "{moved}");
     }
+    for external_work in cas_mcp::actions::EXTERNAL_WORK_ACTIONS {
+        assert!(
+            !surface.actions["coordination"].contains(*external_work),
+            "coordination publishes supervisor-only action {external_work}"
+        );
+        assert!(
+            surface.actions["factory"].contains(*external_work),
+            "factory is missing supervisor-only action {external_work}"
+        );
+    }
     assert!(!surface.actions["factory"].contains("message"));
     assert!(!surface.fields["factory"].contains("summary"));
     assert!(!surface.fields["coordination"].contains("worker_names"));
     assert!(!surface.actions["skill"].contains("get"));
     assert!(!surface.actions["system"].contains("status"));
     assert!(surface.fields["coordination"].contains("summary"));
+    for external_work_field in [
+        "external_ref",
+        "request_id",
+        "resource_id",
+        "handoff_id",
+        "expected_generation",
+        "to_slot_id",
+        "offer_ttl_secs",
+    ] {
+        assert!(
+            !surface.fields["coordination"].contains(external_work_field),
+            "coordination publishes external-work field {external_work_field}"
+        );
+        assert!(
+            surface.fields["factory"].contains(external_work_field),
+            "factory is missing external-work field {external_work_field}"
+        );
+    }
     assert!(surface.fields["task"].contains("risk"));
     assert!(!surface.fields["verification"].contains("files_reviewed"));
 }

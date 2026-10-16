@@ -1153,6 +1153,16 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
         let old_id = "pre-clear-session";
         let new_id = "post-clear-session";
         session_start(&daemon, old_id, "supervisor").await;
+        let cloud = fx.cloud.clone();
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(format!("/api/agents/{old_id}/shutdown")))
+            .respond_with(move |_: &Request| {
+                cloud.state().agents.remove(old_id);
+                ResponseTemplate::new(200).set_body_json(json!({"released_locks":0}))
+            }).with_priority(1).expect(1).mount(&fx._server).await;
+        let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+        let original = store.get(old_id).unwrap();
+        let intent_path = crate::cloud::shutdown::incarnation_path(&fx.cas_root, &original, old_id);
         let core = crate::mcp::server::CasCore::with_daemon(
             fx.cas_root.clone(), None, Some(Arc::clone(&daemon)),
         );
@@ -1164,11 +1174,17 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
         daemon.handle_socket_event(DaemonEvent::SessionEnd {
             session_id: old_id.into(), cc_pid: Some(our_cc_pid()),
         }).await;
-        let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+        let db = rusqlite::Connection::open(fx.cas_root.join("cas.db")).unwrap();
         if retained {
-            store.graceful_shutdown(old_id).unwrap();
+            db.execute_batch("CREATE TRIGGER fail_old_delete BEFORE DELETE ON agents WHEN OLD.id='pre-clear-session' BEGIN SELECT RAISE(FAIL, 'retained cleanup fixture'); END;").unwrap();
+        }
+        let root = fx.cas_root.clone();
+        let cleaned = tokio::task::spawn_blocking(move || crate::hooks::handlers::cleanup_agent_leases(&root, old_id)).await.unwrap();
+        if retained {
+            assert!(cleaned.is_none());
+            db.execute_batch("DROP TRIGGER fail_old_delete").unwrap();
         } else {
-            crate::hooks::handlers::cleanup_agent_leases(&fx.cas_root, old_id).unwrap();
+            assert!(cleaned.is_some());
             assert!(store.get(old_id).is_err());
         }
         session_start(&daemon, new_id, "supervisor").await;
@@ -1183,10 +1199,18 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
         tokio::spawn(async {}).await.unwrap();
         daemon.await_cloud_presence().await;
         assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id), "old-core recovery stole heartbeat ownership (retained={retained})");
+        let recovered = store.get(old_id).unwrap();
+        let mut shutdown = crate::cloud::shutdown::Snapshot::load(&fx.cas_root);
+        shutdown.refresh_after_lease(&fx.cas_root);
+        assert!(shutdown.is_ended(&fx.cas_root, &recovered, chrono::Utc::now()).unwrap(), "automatic recovery must not remove S's fence");
         let before = store.get(new_id).unwrap().last_heartbeat;
         heartbeat_tick(&daemon).await;
         assert!(store.get(new_id).unwrap().last_heartbeat > before);
         assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id));
         assert_eq!(fx.cloud.state().heartbeats.last().map(|(id, _)| id.as_str()), Some(new_id));
+        assert!(!fx.cloud.state().agents.contains_key(old_id), "S's cleanup must complete");
+        assert_eq!(fx.cloud.state().registrations.iter().filter(|row| row["id"] == old_id).count(), 1, "old core must not resurrect S in Cloud");
+        let intent: Value = serde_json::from_slice(&std::fs::read(&intent_path).unwrap()).unwrap();
+        assert!(!intent["completed_at"].is_null(), "S remains drainable after old-core activity");
     }
 }

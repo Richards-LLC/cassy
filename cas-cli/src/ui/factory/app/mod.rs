@@ -35,6 +35,8 @@ pub(crate) mod delivery_evidence;
 mod director_refresh;
 mod imports;
 mod init;
+#[cfg(test)]
+mod merge_alert_tests;
 mod panels_and_modes;
 pub(crate) mod render_and_ops;
 mod sidecar_and_selection;

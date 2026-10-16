@@ -124,9 +124,19 @@ pub(crate) fn write_normal_flag(
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return false;
     };
-    let Ok(Some(row)) = queue.queued_prompt(row_id) else { return false; };
-    if row.prompt != probe.prompt || row.target != probe.target
-        || !super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) { return false; }
+    let Ok(current) = queue.queued_prompt(row_id) else {
+        return false;
+    };
+    // An acknowledged, removed or replaced original needs no health incident.
+    let Some(row) = current else {
+        return true;
+    };
+    if row.prompt != probe.prompt
+        || row.target != probe.target
+        || !super::poison_sweep_jobs::still_unread(queue.as_ref(), &row)
+    {
+        return true;
+    }
     let detail = normal_delivery_watchdog_flag_detail(evidence);
     if let Err(error) =
         queue.record_wake_attempt(row_id, cas_store::WakeAttempt::Failed, Some(&detail))
@@ -213,10 +223,16 @@ pub(crate) fn write_idle_unread(
     candidate: IdleCandidate,
     live: &Arc<AtomicBool>,
 ) -> bool {
-    if !live.load(Ordering::Acquire) { return false; }
-    let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else { return false; };
+    if !live.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else {
+        return false;
+    };
     let row = candidate.row;
-    if !super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) { return false; }
+    if !super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) {
+        return false;
+    }
     let summary: String = row
         .summary
         .as_deref()

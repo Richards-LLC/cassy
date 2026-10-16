@@ -95,7 +95,6 @@ pub(crate) enum RelayOutput {
         done: bool,
     },
     IdleUnreadRead {
-        context: super::queue_and_events::message_attention::AttentionInputs,
         candidates: Vec<super::delivery_probe_jobs::IdleCandidate>,
         generation: u64,
     },

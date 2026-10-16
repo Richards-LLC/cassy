@@ -3866,7 +3866,7 @@ impl FactoryDaemon {
                             }
                         }
                     }
-                    RelayOutput::IdleUnreadRead { context: _, candidates, generation } => {
+                    RelayOutput::IdleUnreadRead { candidates, generation } => {
                         if generation == self.queue_jobs.poison_jobs.generation {
                             let context = message_attention::AttentionInputs::from_daemon(self);
                             self.decide_idle_unread_probe(context, candidates);
@@ -4535,7 +4535,7 @@ impl FactoryDaemon {
         let generation = self.queue_jobs.poison_jobs.generation;
         self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::IdleUnread, move || {
             let candidates = super::delivery_probe_jobs::read_idle_unread(&context, &supervisor);
-            RelayOutput::IdleUnreadRead { context, candidates, generation }
+            RelayOutput::IdleUnreadRead { candidates, generation }
         });
         self.drain_relay_jobs();
     }
@@ -8190,6 +8190,7 @@ impl FactoryDaemon {
         for name in &shut_down_recipients {
             self.normal_delivery_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
             self.queue_jobs.normal_probe_jobs.forget_pane(name);
+            self.queue_jobs.poison_jobs.forget_pane(name);
             self.urgent_wake_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
         }
 

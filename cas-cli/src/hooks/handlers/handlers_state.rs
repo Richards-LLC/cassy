@@ -850,15 +850,17 @@ mod supervisor_handoff_tests {
         crate::supervisor_notices::adopt_operator_notices(&root, "old-session").unwrap();
         assert_eq!(
             queue.peek_all(100).unwrap().len(),
-            1,
-            "the ending daemon cannot capture its orphan notice"
+            2,
+            "a surviving daemon can adopt its own session's orphan notice"
         );
         crate::supervisor_notices::adopt_operator_notices(&root, "peer-session").unwrap();
         let rows = queue.peek_all(100).unwrap();
         assert_eq!(rows.len(), 2, "one grouped notice per peer and operator");
-        assert!(rows.iter().any(
-            |r| r.target == "operator" && r.factory_session.as_deref() == Some("peer-session")
-        ));
+        assert!(
+            rows.iter()
+                .any(|r| r.target == "operator"
+                    && r.factory_session.as_deref() == Some("old-session"))
+        );
         assert!(rows.iter().any(|r| r.target == "peer" && r.factory_session.as_deref() == Some("peer-session")));
         assert!(
             rows.iter()

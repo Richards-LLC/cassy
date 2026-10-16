@@ -640,7 +640,7 @@ fn lifecycle_owner_or_successor(
     session: Option<&str>,
     saved_name: Option<&str>,
 ) -> Option<(OwningSupervisor, crate::supervisor_notices::Recipient)> {
-    let owner = resolve_owning_supervisor(agents, session).or_else(|| {
+    let owner = resolve_worker_supervisor(agents, session).or_else(|| {
         let registered = agents.list(None).ok()?;
         let name = saved_name
             .map(str::to_string)

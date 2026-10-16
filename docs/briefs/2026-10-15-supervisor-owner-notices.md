@@ -12,11 +12,13 @@ successor, then a live supervisor in this project's local registry, then the
 operator. The receiving supervisor's actual name and session replace the old
 routing. Operator prompts use Commander schema 2. Orphan and integration
 fallbacks remain in the project's durable notice outbox until a connected daemon
-adopts them into its own session; the ending session cannot capture its orphan
-notice. Without another daemon, ownership is cleared and the notice remains
+adopts them into its own session. A surviving daemon adopts notices from a
+supervisor-only restart in its own session; a daemon that is shutting down leaves
+adoption to another daemon. Without a daemon, ownership is cleared and the notice remains
 pending. Ordinary task lifecycle transitions stay with their owning session or
-the same supervisor's successor; they never fall back to the operator or an
-unrelated peer. A heartbeat older than five minutes is not live even if the row
+the same supervisor's successor, including the existing sole live supervisor
+whose session stamp is missing. They never fall back to the operator or an
+unrelated sessionful peer. A heartbeat older than five minutes is not live even if the row
 still says Active. Worker commands retain their session isolation.
 
 Focusing overlapping integration lanes tells both owners and deduplicates a

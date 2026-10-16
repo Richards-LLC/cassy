@@ -98,6 +98,10 @@ class StubAgent(unittest.TestCase):
             self.assertLess(max(slow_n), 60)
             self.assertGreater(max(fast_n), 100, fast[-200:])
             self.assertEqual(load.WRITE_SEQ.findall(spare), [], "no rate left: the pane sleeps")
+            claims = load.read_writer_claims(Path(tmp.name) / "writer-slots")
+            self.assertEqual([(c["label"], c["rate"]) for c in claims],
+                             [("worker-pane", 40.0), ("worker-pane", 200.0), ("worker-pane", None)])
+            self.assertTrue(all(c["tty"].startswith("/dev/pts/") for c in claims), claims)
 
     def test_supervisor_pane_sleeps_and_echoes(self):
         tmp, stub = stub_dir([40.0])

@@ -227,8 +227,23 @@ def prepare_run(args: argparse.Namespace, run_dir: Path) -> dict:
 # Each write carries its sequence number, so the harness can count the
 # writes that reached it.
 SYNTHETIC_WRITER = r"""
-import sys, time
-rate, label = float(sys.argv[1]), sys.argv[2]
+import os, sys, time
+rates_file, slots, label = sys.argv[1], sys.argv[2], sys.argv[3]
+# Claim the first free rate with an exclusive create, and log the claim
+# (or its absence) so a receipt can show which process wrote at which rate.
+rate = None
+for index, line in enumerate(open(rates_file).read().split()):
+    try:
+        os.close(os.open(os.path.join(slots, str(index)), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        continue
+    rate = float(line)
+    break
+with open(os.path.join(slots, "claims.log"), "a") as log:
+    log.write("%d %d %s %s %s\n" % (os.getpid(), os.getppid(), label, rate, os.ttyname(0)))
+if rate is None:
+    while True:
+        time.sleep(3600)
 interval, out = 1.0 / rate, sys.stdout.buffer
 spinner = "|/-\\"
 n, due = 0, time.monotonic()
@@ -267,14 +282,8 @@ def stub_script(help_file: Path, version_file: Path, fake_bin: Path,
     if writer_rates:
         lines += [
             "if [ -t 0 ] && [ \"$CAS_AGENT_ROLE\" = worker ]; then",
-            "  slot=0",
-            f"  for rate in $(cat '{fake_bin / 'writer-rates'}'); do",
-            f"    if mkdir '{fake_bin / 'writer-slots'}'/$slot 2>/dev/null; then",
-            f"      exec python3 -I '{fake_bin / 'synthetic-writer.py'}' \"$rate\" "
-            "\"${CAS_AGENT_NAME:-worker}\"",
-            "    fi",
-            "    slot=$((slot + 1))",
-            "  done",
+            f"  exec python3 -I '{fake_bin / 'synthetic-writer.py'}' '{fake_bin / 'writer-rates'}' "
+            f"'{fake_bin / 'writer-slots'}' \"${{CAS_AGENT_NAME:-worker}}\"",
             "fi",
         ]
     lines.append("exec sleep 100000")
@@ -1031,6 +1040,22 @@ def summarize_echo(probe: EchoProbe | None) -> dict:
     }
 
 
+def read_writer_claims(slots: Path) -> list[dict]:
+    """Which process claimed which writer rate (from the writers' own log)."""
+    claims = []
+    try:
+        lines = (slots / "claims.log").read_text().splitlines()
+    except OSError:
+        return claims
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 5:
+            claims.append({"pid": int(fields[0]), "ppid": int(fields[1]), "label": fields[2],
+                           "rate": None if fields[3] == "None" else float(fields[3]),
+                           "tty": fields[4]})
+    return claims
+
+
 def summarize_writers(probe: EchoProbe | None, rates: list[float] | None) -> dict:
     """Configured writer rates against the write rates that reached a client."""
     observed = []
@@ -1688,6 +1713,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "sqlite_busy": count_busy_warnings(env["cas_dir"], t0_wall),
         "daemon": daemon,
         "host_load": summarize_load(load_sampler.samples),
+        "writer_claims": read_writer_claims(env["fake_bin"] / "writer-slots"),
         "synthetic_writers": summarize_writers(echo_probe, args.synthetic_writers),
         "key_to_echo": summarize_echo(echo_probe),
     }
@@ -1707,7 +1733,7 @@ def control_summary(receipt: dict) -> dict:
     """The no-pressure control phase, kept compact inside the main receipt."""
     keep = ("started_at", "finished_at", "run_dir", "background_writers", "calls", "slos",
             "slos_met", "sqlite_busy", "agent_errors", "agent_boot_failures", "host_load",
-            "synthetic_writers",
+            "synthetic_writers", "writer_claims",
             "key_to_echo", "flv2_receipts", "agents")
     summary = {key: receipt[key] for key in keep}
     summary["lock_waits"] = {k: v for k, v in receipt["lock_waits"].items() if k != "episodes"}

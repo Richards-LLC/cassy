@@ -7601,7 +7601,7 @@ mod workspace_contract_tests {
         let worktree = cas_root.join("worktrees/worker-e460");
         std::fs::create_dir_all(worktree.join("src")).unwrap();
         std::fs::create_dir_all(cas_root.join("operator")).unwrap();
-        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT", "CDPATH"] {
             env.remove(key);
         }
         env.set("CAS_FACTORY_MODE", "1");
@@ -7620,6 +7620,11 @@ mod workspace_contract_tests {
             ("cd \"$LATER_CWD\"; LATER_CWD=src; printf x > file.txt", true),
             ("D=../..; cd \"$D\"; D=src; printf x > config.toml", true),
             ("{ cd ../..; }; printf x > config.toml", true),
+            ("D=../..; false && D=src; cd \"$D\" && printf x > config.toml", true),
+            ("false && D=src; cd \"$D\" && printf x > file.txt", true),
+            ("CDPATH=../..; cd operator && printf x > write-policy.toml", true),
+            ("sh -c 'cd && printf x > new.rs'; HOME=src", true),
+            ("CDPATH=../..; cd ./src && printf x > new.rs", false),
             ("sh -c \"$UNKNOWN_SCRIPT\"", true),
             ("cd src && printf x > new.rs", false),
             ("D=src; cd \"$D\" && printf x > new.rs", false),

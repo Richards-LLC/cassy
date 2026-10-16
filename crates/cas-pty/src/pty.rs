@@ -480,9 +480,6 @@ fn worker_credential_grant_nonce() -> &'static str {
         .as_str()
 }
 
-/// Red-first stub (cas-033a).
-const CAS_033A_RED_STUB: bool = true;
-
 fn push_factory_worker_metadata_env(
     env: &mut Vec<(String, String)>,
     role: &str,
@@ -1317,9 +1314,7 @@ impl PtyConfig {
             // worker names its own harness. Without this it inherited the
             // supervisor's default worker CLI (e.g. codex), its registry row
             // recorded that, and recycle relaunched it on the wrong harness.
-            if !CAS_033A_RED_STUB {
-                env.push(("CAS_FACTORY_WORKER_CLI".to_string(), "claude".to_string()));
-            }
+            env.push(("CAS_FACTORY_WORKER_CLI".to_string(), "claude".to_string()));
         }
 
         // Set CAS_ROOT env var if provided (enables workers in clones to use main's .cas)

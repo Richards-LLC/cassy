@@ -497,18 +497,12 @@ fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort>
 /// Recycling must not silently switch a Codex worker to the supervisor's
 /// default harness or account, so every provider selector is copied from the
 /// agent row rather than re-resolved from current process environment.
-/// Red-first stub (cas-033a).
-const CAS_033A_RED_STUB: bool = true;
-
 /// cas-033a: the harness a recycle relaunches `agent` on. A Claude worker
 /// spawned before it tagged its own harness recorded the supervisor's
 /// inherited default worker CLI (codex in a mixed fleet) next to its Claude
 /// model. A Claude model runs only on Claude, so that record cannot be right.
 fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
     let recorded = worker_cli_from_agent(agent);
-    if CAS_033A_RED_STUB {
-        return recorded;
-    }
     let model_cli = agent
         .metadata
         .get("worker_model")
@@ -3480,9 +3474,8 @@ impl CasService {
         // cas-033a: the daemon stops the worker before it relaunches it, so a
         // recipe the routing policy refuses must be refused here, while the
         // worker is still running, not after it is gone.
-        if !CAS_033A_RED_STUB
-            && let Err(error) =
-                cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+        if let Err(error) =
+            cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
         {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,

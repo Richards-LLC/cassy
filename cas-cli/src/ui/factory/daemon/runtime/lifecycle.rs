@@ -3102,6 +3102,17 @@ impl FactoryDaemon {
             }
         }
 
+        // End only this session's Violet watches before removing its liveness
+        // receipt. A running claim finishes first; later ticks cannot reopen it.
+        if let Some(violet) = violet_wake.as_ref() {
+            let violet = std::sync::Arc::clone(violet);
+            match tokio::task::spawn_blocking(move || violet.stop_blocking()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "could not stop session Violet watches"),
+                Err(error) => tracing::warn!(%error, "Violet session stop task failed"),
+            }
+        }
+
         // cas-223f review M4: prompts waiting for their fresh re-check are not
         // dropped at shutdown. Finished re-checks are delivered as decided;
         // ones that never reported are re-checked here, as the inject loop

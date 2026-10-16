@@ -329,9 +329,10 @@ fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
     let saved = WatchBook::read(&fx.watch_path).unwrap();
     let mut expected = original;
     expected.last_human_at = at(25);
-    expected
-        .seen_keys
-        .push_back(format!("slack:T0123:C1:{}", ts(25)));
+    expected.foreign_seen_keys.insert(
+        ts(0),
+        VecDeque::from([format!("slack:T0123:C1:{}", ts(25))]),
+    );
     assert_eq!(saved.watch("C1", "owner"), Some(&expected));
     *relay.fail_ack.borrow_mut() = false;
     relay.set_now(at(200));
@@ -471,7 +472,12 @@ fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
         assert!(row.prompt.contains(&format!("message_ts={}", ts(owned))));
         assert!(!row.prompt.contains(&format!("message_ts={}", ts(foreign))));
     }
-    assert_eq!(WatchBook::read(&fx.watch_path).unwrap().thread_owner("C1", &ts(150)), Some("first"));
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .thread_owner("C1", &ts(150)),
+        Some("first")
+    );
 }
 
 #[test]
@@ -481,13 +487,21 @@ fn cas_639c_review_missing_metadata_prunes_old_owner_before_routing() {
     let mut old = fx.wake("old", t0());
     relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
     old.poll_once(&relay, &fx.queue, true, at(10));
-    crate::ui::factory::session::SessionManager::new().remove_metadata("old").unwrap();
+    crate::ui::factory::session::SessionManager::new()
+        .remove_metadata("old")
+        .unwrap();
     let mut next = fx.wake("next", at(20));
     relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
     next.poll_once(&relay, &fx.queue, true, at(30));
-    assert_eq!(fx.wakes().last().unwrap().factory_session.as_deref(), Some("next"));
+    assert_eq!(
+        fx.wakes().last().unwrap().factory_session.as_deref(),
+        Some("next")
+    );
     let saved = WatchBook::read(&fx.watch_path).unwrap();
-    assert_eq!(saved.watch("C1", "old").unwrap().stop_reason.as_deref(), Some("session_end"));
+    assert_eq!(
+        saved.watch("C1", "old").unwrap().stop_reason.as_deref(),
+        Some("session_end")
+    );
 }
 
 #[test]
@@ -518,8 +532,13 @@ fn cas_639c_review_corrupt_book_is_quarantined_and_recovered_with_doctor_finding
     relay.publish(mention("C1", 0));
     let mut wake = fx.wake(SESSION, t0());
     assert_eq!(wake.poll_once(&relay, &fx.queue, true, at(10)).wakes, 1);
-    assert_eq!(std::fs::read(fx.watch_path.with_extension("json.corrupt")).unwrap(), corrupt);
-    let (health, message) = watch_status(fx._temp.path(), at(10)).unwrap().doctor(at(10));
+    assert_eq!(
+        std::fs::read(fx.watch_path.with_extension("json.corrupt")).unwrap(),
+        corrupt
+    );
+    let (health, message) = watch_status(fx._temp.path(), at(10))
+        .unwrap()
+        .doctor(at(10));
     assert_eq!(health, WatchHealth::Warning);
     assert!(message.contains("corrupt"), "{message}");
 }
@@ -536,7 +555,14 @@ fn cas_639c_review_foreign_hot_thread_cannot_evict_cold_thread_dedupe() {
     let mut claimant = fx.wake("claimant", at(20));
     for batch in 0..11 {
         for item in 0..20 {
-            relay.publish(envelope(PROJECT, "C1", "thread_reply", 25 + batch * 20 + item, 0, "U2"));
+            relay.publish(envelope(
+                PROJECT,
+                "C1",
+                "thread_reply",
+                25 + batch * 20 + item,
+                0,
+                "U2",
+            ));
         }
         claimant.poll_once(&relay, &fx.queue, false, at(100 + batch * 70));
     }
@@ -555,20 +581,33 @@ fn cas_639c_review_versioned_book_migrates_legacy_once_without_writing_it() {
     let mut old = fx.wake("old", t0());
     relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
     old.poll_once(&relay, &fx.queue, true, at(10));
-    let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
     legacy.as_object_mut().unwrap().remove("format_version");
     let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
     std::fs::remove_file(&fx.watch_path).unwrap();
     let legacy_path = fx.watch_path.with_file_name("watches.json");
     std::fs::write(&legacy_path, &legacy_bytes).unwrap();
-    fx.wake("next", at(20)).poll_once(&relay, &fx.queue, true, at(30));
+    fx.wake("next", at(20))
+        .poll_once(&relay, &fx.queue, true, at(30));
     assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
-    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
     assert_eq!(saved["format_version"], 2);
     std::fs::write(&legacy_path, b"old binary overwrote its legacy file").unwrap();
-    fx.wake("next", at(40)).poll_once(&relay, &fx.queue, true, at(50));
-    assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "old").unwrap().is_active());
-    assert_eq!(std::fs::read(&legacy_path).unwrap(), b"old binary overwrote its legacy file");
+    fx.wake("next", at(40))
+        .poll_once(&relay, &fx.queue, true, at(50));
+    assert!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "old")
+            .unwrap()
+            .is_active()
+    );
+    assert_eq!(
+        std::fs::read(&legacy_path).unwrap(),
+        b"old binary overwrote its legacy file"
+    );
 }
 
 #[test]
@@ -581,10 +620,139 @@ fn cas_639c_review_future_book_version_is_refused_without_overwrite() {
     relay.publish(mention("C1", 0));
     let mut wake = fx.wake(SESSION, t0());
     let report = wake.poll_once(&relay, &fx.queue, true, at(10));
-    assert!(report.errors.iter().any(|error| error.contains("unsupported")), "{report:?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("unsupported")),
+        "{report:?}"
+    );
     assert_eq!(report.wakes, 0);
     assert_eq!(std::fs::read(&fx.watch_path).unwrap(), future);
     assert!(!fx.watch_path.with_extension("json.corrupt").exists());
+}
+
+#[test]
+fn cas_639c_review_clean_end_stops_only_own_watches_and_blocks_later_ticks() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut first = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    first.poll_once(&relay, &fx.queue, true, at(10));
+    let mut second = fx.wake("second", at(20));
+    relay.publish(mention("C2", 21));
+    second.poll_once(&relay, &fx.queue, true, at(30));
+    let runtime = VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap();
+    assert_eq!(runtime.stop_blocking().unwrap(), 1);
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(
+        saved.watch("C1", "first").unwrap().stop_reason.as_deref(),
+        Some("session_end")
+    );
+    assert!(saved.watch("C2", "second").unwrap().is_active());
+    let before = std::fs::read(&fx.watch_path).unwrap();
+    assert!(runtime.tick_blocking().0.errors.is_empty());
+    assert_eq!(std::fs::read(&fx.watch_path).unwrap(), before);
+}
+
+fn race_wait_for(path: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !path.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for {}", path.display()));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "subprocess role; invoked only by the two-process race test"]
+fn cas_639c_review_process_race_child() {
+    let root = PathBuf::from(std::env::var_os("CAS_639C_RACE_ROOT").expect("child root"));
+    let session = std::env::var("CAS_639C_RACE_SESSION").expect("child session");
+    let home = std::env::var_os("HOME").unwrap();
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("HOME", home);
+    let metadata = crate::ui::factory::session::create_metadata(
+        &session,
+        std::process::id(),
+        "supervisor",
+        &[],
+        None,
+        None,
+        None,
+    );
+    crate::ui::factory::session::SessionManager::new()
+        .save_metadata(&metadata)
+        .unwrap();
+    let queue = SqlitePromptQueueStore::open(&root).unwrap();
+    let mut wake = VioletWake::new(
+        PROJECT.into(),
+        vec![],
+        format!("machine:{session}"),
+        session.clone(),
+        WatchBook::path(&root),
+        vec![],
+        t0(),
+    );
+    std::fs::write(root.join(format!("ready-{session}")), b"ready").unwrap();
+    race_wait_for(&root.join("start")).unwrap();
+    let relay = FakeRelay::new();
+    relay.publish(mention(if session == "first" { "C1" } else { "C2" }, 0));
+    for tick in 0..8 {
+        let report = wake.poll_once(&relay, &queue, true, at(10 + tick));
+        assert!(report.errors.is_empty(), "{report:?}");
+    }
+    std::fs::write(root.join(format!("done-{session}")), b"done").unwrap();
+    race_wait_for(&root.join("release")).unwrap();
+}
+
+#[test]
+fn cas_639c_review_two_process_race_preserves_both_live_watch_sets() {
+    let fx = Fixture::new();
+    let mut children: Vec<_> = ["first", "second"].into_iter().map(|session| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "ui::factory::daemon::runtime::violet_activity::tests::cas_639c_review_process_race_child", "--nocapture"])
+            .env("CAS_639C_RACE_ROOT", fx._temp.path())
+            .env("CAS_639C_RACE_SESSION", session)
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .spawn().unwrap()
+    }).collect();
+    let result = (|| -> Result<(), String> {
+        for session in ["first", "second"] {
+            race_wait_for(&fx._temp.path().join(format!("ready-{session}")))?;
+        }
+        std::fs::write(fx._temp.path().join("start"), b"start").map_err(|e| e.to_string())?;
+        for session in ["first", "second"] {
+            race_wait_for(&fx._temp.path().join(format!("done-{session}")))?;
+        }
+        let saved = WatchBook::read(&fx.watch_path).ok_or("missing race book")?;
+        let owners: BTreeSet<_> = saved
+            .active()
+            .map(|watch| watch.factory_session.as_str())
+            .collect();
+        if owners != BTreeSet::from(["first", "second"]) {
+            return Err(format!("lost live race owner: {owners:?}"));
+        }
+        Ok(())
+    })();
+    std::fs::write(fx._temp.path().join("release"), b"release").unwrap();
+    if result.is_err() {
+        for child in &mut children {
+            let _ = child.kill();
+        }
+    }
+    let outputs: Vec<_> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap())
+        .collect();
+    assert!(result.is_ok(), "{result:?}; children: {outputs:?}");
+    assert!(
+        outputs.iter().all(|output| output.status.success()),
+        "{outputs:?}"
+    );
+    assert_eq!(fx.wakes().len(), 2);
 }
 
 #[test]

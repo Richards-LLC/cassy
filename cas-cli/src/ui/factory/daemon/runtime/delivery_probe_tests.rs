@@ -247,3 +247,53 @@ async fn cas_031e_superseded_message_discards_its_held_probe_result() {
             .drain_for_shutdown(&root, Duration::from_secs(3))
     );
 }
+
+
+#[tokio::test]
+async fn cas_cc89_whole_poison_sweep_runs_under_enforced_daemon_step() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_temp, mut daemon, queue, row) = fixture(false);
+    let root = daemon.app.cas_dir().to_path_buf();
+    let old = chrono::Utc::now() - chrono::Duration::minutes(31);
+    rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=? WHERE id=?",
+        rusqlite::params![old.to_rfc3339(), row],
+    ).unwrap();
+    daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
+    let progress = loop_watchdog::LoopProgress::new();
+    let before = cas_store::lane_guard::thread_violations();
+    let targets = vec!["worker-a".into(), daemon.app.supervisor_name().into(), "all_workers".into()];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        {
+            let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(
+                &progress, loop_watchdog::LoopPhase::PromptQueue,
+            );
+            daemon.run_prompt_poison_sweep(queue.as_ref(), &targets).await;
+        }
+        let notices: Vec<_> = queue.peek_all(30).unwrap().into_iter()
+            .filter(|row| row.source == "delivery-watchdog").collect();
+        if !notices.is_empty() {
+            assert_eq!(notices.len(), 1, "one durable sender bounce");
+            break;
+        }
+        assert!(Instant::now() < deadline, "full sweep never bounced the unread message");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(cas_store::lane_guard::thread_violations(), before);
+    assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
+}
+
+#[test]
+#[should_panic(expected = "enforce mode: move it to the jobs lane")]
+fn cas_cc89_old_completion_read_panics_under_enforcement_control() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_temp, daemon, _queue, _row) = fixture(false);
+    let progress = loop_watchdog::LoopProgress::new();
+    let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(
+        &progress, loop_watchdog::LoopPhase::PromptQueue,
+    );
+    super::super::delivery_probe_jobs::recipient_turn_completion_after_io(
+        daemon.app.cas_dir(), "worker-a", chrono::Utc::now(),
+    );
+}

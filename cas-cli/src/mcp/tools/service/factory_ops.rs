@@ -7205,7 +7205,8 @@ impl CasService {
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
         let tasks = crate::store::open_task_store(&self.inner.cas_root)
-            .and_then(|store| store.list(None));
+            .map_err(|error| error.to_string())
+            .and_then(|store| store.list(None).map_err(|error| error.to_string()));
         let closed_task_ids = tasks.as_ref().map(|tasks| tasks.iter()
             .filter(|task| task.status == cas_types::TaskStatus::Closed)
             .map(|task| task.id.clone()).collect()).unwrap_or_default();

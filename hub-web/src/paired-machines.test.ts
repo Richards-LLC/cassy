@@ -196,16 +196,15 @@ describe('fleet permissions on a paired machine (cas-d382)', () => {
     expect(block.getAttribute('aria-label')).toBe('Fleet permissions on Atlas');
     const manage = block.querySelector<HTMLElement>('[data-permission="manage"]')!;
     expect(manage.querySelector('.fleet-permission-name')?.textContent).toBe('Stop and restart workers and sessions');
-    // cas-a217: the list says which permission allows write grants.
+    // cas-ba64: explain the additional use after naming the missing permission.
     expect(manage.querySelector('.fleet-permission-also')?.textContent).toBe('Also needed to grant a task write access outside its worktree.');
     expect(block.querySelector('[data-permission="operate"] .fleet-permission-also')).toBeNull();
     expect(manage.querySelector('.fleet-permission-state')?.textContent).toBe('Not allowed on this pairing');
-    const stop = manage.querySelector<HTMLButtonElement>('.fleet-permission-control')!;
-    expect(stop.getAttribute('aria-disabled')).toBe('true');
-    expect(stop.disabled).toBe(false); // focusable, so its description is reachable
-    expect(stop.getAttribute('aria-describedby')?.split(' ').map((id) => document.getElementById(id)?.textContent)).toEqual([
-      'Not allowed on this pairing', 'Needs the Stop and restart workers and sessions permission.',
-    ]);
+    const reason = manage.querySelector('.fleet-permission-reason')!;
+    const also = manage.querySelector('.fleet-permission-also')!;
+    expect(reason.textContent).toBe('Needs the Stop and restart workers and sessions permission.');
+    expect(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(manage.querySelector('.fleet-permission-control')).toBeNull();
     const command = 'cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage';
     expect(manage.querySelector('code')?.textContent).toBe(command);
     manage.querySelector<HTMLButtonElement>('.fleet-permission-copy')!.click();

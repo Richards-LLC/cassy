@@ -172,9 +172,27 @@ test.describe("write access without factory:manage cas_ab04", () => {
       await grant.focus();
       await page.keyboard.press("Enter");
       await expect(page.locator("#status-view .write-grant")).toHaveCount(0);
-      // cas-a217: the line names Write access and the permission that enables it.
-      await expect(page.locator(`#${await grant.getAttribute("aria-describedby")}`)).toHaveText("Write access: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.");
+      // cas-ba64: the shared lead, this control group's permission and the
+      // Paired machines instruction are all in its accessible description.
+      const descriptionIds = (await grant.getAttribute("aria-describedby"))?.split(" ") ?? [];
+      expect(descriptionIds).toHaveLength(3);
+      expect(await Promise.all(descriptionIds.map(async (id) => page.locator(`#${id}`).textContent()))).toEqual([
+        "Not allowed on this pairing.",
+        "Write access: needs Stop and restart workers and sessions.",
+        "Pair again from Paired machines to add the Stop and restart workers and sessions permission.",
+      ]);
       expect(hub.writeGrants).toHaveLength(0);
+      await page.locator("#paired-machines-toggle").click();
+      const manage = page.locator('#paired-machines-dialog [data-machine-id="atlas"] [data-permission="manage"]');
+      await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
+      await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");
+      expect(await manage.evaluate((node) => {
+        const reason = node.querySelector(".fleet-permission-reason")!;
+        const also = node.querySelector(".fleet-permission-also")!;
+        return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
+      })).toBe(true);
+      await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
+      await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     });
   });
 });

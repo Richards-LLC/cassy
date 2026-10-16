@@ -64,7 +64,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** the `#pair=…&hub=…&scopes=…` link printed by `cas hub pair`, opened in a browser
 - **Goal:** the link pairs this browser and I reach the supervisor
-- **Touches:** `hub-web/src/fragment.ts`, `hub-web/src/pair*.ts`, `hub-web/src/pending-pairing.ts`, `hub-web/src/storage.ts`, `hub-web/src/connection.ts`
+- **Touches:** `hub-web/src/fragment.ts`, `hub-web/src/pair*.ts`, `hub-web/src/pending-pairing.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/storage.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/pair-link.journey.ts`
 - **Gaps:** the exchange endpoint is doubled
 
@@ -75,6 +75,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. Check the technical details — the origin and the granted scope boxes, in sentence case
 4. Pair — the exchange goes to the link's machine
 5. Reach the supervisor — the machine's supervisor is listed and opens
+6. Paired machines names each pairing's fleet permissions — the missing permission and its related note are ordered before the re-pair command, without a disabled Stop and restart button that looks like an available fleet action
 
 #### Expected experience
 
@@ -544,7 +545,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 1280, an open conversation whose session has workers, a ready task and an awaiting-merge task, on a device paired with factory:operate and factory:manage
 - **Goal:** pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming, and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing on a timer
-- **Touches:** `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Touches:** `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
 - **Suite:** `hub-web/e2e/journeys/fleet-ops.journey.ts`
 - **Gaps:** the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe, 409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
 
@@ -554,7 +555,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns it
 3. Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and focused; confirming stops it, and a stale stop says what changed
 4. Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it once and the row reads "Asked … ago"
-5. A pairing without factory:manage — Stop… is disabled, saying it is not allowed on this pairing and naming the command that adds it; the header gives one line per missing permission, naming its controls (Add worker and Focus epic: Manage workers and tasks; Write access: Stop and restart workers and sessions), and each disabled control is described by its line
+5. A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears without a disabled Stop and restart button.
 
 #### Expected experience
 
@@ -636,7 +637,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. An incomplete grant says what is missing — Review grant with no folder says to enter one, and nothing is sent
 3. Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder with the task id unbroken, is shown and announced; Folder and Reason clear, so one more click cannot resend the grant; at 1280×844 the receipt sits in view clear of the rail's bottom fade
 4. Revoke it after confirming — Revoke… asks to revoke every grant for the task; confirming says how many were removed
-5. A pairing without factory:manage — Write access… is disabled, and its line reads "Write access: … Needs the Stop and restart workers and sessions permission. Add it in Paired machines."
+5. A pairing without factory:manage — Write access… is disabled and its accessible description names the shared "Not allowed on this pairing" lead, its Stop and restart workers and sessions permission, and the Paired machines re-pair command; Paired machines shows Needs before Also needed and has no disabled Stop and restart button.
 
 #### Expected experience
 

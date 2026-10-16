@@ -566,3 +566,95 @@ fn cas_69b4_numeric_and_word_run_aliases_keep_their_own_values() {
         );
     }
 }
+
+#[tokio::test]
+async fn cas_69b4_review_x86_architecture_is_not_repetition() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            (
+                "x86 architecture after explicit low count",
+                "target=whole parallelism=16 loops=1 result=PASS host x86_64",
+            ),
+            (
+                "x86 architecture after jobs",
+                "whole target -j16 x86_64; PASS",
+            ),
+            (
+                "x86 standalone host",
+                "whole target -j16; host x86_64; PASS",
+            ),
+        ],
+        Some("loops"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cas_69b4_review_x64_architecture_is_not_repetition() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            ("x64 standalone host", "whole target -j16; host x64; PASS"),
+            (
+                "x64 after explicit low count",
+                "target=whole parallelism=16 loops=1 result=PASS host x64",
+            ),
+        ],
+        Some("loops"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cas_69b4_review_explicit_low_counts_win_over_shorthand() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            (
+                "loops2 after bound x3",
+                "whole target -j16 x3 loops=2 result=PASS",
+            ),
+            (
+                "loops2 before bound x3",
+                "whole target loops=2 -j16 x3 result=PASS",
+            ),
+            (
+                "runs2 after bound x3",
+                "whole target --jobs 16 x3 runs=2 result=PASS",
+            ),
+            (
+                "runs2 colon before 3x",
+                "whole target runs: 2 -j16 3x; PASS",
+            ),
+            ("loops2 before 3x", "whole target loops=2 -j16 3x; PASS"),
+            (
+                "loops2 after 3x",
+                "whole target -j16 3x loops=2 result=PASS",
+            ),
+            (
+                "zero explicit runs",
+                "whole target --jobs 16 x3 runs=0 result=PASS",
+            ),
+        ],
+        Some("loops"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cas_69b4_review_x_repetition_requires_adjacent_parallelism() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            (
+                "x3 unbound after result",
+                "whole target parallelism=16 result=PASS x3",
+            ),
+            ("x3 across delimiter", "whole target -j16; x3; PASS"),
+            (
+                "x3 after unrelated number",
+                "whole target -j16 host=16 x3; PASS",
+            ),
+            ("x3 underscore suffix", "whole target -j16 x3_host; PASS"),
+        ],
+        Some("loops"),
+    )
+    .await;
+}

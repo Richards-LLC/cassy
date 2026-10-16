@@ -107,8 +107,8 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
 }
 
 #[test]
-fn cas_bfa1_self_target_refreshes_trunk_and_preserves_unique_work() {
-    with_fixture(|repo, origin, root, base| {
+fn cas_bfa1_self_target_preserves_tip_and_recorded_parent_preserves_unique_work() {
+    with_fixture(|repo, origin, root, _| {
         let store = crate::store::open_task_store(root).unwrap();
         let mut epic = store.get("cas-unpublished").unwrap();
         epic.deliverables
@@ -117,10 +117,14 @@ fn cas_bfa1_self_target_refreshes_trunk_and_preserves_unique_work() {
             .unwrap()
             .target_branch = "epic/unpublished".into();
         store.update(&epic).unwrap();
+        let old = git(repo, &["rev-parse", "epic/unpublished"]);
         let receipt = focus(root);
-        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), base);
-        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
-        assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), old);
+        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), old);
+        assert!(
+            receipt.contains("unchanged") && !receipt.contains("FAST-FORWARDED"),
+            "{receipt}"
+        );
     });
     with_fixture(|repo, origin, root, _| {
         git(repo, &["checkout", "epic/unpublished"]);

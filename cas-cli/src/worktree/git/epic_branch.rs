@@ -40,7 +40,7 @@ impl GitOperations {
     pub(crate) fn ensure_epic_published(
         &self,
         branch: &str,
-        base: &str,
+        base: Option<&str>,
     ) -> Result<EpicBranchReadiness, String> {
         let observation = self.observe_epic_publication(branch, base);
         self.ensure_epic_published_observed(branch, base, &observation)
@@ -49,7 +49,7 @@ impl GitOperations {
     pub(crate) fn observe_epic_publication(
         &self,
         branch: &str,
-        base: &str,
+        base: Option<&str>,
     ) -> EpicPublicationObservation {
         let previous_remote = self.resolve_commit(&format!("origin/{branch}")).is_some();
         let remote = if !self.has_origin_remote() {
@@ -82,12 +82,14 @@ impl GitOperations {
                 Err(error) => Err(format!("origin presence unverified: {error}")),
             }
         };
-        let base_branch = base.strip_prefix("origin/").unwrap_or(base);
-        let base_fetched = if base_branch == branch {
-            matches!(remote, Ok(Some(true)))
-        } else {
-            self.has_origin_remote() && self.fetch_branch(base_branch).is_ok()
-        };
+        let base_fetched = base.is_none_or(|base| {
+            let base_branch = base.strip_prefix("origin/").unwrap_or(base);
+            if base_branch == branch {
+                matches!(remote, Ok(Some(true)))
+            } else {
+                self.has_origin_remote() && self.fetch_branch(base_branch).is_ok()
+            }
+        });
         EpicPublicationObservation {
             remote,
             base_fetched,
@@ -97,9 +99,9 @@ impl GitOperations {
 
     /// The same cached local/origin comparison used by legacy spawn preparation.
     /// Fetch is owned by the observation, so retries here add no network work.
-    pub(crate) fn shared_parent_ref(&self, branch: &str) -> Result<String, String> {
+    pub(crate) fn shared_parent_ref(&self, branch: &str) -> Result<Option<String>, String> {
         if branch.starts_with("origin/") {
-            return Ok(branch.into());
+            return Ok(self.resolve_commit(branch).map(|_| branch.into()));
         }
         let local = self.resolve_commit(branch);
         let remote_ref = format!(
@@ -107,15 +109,13 @@ impl GitOperations {
             branch.strip_prefix("refs/heads/").unwrap_or(branch)
         );
         let Some(remote) = self.resolve_commit(&remote_ref) else {
-            return local
-                .map(|_| branch.into())
-                .ok_or_else(|| format!("could not resolve recorded parent '{branch}'"));
+            return Ok(local.map(|_| branch.into()));
         };
         let Some(local) = local else {
-            return Ok(remote_ref);
+            return Ok(Some(remote_ref));
         };
         if local == remote {
-            return Ok(branch.into());
+            return Ok(Some(branch.into()));
         }
         let ahead = self
             .commits_behind(&remote, &local)
@@ -124,7 +124,7 @@ impl GitOperations {
             .commits_behind(&local, &remote)
             .map_err(|e| e.to_string())?;
         if ahead == 0 {
-            return Ok(remote_ref);
+            return Ok(Some(remote_ref));
         }
         if behind == 0 {
             return Err(format!(
@@ -139,7 +139,7 @@ impl GitOperations {
     pub(crate) fn ensure_epic_published_observed(
         &self,
         branch: &str,
-        base: &str,
+        base: Option<&str>,
         observation: &EpicPublicationObservation,
     ) -> Result<EpicBranchReadiness, String> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
@@ -211,16 +211,21 @@ impl GitOperations {
                 "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
             ));
         }
-        if !observation.base_fetched {
-            return Err(format!(
-                "base '{base}' fetch failed; publication is unverified, no local fallback was published"
-            ));
-        }
-        let base_ref = self.shared_parent_ref(base)?;
-        let base_sha = self
-            .resolve_commit(&base_ref)
-            .ok_or_else(|| format!("base '{base_ref}' unresolved"))?;
-        if let Some(local) = self.resolve_commit(&refname) {
+        let local = self.resolve_commit(&refname).ok_or_else(|| format!(
+            "'{branch}' doesn't resolve locally or on origin; refusing to recreate a deleted epic lane"
+        ))?;
+        if let Some(base) = base {
+            if !observation.base_fetched {
+                return Err(format!(
+                    "base '{base}' fetch failed; publication is unverified, no local fallback was published"
+                ));
+            }
+            let base_ref = self
+                .shared_parent_ref(base)?
+                .ok_or_else(|| format!("base '{base}' unresolved"))?;
+            let base_sha = self
+                .resolve_commit(&base_ref)
+                .ok_or_else(|| format!("base '{base_ref}' unresolved"))?;
             if local != base_sha {
                 let unique = self
                     .commits_behind(&base_sha, &local)
@@ -228,16 +233,15 @@ impl GitOperations {
                 if unique == 0 {
                     self.advance_local_branch(branch, &local, &base_sha)?;
                     receipts.push(format!(
-                        "FAST-FORWARDED local '{branch}' from {local} to base '{}' at {}",
-                        base_ref, base_sha
+                        "FAST-FORWARDED local '{branch}' from {local} to base '{base_ref}' at {base_sha}"
                     ));
                 } else {
                     receipts.push(format!("preserved {unique} unique local commit(s) on '{branch}' at {local} unchanged"));
                 }
             }
         } else {
-            return Err(format!(
-                "'{branch}' doesn't resolve locally or on origin; refusing to recreate a deleted epic lane from base '{base_ref}'"
+            receipts.push(format!(
+                "preserved local '{branch}' at {local} unchanged; no recorded parent"
             ));
         }
         let tip = self

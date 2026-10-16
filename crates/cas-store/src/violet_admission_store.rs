@@ -334,10 +334,104 @@ impl SqliteVioletAdmissionStore {
         Ok(Self { queue })
     }
 
-    pub fn adopt_unread(&self, _binding: &VioletAdmissionRebind) -> Result<VioletAdmissionReceipt> {
-        Err(StoreError::Other(
-            "unread adoption is not implemented".into(),
-        ))
+    /// Move an existing, never-selected queue row after Cloud authorized its
+    /// rebind. Any local dispatch/read evidence requires consumption recovery,
+    /// not this unread path. In-flight dispatch still requires a runtime fence.
+    pub fn adopt_unread(&self, binding: &VioletAdmissionRebind) -> Result<VioletAdmissionReceipt> {
+        if [
+            &binding.delivery_id,
+            &binding.occurrence_id,
+            &binding.reader_slot_id,
+            &binding.project_id,
+            &binding.registration_id,
+            &binding.factory_session,
+            &binding.recipient,
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+            || binding.expected_generation < 1
+        {
+            return Err(StoreError::Other(
+                "invalid Violet rebind identity or generation".into(),
+            ));
+        }
+        let (receipt, moved) = crate::shared_db::with_immediate_write_txn_pooled(
+            &self.queue.conn,
+            |tx| {
+                let current: Option<(i64, String, i64, String, String, String)> = tx.query_row(
+                "SELECT prompt_id,registration_id,delivery_generation,factory_session,recipient,consumption
+                 FROM violet_admissions WHERE delivery_id=?1 AND occurrence_id=?2
+                   AND reader_slot_id=?3 AND project_id=?4",
+                params![binding.delivery_id,binding.occurrence_id,binding.reader_slot_id,binding.project_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))
+            ).optional()?;
+                let Some((prompt_id, registration, generation, session, recipient, consumption)) =
+                    current
+                else {
+                    return Err(StoreError::NotFound(
+                        "known local Violet admission; remote discovery required".into(),
+                    ));
+                };
+                if consumption != "queued" {
+                    return Err(StoreError::Other(
+                        "Violet consumption requires recovery, not unread adoption".into(),
+                    ));
+                }
+                let receipt = VioletAdmissionReceipt {
+                    delivery_id: binding.delivery_id.clone(),
+                    prompt_id,
+                    created: false,
+                };
+                if registration == binding.registration_id
+                    && generation == binding.delivery_generation
+                    && session == binding.factory_session
+                    && recipient == binding.recipient
+                {
+                    return Ok((receipt, false));
+                }
+                let next_generation =
+                    generation.checked_add(i64::from(registration != binding.registration_id));
+                if generation != binding.expected_generation
+                    || next_generation != Some(binding.delivery_generation)
+                {
+                    return Err(StoreError::Other(
+                        "stale Violet delivery generation on rebind".into(),
+                    ));
+                }
+                let untouched: bool = tx.query_row(
+                "SELECT processed_at IS NULL AND selected_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen WHERE prompt_id=q.id)
+                    AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_transport WHERE prompt_id=q.id)
+                 FROM prompt_queue q WHERE id=?1 AND target=?2 AND factory_session=?3",
+                params![prompt_id,recipient,session], |r|r.get(0)
+            ).optional()?.unwrap_or(false);
+                if !untouched {
+                    return Err(StoreError::Other(
+                        "Violet dispatch/read evidence requires consumption recovery".into(),
+                    ));
+                }
+                tx.execute(
+                    "UPDATE prompt_queue SET target=?2,factory_session=?3 WHERE id=?1",
+                    params![prompt_id, binding.recipient, binding.factory_session],
+                )?;
+                tx.execute(
+                    "UPDATE violet_admissions SET registration_id=?2,delivery_generation=?3,
+                factory_session=?4,recipient=?5,ack_pending=0 WHERE delivery_id=?1",
+                    params![
+                        binding.delivery_id,
+                        binding.registration_id,
+                        binding.delivery_generation,
+                        binding.factory_session,
+                        binding.recipient
+                    ],
+                )?;
+                Ok((receipt, true))
+            },
+        )?;
+        if moved {
+            self.queue.signal_inbox(&binding.recipient);
+        }
+        Ok(receipt)
     }
 
     /// Includes admissions already acknowledged remotely: a lost response must

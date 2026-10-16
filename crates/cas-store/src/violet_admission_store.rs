@@ -94,6 +94,86 @@ mod tests {
             "blocked body remains durable for the background receipt job");
     }
 
+    fn settled_job(store: &SqliteVioletAdmissionStore, row: &VioletAdmissionInput, instance: &str) -> VioletConsumptionJob {
+        let ack = store.pending_acknowledgements(&row.registration_id,&row.project_id).unwrap().remove(0);
+        assert!(store.settle_acknowledgement(&ack,&row.registration_id,&row.project_id).unwrap());
+        store.prepare_body_dispatch(&row.delivery_id,&row.registration_id,&row.project_id,instance,
+            "00000082-2222-4222-8222-000000000082").unwrap()
+    }
+
+    fn body_response(job: &VioletConsumptionJob, row: &VioletAdmissionInput) -> String {
+        serde_json::json!({"schema":"cassy.coordination/v1","code":"completed",
+            "receipt":{"request_id":job.request_id,"delivery":{
+                "id":row.delivery_id,"occurrence_id":row.occurrence_id,"reader_slot_id":row.reader_slot_id,
+                "registration_id":job.registration_id,"delivery_generation":job.delivery_generation,
+                "status":"admitted","consumption":job.state}}}).to_string()
+    }
+
+    #[test]
+    fn cas_c423_store_body_permit_is_one_use_and_pointer_claim_is_separate() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let admitted = store.admit(&row).unwrap();
+        let job = settled_job(&store,&row,"daemon-instance-a");
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        let pointer = queue.claim_recipient_transport_token(admitted.prompt_id,&row.recipient).unwrap().unwrap();
+        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
+        let same = store.prepare_body_dispatch(&row.delivery_id,&row.registration_id,&row.project_id,
+            "daemon-instance-a","new-id-must-be-ignored").unwrap();
+        assert_eq!(same.input_json,job.input_json,"retry uses frozen request bytes");
+        let mut bad: serde_json::Value = serde_json::from_str(&body_response(&job,&row)).unwrap();
+        bad["receipt"]["delivery"]["reader_slot_id"] = serde_json::json!("foreign-reader");
+        assert!(store.confirm_body_dispatch(&job,"daemon-instance-a",&bad.to_string()).is_err());
+        assert!(store.confirm_body_dispatch(&job,"daemon-instance-a",&body_response(&job,&row)).unwrap());
+        assert!(!queue.authorize_body_handoff(admitted.prompt_id,"foreign-reader",Some(&row.factory_session)).unwrap());
+        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some("foreign-session")).unwrap());
+        // The pointer claim is taken over by the hook, which spends the body
+        // permit and its surfacing receipt in the same writer transaction.
+        let surfaced = queue.surface_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap();
+        assert_eq!(surfaced.len(),1);
+        assert_eq!(surfaced[0].id,admitted.prompt_id);
+        assert!(!queue.release_recipient_transport_claim(admitted.prompt_id,&row.recipient,pointer).unwrap());
+        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
+        assert!(!store.confirm_body_dispatch(&job,"daemon-instance-a",&body_response(&job,&row)).unwrap(),
+            "lost local result cannot replenish a spent permit");
+        assert!(queue.poll_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap().is_empty());
+        assert_eq!(store.prepare_consumed_receipts(&row.registration_id,&row.project_id,"daemon-instance-a",
+            ||"00000081-2222-4222-8222-000000000081".into()).unwrap(),1);
+        let pending = store.due_consumption_jobs(&row.registration_id,&row.project_id,i64::MAX).unwrap();
+        assert_eq!(pending.len(),1);
+        assert_eq!(pending[0].state,"consumed");
+        assert_eq!(store.prepare_consumed_receipts(&row.registration_id,&row.project_id,"daemon-instance-a",
+            || panic!("consumed already journaled")).unwrap(),0);
+    }
+
+    #[test]
+    fn cas_c423_store_crash_or_successor_never_rearms_original_body() {
+        for confirm_first in [false,true] {
+            let root = tempfile::tempdir().unwrap();
+            let row = input();
+            let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+            let admitted = store.admit(&row).unwrap();
+            let job = settled_job(&store,&row,"predecessor-instance");
+            let response = body_response(&job,&row);
+            if confirm_first { assert!(store.confirm_body_dispatch(&job,"predecessor-instance",&response).unwrap()); }
+            let restarted = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+            assert_eq!(restarted.revoke_predecessor_body_attempts(&row.registration_id,"successor-instance").unwrap(),1);
+            assert!(!restarted.confirm_body_dispatch(&job,"predecessor-instance",&response).unwrap());
+            assert!(restarted.prepare_body_dispatch(&row.delivery_id,&row.registration_id,&row.project_id,
+                "successor-instance","different-request").is_err());
+            let recovered = restarted.recover_known(&successor(&row),VioletConsumption::Queued).unwrap();
+            assert_eq!(recovered.consumption,VioletConsumption::DispatchUncertain);
+            assert!(recovered.recovery_prompt_id.is_some());
+            let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+            assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
+            let notices = queue.poll_unseen_for_recipient("supervisor-successor",Some("factory-successor"),10).unwrap();
+            assert_eq!(notices.len(),1);
+            assert_ne!(notices[0].id,admitted.prompt_id);
+            assert!(!notices[0].prompt.contains(&row.prompt));
+        }
+    }
+
     #[test]
     fn cas_c423_store_admission_is_stable_across_lost_ack_restart_and_reader_fanout() {
         let root = tempfile::tempdir().unwrap();
@@ -462,6 +542,8 @@ mod tests {
         let row = input();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
         let first = store.admit(&row).unwrap();
+        let job = settled_job(&store,&row,"original-instance");
+        assert!(store.confirm_body_dispatch(&job,"original-instance",&body_response(&job,&row)).unwrap());
         let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
         assert_eq!(
             queue
@@ -487,6 +569,31 @@ mod tests {
             store.adopt_unread(&binding).is_err(),
             "consumed cannot regress to queued"
         );
+    }
+
+    #[test]
+    fn cas_c423_store_body_budget_and_failed_receipt_do_not_spend_permit() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let admitted = store.admit(&row).unwrap();
+        let job = settled_job(&store,&row,"original-instance");
+        assert!(store.confirm_body_dispatch(&job,"original-instance",&body_response(&job,&row)).unwrap());
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        let small = queue.surface_for_recipient_within_budget(&row.recipient,Some(&row.factory_session),
+            HookDrain::Unseen,10,1).unwrap();
+        assert!(small.rows.is_empty());
+        assert_eq!(small.over_budget.len(),1);
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_body_receipt BEFORE INSERT ON prompt_queue_recipient_seen
+            BEGIN SELECT RAISE(ABORT, 'body receipt write failed'); END;").unwrap();
+        let error = queue.poll_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap_err();
+        assert!(error.to_string().contains("body receipt write failed"));
+        db.execute_batch("DROP TRIGGER fail_body_receipt").unwrap();
+        let body = queue.poll_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap();
+        assert_eq!(body.len(),1);
+        assert_eq!(body[0].id,admitted.prompt_id);
+        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
     }
 
     #[test]

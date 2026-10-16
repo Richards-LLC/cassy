@@ -445,12 +445,15 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Set the agent ID for heartbeat tracking, and push its cloud
-    /// registration (cas-f707). This is how the eager MCP registration path
-    /// and PID adoption reach the cloud, not only SessionStart.
+    /// Bootstrap or refresh the MCP identity's heartbeat tracking and presence.
+    /// SessionStart and validated PID adoption can establish a newer owner;
+    /// a surviving old MCP core must not replace that owner after /clear.
     pub async fn set_agent_id(&self, id: String) {
         {
             let mut agent_id = self.agent_id.write().await;
+            if agent_id.as_ref().is_some_and(|current| current != &id) {
+                return;
+            }
             *agent_id = Some(id.clone());
         }
         self.kick_cloud_presence(id).await;
@@ -934,18 +937,27 @@ impl EmbeddedDaemon {
         #[cfg(not(unix))]
         let cc_pid = std::process::id();
 
-        if let Ok(store) = open_agent_store(&self.config.cas_root) {
-            if let Ok(Some(agent)) = store.get_by_pid(cc_pid) {
+        let expected_owner = self.agent_id.read().await.clone();
+        if let Ok(store) = open_agent_store(&self.config.cas_root)
+            && let Ok(Some(agent)) = store.get_by_pid(cc_pid)
+            && !crate::cloud::shutdown::is_ended(&self.config.cas_root, &agent).unwrap_or(true)
+        {
+            let mut pid_sessions = self.pid_sessions.write().await;
+            let mut owner = self.agent_id.write().await;
+            // PID adoption has stronger authority than MCP bootstrap, while a
+            // concurrent hook's session mapping/owner still takes precedence.
+            if owner.as_ref() == expected_owner.as_ref()
+                && pid_sessions.get(&cc_pid).is_none_or(|id| id == &agent.id)
+            {
                 eprintln!(
                     "[Cassy] Adopting pre-registered agent: {} (registered via fallback)",
                     agent.id
                 );
-                // Populate pid_sessions so GetSession queries work
-                {
-                    let mut pid_sessions = self.pid_sessions.write().await;
-                    pid_sessions.insert(cc_pid, agent.id.clone());
-                }
-                self.set_agent_id(agent.id).await;
+                pid_sessions.insert(cc_pid, agent.id.clone());
+                *owner = Some(agent.id.clone());
+                drop(owner);
+                drop(pid_sessions);
+                self.kick_cloud_presence(agent.id).await;
             }
         }
 
@@ -1983,12 +1995,23 @@ impl EmbeddedDaemon {
             // Send agent heartbeat if registered. A reset/restart may leave an
             // older same-name row behind; move heartbeat ownership to the
             // newest row before liveness checks can reap the old one.
-            if let Some(mut id) = self.agent_id.read().await.clone() {
+            // Drop the read guard before recovery can update ownership.
+            let heartbeat_id = self.agent_id.read().await.clone();
+            if let Some(mut id) = heartbeat_id {
                 if let Ok(agent) = store.get(&id)
                     && let Some(newest) =
                         crate::daemon::newest_agent_for_identity(store.as_ref(), &agent)
                     && newest.id != id
+                    // Reviving an old MCP row refreshes its local heartbeat,
+                    // but does not supersede its ended-incarnation fence.
+                    && !crate::cloud::shutdown::is_ended(&self.config.cas_root, &newest)
+                        .unwrap_or(true)
                 {
+                    let mut owner = self.agent_id.write().await;
+                    if owner.as_deref() != Some(id.as_str()) {
+                        // A concurrent SessionStart already chose a new owner.
+                        return;
+                    }
                     tracing::info!(
                         worker = %newest.name,
                         previous_agent_id = %id,
@@ -1996,7 +2019,7 @@ impl EmbeddedDaemon {
                         "switching heartbeat to newest agent registration"
                     );
                     id = newest.id;
-                    *self.agent_id.write().await = Some(id.clone());
+                    *owner = Some(id.clone());
                 }
                 // Liveness gate (EPIC cas-9508 / cas-2749): before heartbeating,
                 // verify the Claude Code client process our agent record belongs
@@ -2089,7 +2112,9 @@ impl EmbeddedDaemon {
                                 );
                                 let _ = store.mark_stale(&id);
                                 let mut guard = self.agent_id.write().await;
-                                *guard = None;
+                                if guard.as_deref() == Some(id.as_str()) {
+                                    *guard = None;
+                                }
                                 drop(guard);
                                 self.kick_cloud_presence(String::new()).await;
                                 return;
@@ -2137,7 +2162,9 @@ impl EmbeddedDaemon {
                 if terminal {
                     // Clear agent_id so we stop heartbeating on future ticks
                     let mut guard = self.agent_id.write().await;
-                    *guard = None;
+                    if guard.as_deref() == Some(id.as_str()) {
+                        *guard = None;
+                    }
                 } else if !succeeded {
                     tracing::error!(
                         agent_id = %id.chars().take(8).collect::<String>(),

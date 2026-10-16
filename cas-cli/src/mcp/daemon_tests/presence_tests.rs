@@ -1141,3 +1141,280 @@ async fn cas_4ac8_round4_unicode_session_start_and_heartbeat_complete() {
     assert!(fx.cloud.state().agents.contains_key(id));
     assert_eq!(fx.cloud.state().heartbeats.len(), 1);
 }
+
+/// A surviving MCP core is still bound to the pre-clear session. Its identity
+/// recovery must not replace the daemon's newer hook-announced heartbeat owner.
+#[tokio::test]
+async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
+    for (retained, pending) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (mut fx, daemon) = fixture("cas-9735").await;
+        fx._env.set("CAS_AGENT_ROLE", "supervisor");
+        let daemon = Arc::new(daemon);
+        let old_id = "pre-clear-session";
+        let new_id = "post-clear-session";
+        session_start(&daemon, old_id, "supervisor").await;
+        let cloud = fx.cloud.clone();
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(format!(
+                "/api/agents/{old_id}/shutdown"
+            )))
+            .respond_with(move |_: &Request| {
+                if pending && attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return ResponseTemplate::new(503);
+                }
+                cloud.state().agents.remove(old_id);
+                ResponseTemplate::new(200).set_body_json(json!({"released_locks":0}))
+            })
+            .with_priority(1)
+            .expect(if pending { 2 } else { 1 })
+            .mount(&fx._server)
+            .await;
+        let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(
+            fx.cas_root.clone(),
+            None,
+            Some(Arc::clone(&daemon)),
+        );
+        core.bind_agent_identity(
+            old_id.into(),
+            crate::mcp::server::AgentIdentitySource::ServerInternal,
+        )
+        .unwrap();
+        let service = crate::mcp::tools::CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        daemon
+            .handle_socket_event(DaemonEvent::SessionEnd {
+                session_id: old_id.into(),
+                cc_pid: Some(our_cc_pid()),
+            })
+            .await;
+        let db = rusqlite::Connection::open(fx.cas_root.join("cas.db")).unwrap();
+        if retained {
+            db.execute_batch("CREATE TRIGGER fail_old_delete BEFORE DELETE ON agents WHEN OLD.id='pre-clear-session' BEGIN SELECT RAISE(FAIL, 'retained cleanup fixture'); END;").unwrap();
+        }
+        let root = fx.cas_root.clone();
+        let cleaned = tokio::task::spawn_blocking(move || {
+            crate::hooks::handlers::cleanup_agent_leases(&root, old_id)
+        })
+        .await
+        .unwrap();
+        if retained {
+            assert!(cleaned.is_none());
+            db.execute_batch("DROP TRIGGER fail_old_delete").unwrap();
+        } else {
+            assert!(cleaned.is_some());
+            assert!(store.get(old_id).is_err());
+        }
+        session_start(&daemon, new_id, "supervisor").await;
+        daemon.await_cloud_presence().await;
+        assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id));
+        let result = service
+            .coordination(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value::<cas_mcp::types::CoordinationRequest>(
+                    json!({"action":"whoami"}),
+                )
+                .unwrap(),
+            ))
+            .await;
+        assert!(result.is_ok(), "retained={retained}: {result:?}");
+        // The single-thread runtime schedules the recovery task before this
+        // barrier; then settle its real HTTP presence work before observing.
+        tokio::spawn(async {}).await.unwrap();
+        daemon.await_cloud_presence().await;
+        assert_eq!(
+            daemon.agent_id.read().await.as_deref(),
+            Some(new_id),
+            "old-core recovery stole heartbeat ownership (retained={retained})"
+        );
+        let recovered = store.get(old_id).unwrap();
+        let mut shutdown = crate::cloud::shutdown::Snapshot::load(&fx.cas_root);
+        shutdown.refresh_after_lease(&fx.cas_root);
+        assert!(
+            shutdown
+                .is_ended(&fx.cas_root, &recovered, chrono::Utc::now())
+                .unwrap(),
+            "automatic recovery must not remove S's fence"
+        );
+        if pending {
+            assert!(fx.cloud.state().agents.contains_key(old_id), "failed cleanup must remain pending until after old-core activity");
+            let root = fx.cas_root.clone();
+            tokio::task::spawn_blocking(move || {
+                let coordinator = crate::cloud::presence::project_coordinator(&root).unwrap();
+                // Exercise the real retry after its injected clock passes the
+                // backoff, without sleeping or editing the durable intent.
+                crate::cloud::shutdown::drain(&root, &coordinator, chrono::Utc::now() + chrono::Duration::seconds(31)).unwrap();
+            }).await.unwrap();
+        }
+        let old_heartbeat = store.get(old_id).unwrap().last_heartbeat;
+        let before = store.get(new_id).unwrap().last_heartbeat;
+        tokio::time::timeout(std::time::Duration::from_secs(2), heartbeat_tick(&daemon))
+            .await
+            .unwrap();
+        assert!(store.get(new_id).unwrap().last_heartbeat > before);
+        assert_eq!(store.get(old_id).unwrap().last_heartbeat, old_heartbeat, "daemon must not keep S locally alive");
+        assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id));
+        assert_eq!(
+            fx.cloud
+                .state()
+                .heartbeats
+                .last()
+                .map(|(id, _)| id.as_str()),
+            Some(new_id)
+        );
+        assert!(
+            !fx.cloud.state().agents.contains_key(old_id),
+            "S's cleanup must complete"
+        );
+        assert_eq!(
+            fx.cloud
+                .state()
+                .registrations
+                .iter()
+                .filter(|row| row["id"] == old_id)
+                .count(),
+            1,
+            "old core must not resurrect S in Cloud"
+        );
+        fx._server.verify().await; // All expected cleanup attempts completed.
+        assert!(
+            crate::cloud::shutdown::is_ended(&fx.cas_root, &store.get(old_id).unwrap()).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_9735_unowned_daemon_adopts_live_pid_registration() {
+    let (fx, daemon) = fixture("cas-9735").await;
+    let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+    let mut agent = Agent::new("pid-owned-session".into(), "pid-owned-supervisor".into());
+    agent.role = AgentRole::Supervisor;
+    agent.pid = Some(our_cc_pid());
+    agent.cc_session_id = Some(agent.id.clone());
+    agent.last_heartbeat -= chrono::Duration::minutes(1);
+    store.register(&agent).unwrap();
+    assert!(daemon.agent_id.read().await.is_none());
+    tokio::time::timeout(std::time::Duration::from_secs(2), heartbeat_tick(&daemon))
+        .await
+        .unwrap();
+    assert_eq!(
+        daemon.agent_id.read().await.as_deref(),
+        Some(agent.id.as_str())
+    );
+    assert!(store.get(&agent.id).unwrap().last_heartbeat > agent.last_heartbeat);
+    assert!(fx.cloud.state().agents.contains_key(&agent.id));
+    assert!(
+        matches!(daemon.handle_socket_event(DaemonEvent::GetSession { cc_pid: our_cc_pid() }).await,
+        DaemonResponse::Session { session_id } if session_id == agent.id)
+    );
+}
+
+#[tokio::test]
+async fn cas_9735_clear_context_keeps_durable_worker_heartbeat_and_lease() {
+    for cli in ["claude", "codex"] {
+        let (mut fx, daemon) = fixture("cas-9735").await;
+        fx._env.set("CAS_AGENT_ROLE", "worker");
+        fx._env.set("CAS_FACTORY_WORKER_CLI", cli);
+        let old_id = "durable-worker-session";
+        let new_session = "new-worker-transcript";
+        for session in [old_id, new_session] {
+            if session == new_session {
+                let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+                let mut worker = store.get(old_id).unwrap();
+                worker.cc_session_id = Some(new_session.into());
+                store.update(&worker).unwrap();
+                assert!(
+                    crate::hooks::handlers::cleanup_agent_leases(&fx.cas_root, old_id)
+                        .unwrap()
+                        .is_empty()
+                );
+                daemon
+                    .handle_socket_event(DaemonEvent::SessionEnd {
+                        session_id: old_id.into(),
+                        cc_pid: Some(our_cc_pid()),
+                    })
+                    .await;
+            }
+            daemon
+                .handle_socket_event(DaemonEvent::SessionStart {
+                    session_id: session.into(),
+                    agent_name: Some("durable-worker".into()),
+                    agent_role: Some("worker".into()),
+                    cc_pid: our_cc_pid(),
+                    clone_path: None,
+                })
+                .await;
+            daemon.await_cloud_presence().await;
+            if session == old_id {
+                crate::store::open_task_store(&fx.cas_root)
+                    .unwrap()
+                    .add(&Task::new(
+                        "cas-reset-lease".into(),
+                        "Worker reset lease".into(),
+                    ))
+                    .unwrap();
+                crate::store::open_agent_store(&fx.cas_root)
+                    .unwrap()
+                    .try_claim("cas-reset-lease", old_id, 600, None)
+                    .unwrap();
+            }
+        }
+        let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), heartbeat_tick(&daemon))
+            .await
+            .unwrap();
+        assert_eq!(daemon.agent_id.read().await.as_deref(), Some(old_id));
+        assert_eq!(store.list(None).unwrap().len(), 1);
+        assert_eq!(
+            store.get(old_id).unwrap().cc_session_id.as_deref(),
+            Some(new_session)
+        );
+        assert_eq!(
+            store
+                .get_lease("cas-reset-lease")
+                .unwrap()
+                .unwrap()
+                .agent_id,
+            old_id
+        );
+        assert!(
+            !crate::cloud::shutdown::is_ended(&fx.cas_root, &store.get(old_id).unwrap()).unwrap()
+        );
+        assert!(fx.cloud.state().agents.contains_key(old_id));
+    }
+}
+
+#[tokio::test]
+async fn cas_9735_startup_pid_adoption_replaces_mcp_bootstrap_owner() {
+    let (fx, daemon) = fixture("cas-9735").await;
+    let daemon = Arc::new(daemon);
+    let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+    let mut cached = Agent::new("cached-mcp-session".into(), "cached-mcp".into());
+    cached.pid = Some(std::process::id());
+    cached.role = AgentRole::Supervisor;
+    store.register(&cached).unwrap();
+    daemon.set_agent_id(cached.id.clone()).await;
+    daemon.await_cloud_presence().await;
+    let mut current = Agent::new("current-pid-session".into(), "current-harness".into());
+    current.pid = Some(our_cc_pid());
+    current.role = AgentRole::Supervisor;
+    store.register(&current).unwrap();
+    let running = tokio::spawn(Arc::clone(&daemon).run());
+    let adopted = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if daemon.pid_sessions.read().await.get(&our_cc_pid()) == Some(&current.id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    daemon.shutdown();
+    tokio::time::timeout(std::time::Duration::from_secs(3), running).await.unwrap().unwrap().unwrap();
+    daemon.await_cloud_presence().await;
+    assert!(adopted.is_ok(), "real daemon startup must adopt the harness PID");
+    assert_eq!(daemon.agent_id.read().await.as_deref(), Some(current.id.as_str()));
+    assert!(fx.cloud.state().agents.contains_key(&current.id));
+}

@@ -25,16 +25,17 @@ const WORKER_MCP_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::f
 struct WorkerMcpActivityPermit<'a> {
     state: &'a std::sync::Mutex<crate::mcp::server::WorkerMcpActivityState>,
     recorded: bool,
+    not_worker: bool,
 }
 
 impl<'a> WorkerMcpActivityPermit<'a> {
     fn acquire(core: &'a CasCore) -> Option<Self> {
         let mut state = core.worker_mcp_activity.lock().ok()?;
-        if state.recording || state.last_recorded_at.is_some_and(|at| at.elapsed() < WORKER_MCP_ACTIVITY_INTERVAL) {
+        if state.not_worker || state.recording || state.last_recorded_at.is_some_and(|at| at.elapsed() < WORKER_MCP_ACTIVITY_INTERVAL) {
             return None;
         }
         state.recording = true;
-        Some(Self { state: &core.worker_mcp_activity, recorded: false })
+        Some(Self { state: &core.worker_mcp_activity, recorded: false, not_worker: false })
     }
 }
 
@@ -42,6 +43,7 @@ impl Drop for WorkerMcpActivityPermit<'_> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             if self.recorded { state.last_recorded_at = Some(std::time::Instant::now()); }
+            if self.not_worker { state.not_worker = true; }
             state.recording = false;
         }
     }
@@ -68,7 +70,13 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
     if !core.has_server_internal_identity(&id) { return; }
     let Ok(agents) = core.open_agent_store() else { return };
     let Ok(agent) = agents.get(&id) else { return };
-    if agent.role != AgentRole::Worker || !matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) {
+    if agent.role != AgentRole::Worker {
+        // Standard is a bootstrap role: registration can reconcile the same
+        // caller to Worker after this request. Only stable factory roles cache.
+        permit.not_worker = matches!(agent.role, AgentRole::Supervisor | AgentRole::Director);
+        return;
+    }
+    if !matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) {
         return;
     }
     if let Ok(events) = crate::store::open_event_store(&core.cas_root) {
@@ -690,6 +698,82 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::potentially_mutating_call;
+
+    #[test]
+    fn cas_4e19_authenticated_non_worker_verdict_skips_store_access_across_clones() {
+        use crate::mcp::server::{AgentIdentitySource, CasCore};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for role in [cas_types::AgentRole::Supervisor, cas_types::AgentRole::Director] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let supervisor = cas_types::Agent::new_with_role("cached-supervisor".into(), "cached-supervisor".into(), role);
+            core.open_agent_store().unwrap().register(&supervisor).unwrap();
+            core.bind_agent_identity(supervisor.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+            super::record_worker_mcp_activity(&core, "task", "notes");
+            let before = cas_store::wait_budget::store_access_violations();
+            {
+                let _forbid = cas_store::wait_budget::forbid_store_access();
+                for _ in 0..16 {
+                    super::record_worker_mcp_activity(&core.clone(), "task", "notes");
+                }
+            }
+            assert_eq!(cas_store::wait_budget::store_access_violations(), before,
+                "a confirmed non-worker core must not read the store again");
+            assert!(crate::store::open_event_store(&root).unwrap().list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().is_empty());
+
+            let worker_core = CasCore::with_daemon(root.clone(), None, None);
+            let worker = cas_types::Agent::new_with_role("independent-worker".into(), "independent-worker".into(), cas_types::AgentRole::Worker);
+            worker_core.open_agent_store().unwrap().register(&worker).unwrap();
+            worker_core.bind_agent_identity(worker.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+            super::record_worker_mcp_activity(&worker_core, "task", "notes");
+            assert!(crate::store::open_event_store(&root).unwrap().latest_worker_activity(&worker.id, &worker.name).unwrap().is_some(),
+                "a non-worker verdict belongs only to that immutable caller core");
+        }
+    }
+
+    #[test]
+    fn cas_4e19_inactive_worker_verdict_is_retryable() {
+        use crate::mcp::server::{AgentIdentitySource, CasCore};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let mut worker = cas_types::Agent::new_with_role("recovering-worker".into(), "recovering-worker".into(), cas_types::AgentRole::Worker);
+        worker.status = cas_types::AgentStatus::Shutdown;
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        core.bind_agent_identity(worker.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        assert!(crate::store::open_event_store(&root).unwrap().latest_worker_activity(&worker.id, &worker.name).unwrap().is_none());
+        worker.status = cas_types::AgentStatus::Active;
+        core.open_agent_store().unwrap().update(&worker).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        assert!(crate::store::open_event_store(&root).unwrap().latest_worker_activity(&worker.id, &worker.name).unwrap().is_some(),
+            "inactive workers must not be cached as non-workers");
+    }
+
+    #[test]
+    fn cas_4e19_standard_to_worker_reconciliation_records_activity() {
+        use crate::mcp::server::{AgentIdentitySource, CasCore};
+        use cas_types::{Agent, AgentRole};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let caller = Agent::new("bootstrap-worker".into(), "bootstrap-worker".into());
+        core.open_agent_store().unwrap().register(&caller).unwrap();
+        core.bind_agent_identity(caller.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        let events = crate::store::open_event_store(&root).unwrap();
+        assert!(events.latest_worker_activity(&caller.id, &caller.name).unwrap().is_none());
+
+        core.register_agent_with_hints(caller.id.clone(), caller.name.clone(), None, None,
+            Some(AgentRole::Worker), AgentIdentitySource::ServerInternal).unwrap();
+        assert_eq!(core.open_agent_store().unwrap().get(&caller.id).unwrap().role, AgentRole::Worker);
+        super::record_worker_mcp_activity(&core.clone(), "task", "notes");
+        assert!(events.latest_worker_activity(&caller.id, &caller.name).unwrap().is_some(),
+            "a hook-created Standard row corrected to Worker must record MCP activity on the same core");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cas_6eec_mcp_burst_records_one_activity_across_service_clones() {

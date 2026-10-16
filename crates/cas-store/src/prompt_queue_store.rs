@@ -3035,6 +3035,28 @@ pub fn read_inbox_signal(cas_dir: &Path, recipient: &str) -> Option<i64> {
 }
 
 impl SqlitePromptQueueStore {
+    /// Remove the empty diagnostic artifact left by older installations/tools.
+    /// All live queue tables are in cas.db. Never discard data, SQLite recovery
+    /// sidecars, symlinks, or directories, and don't let cleanup block delivery.
+    fn remove_empty_queue_artifact(cas_dir: &Path) {
+        let path = cas_dir.join("prompt_queue.db");
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { return };
+        if !metadata.file_type().is_file() || metadata.len() != 0 {
+            return;
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            match std::fs::symlink_metadata(cas_dir.join(format!("prompt_queue.db{suffix}"))) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return,
+            }
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(%error, "could not remove empty prompt queue artifact");
+            }
+        }
+    }
+
     /// Stamp `recipient`'s inbox signal after a committed enqueue.
     /// Best-effort: a failed stamp only delays surfacing to the next turn.
     fn signal_inbox(&self, recipient: &str) {
@@ -3068,6 +3090,8 @@ impl SqlitePromptQueueStore {
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;
+
+        Self::remove_empty_queue_artifact(cas_dir);
 
         Ok(Self { conn })
     }
@@ -8744,6 +8768,72 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn cas_4e19_writable_queue_open_removes_empty_diagnostic_decoy() {
+        let (temp, store) = create_test_store();
+        let prompt = "real queued message";
+        let id = store.enqueue("sender", "worker", prompt).unwrap();
+        let decoy = temp.path().join("prompt_queue.db");
+        std::fs::write(&decoy, []).unwrap();
+
+        let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+        assert!(decoy.exists(), "read-only diagnosis must not mutate files");
+        let rows = reader.peek_all(10).unwrap();
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, prompt));
+
+        let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        reopened.init().unwrap();
+        assert!(!decoy.exists(), "writable open must remove the misleading empty database");
+        let rows = reopened.peek_all(10).unwrap();
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, prompt));
+        assert!(temp.path().join("cas.db").metadata().unwrap().len() > 0);
+        SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert!(!decoy.exists(), "opening the queue must never recreate the decoy");
+    }
+
+    #[test]
+    fn cas_4e19_queue_cleanup_preserves_data_and_recovery_sidecars() {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let temp = TempDir::new().unwrap();
+            let artifact = temp.path().join("prompt_queue.db");
+            let retained = b"diagnostic evidence";
+            if suffix.is_empty() {
+                std::fs::write(&artifact, retained).unwrap();
+            } else {
+                std::fs::write(&artifact, []).unwrap();
+                std::fs::write(temp.path().join(format!("prompt_queue.db{suffix}")), retained).unwrap();
+            }
+            let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+            store.init().unwrap();
+            assert!(artifact.exists(), "preserve data or recovery evidence: {suffix}");
+            let evidence = temp.path().join(format!("prompt_queue.db{suffix}"));
+            assert_eq!(std::fs::read(evidence).unwrap(), retained);
+            assert_eq!(store.pending_count().unwrap(), 0, "retained artifacts must not become the live queue");
+        }
+    }
+
+    #[test]
+    fn cas_4e19_queue_cleanup_preserves_directories() {
+        let temp = TempDir::new().unwrap();
+        let artifact = temp.path().join("prompt_queue.db");
+        std::fs::create_dir(&artifact).unwrap();
+        SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert!(artifact.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cas_4e19_queue_cleanup_does_not_follow_symlinks() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("elsewhere.db");
+        std::fs::write(&target, []).unwrap();
+        let artifact = temp.path().join("prompt_queue.db");
+        std::os::unix::fs::symlink(&target, &artifact).unwrap();
+        SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert!(std::fs::symlink_metadata(&artifact).unwrap().file_type().is_symlink());
+        assert!(target.exists());
     }
 
     #[test]

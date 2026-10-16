@@ -439,12 +439,94 @@ fn cas_8063_name_at_machine_prefers_live_successor_and_disambiguates_live_twins(
     let mut new = peer("same", "box", true);
     new.agent_id = "new-id".into();
     let peers = vec![old.clone(), new.clone()];
-    assert_eq!(resolve_peer_target(&peers, "same@box").unwrap().unwrap().agent_id, "new-id");
+    assert_eq!(
+        resolve_peer_target(&peers, "same@box")
+            .unwrap()
+            .unwrap()
+            .agent_id,
+        "new-id"
+    );
     old.live = true;
     let peers = vec![old, new];
     let ambiguity = resolve_peer_target(&peers, "same@box").unwrap_err();
     for id in ["old-id", "new-id"] {
         assert!(ambiguity.contains(id), "{ambiguity}");
-        assert_eq!(resolve_peer_target(&peers, id).unwrap().unwrap().agent_id, id);
+        assert_eq!(
+            resolve_peer_target(&peers, id).unwrap().unwrap().agent_id,
+            id
+        );
     }
 }
+
+#[test]
+fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
+    for case in [
+        "name",
+        "machine",
+        "worker",
+        "nonfactory",
+        "future",
+        "live",
+        "unknown-machine",
+        "stale-current",
+        "ambiguous",
+    ] {
+        let machine = Machine::new();
+        let agents = open_agent_store(&machine.cas).unwrap();
+        let mut old = Agent::new("old".into(), "same".into());
+        old.role = AgentRole::Supervisor;
+        old.status = AgentStatus::Shutdown;
+        old.machine_id = Some("box".into());
+        old.factory_session = Some("previous".into());
+        match case {
+            "name" => old.name = "other".into(),
+            "machine" => old.machine_id = Some("other-box".into()),
+            "worker" => old.role = AgentRole::Worker,
+            "nonfactory" => old.factory_session = None,
+            "future" => old.registered_at = chrono::Utc::now() + chrono::Duration::days(1),
+            "live" => old.status = AgentStatus::Active,
+            "unknown-machine" => old.machine_id = None,
+            _ => {}
+        }
+        agents.register(&old).unwrap();
+        let mut current = Agent::new("current".into(), "same".into());
+        current.role = AgentRole::Supervisor;
+        current.machine_id = Some("box".into());
+        current.factory_session = Some("factory-a".into());
+        if case == "stale-current" {
+            current.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(301);
+        }
+        agents.register(&current).unwrap();
+        if case == "live" {
+            agents.update(&old).unwrap();
+        }
+        if case == "ambiguous" {
+            let mut other = current.clone();
+            other.id = "other-current".into();
+            other.factory_session = Some("other-session".into());
+            agents.register(&other).unwrap();
+            agents.update(&current).unwrap();
+        }
+        let mailbox = FakeMailbox::default();
+        mailbox
+            .inbox
+            .lock()
+            .unwrap()
+            .push(message("old-mail", "old", REPO, "must not route"));
+        let report = machine.deliver(&mailbox);
+        assert!(
+            mailbox
+                .claims
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|ids| !ids.iter().any(|id| id == "old")),
+            "{case}: {report:?}"
+        );
+        assert!(machine.rows().is_empty(), "{case}: {report:?}");
+        if case == "ambiguous" {
+            assert!(!report.errors.is_empty());
+        }
+    }
+}
+

@@ -13,6 +13,7 @@
 //! pane, act as the operator, or spawn or direct workers (cas-604d).
 
 use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -369,6 +370,12 @@ pub fn resolve_peer_target<'a>(
     target: &str,
 ) -> Result<Option<&'a Peer>, String> {
     let target = target.trim();
+    if let Some(peer) = peers
+        .iter()
+        .find(|peer| peer.agent_id.eq_ignore_ascii_case(target))
+    {
+        return Ok(Some(peer));
+    }
     let (name, machine) = match target.rsplit_once('@') {
         Some((name, machine)) => (name, Some(machine)),
         None => (target, None),
@@ -386,6 +393,40 @@ pub fn resolve_peer_target<'a>(
             })
         })
         .collect();
+    let mut addresses: BTreeMap<_, Vec<&Peer>> = BTreeMap::new();
+    for peer in matches {
+        let machine = peer
+            .machine_id
+            .as_deref()
+            .unwrap_or(&peer.machine)
+            .to_ascii_lowercase();
+        let project = peer
+            .canonical_id
+            .as_deref()
+            .and_then(crate::cloud::normalize_project_canonical_id);
+        addresses
+            .entry((peer.name.to_ascii_lowercase(), machine, project))
+            .or_default()
+            .push(peer);
+    }
+    let mut matches = Vec::new();
+    for group in addresses.values() {
+        let live: Vec<_> = group.iter().copied().filter(|peer| peer.live).collect();
+        if live.is_empty() {
+            // During downtime, queue to the most recently seen identity. Its
+            // successor claims this address when it returns.
+            if let Some(peer) = group
+                .iter()
+                .max_by_key(|peer| (peer.last_heartbeat, &peer.agent_id))
+            {
+                matches.push(*peer);
+            }
+        } else {
+            matches.extend(live);
+        }
+    }
+    matches.sort_by_key(|peer| &peer.agent_id);
+    matches.dedup_by_key(|peer| &peer.agent_id);
     match matches.as_slice() {
         [] => Ok(None),
         [peer] => Ok(Some(peer)),
@@ -393,11 +434,143 @@ pub fn resolve_peer_target<'a>(
             "'{target}' names {} peer supervisors; address one as {}",
             many.len(),
             many.iter()
-                .map(|peer| format!("{}@{}", peer.name, peer.machine))
+                .map(|peer| format!(
+                    "{} ({}@{}, session {})",
+                    peer.agent_id,
+                    peer.name,
+                    peer.machine,
+                    peer.session.as_deref().unwrap_or("unknown")
+                ))
                 .collect::<Vec<_>>()
                 .join(" or ")
         )),
     }
+}
+
+/// Local retirement identity is not a remote roster entry. It only allows an
+/// authenticated mailbox claim for a predecessor of this project's supervisor.
+#[derive(Clone, Deserialize)]
+struct RetiredRecipient {
+    #[serde(default)]
+    id: String,
+    name: String,
+    role: AgentRole,
+    machine_id: Option<String>,
+    factory_session: Option<String>,
+    registered_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn retired_recipients(cas_root: &Path) -> Result<Vec<RetiredRecipient>, String> {
+    const HISTORY_LIMIT: usize = 10_000;
+    let events = crate::store::open_event_store(cas_root)
+        .map_err(|e| e.to_string())?
+        .list_by_type(crate::types::EventType::AgentShutdown, HISTORY_LIMIT)
+        .map_err(|e| e.to_string())?;
+    if events.len() == HISTORY_LIMIT {
+        return Err(
+            "retired peer identity history reached its limit; older addresses were not checked"
+                .into(),
+        );
+    }
+    Ok(events
+        .into_iter()
+        .filter_map(|event| {
+            if event.entity_type != crate::types::EventEntityType::Agent {
+                return None;
+            }
+            let mut identity: RetiredRecipient =
+                serde_json::from_value(event.metadata?.get("retired_agent")?.clone()).ok()?;
+            identity.id = event.entity_id;
+            Some(identity)
+        })
+        .collect())
+}
+
+fn live_supervisor(agent: &crate::types::Agent) -> bool {
+    agent.role == AgentRole::Supervisor
+        && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+        && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+            agent,
+            crate::mcp::tools::service::agent_liveness::agent_process_is_alive(agent),
+            crate::cloud::peers::PEER_LIVE_SECS,
+        )
+        .is_live()
+}
+
+fn recipient_routes<'a>(
+    all: &'a [crate::types::Agent],
+    retired: &[RetiredRecipient],
+    session: &str,
+) -> (BTreeMap<String, &'a crate::types::Agent>, Vec<String>) {
+    let live: Vec<_> = all.iter().filter(|agent| live_supervisor(agent)).collect();
+    let mut routes: BTreeMap<_, _> = live
+        .iter()
+        .copied()
+        .filter(|agent| agent.factory_session.as_deref() == Some(session))
+        .map(|agent| (agent.id.clone(), agent))
+        .collect();
+    let mut errors = BTreeSet::new();
+    let rows = all
+        .iter()
+        .filter(|agent| !live_supervisor(agent))
+        .map(|agent| RetiredRecipient {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            role: agent.role,
+            machine_id: agent.machine_id.clone(),
+            factory_session: agent.factory_session.clone(),
+            registered_at: agent.registered_at,
+        });
+    for old in rows.chain(
+        retired
+            .iter()
+            .filter(|old| !all.iter().any(|a| a.id == old.id))
+            .cloned(),
+    ) {
+        if old.role != AgentRole::Supervisor
+            || old.name.trim().is_empty()
+            || old
+                .factory_session
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            continue;
+        }
+        let Some(machine) = old.machine_id.as_deref().filter(|s| !s.trim().is_empty()) else {
+            continue;
+        };
+        let successors: Vec<_> = live
+            .iter()
+            .copied()
+            .filter(|agent| {
+                agent.name.eq_ignore_ascii_case(&old.name)
+                    && agent.machine_id.as_deref() == Some(machine)
+                    && agent.registered_at >= old.registered_at
+            })
+            .collect();
+        match successors.as_slice() {
+            [successor] if successor.factory_session.as_deref() == Some(session) => {
+                routes.insert(old.id, *successor);
+            }
+            many if many.len() > 1
+                && many
+                    .iter()
+                    .any(|a| a.factory_session.as_deref() == Some(session)) =>
+            {
+                errors.insert(format!(
+                    "ambiguous live successors for {}@{}: {}",
+                    old.name,
+                    machine,
+                    many.iter()
+                        .map(|a| a.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            _ => {}
+        }
+    }
+    (routes, errors.into_iter().collect())
 }
 
 /// What one delivery tick did.
@@ -456,14 +629,34 @@ pub fn deliver_claimed_with(
     consumer_id: &str,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
 ) -> DeliveryReport {
+    deliver_claimed_with_history(
+        mailbox,
+        queue,
+        agents,
+        canonical_id,
+        alias_class,
+        factory_session,
+        consumer_id,
+        &[],
+        on_admitted,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver_claimed_with_history(
+    mailbox: &dyn PeerMailbox,
+    queue: &dyn PromptQueueStore,
+    agents: &dyn AgentStore,
+    canonical_id: &str,
+    alias_class: &[String],
+    factory_session: &str,
+    consumer_id: &str,
+    retired: &[RetiredRecipient],
+    on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
+) -> DeliveryReport {
     let mut report = DeliveryReport::default();
-    let recipients: Vec<_> = match agents.list(None) {
-        Ok(all) => all
-            .into_iter()
-            .filter(|agent| agent.role == AgentRole::Supervisor)
-            .filter(|agent| agent.factory_session.as_deref() == Some(factory_session))
-            .filter(|agent| matches!(agent.status, AgentStatus::Active | AgentStatus::Idle))
-            .collect(),
+    let all = match agents.list(None) {
+        Ok(all) => all,
         Err(error) => {
             report
                 .errors
@@ -471,10 +664,12 @@ pub fn deliver_claimed_with(
             return report;
         }
     };
-    if recipients.is_empty() {
+    let (routes, errors) = recipient_routes(&all, retired, factory_session);
+    report.errors.extend(errors);
+    if routes.is_empty() {
         return report;
     }
-    let recipient_ids: Vec<String> = recipients.iter().map(|agent| agent.id.clone()).collect();
+    let recipient_ids: Vec<_> = routes.keys().cloned().collect();
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
         .collect();
@@ -508,9 +703,7 @@ pub fn deliver_claimed_with(
     }
     let mut acks = Vec::new();
     for message in &claimed {
-        let recipient = recipients
-            .iter()
-            .find(|agent| agent.id == message.recipient_agent_id);
+        let recipient = routes.get(&message.recipient_agent_id).copied();
         let same_repo = crate::cloud::project_ids_match_with_aliases(
             &message.project_id,
             canonical_id,

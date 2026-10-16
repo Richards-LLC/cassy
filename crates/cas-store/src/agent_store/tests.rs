@@ -1484,17 +1484,25 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     agent.role = AgentRole::Supervisor;
     agent.machine_id = Some("stable-machine".into());
     agent.factory_session = Some("old-factory".into());
-    agent.metadata.insert("private-value".into(), "not-retirement-data".into());
+    agent
+        .metadata
+        .insert("private-value".into(), "not-retirement-data".into());
     agents.register(&agent).unwrap();
     agents.unregister(&agent.id).unwrap();
     agents.unregister(&agent.id).unwrap();
-    let retired = events.list_by_type(cas_types::EventType::AgentShutdown, 10).unwrap();
+    let retired = events
+        .list_by_type(cas_types::EventType::AgentShutdown, 10)
+        .unwrap();
     assert_eq!(retired.len(), 1);
     assert_eq!(retired[0].entity_id, agent.id);
-    let metadata = retired[0].metadata.as_ref().expect("retirement survives row deletion");
+    let metadata = retired[0]
+        .metadata
+        .as_ref()
+        .expect("retirement survives row deletion");
     assert_eq!(metadata["retired_agent"]["role"], "supervisor");
     assert_eq!(metadata["retired_agent"]["machine_id"], "stable-machine");
     assert_eq!(metadata["retired_agent"]["factory_session"], "old-factory");
     assert!(metadata["retired_agent"].get("metadata").is_none());
     assert!(!metadata.to_string().contains("private-value"));
 }
+

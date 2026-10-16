@@ -123,16 +123,19 @@ impl PeerMailboxRuntime {
                 .map_err(|e| e.to_string())?
                 .iter()
                 .any(|agent| {
-                    agent.role == AgentRole::Supervisor
+                    live_supervisor(agent)
                         && agent.factory_session.as_deref() == Some(&self.factory_session)
-                        && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
                 });
             if !has_recipient {
                 return Err("no live supervisor in this factory session".into());
             }
             // cas-4736: record epic split proposals and answers before ack.
             let cas_dir = self.cas_dir.clone();
-            Ok(deliver_claimed_with(
+            let (retired, history_error) = match retired_recipients(&self.cas_dir) {
+                Ok(retired) => (retired, None),
+                Err(error) => (Vec::new(), Some(format!("retired peer identity lookup failed: {error}"))),
+            };
+            let mut report = deliver_claimed_with_history(
                 &mailbox,
                 queue.as_ref(),
                 agents.as_ref(),
@@ -140,6 +143,7 @@ impl PeerMailboxRuntime {
                 &crate::cloud::project_aliases_from_config_toml(&self.cas_dir),
                 &self.factory_session,
                 &self.consumer_id,
+                &retired,
                 &move |recipient, message| {
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
@@ -152,7 +156,9 @@ impl PeerMailboxRuntime {
                     }
                     Ok(())
                 },
-            ))
+            );
+            if let Some(error) = history_error { report.errors.push(error); }
+            Ok(report)
         };
         let mut report = run().unwrap_or_else(|error| DeliveryReport {
             errors: vec![error],

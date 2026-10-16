@@ -99,6 +99,17 @@ class LaneBaseTests(unittest.TestCase):
         self.git('update-ref', 'refs/remotes/origin/epic/alias', self.epic)
         self.assertEqual(self.classify()['class'], 'hub-web-only')
 
+    def test_epic_advancing_after_spawn_preserves_task_fork(self):
+        lane = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-qb', 'epic-progress', self.epic)
+        self.write('cas-cli/src/other.rs', '// sibling merged while worker runs\n')
+        self.commit('epic advances after spawn')
+        self.git('update-ref', 'refs/remotes/origin/epic/approved', 'HEAD')
+        self.git('checkout', '-q', lane)
+        out = self.classify()
+        self.assertEqual(out['class'], 'hub-web-only')
+        self.assertEqual(out['comparison-base'], self.epic)
+
     def test_most_recent_ancestor_epic_wins(self):
         self.git('update-ref', 'refs/remotes/origin/epic/older', self.main)
         self.assertEqual(self.classify()['class'], 'hub-web-only')

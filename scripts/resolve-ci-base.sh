@@ -14,14 +14,17 @@ if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
     git show-ref --verify --quiet "refs/remotes/$default_ref" || exit 1
     base="$(git rev-parse --verify "$default_ref^{commit}")"
     if [[ "${GITHUB_REF:-}" == refs/heads/factory/* ]]; then
-        # A fetched same-repository epic is trusted only if its tip is an
-        # ancestor of this lane. Prefer the unique maximal ancestor; two
-        # incomparable merged epics give no task parent and fail closed.
+        # Use the shared fork, since a sibling may advance an epic while the
+        # worker runs. Only fetched same-repository epic refs supply candidates.
+        # Two incomparable maximal forks give no task parent and fail closed.
         parents=()
         while read -r candidate; do
             [[ -n "$candidate" ]] || continue
-            git merge-base --is-ancestor "$candidate" HEAD || continue
-            parents+=("$(git rev-parse "$candidate^{commit}")")
+            if ! fork="$(git merge-base "$candidate" HEAD)"; then
+                echo 'CI base: shared epic ancestry unavailable; refusing task scope' >&2
+                exit 1
+            fi
+            parents+=("$fork")
         done < <(git for-each-ref --format='%(refname)' refs/remotes/origin/epic/)
         selected=''
         for candidate in "${parents[@]}"; do

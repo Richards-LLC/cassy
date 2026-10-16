@@ -1939,8 +1939,9 @@ or ownership guess is made for legacy directories.
 ### First factory push scope and reference admission
 
 The shared CI classifier resolves a first factory push against the unique
-maximal ancestor among fetched `origin/epic/*` refs, falling back to the
-configured default remote branch when no epic parent is available. Local refs,
+maximal merge base among fetched `origin/epic/*` refs, preserving the task fork
+when sibling merges advance the epic. It falls back to the configured default
+remote branch when no epic parent is available. Local refs,
 unknown bases and incomparable epic parents cannot authorize a Rust skip.
 Subsequent repair pushes compare against the previous push, so unrelated epic
 changes do not widen a test-only repair. All scoped consumers use that resolved

@@ -22,6 +22,28 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn empty_root_init_runs_all_migrations_through_m278() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let project = home.join("empty-root");
+            std::fs::create_dir_all(&project).unwrap();
+
+            let cas_dir = crate::store::init_cas_dir(&project)
+                .expect("fresh root should apply every registered migration");
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            let applied: i64 = conn
+                .query_row("SELECT COUNT(*) FROM cas_migrations", [], |row| row.get(0))
+                .unwrap();
+            let latest: i64 = conn
+                .query_row("SELECT MAX(id) FROM cas_migrations", [], |row| row.get(0))
+                .unwrap();
+
+            assert_eq!(applied, crate::migration::MIGRATIONS.len() as i64);
+            assert_eq!(latest, MIGRATION.id as i64);
+            assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
+        });
+    }
+
+    #[test]
     fn journal_migration_recreates_the_schema_and_preserves_immutable_requests() {
         let conn = Connection::open_in_memory().unwrap();
         assert!(!crate::migration::migration_is_detected(&conn, &MIGRATION));

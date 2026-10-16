@@ -91,7 +91,6 @@ impl Fx {
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     let mut env = TestEnvGuard::new();
     let fx = fixture(&mut env);

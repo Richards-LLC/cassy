@@ -1,5 +1,6 @@
 //! Distribution and routing contracts for the built-in cas-image-generate skill.
 
+use crate::test_env_guard::TestEnvGuard;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use quick_xml::Reader;
@@ -133,6 +134,7 @@ fn builtin_catalog_registers_all_mirror_entries() {
 
 #[test]
 fn cas_update_syncs_the_skill_to_all_enabled_harnesses() {
+    let _env = TestEnvGuard::new();
     let project = TempDir::new().unwrap();
     let home = project.path().join("home");
     let xdg = project.path().join("xdg");

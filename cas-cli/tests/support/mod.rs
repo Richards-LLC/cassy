@@ -229,14 +229,16 @@ impl CasSandbox {
                 .output()
                 .unwrap();
             let after = snapshot();
-            let changed: Vec<_> = before
+            let changed: std::collections::BTreeSet<_> = before
                 .keys()
                 .chain(after.keys())
                 .filter(|path| before.get(*path) != after.get(*path))
                 .collect();
             assert!(
                 changed.is_empty(),
-                "{case} wrote outside its fixture into the worker worktree: {changed:?}"
+                "{case} wrote outside its fixture into the worker worktree: {} paths; first8: {:?}",
+                changed.len(),
+                changed.iter().take(8).collect::<Vec<_>>()
             );
             assert!(
                 output.status.success(),

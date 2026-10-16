@@ -12,6 +12,7 @@
 //! These tests pin the invariant: every claimed write is attributed to the
 //! harness directory it actually landed in, and the claimed file exists there.
 
+use crate::test_env_guard::TestEnvGuard;
 use assert_cmd::Command;
 use std::path::Path;
 use tempfile::TempDir;
@@ -86,6 +87,7 @@ fn init_project(temp: &TempDir) {
 /// relative path that did not exist under `.codex`.
 #[test]
 fn sync_attributes_every_claimed_write_to_the_directory_it_landed_in() {
+    let _env = TestEnvGuard::new();
     let temp = TempDir::new().unwrap();
     init_project(&temp);
 
@@ -152,6 +154,7 @@ fn sync_attributes_every_claimed_write_to_the_directory_it_landed_in() {
 /// writes.
 #[test]
 fn codex_sync_reports_its_own_result_and_is_idempotent() {
+    let _env = TestEnvGuard::new();
     let temp = TempDir::new().unwrap();
     init_project(&temp);
 
@@ -221,6 +224,7 @@ fn codex_sync_reports_its_own_result_and_is_idempotent() {
 #[test]
 #[cfg(unix)]
 fn unwritable_codex_destination_fails_loudly_instead_of_claiming_success() {
+    let _env = TestEnvGuard::new();
     use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();

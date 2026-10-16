@@ -1,5 +1,6 @@
 //! Distribution contract for the managed Viktor gateway.
 
+use crate::test_env_guard::TestEnvGuard;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -23,6 +24,7 @@ fn cas_cmd(root: &std::path::Path) -> Command {
 
 #[test]
 fn clean_init_and_sync_distribute_viktor_skill_and_status_never_prints_a_key() {
+    let _env = TestEnvGuard::new();
     let temp = TempDir::new().unwrap();
 
     cas_cmd(temp.path())

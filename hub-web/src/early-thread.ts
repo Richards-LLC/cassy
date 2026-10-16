@@ -26,7 +26,7 @@ export function threadBeforePanes(input: {
 
 /** Read the grid's placeholder from the DOM it is painted into. */
 export function gridPlaceholder(grid: HTMLElement): GridPlaceholder {
-  if (grid.querySelector(":scope > .pane-host")) return "none";
+  if (grid.querySelector(":scope > .conversation-thread-slot")) return "none";
   const empty = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!empty) return "none";
   return empty.classList.contains("empty-pane-slot") ? "no-panes" : "connecting";

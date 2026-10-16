@@ -153,7 +153,12 @@ def refresh_worker_cache(version, worktree, receipt_path):
                 if not match or match[1] in {".", ".."}:
                     raise RuntimeError("refresh reported no published snapshot")
                 snapshot = match[1]
-                metadata = (cache_root / "snapshots" / snapshot / ".cas-build-cache-metadata")
+                # cas-3f93: `[factory] scratch_root` relocates the published
+                # baseline; the refresh names the root it wrote.
+                published = re.search(r"^Worker build-cache root: (/.+)$", stdout, re.MULTILINE)
+                published_root = Path(published[1]) if published else cache_root
+                evidence["cache_root"] = str(published_root)
+                metadata = (published_root / "snapshots" / snapshot / ".cas-build-cache-metadata")
                 if f"source_commit={released}" not in metadata.read_text().splitlines():
                     raise RuntimeError("published snapshot provenance differs from released commit")
                 evidence.update(status="PASS", snapshot=snapshot)

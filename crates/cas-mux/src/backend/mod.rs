@@ -99,6 +99,28 @@ impl SupervisorCli {
     }
 }
 
+/// cas-3f93: a managed worker checkout under a project whose
+/// `[factory] scratch_root` is set builds into its relocated private target,
+/// the same directory the capped worker check and target seeding use. Unset,
+/// or any unmanaged checkout, leaves Cargo's in-tree default untouched.
+fn worker_scratch_target(cwd: &Path) -> Option<PathBuf> {
+    let cas_dir = cas_types::factory_scratch::managed_worktree_store(cwd)?;
+    let contents = std::fs::read_to_string(cas_dir.join("config.toml")).ok()?;
+    let document: toml::Value = toml::from_str(&contents).ok()?;
+    let value = document.get("factory")?.get("scratch_root")?.as_str();
+    let root = cas_types::factory_scratch::parse_scratch_root(value)?;
+    Some(cas_types::factory_scratch::worker_target_dir(Some(&root), cwd))
+}
+
+fn push_worker_target_env(config: &mut PtyConfig) {
+    if let Some(target) = config.cwd.as_deref().and_then(worker_scratch_target) {
+        config.env.retain(|(name, _)| name != "CARGO_TARGET_DIR");
+        config
+            .env
+            .push(("CARGO_TARGET_DIR".to_string(), target.to_string_lossy().into_owned()));
+    }
+}
+
 pub(super) fn finish_worker_config(
     config: &mut PtyConfig,
     supervisor_cli: SupervisorCli,
@@ -107,6 +129,7 @@ pub(super) fn finish_worker_config(
     cas_root: Option<&PathBuf>,
 ) {
     config.apply_worker_build_concurrency(active_workers);
+    push_worker_target_env(config);
     config.env.push((
         "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
         supervisor_cli.backend().name().to_string(),
@@ -635,4 +658,61 @@ pub(super) fn sanitize_toml_arg(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod scratch_root_tests {
+    use super::*;
+
+    fn worker_config(cwd: PathBuf) -> PtyConfig {
+        PtyConfig {
+            command: "true".into(),
+            args: vec![],
+            cwd: Some(cwd),
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    fn target_env(config: &PtyConfig) -> Vec<&str> {
+        config
+            .env
+            .iter()
+            .filter(|(name, _)| name == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn scratch_root_worker_spawn_exports_relocated_cargo_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = dir.path().join(".cas");
+        let worktree = cas.join("worktrees/worker-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let scratch = dir.path().join("rewind");
+
+        // Unset: no CARGO_TARGET_DIR, so Cargo keeps <worktree>/target.
+        let mut config = worker_config(worktree.clone());
+        push_worker_target_env(&mut config);
+        assert!(target_env(&config).is_empty());
+
+        std::fs::write(
+            cas.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let mut config = worker_config(worktree.clone());
+        push_worker_target_env(&mut config);
+        let expected = scratch
+            .join(cas_types::factory_scratch::project_key(&cas))
+            .join("targets/worker-1");
+        assert_eq!(target_env(&config), [expected.to_str().unwrap()]);
+
+        // The main checkout is not a managed worker checkout.
+        let mut config = worker_config(dir.path().to_path_buf());
+        push_worker_target_env(&mut config);
+        assert!(target_env(&config).is_empty());
+    }
 }

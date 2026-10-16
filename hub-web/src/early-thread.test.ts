@@ -41,8 +41,8 @@ describe("reading the grid's placeholder (cas-fc2c)", () => {
     expect(gridPlaceholder(grid('<div class="empty"></div>'))).toBe("connecting");
     expect(gridPlaceholder(grid('<div class="conversation-mount conversation-early"></div><div class="empty conversation-opening"></div>'))).toBe("connecting");
     expect(gridPlaceholder(grid('<div class="empty empty-pane-slot"></div>'))).toBe("no-panes");
-    expect(gridPlaceholder(grid('<div class="conversation-mount conversation-thread-slot"></div><div class="pane-host" hidden></div>'))).toBe("none");
+    expect(gridPlaceholder(grid('<div class="conversation-mount conversation-thread-slot"></div>'))).toBe("none");
     // Only the grid's own child counts: the thread's own empty state in its slot does not.
-    expect(gridPlaceholder(grid('<div class="conversation-mount conversation-thread-slot"><div class="empty"></div></div><div class="pane-host" hidden></div>'))).toBe("none");
+    expect(gridPlaceholder(grid('<div class="conversation-mount conversation-thread-slot"><div class="empty"></div></div>'))).toBe("none");
   });
 });

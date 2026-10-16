@@ -110,7 +110,7 @@ class TransportSocket {
 function supervisor(machine: StoredMachine, onState: HubCallbacks["onState"] = () => {}, onMachineEvent: HubCallbacks["onMachineEvent"] = () => {}, onSessions: HubCallbacks["onSessions"] = () => {}): HubConnectionSupervisor {
   const connection = new HubConnectionSupervisor(machine, {
     onState, onSessions, onMachineEvent, onSessionState: () => {},
-    onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+    onOutput: () => {}, onSocketError: () => {},
   });
   supervisors.push(connection);
   return connection;
@@ -140,7 +140,7 @@ describe("Commander live connection lifecycle", () => {
     const history = new ConversationHistory();
     const connection = new HubConnectionSupervisor(await storedMachine("overlapping-attach"), {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
-      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
       onMessageQueued: (_session, receipt) => { history.acknowledge(receipt); },
       onConversationHistory: (_session, page) => { page.messages.forEach(message => history.hydrateSend(message)); },
     });
@@ -226,7 +226,7 @@ describe("Commander live connection lifecycle", () => {
     const state = vi.fn(), error = vi.fn();
     const connection = new HubConnectionSupervisor(machine, {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
-      onSessionState: state, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: error,
+      onSessionState: state, onOutput: () => {}, onSocketError: error,
       onMessageQueued: queued,
     });
     supervisors.push(connection);
@@ -293,7 +293,7 @@ describe("Commander live connection lifecycle", () => {
     const queued = vi.fn();
     const connection = new HubConnectionSupervisor(await storedMachine("drain-lifetime"), {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
-      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
       onMessageQueued: queued,
     });
     supervisors.push(connection);
@@ -954,7 +954,7 @@ describe("Commander live connection lifecycle", () => {
     let written = false;
     const connection: HubConnectionSupervisor = new HubConnectionSupervisor(await storedMachine("session-before-machine"), {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
-      onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
       onAttachState: (session, state) => {
         if (state.phase === "live" && !written) written = connection.send(session, {
           SendMessage: { target: "supervisor", text: "Held in the first tab", client_ref: "held-before-live" },

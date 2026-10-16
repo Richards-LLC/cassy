@@ -746,8 +746,10 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     #[cfg(unix)]
     let target_lease = crate::factory_target_cache::owner::acquire(&cas_root, &repo)?;
+    // cas-3f93: the private target, relocated when `[factory] scratch_root` is set.
+    let target_dir = crate::factory_scratch::worker_target_dir(&repo);
     #[cfg(unix)]
-    discard_shared_fingerprints(&repo.join("target"))?;
+    discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
     if let Some(reason) = &host_path_opt_out {
@@ -809,7 +811,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     command
         .args(&cargo_args)
         .current_dir(&repo)
-        .env("CARGO_TARGET_DIR", repo.join("target"))
+        .env("CARGO_TARGET_DIR", &target_dir)
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
@@ -1200,6 +1202,39 @@ printf '%s\n' "$@" > target/cargo-args"#);
         assert!(scope_args.contains("MemoryHigh=3221225472\n"), "{scope_args}");
         // pin: the external build receives exactly the admitted Cargo argv.
         assert_eq!(std::fs::read_to_string(repo.join("target/cargo-args")).unwrap(), "check\n-p\ncas\n--lib\n");
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
+    /// cas-3f93: with `[factory] scratch_root` set the capped check builds
+    /// into the worker's relocated private target, under its lifetime lease,
+    /// and never creates in-tree build output.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_root_worker_check_builds_into_relocated_target() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let scratch = dir.path().join("rewind");
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let expected = scratch
+            .join(cas_types::factory_scratch::project_key(&root))
+            .join("targets/worker");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, &format!(
+            "[ \"$CARGO_TARGET_DIR\" = {:?} ] || exit 4\n[ -f \"$CARGO_TARGET_DIR/{}\" ] || exit 5\necho run >> \"$CARGO_TARGET_DIR/runs\"",
+            expected.display().to_string(),
+            crate::factory_target_cache::owner::MARKER,
+        ));
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo).unwrap();
+        assert_eq!(std::fs::read_to_string(expected.join("runs")).unwrap(), "run\n");
+        assert!(!repo.join("target/debug").exists());
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
     }
 

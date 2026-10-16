@@ -565,6 +565,15 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
+    /// cas-3f93: absolute base for regenerable worker build output. When set,
+    /// each managed worker's Cargo target lives at
+    /// `<scratch_root>/<project-key>/targets/<worktree>` and target baselines
+    /// at `<scratch_root>/<project-key>/build-cache`, so they can sit on a
+    /// dedicated scratch drive. Unset keeps `<worktree>/target` and
+    /// `.cas/build-cache`. Running workers migrate on respawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_root: Option<String>,
+
     /// Operator-only automatic supervisor replies in local history. Terminal
     /// questions and explicit operator messages are recorded separately. This
     /// does not enroll a cloud audience. Set false to opt out; re-enabling
@@ -970,6 +979,7 @@ impl Default for FactoryConfig {
             worker_denied_clis: default_worker_denied_clis(),
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
+            scratch_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),
             message_max_chars: default_message_max_chars(),
@@ -1040,27 +1050,8 @@ pub fn project_factory_artifacts_root(
     cas_root: &std::path::Path,
     artifacts_base: &std::path::Path,
 ) -> std::path::PathBuf {
-    use sha2::{Digest, Sha256};
-    let store = cas_root
-        .canonicalize()
-        .unwrap_or_else(|_| cas_root.to_path_buf());
-    let label = store
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("project")
-        .chars()
-        .take(48)
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let hash = Sha256::digest(store.as_os_str().as_encoded_bytes());
-    artifacts_base.join(format!("{label}-{hash:x}"))
+    // cas-3f93: the scratch root namespaces projects with the same key.
+    artifacts_base.join(cas_types::factory_scratch::project_key(cas_root))
 }
 
 /// Resolve the artifact base and its writable project namespace together.

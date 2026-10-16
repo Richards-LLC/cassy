@@ -3264,7 +3264,18 @@ pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
     };
     match harness {
         SupervisorCli::Claude => true,
-        SupervisorCli::Codex => home.join(".codex").is_dir(),
+        // cas-e1f4: once ~/.codex is retired as an account, a named home or
+        // the shared base still means Codex is installed.
+        SupervisorCli::Codex => {
+            home.join(".codex").is_dir()
+                || crate::accounts::Provider::Codex.base_dir(&home).is_dir()
+                || std::fs::read_dir(&home).is_ok_and(|entries| {
+                    entries.flatten().any(|entry| {
+                        entry.file_name().to_str().is_some_and(|name| name.starts_with(".codex-"))
+                            && entry.path().is_dir()
+                    })
+                })
+        }
         SupervisorCli::Grok => home.join(".grok").is_dir(),
         SupervisorCli::OpenCode => {
             let config = std::env::var_os("XDG_CONFIG_HOME")

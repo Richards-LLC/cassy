@@ -511,19 +511,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, imported, decode(encodedSignature), new TextEncoder().encode(`${encodedHeader}.${encodedClaims}`))).toBe(true);
   });
 
-  // Contract: approved Ghostty WASM bytes retain their pinned integrity.
-  // Consumer: the Ghostty terminal runtime loading these vendored artifacts.
-  it("pins the green Ghostty WASM spike artifacts by integrity", async () => {
-    const cases = [
-      ["terminal/ghostty/vendor/ghostty-vt.wasm", "6b1df1a96d59adc26360c312924898dbc122f980c17a32eb1624e48795b83f7e"],
-      ["terminal/ghostty/vendor/ghostty-write-pty.wasm", "75cb147e98ede3f85f3cd6236a30f6d12565b0b237e1d8db941f5f3e8ad3d903"],
-    ];
-    for (const [path, expected] of cases) {
-      const bytes = await readFile(new URL(path, import.meta.url));
-      expect(createHash("sha256").update(bytes).digest("hex")).toBe(expected);
-    }
-  });
-
   // Contract: keeps long-lived credentials out of ambient browser storage and URL channels.
   // Consumer: IndexedDB credential catalog and DPoP signing code; ambient-channel security audit (not a runtime proof).
   // Structural contract retained.
@@ -589,16 +576,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(recovery).toContain("requestControl(session, true);");
     // pin: successful recovery returns the holder so Interrupt can name it.
     expect(recovery).toContain("return { taken: leases.get(key)?.held_by_me === true, holder };");
-  });
-
-  // Contract: never caches an asynchronously-created terminal against a detached render.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("never caches an asynchronously-created terminal against a detached render", async () => {
-    const source = await readSource("main.ts");
-    expect(source).toContain("existingSurface.element !== mount || !existingSurface.element.isConnected");
-    expect(source).toContain("!mount.isConnected || currentMount !== mount");
-    expect(source).toContain("surface.dispose();");
   });
 
   // Contract: preserves the active pane grid across lease and status renders.
@@ -708,12 +685,10 @@ describe("binding Cassy Cloud browser invariants", () => {
   // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
   // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps the section 2 visual system tokenized and machine copy mono", async () => {
-    const [main, css, html, renderer, surface] = await Promise.all([
+    const [main, css, html] = await Promise.all([
       "main.ts",
       "styles.css",
       "../index.html",
-      "terminal/ghostty/renderer.ts",
-      "terminal/ghostty/surface.ts",
     ].map((path) => readSource(path)));
     expect(css).toContain('@import "./tokens.css";');
     expect(css).not.toContain(":root {");
@@ -734,9 +709,6 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(shadows.filter((value) => value === "var(--shadow-overlay)")).toHaveLength(2);
     expect(shadows.filter((value) => value === "none")).toHaveLength(2);
     for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head|-sup)?)\))$/);
-    expect(renderer).not.toContain('"700"');
-    expect(surface).not.toContain('"normal 700"');
-    expect(surface).not.toContain('"italic 700"');
   });
 
   // Contract: keeps palette and picker states readable and distinct in every colour mode (cas-78c81).
@@ -807,17 +779,17 @@ describe("binding Cassy Cloud browser invariants", () => {
     }
   });
 
-  // cas-37f8, cas-0546: Commander never sizes a pane. Its hidden surface is
-  // pinned to the pane's real grid and no ResizePane is ever sent.
-  // Consumer: Commander application render and event handlers (main.ts), operating the hidden pane host.
-  it("never sends a pane size and pins the hidden surface to the pane's real grid", async () => {
-    const source = await readSource("main.ts");
+  // cas-37f8, cas-0546, cas-f285: Commander never sizes a pane, types into one
+  // or asks for its keyframe; no terminal emulator runs in it at all.
+  // Consumer: Commander application render and event handlers (main.ts) and the hub connection.
+  it("never sizes, types into or keyframes a pane, and runs no terminal emulator", async () => {
+    const [source, connection] = await Promise.all(["main.ts", "connection.ts"].map((path) => readSource(path)));
     expect(source).not.toContain("ResizePane");
     expect(source).not.toMatch(/\bInput: \{ pane_id/);
-    expect(source).toContain("onResize: () => undefined,");
-    expect(source).toContain("onData: () => undefined,");
-    expect(source).toContain("surfaces.get(key)?.setAuthoritativeSize({ cols, rows });");
-    expect(source).toContain("surface.setAuthoritativeSize(paneGrid(key, state));");
+    for (const text of [source, connection]) {
+      expect(text).not.toMatch(/RequestPaneKeyframe|requestPaneKeyframe/);
+      expect(text).not.toMatch(/ghostty|createTerminalSurface|TerminalSurface/i);
+    }
   });
 
   // Contract: keeps retrying opaque authenticated reads without claiming a pairing refusal.
@@ -833,7 +805,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       if (new URL(String(input)).pathname === "/v1/health") {
@@ -876,7 +848,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
 
@@ -940,7 +912,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       } satisfies StoredMachine;
       const callbacks = {
         onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-        onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+        onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
       } satisfies HubCallbacks;
       const supervisor = new HubConnectionSupervisor(machine, callbacks);
       const internals = supervisor as unknown as { desired: boolean; attachRetryTimers: Map<string, number> };
@@ -979,7 +951,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     const states: ConnectionState[] = [];
     const callbacks = {
       onState: (state: ConnectionState) => states.push(state), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const startedAt = Date.now();
@@ -1026,7 +998,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     (supervisor as unknown as { desired: boolean }).desired = true;
@@ -1126,32 +1098,14 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toMatch(/grid\.querySelector(<HTMLElement>)?\("\.empty"\)/);
   });
 
-  // Contract: puts the conversation up before its pane surface loads (cas-04ee), in its own
-  // visible slot beside the hidden pane host, never inside it (cas-0546).
+  // Contract: the conversation mounts straight into the stage's slot (cas-04ee,
+  // cas-f285): no pane host, terminal mount or surface stands beside it.
   // Consumer: Commander application render and event handlers (main.ts), operating the conversation surface.
-  it("puts the conversation up before its pane surface loads, outside the hidden host (cas-04ee, cas-0546)", async () => {
+  it("mounts the conversation straight into the stage, with no pane host (cas-04ee, cas-f285)", async () => {
     const main = await readSource("main.ts");
-    const premount = main.indexOf("mountConversation(key, slot);");
-    expect(premount).toBeGreaterThan(-1);
-    expect(premount).toBeLessThan(main.indexOf("const surface = await createTerminalSurface(mount, {"));
-    // The thread mounts in the stage's slot; only the surface mounts in the host.
-    expect(main).toContain("const { slot, host } = ensureConversationStage(grid);");
-    expect(main).not.toMatch(/mountConversation\([^)]*mount\)/);
-    expect(main).toContain("surface.setCanvasPainting(false);");
-  });
-
-  // Contract: requests an authoritative supervisor keyframe before lazily mounted workers.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {
-    const [connection, main] = await Promise.all(["connection.ts", "main.ts"].map((path) => readSource(path)));
-    expect(connection.indexOf("this.requestPaneKeyframe(session, supervisor.id)")).toBeLessThan(
-      connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
-    );
-    expect(connection).not.toContain("welcome.scrollback, true");
-    // cas-0546: only the supervisor's pane is mounted, so only it asks for a keyframe.
-    expect(main).toContain("connections.get(machineId)?.requestPaneKeyframe(session, paneId);");
-    expect(main).not.toContain("requestPaneKeyframe(session, pane.id)");
+    expect(main).toContain("const slot = ensureConversationStage(grid);");
+    expect(main).toContain("mountConversation(key, slot);");
+    expect(main).not.toMatch(/pane-host|terminal-mount|setCanvasPainting/);
   });
 
   it("multiplexes sessions on one proto-2 socket and routes raw PTY binary frames", async () => {
@@ -1188,7 +1142,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onScrollbackPage: vi.fn(),
       onFlowControlReset: vi.fn(), onSocketError: vi.fn(), onConversationHistory: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
@@ -1209,11 +1163,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(socket.sent.map((value) => JSON.parse(value))).toEqual(expect.arrayContaining([
       { proto: 2 },
       { channel: "events", subscribe: true },
-      // Supervisors only by default (cas-6261): the subscribe names workers off.
-      { channel: "pty:factory-a", subscribe: true, workers: false },
-      { channel: "pty:factory-b", subscribe: true, workers: false },
+      // Supervisors only (cas-6261): the hub never streams workers, so the subscribe names none.
+      { channel: "pty:factory-a", subscribe: true },
+      { channel: "pty:factory-b", subscribe: true },
     ]));
-    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true, workers: false }))).toHaveLength(1);
+    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true }))).toHaveLength(1);
 
     socket.receive(JSON.stringify({
       channel: "pty:factory-a",
@@ -1221,9 +1175,21 @@ describe("binding Cassy Cloud browser invariants", () => {
         session_name: "factory-a",
         state: { focused_pane: "supervisor", panes: [{ id: "supervisor", kind: "Supervisor" }] },
         protocol_version: 3,
-        capabilities: ["authoritative_pane_keyframes"],
+        capabilities: ["authoritative_pane_keyframes", "paged_scrollback"],
+        pane_bootstrap: [{ pane_id: "supervisor", epoch: 1788970165000, cols: 100, rows: 28, scrollback_start_row: 0, scrollback_end_row: 412 }],
       } },
     }));
+    // cas-f285: no terminal runs here, so no keyframe is asked for; the pane's
+    // rows are read through its announced generation instead.
+    expect(socket.sent.some((value) => value.includes("RequestPaneKeyframe"))).toBe(false);
+    expect(callbacks.onSessionState).toHaveBeenCalledWith("factory-a", expect.objectContaining({ focused_pane: "supervisor" }), undefined);
+    expect(supervisor.paneBootstrap("factory-a", "supervisor")).toMatchObject({ epoch: 1788970165000, scrollback_end_row: 412 });
+    expect(supervisor.requestScrollback("factory-a", "supervisor", 1788970165000, 212, 200)).toBe(true);
+    expect(socket.sent.map((value) => JSON.parse(value) as Record<string, any>).find((value) => value.message?.ScrollbackRequest)?.message.ScrollbackRequest)
+      .toEqual({ pane_id: "supervisor", generation: 1788970165000, start_row: 212, count: 200 });
+    const page = { pane_id: "supervisor", generation: 1788970165000, start_row: 212, next_row: 213, rows: [{ screen_row: 212, text: "ready", style_runs: [] }] };
+    socket.receive(JSON.stringify({ channel: "pty:factory-a", message: { ScrollbackPage: page } }));
+    expect(callbacks.onScrollbackPage).toHaveBeenCalledWith("factory-a", page);
     const historyRequest = socket.sent
       .map((value) => JSON.parse(value) as Record<string, any>)
       .find((value) => value.channel === "pty:factory-a" && value.message?.ConversationHistoryRequest);
@@ -1252,7 +1218,7 @@ describe("binding Cassy Cloud browser invariants", () => {
 
     socket.receive(JSON.stringify({ channel: "pty:factory-a", keyframe_required: { skipped: 200 } }));
     expect(callbacks.onFlowControlReset).toHaveBeenCalledWith("factory-a");
-    expect(socket.sent.some((value) => value.includes("RequestPaneKeyframe"))).toBe(true);
+    expect(socket.sent.some((value) => value.includes("RequestPaneKeyframe"))).toBe(false);
     supervisor.stop();
   });
 
@@ -1285,7 +1251,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const internals = supervisor as unknown as {
@@ -1409,7 +1375,7 @@ describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
     } satisfies StoredMachine;
     const callbacks = {
       onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
-      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     let calls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => replies(new URL(String(input)).pathname, calls++));

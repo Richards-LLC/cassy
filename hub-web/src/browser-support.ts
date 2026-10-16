@@ -43,8 +43,7 @@ export const REQUIRED_BROWSER_APIS: readonly BrowserRequirement[] = [
   { api: "Array.prototype.toSorted", usedBy: "main.ts, attention-view.ts, launch-session.ts", area: "app", since: { chrome: 110, edge: 110, firefox: 115, safari: "16.4" } },
   { api: "HTMLDialogElement.prototype.showModal", usedBy: "main.ts, launch-session.ts", area: "app", since: { chrome: 37, edge: 79, firefox: 98, safari: "15.4" } },
   { api: "crypto.subtle", usedBy: "dpop.ts", area: "transport", since: { chrome: 37, edge: 79, firefox: 34, safari: "11" } },
-  { api: "ResizeObserver", usedBy: "terminal/ghostty/surface.ts", area: "app", since: { chrome: 64, edge: 79, firefox: 69, safari: "13.1" } },
-  { api: "WebAssembly.instantiate", usedBy: "terminal/ghostty/runtime.ts", area: "app", since: { chrome: 57, edge: 16, firefox: 52, safari: "11" } },
+  { api: "ResizeObserver", usedBy: "main.ts", area: "app", since: { chrome: 64, edge: 79, firefox: 69, safari: "13.1" } },
 ];
 
 type Probe = (api: string) => boolean;
@@ -56,8 +55,6 @@ const DEFAULT_PROBES: Record<string, () => boolean> = {
     typeof (globalThis as { HTMLDialogElement?: { prototype?: { showModal?: unknown } } }).HTMLDialogElement?.prototype?.showModal === "function",
   "crypto.subtle": () => typeof globalThis.crypto?.subtle?.importKey === "function",
   "ResizeObserver": () => typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === "function",
-  "WebAssembly.instantiate": () =>
-    typeof (globalThis as { WebAssembly?: { instantiate?: unknown } }).WebAssembly?.instantiate === "function",
 };
 
 function defaultProbe(api: string): boolean {

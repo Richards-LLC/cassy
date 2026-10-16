@@ -158,6 +158,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.scratch_root",
+        section: "factory",
+        name: "Worker Build Scratch Root",
+        description: "Absolute base for regenerable worker build output. When set, each factory worker's Cargo target lives at <root>/<project-key>/targets/<worktree> and published target baselines at <root>/<project-key>/build-cache, which must share one filesystem so seeding can hard-link. Empty keeps <worktree>/target and .cas/build-cache. Running workers move on respawn; rebuild the baseline with scripts/refresh-worker-build-cache.sh after changing it.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "scratch", "target", "cargo", "build-cache", "disk", "drive", "cache"],
+        use_cases: &[
+            "Put worker Cargo targets and build-cache baselines on a dedicated scratch drive such as /mnt/rewind/cas",
+            "Leave empty to keep targets inside each worker checkout",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.message_max_chars",
         section: "factory",
         name: "Agent Message Character Cap",

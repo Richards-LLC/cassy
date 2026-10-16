@@ -7,7 +7,11 @@
 //! 1. an open task whose delivery commit is on the default branch: a
 //!    non-merge commit whose subject names the task;
 //! 2. an open epic whose children have all closed or been cancelled;
-//! 3. an open task idle for [`IDLE_DAYS`] or more.
+//! 3. an open task idle for [`IDLE_DAYS`] or more;
+//! 4. an open task whose cited code is all gone (cas-d9038): every file path
+//!    or qualified symbol it names is absent from the default branch, and git
+//!    history dates each removal. Citations git never saw (planned code, typos)
+//!    do not count either way.
 //!
 //! Each finding carries its evidence. Kinds 1 and 2 also carry the one call
 //! that closes them through the ordinary close gates; nothing here closes,
@@ -65,6 +69,62 @@ pub(crate) struct IdleOpen {
     pub idle_days: i64,
 }
 
+/// What a cited piece of code is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CitationKind {
+    File,
+    Symbol,
+}
+
+/// One cited path or symbol that the default branch no longer has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoneCitation {
+    pub kind: CitationKind,
+    /// The path, or the symbol as the task wrote it.
+    pub cited: String,
+    /// The commit that removed it, short form.
+    pub removed_in: String,
+    /// That commit's date, `YYYY-MM-DD`.
+    pub removed_on: String,
+}
+
+/// Kind 4: an open task whose every dated citation is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleCitations {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub gone: Vec<GoneCitation>,
+}
+
+/// How much kind 4 may spend. Tree checks are one `ls-tree` and one batched
+/// `grep`; each symbol's removal date is a `git log -S` bounded to the task's
+/// lifetime, and those are capped and timed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CitationBudget {
+    /// Open tasks whose text is read for citations.
+    pub max_tasks: usize,
+    /// `git log -S` lookups for removed symbols.
+    pub max_symbol_lookups: usize,
+    /// Wall time for all removal lookups.
+    pub lookup_deadline: std::time::Duration,
+}
+
+impl CitationBudget {
+    /// `cas doctor`: thorough.
+    pub(crate) const DOCTOR: Self = Self {
+        max_tasks: 500,
+        max_symbol_lookups: 40,
+        lookup_deadline: std::time::Duration::from_secs(10),
+    };
+    /// A supervisor's SessionStart: a fraction of the hook's budget.
+    pub(crate) const SESSION_START: Self = Self {
+        max_tasks: 200,
+        max_symbol_lookups: 6,
+        lookup_deadline: std::time::Duration::from_millis(1_500),
+    };
+}
+
 /// What one scan found.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BacklogReport {
@@ -75,12 +135,236 @@ pub(crate) struct BacklogReport {
     pub delivered: Vec<DeliveredOpen>,
     pub finished_epics: Vec<FinishedEpic>,
     pub idle: Vec<IdleOpen>,
+    /// Kind 4 (cas-d9038).
+    pub stale_citations: Vec<StaleCitations>,
+    /// Open tasks kind 4 could not finish within its budget.
+    pub citations_unchecked: usize,
 }
 
 impl BacklogReport {
     pub(crate) fn is_clean(&self) -> bool {
-        self.delivered.is_empty() && self.finished_epics.is_empty() && self.idle.is_empty()
+        self.delivered.is_empty()
+            && self.finished_epics.is_empty()
+            && self.idle.is_empty()
+            && self.stale_citations.is_empty()
     }
+}
+
+/// File paths (with at least one directory) and qualified symbols cited in
+/// `text`, each once, in order of first mention. A `:line` suffix is dropped;
+/// URLs and absolute paths are not citations of the tree.
+pub(crate) fn extract_citations(text: &str) -> (Vec<String>, Vec<String>) {
+    use std::sync::LazyLock;
+    // A path starts after a delimiter, so the middle of a URL or an absolute
+    // path never matches; it needs a directory and an extension.
+    static FILE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?:^|[\s`'"(\[<,;])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,6})(?::\d+(?:-\d+)?)?"#,
+        )
+        .expect("file citation pattern")
+    });
+    static SYMBOL: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?:^|[^A-Za-z0-9_:])((?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*)")
+            .expect("symbol citation pattern")
+    });
+    let mut files: Vec<String> = Vec::new();
+    for capture in FILE.captures_iter(text) {
+        let path = capture[1].trim_start_matches("./").to_string();
+        if !path.contains("..") && !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    let mut symbols: Vec<String> = Vec::new();
+    for capture in SYMBOL.captures_iter(text) {
+        let symbol = capture[1].to_string();
+        if symbol_is_distinctive(&symbol) && !symbols.contains(&symbol) {
+            symbols.push(symbol);
+        }
+    }
+    (files, symbols)
+}
+
+/// The identifier a qualified symbol is looked up by: its last segment.
+fn symbol_identifier(symbol: &str) -> &str {
+    symbol.rsplit("::").next().unwrap_or(symbol)
+}
+
+/// Short or plain last segments (`fmt`, `User`, `new`) occur everywhere, so
+/// their presence proves nothing; only distinctive ones are tested.
+fn symbol_is_distinctive(symbol: &str) -> bool {
+    let identifier = symbol_identifier(symbol);
+    identifier.contains('_') || identifier.chars().count() >= 8
+}
+
+fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run git {}: {error}", args.first().unwrap_or(&"")))?;
+    // `git grep` exits 1 when nothing matched.
+    if output.status.success() || (args.first() == Some(&"grep") && output.status.code() == Some(1)) {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// `(short sha, date)` of the newest commit on `reference` that `args`
+/// select, or `None` when git saw no such commit.
+fn dated_commit(repo: &Path, reference: &str, args: &[&str]) -> Option<(String, String)> {
+    let mut full = vec!["log", "-1", "--format=%h%x1f%cs", reference];
+    full.extend_from_slice(args);
+    let output = git_stdout(repo, &full).ok()?;
+    let (sha, date) = output.trim().split_once('\u{1f}')?;
+    (!sha.is_empty()).then(|| (sha.to_string(), date.to_string()))
+}
+
+/// Kind 4 against `reference` in `repo`.
+///
+/// A task counts when it cites code, none of what it cites is on
+/// `reference`, and git dates at least one removal: a file by its deleting
+/// commit, a symbol by the newest commit that changed how often its
+/// identifier occurs (`git log -S`, bounded to the task's lifetime). A
+/// citation git never saw, such as code a task plans to write, is set aside
+/// rather than called gone. Returns the findings and how many open tasks the
+/// budget left unchecked.
+pub(crate) fn stale_citations(
+    repo: &Path,
+    reference: &str,
+    tasks: &[Task],
+    budget: CitationBudget,
+) -> (Vec<StaleCitations>, usize) {
+    let open: Vec<&Task> = tasks
+        .iter()
+        .filter(|task| task.is_open() && task.task_type != TaskType::Epic)
+        .collect();
+    let mut unchecked = open.len().saturating_sub(budget.max_tasks);
+    let cited: Vec<(&Task, Vec<String>, Vec<String>)> = open
+        .into_iter()
+        .take(budget.max_tasks)
+        .filter_map(|task| {
+            let (files, symbols) = extract_citations(&format!(
+                "{}\n{}\n{}",
+                task.title, task.description, task.notes
+            ));
+            (!files.is_empty() || !symbols.is_empty()).then_some((task, files, symbols))
+        })
+        .collect();
+    if cited.is_empty() {
+        return (Vec::new(), unchecked);
+    }
+    let Ok(tree) = git_stdout(repo, &["ls-tree", "-r", "--name-only", reference]) else {
+        return (Vec::new(), unchecked + cited.len());
+    };
+    let tree: std::collections::HashSet<&str> = tree.lines().collect();
+    let mut identifiers: Vec<&str> = cited
+        .iter()
+        .flat_map(|(_, _, symbols)| symbols.iter().map(|symbol| symbol_identifier(symbol)))
+        .collect();
+    identifiers.sort_unstable();
+    identifiers.dedup();
+    let present: std::collections::HashSet<String> = if identifiers.is_empty() {
+        Default::default()
+    } else {
+        let mut args = vec!["grep", "-o", "-h", "-w", "-F"];
+        for identifier in &identifiers {
+            args.push("-e");
+            args.push(identifier);
+        }
+        args.push(reference);
+        args.push("--");
+        match git_stdout(repo, &args) {
+            Ok(output) => output.lines().map(str::to_string).collect(),
+            Err(_) => return (Vec::new(), unchecked + cited.len()),
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut lookups = 0usize;
+    let mut found = Vec::new();
+    'tasks: for (task, files, symbols) in cited {
+        let live = files.iter().any(|file| tree.contains(file.as_str()))
+            || symbols.iter().any(|symbol| present.contains(symbol_identifier(symbol)));
+        if live {
+            continue;
+        }
+        let mut gone = Vec::new();
+        for file in &files {
+            if let Some((sha, date)) =
+                dated_commit(repo, reference, &["--diff-filter=D", "--", file.as_str()])
+            {
+                gone.push(GoneCitation {
+                    kind: CitationKind::File,
+                    cited: file.clone(),
+                    removed_in: sha,
+                    removed_on: date,
+                });
+            }
+        }
+        let since = format!(
+            "--since={}",
+            (task.created_at - chrono::Duration::days(30)).to_rfc3339()
+        );
+        for symbol in &symbols {
+            if lookups >= budget.max_symbol_lookups || started.elapsed() >= budget.lookup_deadline {
+                unchecked += 1;
+                continue 'tasks;
+            }
+            lookups += 1;
+            let pickaxe = format!("-S{}", symbol_identifier(symbol));
+            if let Some((sha, date)) = dated_commit(repo, reference, &[&pickaxe, &since]) {
+                gone.push(GoneCitation {
+                    kind: CitationKind::Symbol,
+                    cited: symbol.clone(),
+                    removed_in: sha,
+                    removed_on: date,
+                });
+            }
+        }
+        if !gone.is_empty() {
+            found.push(StaleCitations {
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                status: task.status.to_string(),
+                gone,
+            });
+        }
+    }
+    found.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+    (found, unchecked)
+}
+
+/// One kind-4 line: the task and each removal, with a call to review.
+pub(crate) fn stale_citation_line(finding: &StaleCitations) -> String {
+    const SHOWN: usize = 3;
+    let mut removals: Vec<String> = finding
+        .gone
+        .iter()
+        .take(SHOWN)
+        .map(|gone| {
+            format!(
+                "{} removed in {} ({})",
+                clip(&gone.cited, 40),
+                gone.removed_in,
+                gone.removed_on
+            )
+        })
+        .collect();
+    if finding.gone.len() > SHOWN {
+        removals.push(format!("+{} more", finding.gone.len() - SHOWN));
+    }
+    format!(
+        "{} ({}) \"{}\": cites only removed code: {}. Worth a review; nothing closes it.",
+        finding.task_id,
+        finding.status,
+        clip(&finding.title, 50),
+        removals.join("; "),
+    )
 }
 
 /// Kind 1 over `commits` (the default branch's non-merge history, newest
@@ -170,6 +454,15 @@ pub(crate) fn idle_open(tasks: &[Task], now: DateTime<Utc>) -> Vec<IdleOpen> {
 /// task store; kind 1 also reads the default branch of the project's git
 /// repository (the store's parent directory), and says why when it cannot.
 pub(crate) fn scan(cas_root: &Path, now: DateTime<Utc>) -> Result<BacklogReport, String> {
+    scan_with(cas_root, now, CitationBudget::DOCTOR)
+}
+
+/// [`scan`] with kind 4 bounded by `budget`.
+pub(crate) fn scan_with(
+    cas_root: &Path,
+    now: DateTime<Utc>,
+    budget: CitationBudget,
+) -> Result<BacklogReport, String> {
     let store = crate::store::open_task_store_local(cas_root).map_err(|error| error.to_string())?;
     let tasks = store.list(None).map_err(|error| error.to_string())?;
     let deps = store
@@ -195,6 +488,8 @@ pub(crate) fn scan(cas_root: &Path, now: DateTime<Utc>) -> Result<BacklogReport,
                 Ok(commits) => report.delivered = delivered_open(&tasks, &commits),
                 Err(error) => report.delivery_unknown = Some(error),
             }
+            (report.stale_citations, report.citations_unchecked) =
+                stale_citations(repo, &reference, &tasks, budget);
             report.default_ref = Some(reference);
         }
         Err(error) => report.delivery_unknown = Some(error),
@@ -291,11 +586,12 @@ fn short(sha: &str) -> &str {
 /// `1 delivered but open, 2 finished epics open, 3 idle 14+ days`.
 pub(crate) fn summary_line(report: &BacklogReport) -> String {
     format!(
-        "{} delivered but open, {} finished epic{} open, {} idle {IDLE_DAYS}+ days",
+        "{} delivered but open, {} finished epic{} open, {} idle {IDLE_DAYS}+ days, {} citing removed code",
         report.delivered.len(),
         report.finished_epics.len(),
         if report.finished_epics.len() == 1 { "" } else { "s" },
         report.idle.len(),
+        report.stale_citations.len(),
     )
 }
 
@@ -368,6 +664,7 @@ pub(crate) fn session_start_block(report: &BacklogReport) -> Option<(String, Str
     take(report.delivered.iter().map(|f| delivered_line(f, reference)).collect(), 3, &mut lines);
     take(report.finished_epics.iter().map(epic_line).collect(), 2, &mut lines);
     take(report.idle.iter().map(idle_line).collect(), 2, &mut lines);
+    take(report.stale_citations.iter().map(stale_citation_line).collect(), 2, &mut lines);
     let mut full = head.clone();
     let tail_reserve = 80;
     let mut shown = 0usize;
@@ -399,7 +696,7 @@ pub(crate) fn session_start_block_for_role(
     if role != Some("supervisor") {
         return None;
     }
-    session_start_block(&scan(cas_root, now).ok()?)
+    session_start_block(&scan_with(cas_root, now, CitationBudget::SESSION_START).ok()?)
 }
 
 /// The SessionStart block's byte cap.

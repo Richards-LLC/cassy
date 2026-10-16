@@ -33,13 +33,19 @@ cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
+if [[ "${FAKE_GH_FAILURE:-}" == list && "$*" == *'actions/runs?status=queued&per_page=100'* ]] ||
+   [[ "${FAKE_GH_FAILURE:-}" == status && "$*" == *'actions/runs/101 --jq .status'* ]] ||
+   [[ "${FAKE_GH_FAILURE:-}" == cancel && "$*" == *'actions/runs/101/cancel'* ]]; then
+    echo 'gh: Resource not accessible by integration (HTTP 403)' >&2
+    exit 1
+fi
 case "$*" in
   *'event=merge_group&status=in_progress&per_page=100'*)
     printf '%s\n' '{"workflow_runs":[{"id":201,"name":"CI","run_started_at":"1970-01-01T00:00:00Z","created_at":"1970-01-01T00:00:00Z","head_branch":"queue","status":"in_progress"},{"id":202,"name":"CI","run_started_at":"1970-01-01T00:31:00Z","created_at":"1970-01-01T00:31:00Z","head_branch":"fresh","status":"in_progress"},{"id":203,"name":"Other workflow","run_started_at":"1970-01-01T00:00:00Z","created_at":"1970-01-01T00:00:00Z","head_branch":"other","status":"in_progress"}]}' ;;
   *'event=merge_group&status=queued&per_page=100'*)
     printf '%s\n' '{"workflow_runs":[{"id":204,"name":"CI","run_started_at":null,"created_at":"1970-01-01T00:00:00Z","head_branch":"queued","status":"queued"},{"id":205,"name":"CI","run_started_at":null,"created_at":"1970-01-01T00:00:00Z","head_branch":"raced","status":"queued"}]}' ;;
   *'actions/runs?status=queued&per_page=100'*)
-    printf '%s\n' '{"workflow_runs":[{"id":101,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"main"},{"id":102,"created_at":"1970-01-01T00:00:00Z","event":"merge_group","head_branch":"queue"},{"id":103,"created_at":"1970-01-01T00:31:00Z","event":"pull_request","head_branch":"fresh"},{"id":104,"created_at":"1970-01-01T00:00:00Z","event":"workflow_dispatch","head_branch":"raced"},{"id":105,"created_at":"not-a-date","event":"push","head_branch":"invalid"}]}' ;;
+    printf '%s\n' '{"workflow_runs":[{"id":101,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"main"},{"id":102,"created_at":"1970-01-01T00:00:00Z","event":"merge_group","head_branch":"queue"},{"id":103,"created_at":"1970-01-01T00:31:00Z","event":"pull_request","head_branch":"fresh"},{"id":104,"created_at":"1970-01-01T00:00:00Z","event":"workflow_dispatch","head_branch":"raced"},{"id":105,"created_at":"not-a-date","event":"push","head_branch":"invalid"},{"id":106,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"next"}]}' ;;
   *'actions/runs/201/jobs?filter=latest&per_page=100'*|*'actions/runs/204/jobs?filter=latest&per_page=100'*)
     printf '%s\n' '{"jobs":[{"name":"Fast Validation — suite archive build","status":"in_progress","started_at":"1970-01-01T00:00:00Z","created_at":"1970-01-01T00:00:00Z"}]}' ;;
   *'actions/runs/202/jobs?filter=latest&per_page=100'*)
@@ -52,6 +58,7 @@ case "$*" in
   *'actions/runs/204 --jq .status'*) printf 'queued\n' ;;
   *'actions/runs/205 --jq .status'*) printf 'queued\n' ;;
   *'actions/runs/101 --jq .status'*) printf 'queued\n' ;;
+  *'actions/runs/106 --jq .status'*) printf 'queued\n' ;;
   *'actions/runs/104 --jq .status'*) printf 'completed\n' ;;
   *'--method POST'*'actions/runs/'*) exit 0 ;;
   *) printf 'unexpected fake gh invocation: %s\n' "$*" >&2; exit 2 ;;
@@ -89,6 +96,27 @@ if env "${run_env[@]}" "$queued_script" >"$queued_output" 2>&1; then
 else
     printf 'FAIL queued watchdog fixture exits successfully\n' >&2; fail=$((fail + 1))
 fi
+
+# Per-run permission errors must not prevent later eligible runs being swept.
+for failure in status cancel list; do
+    : >"$tmp/gh.log"
+    output="$tmp/$failure-error-output"
+    if env "${run_env[@]}" FAKE_GH_FAILURE="$failure" "$queued_script" >"$output" 2>&1; then result=0; else result=$?; fi
+    text="$(<"$output")"; log="$(<"$tmp/gh.log")"
+    if [[ "$failure" == list ]]; then
+        if (( result != 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo 'FAIL list error must fail the job' >&2; fi
+        expect_text "$text" 'error: queued list failed call=GET repos/example/repo/actions/runs?status=queued&per_page=100' 'list permission failure names call'
+        expect_absent "$log" 'actions/runs/101' 'failed list performs no per-run calls'
+    else
+        if (( result == 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $failure error must not fail sweep" >&2; fi
+        expect_text "$text" "warning: $failure failed run=101 call=" "$failure permission failure names call and run"
+        expect_text "$log" 'actions/runs/106/cancel' "$failure error still sweeps later run"
+        if [[ "$failure" == status ]]; then
+            expect_absent "$log" 'actions/runs/101/cancel' 'failed status never attempts cancel'
+        fi
+    fi
+    expect_text "$text" 'HTTP 403' "$failure failure retains underlying cause"
+done
 
 for script in "$merge_script" "$queued_script"; do
     dry_output="$tmp/$(basename "$script").dry-output"

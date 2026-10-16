@@ -332,41 +332,6 @@ fn init_logging(cli: &cli::Cli) {
         if log_dir.exists() {
             let _ = logging::cleanup_old_logs(&log_dir, logging_config.retention_days);
         }
-
-        // Clean up obsolete vector/embedding files (semantic search removed)
-        cleanup_vector_files(root);
-    }
-}
-
-/// Clean up obsolete vector and embedding files from previous versions.
-/// Semantic search has been removed, so these files are no longer needed.
-fn cleanup_vector_files(cas_root: &std::path::Path) {
-    use std::fs;
-    use tracing::debug;
-
-    // Files to delete
-    let files_to_delete = ["vectors.hnsw", "vectors.meta.json"];
-
-    for filename in &files_to_delete {
-        let path = cas_root.join(filename);
-        if path.exists() {
-            match fs::remove_file(&path) {
-                Ok(()) => debug!("Removed obsolete file: {}", path.display()),
-                Err(e) => debug!("Failed to remove {}: {}", path.display(), e),
-            }
-        }
-    }
-
-    // Delete models directory
-    let models_dir = cas_root.join("models");
-    if models_dir.exists() && models_dir.is_dir() {
-        match fs::remove_dir_all(&models_dir) {
-            Ok(()) => debug!(
-                "Removed obsolete models directory: {}",
-                models_dir.display()
-            ),
-            Err(e) => debug!("Failed to remove models directory: {}", e),
-        }
     }
 }
 

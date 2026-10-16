@@ -9,6 +9,14 @@ use message_attention::MessageAttention;
 #[path = "message_attention_tests.rs"]
 mod message_attention_tests;
 
+/// The daemon's own reminder to its owner is not an inter-agent relay.
+/// Caller-written reminder text cannot use this exception.
+fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
+    row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && row.source.eq_ignore_ascii_case(&row.target)
+        && cas_store::parse_reminder_delivery_id(&row.prompt).is_some()
+}
+
 /// What a delivery probe learned about recipient-authored activity (GH #1163).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecipientActivity {
@@ -5168,9 +5176,13 @@ impl FactoryDaemon {
         attempts: u32,
         escalate: bool,
     ) -> bool {
-        let silent =
-            escalate && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
-        let detail = if silent {
+        let self_reminder = self_addressed_reminder(queued);
+        let silent = !self_reminder
+            && escalate
+            && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
+        let detail = if self_reminder {
+            "self reminder waiting for the next turn or wake recheck; no inter-agent alarm".to_string()
+        } else if silent {
             format!(
                 "wake budget spent after {attempts} attempts and the recipient's transcript has been \
                  silent for {}+ minutes; escalated to the supervisor. Wake retries stopped; the message \
@@ -5194,9 +5206,15 @@ impl FactoryDaemon {
             &queued.target,
             super::prompt_queue_jobs::QueueStamp::ParkBusy { detail, recheck_at },
         );
+        if self_reminder {
+            // Retry only after ParkBusy's durable recheck. No body was handed
+            // off, and an eventual idle pane must still get its one wake.
+            self.lifecycle_redelivery_counts.remove(&queued.id);
+            self.lifecycle_redelivery_attempts.remove(&queued.id);
+        }
         // Live probes would keep acting on a row Cassy decided to stop
-        // waking. The redelivery counters stay, so the recheck lands on the
-        // same exhausted budget instead of starting a fresh one.
+        // waking. Ordinary relay counters stay, so their recheck lands on
+        // the same exhausted budget instead of starting a fresh one.
         self.urgent_wake_probes.remove(&queued.id);
         self.normal_delivery_probes.remove(&queued.id);
         self.queue_jobs.normal_probe_jobs.forget_row(queued.id);
@@ -6773,7 +6791,13 @@ impl FactoryDaemon {
         if let Some(reason) = pane.veto_for_idle_recipient() {
             return WakeDecision::deny(reason);
         }
-        if !Self::agent_signals_look_quiet(data, pane_target, now) {
+        // cas-f265: a completed checkpoint and continuing heartbeats can
+        // outlive the supervisor's turn. A fired reminder uses the pane/tool
+        // veto above to judge current work; historical activity must not
+        // postpone it. Missing recipients and other wake classes stay gated.
+        let reminder = class == SupervisorWakeClass::Reminder
+            && data.agents.iter().any(|agent| agent.name == pane_target);
+        if !reminder && !Self::agent_signals_look_quiet(data, pane_target, now) {
             return WakeDecision::deny("supervisor heartbeat and activity both look live");
         }
         WakeDecision::allow(match class {
@@ -9203,6 +9227,13 @@ impl FactoryDaemon {
                         continue;
                     }
                     LifecycleRedelivery::StopUndelivered => {
+                        if self_addressed_reminder(&queued) {
+                            let pane = pane_target.to_string();
+                            self.park_wake_starved_row(
+                                &queued, &pane, LIFECYCLE_MAX_RENUDGE_ATTEMPTS, false,
+                            );
+                            continue;
+                        }
                         // cas-7787 (GH #160): the retry budget is gone and the
                         // relay never arrived. Stop retrying — an audience
                         // that has not appeared in 20 minutes is not going to
@@ -11983,7 +12014,15 @@ pub(super) fn fire_reminder(
             // its own origin; an unstamped row can never wake a pane. The
             // source names the owner by agent name, as other mail does, and
             // the dedupe key keeps a stale snapshot from writing it twice.
-            let owner = reminder_owner_name(reminder, agent_id_to_name, cas_dir);
+            // A self reminder stays self-addressed if a replacement supervisor
+            // takes over its Shutdown owner's wake. The reminder record keeps
+            // the original owner and target IDs; delegated reminders retain
+            // their actual sender for inter-agent delivery accounting.
+            let owner = if reminder.owner_id == reminder.target_id {
+                target.clone()
+            } else {
+                reminder_owner_name(reminder, agent_id_to_name, cas_dir)
+            };
             queue
                 .enqueue_idempotent(
                     &owner,
@@ -20035,3 +20074,7 @@ mod queue_control_tests;
 #[cfg(test)]
 #[path = "delivery_probe_tests.rs"]
 mod delivery_probe_tests;
+
+#[cfg(test)]
+#[path = "reminder_dispatch_tests.rs"]
+mod reminder_dispatch_tests;

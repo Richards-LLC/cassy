@@ -168,10 +168,11 @@ impl FakeUserScopeCloud {
         claimed
     }
 
-    /// A lapsed lease: the message is claimable again.
+    /// A lapsed lease, or an ack the cloud never received: the message is
+    /// claimable again.
     fn expire_leases(&self) {
         for stored in self.messages.lock().unwrap().iter_mut() {
-            if stored.status == "leased" {
+            if matches!(stored.status, "leased" | "delivered") {
                 stored.status = "queued";
             }
         }
@@ -333,7 +334,7 @@ fn cas_2a5a_one_users_supervisor_lists_and_messages_another_project_once() {
         // pin: delivered wording the recipient supervisor acts on.
         assert!(rows[0].prompt.ends_with("Is the hub retry reusable?"));
 
-        // A lapsed lease redelivers: admitted once, acked again.
+        // A lost ack redelivers: admitted once, acked again.
         cloud.expire_leases();
         let again = violet.deliver(&recipient, VIOLET, "sup-violet");
         assert_eq!((again.delivered, again.duplicates), (0, 1));

@@ -170,7 +170,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
-        epic_splits_message: String::new(),
+        epic_splits_status: ObservationStatus::at("ready", Some(Utc::now()), None),
         canonical_id: Some(REPO.into()),
         status: "ready".into(),
         detail: true,
@@ -255,7 +255,7 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
-        epic_splits_message: String::new(),
+        epic_splits_status: ObservationStatus::at("ready", Some(Utc::now()), None),
         canonical_id: Some(REPO.into()),
         detail: true,
         status: "ready".into(),
@@ -356,7 +356,7 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
-        epic_splits_message: String::new(),
+        epic_splits_status: ObservationStatus::at("ready", Some(Utc::now()), None),
         canonical_id: Some(REPO.into()),
         detail: true,
         status: "ready".into(),
@@ -447,6 +447,27 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
             in_merge_queue: false,
         },
     ];
+    cas_store::insert_epic_split(
+        &root,
+        &cas_store::EpicSplit {
+            id: "split-lanes".into(),
+            epic_id: "cas-epic".into(),
+            local_agent_id: "sup-a".into(),
+            peer_agent_id: "sup-b".into(),
+            peer_name: "sup-b".into(),
+            peer_machine: "beta".into(),
+            direction: cas_store::SplitDirection::Outgoing,
+            state: cas_store::SplitState::Accepted,
+            mine: vec!["cas-parked".into()],
+            theirs: vec!["cas-unlinked".into()],
+            reason: None,
+            message_id: None,
+            expires_at: now + Duration::hours(1),
+            created_at: now,
+            decided_at: Some(now),
+        },
+    )
+    .unwrap();
     save_pr_snapshot(&root, prs, observed);
     let mut agents = vec![
         agent("sup-a", "supervisor", "same", "alpha", REPO, 1),
@@ -499,6 +520,13 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
     );
     let a = details.iter().find(|d| d.owner == "sup-a").unwrap();
     assert_eq!(a.work.epics[0].owner.as_deref(), Some("sup-a"));
+    assert_eq!(a.work.splits_status.state, "ready");
+    assert_eq!(a.work.splits[0].id, "split-lanes");
+    assert_eq!(
+        a.work.splits[0].target_branch.as_deref(),
+        Some("epic/target")
+    );
+    assert_eq!(a.work.splits[0].mine, ["cas-parked"]);
     assert!(
         a.work
             .tasks

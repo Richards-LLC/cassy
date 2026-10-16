@@ -105,9 +105,8 @@ pub struct PeerReport {
     pub cloud_presence: Option<super::presence::PresenceRecord>,
     pub cloud_presence_message: String,
     pub mailbox_status: String,
+    pub epic_splits_status: ObservationStatus,
     pub epic_splits: Vec<PeerEpicSplit>,
-    #[serde(skip)]
-    pub(crate) epic_splits_message: String,
     pub canonical_id: Option<String>,
     pub detail: bool,
     pub peers: Vec<PeerDetail>,
@@ -119,7 +118,20 @@ impl PeerReport {
         let mut mailbox_status = String::new();
         peers::append_mailbox_health(cas_root, self_id, &mut mailbox_status);
         let now = Utc::now();
-        let epic_splits = cas_store::list_epic_splits(cas_root)
+        let splits = cas_store::list_epic_splits(cas_root);
+        let epic_splits_status = ObservationStatus::at(
+            if splits.is_ok() {
+                "ready"
+            } else {
+                "unavailable"
+            },
+            Some(now),
+            splits
+                .as_ref()
+                .err()
+                .map(|_| "local split records unavailable"),
+        );
+        let epic_splits = splits
             .unwrap_or_default()
             .into_iter()
             .map(|split| PeerEpicSplit {
@@ -146,8 +158,8 @@ impl PeerReport {
             cloud_presence: self_id.and_then(|id| super::presence::load(cas_root, id)),
             cloud_presence_message: peers::presence_line(cas_root, self_id),
             mailbox_status,
+            epic_splits_status,
             epic_splits,
-            epic_splits_message: super::epic_split::render_splits(cas_root),
             canonical_id: super::resolve_canonical_id(cas_root),
             detail,
             status: "ready".into(),
@@ -643,8 +655,41 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
     for presence_line in report.cloud_presence_message.lines() {
         line(presence_line.to_string());
     }
-    for split_line in report.epic_splits_message.lines() {
-        line(split_line.to_string());
+    if report.detail {
+        line(format!(
+            "Local splits {} at {}",
+            report.epic_splits_status.state,
+            report
+                .epic_splits_status
+                .observed_at
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| "unknown".into())
+        ));
+        for split in &report.epic_splits {
+            line(format!(
+                "  {} [{}] epic {}",
+                split.id, split.display_state, split.epic_id
+            ));
+            line(format!(
+                "    Peer {}@{} | {}",
+                split.peer_name, split.peer_machine, split.direction
+            ));
+            line(format!("    Stored state {}", split.state));
+            line(format!("    Mine {}", split.mine.join(", ")));
+            line(format!("    Theirs {}", split.theirs.join(", ")));
+            line(format!(
+                "    Reason {}",
+                split.reason.as_deref().unwrap_or("unknown")
+            ));
+            line(format!("    Expires {}", split.expires_at.to_rfc3339()));
+            line(format!(
+                "    Decided {}",
+                split
+                    .decided_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".into())
+            ));
+        }
     }
     for mailbox_line in report.mailbox_status.lines() {
         line(mailbox_line.to_string());

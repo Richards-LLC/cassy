@@ -3233,6 +3233,169 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 }
 
 #[tokio::test]
+async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let session_id = format!("test-session-{}", std::process::id());
+    let mut agent = agent_store.get(&session_id).expect("test agent");
+    agent.role = cas::types::AgentRole::Supervisor;
+    agent_store.update(&agent).expect("mark caller supervisor");
+
+    let blocker = service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            depth: None,
+            title: "Decision hold blocker".to_string(),
+            description: None,
+            priority: 1,
+            task_type: "task".to_string(),
+            risk: Some("none".to_string()),
+            door: None,
+            proof_targets: None,
+            supervisor_override: None,
+            reason: None,
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
+        }))
+        .await
+        .expect("blocker create should succeed");
+    let blocker_id = extract_task_id(&extract_text(blocker))
+        .expect("blocker id")
+        .to_string();
+
+    let dependent = service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            depth: None,
+            title: "Operator-held Slack ownership decision".to_string(),
+            description: None,
+            priority: 2,
+            task_type: "task".to_string(),
+            risk: Some("none".to_string()),
+            door: None,
+            proof_targets: None,
+            supervisor_override: None,
+            reason: None,
+            labels: None,
+            notes: None,
+            blocked_by: None,
+            design: None,
+            acceptance_criteria: None,
+            external_ref: None,
+            assignee: None,
+            demo_statement: None,
+            execution_note: None,
+            epic: None,
+        }))
+        .await
+        .expect("dependent create should succeed");
+    let dependent_id = extract_task_id(&extract_text(dependent))
+        .expect("dependent id")
+        .to_string();
+
+    service
+        .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: Some(blocker_id.clone()),
+            depth: None,
+            id: dependent_id.clone(),
+            title: None,
+            notes: None,
+            priority: None,
+            labels: None,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            demo_statement: None,
+            execution_note: None,
+            risk: None,
+            door: None,
+            status: None,
+            epic: None,
+            origin_project: None,
+            epic_verification_owner: None,
+            assignee: None,
+            external_ref: None,
+            proof_targets: None,
+        }))
+        .await
+        .expect("adding a blocker should mark the dependent blocked");
+    service
+        .cas_task_notes(Parameters(TaskNotesRequest {
+            id: dependent_id.clone(),
+            note: "Hold until the operator resolves Slack ownership after the peer board ships."
+                .to_string(),
+            note_type: "decision".to_string(),
+            supervisor_override: None,
+            reason: None,
+        }))
+        .await
+        .expect("decision hold note should be recorded");
+
+    let dispatch = cas_store::create_verification_dispatch(
+        &cas_dir,
+        &blocker_id,
+        &session_id,
+        &session_id,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    )
+    .expect("create exact supervisor verification dispatch");
+    service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: blocker_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved for close".to_string(),
+            confidence: Some(0.9),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect("verification add should succeed");
+    let close = service
+        .cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
+            id: blocker_id,
+            reason: Some("peer board shipped".to_string()),
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+        .await
+        .expect("blocker close should succeed");
+
+    let show = service
+        .cas_task_show(Parameters(TaskShowRequest {
+            id: dependent_id.clone(),
+            with_deps: false,
+        }))
+        .await
+        .expect("task_show should succeed");
+    let text = extract_text(show);
+    assert!(
+        text.contains("Status: Blocked"),
+        "closing a dependency must not release the operator's decision hold: {text}"
+    );
+    let close_text = extract_text(close);
+    assert!(
+        close_text.contains(&dependent_id)
+            && close_text.contains("operator resolves Slack ownership"),
+        "close must surface the remaining hold and its reason: {close_text}"
+    );
+}
+
+#[tokio::test]
 async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
     let mut test_env = TestEnvGuard::temp_home();
     let (_temp, service) = setup_cas(&mut test_env);

@@ -189,8 +189,15 @@ mod tests {
         // The pointer claim is taken over by the hook, which spends the body
         // permit and its surfacing receipt in the same writer transaction.
         let surfaced = queue
-            .surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
-            .unwrap();
+            .surface_for_recipient_within_budget(
+                &row.recipient,
+                Some(&row.factory_session),
+                HookDrain::WakeNamed(&[admitted.prompt_id]),
+                10,
+                HOOK_SURFACE_BUDGET_CHARS,
+            )
+            .unwrap()
+            .rows;
         assert_eq!(surfaced.len(), 1);
         assert_eq!(surfaced[0].id, admitted.prompt_id);
         assert!(

@@ -2395,7 +2395,7 @@ pub trait PromptQueueStore: Send + Sync {
         since: DateTime<Utc>,
     ) -> Result<bool>;
 
-    /// Retire an unread alarm after a handed-off row's recipient performs
+    /// Retire an unread alarm after a handed-off row's worker performs
     /// authenticated work, or for a self-addressed reminder. This is attention
     /// evidence only: it never writes a read receipt or acknowledgement.
     /// Unknown adapters keep the alarm eligible.
@@ -4583,7 +4583,7 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
         action = format!("OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
             SELECT 1 FROM agents recipient
              WHERE recipient.factory_session = q.factory_session
-               AND (recipient.name = q.target OR (q.target = 'supervisor' AND recipient.role = 'supervisor'))
+               AND recipient.role = 'worker' AND recipient.name = q.target
                AND ({})))", evidence.join(" OR "));
     }
     Ok(conn.query_row(

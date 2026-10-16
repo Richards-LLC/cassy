@@ -1077,10 +1077,22 @@ fn cas_0cdaa_unrelated_supervisor_activity_keeps_unread_alarm() {
     let _env = env();
     let mut f = Fixture::new();
     handed_off_row(&f, "worker", SUPERVISOR);
-    f.queue.enqueue_urgent_with_outcome(
-        "supervisor", "worker", "A different task update", Some(SESSION),
-        Some("status"), Some(cas_store::NotificationPriority::Normal), false,
-        Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: format!("{SUPERVISOR}-id") }),
-    ).unwrap();
-    assert!(!f.scan().is_empty(), "worker action fallback must not hide unread deliveries to the supervisor");
+    f.queue
+        .enqueue_urgent_with_outcome(
+            "supervisor",
+            "worker",
+            "A different task update",
+            Some(SESSION),
+            Some("status"),
+            Some(cas_store::NotificationPriority::Normal),
+            false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: format!("{SUPERVISOR}-id"),
+            }),
+        )
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "worker action fallback must not hide unread deliveries to the supervisor"
+    );
 }

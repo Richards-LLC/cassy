@@ -2410,6 +2410,45 @@ mod tests {
         assert_eq!(inbox.len(), 6, "{inbox:?}");
         assert!(inbox[5].text.contains(shared), "{}", inbox[5].text);
         assert!(queue.teams_body_fallback_claimed(broadcast, worker).unwrap());
+
+        // A managed body that cannot fit a hook must still wait for its
+        // confirmed consumption receipt. The actual Teams write spends the
+        // permit once; an error or another delivery cannot replenish it.
+        let body = format!("<cas-violet-activity v=\"2\">{}</cas-violet-activity>",
+            "managed occurrence reference ".repeat(500));
+        let admissions = cas_store::SqliteVioletAdmissionStore::open(&cas_dir).unwrap();
+        let input = cas_store::VioletAdmissionInput {
+            delivery_id: "00000001-1111-4111-8111-000000000001".into(),
+            occurrence_id: "00000002-1111-4111-8111-000000000002".into(),
+            reader_slot_id: "00000003-1111-4111-8111-000000000003".into(),
+            registration_id: "registered-reader".into(), delivery_generation: 1,
+            route_generation: 0, project_id: "project".into(), target_json: "{}".into(),
+            workspace_id: "T1".into(), channel_id: "C1".into(), message_ts: "1760616042.000200".into(),
+            factory_session: session.clone(), recipient: worker.into(),
+            prompt: body.clone(), lease_token: "lease".into(),
+        };
+        let id = admissions.admit(&input).unwrap().prompt_id;
+        let text = format!("[cas #{id}]\n{body}");
+        assert!(daemon.deliver_queued_to_worker(worker, "violet", &text, None, id, &body)
+            .await.is_err(), "durable admission alone cannot expose a managed body");
+        assert_eq!(read_inbox().len(), 6);
+        let ack = admissions.pending_acknowledgements(&input.registration_id, &input.project_id)
+            .unwrap().remove(0);
+        admissions.settle_acknowledgement(&ack, &input.registration_id, &input.project_id).unwrap();
+        let job = admissions.prepare_body_dispatch(&input.delivery_id, &input.registration_id,
+            &input.project_id, "live-daemon", "00000004-1111-4111-8111-000000000004").unwrap();
+        let response = serde_json::json!({"schema":"cassy.coordination/v1","code":"completed",
+            "receipt":{"request_id":job.request_id,"delivery":{
+                "id":input.delivery_id,"occurrence_id":input.occurrence_id,"reader_slot_id":input.reader_slot_id,
+                "registration_id":input.registration_id,"delivery_generation":1,
+                "status":"admitted","consumption":"dispatch_uncertain"}}});
+        assert!(admissions.confirm_body_dispatch(&job, "live-daemon", &response.to_string()).unwrap());
+        assert_eq!(daemon.deliver_queued_to_worker(worker, "violet", &text, None, id, &body)
+            .await.unwrap(), InjectOutcome::Delivered);
+        assert!(read_inbox()[6].text.contains(&body));
+        assert!(daemon.deliver_queued_to_worker(worker, "violet", &text, None, id, &body)
+            .await.is_err(), "the original body is one-use even on the Teams channel");
+        assert_eq!(read_inbox().len(), 7);
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

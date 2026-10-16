@@ -114,6 +114,7 @@ pub use embeddings::{
 pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
+pub(crate) use sync_queue::MEMORY_FOLD_CONFLICT;
 pub use sync_queue::{
     EntityType, PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QueueHealth,
     QueuedSync, QuarantinedRow, SYNC_REVISION_STATEMENTS, SyncOperation, SyncQueue,

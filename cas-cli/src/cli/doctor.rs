@@ -6594,7 +6594,7 @@ mod tests {
                     id,
                     "{}",
                     "local",
-                    crate::cloud::sync_queue::MEMORY_FOLD_CONFLICT,
+                    crate::cloud::MEMORY_FOLD_CONFLICT,
                     None,
                     None,
                 )
@@ -6606,7 +6606,7 @@ mod tests {
                 "unrelated",
                 "{}",
                 "local",
-                crate::cloud::sync_queue::MEMORY_FOLD_CONFLICT,
+                crate::cloud::MEMORY_FOLD_CONFLICT,
                 None,
                 None,
             )

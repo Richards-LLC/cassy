@@ -120,7 +120,7 @@ impl CloudSyncer {
             &incoming.id,
             &journal,
             "local",
-            crate::cloud::sync_queue::MEMORY_FOLD_CONFLICT,
+            crate::cloud::MEMORY_FOLD_CONFLICT,
             self.queue.revision(EntityType::Entry, &local.id)?,
             self.incoming_revisions.lock().ok().and_then(|revisions| {
                 revisions

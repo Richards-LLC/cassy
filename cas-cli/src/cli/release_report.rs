@@ -3257,6 +3257,11 @@ mod tests {
 
         let sources = AcquiredSources {
             project: "fixture".to_string(),
+            changes: changelog_changes(&changelog.body),
+            release_pr: None,
+            closure_window: None,
+            issues_still_open: Vec::new(),
+            issues_closed_outside: Vec::new(),
             changelog: Some(changelog),
             changelog_path: None,
             release_notes: None,
@@ -3272,8 +3277,18 @@ mod tests {
             retrieved_at: "2026-10-15T00:00:00Z".to_string(),
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
-        assert!(report.contains("| Fix entries | 1 |"), "{report}");
-        assert!(report.contains("| Changed entries | 1 |"), "{report}");
+        assert!(
+            report.contains("| Changes shipped | 2 | 1 fixed, 1 changed; tests and docs not counted |"),
+            "{report}"
+        );
+        assert!(report.contains(
+            "| Sessions | 1 | The factory daemon loop no longer stalls on reminder probes |"
+        ));
+        // Zero and unmeasured values stay off page one, named in the note.
+        assert!(!report.contains("| 0 |"), "{report}");
+        assert!(!report.contains("| unavailable |"), "{report}");
+        assert!(report.contains("No GitHub issues were closed with this release."));
+        assert!(report.contains("Not measured for this release: green to published"));
     }
 
     #[test]
@@ -3350,6 +3365,11 @@ Dev reply
 
         let mut sources = AcquiredSources {
             project: "fixture".to_string(),
+            changes: Vec::new(),
+            release_pr: None,
+            closure_window: None,
+            issues_still_open: Vec::new(),
+            issues_closed_outside: Vec::new(),
             changelog: None,
             changelog_path: None,
             release_notes: None,
@@ -3398,7 +3418,11 @@ Dev reply
         sources.release_evidence.main_to_published_seconds = Some(616);
         let main_landed_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(
-            main_landed_report.contains("| Green to published | unavailable |"),
+            !main_landed_report.contains("| Green to published |"),
+            "{main_landed_report}"
+        );
+        assert!(
+            main_landed_report.contains("Not measured for this release: green to published"),
             "{main_landed_report}"
         );
         assert!(
@@ -3411,7 +3435,8 @@ Dev reply
             "{report}"
         );
         // cas-9734: the release's lesson recurrence rate.
-        assert!(report.contains("| Lesson recurrence | unavailable |"), "{report}");
+        assert!(!report.contains("| Lesson recurrence |"), "{report}");
+        assert!(report.contains("lesson recurrence."), "{report}");
         let recorded: LessonRecurrence = serde_json::from_str(
             r#"{"version":"9.98.0","rescues":4,"recurrences":2,"rate":0.5,"classes":["scratch-base","version-literals"]}"#,
         )
@@ -3521,14 +3546,6 @@ Was: reports lacked evidence. Now: reports include verification evidence.
 ```
 "#;
         let parsed = parse_release_note_draft(draft);
-        let themes = draft_theme_order(&parsed.articles);
-        assert!(
-            themes
-                .iter()
-                .all(|theme| !theme.contains("Reply (Was → Now)")),
-            "unexpected presentation heading in themes: {themes:?}"
-        );
-
         let sources = AcquiredSources {
             project: "fixture".to_string(),
             changes: Vec::new(),

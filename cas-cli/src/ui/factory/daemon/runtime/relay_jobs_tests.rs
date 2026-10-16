@@ -447,3 +447,177 @@ fn c4491f_unread_assignment_is_checked_before_it_is_delivered() {
         UnreadAssignmentOutcome::Suppressed
     );
 }
+
+/// A prompt the inject path sees after its re-check never reported.
+fn unread_batch(text: &str) -> super::factory_jobs::DeliverabilityBatch {
+    super::factory_jobs::DeliverabilityBatch {
+        prompts: vec![(
+            crate::ui::factory::director::Prompt {
+                target: "relay-worker".into(),
+                text: text.into(),
+                stall_nudge_task: None,
+                retract_worker: None,
+                retract_task: None,
+                retract_epic: None,
+                drop_if_worker_assigned: None,
+                durable_retry: true,
+            },
+            true,
+        )],
+        assignments: vec![crate::ui::factory::app::AssignmentRead::Unread],
+        events: Vec::new(),
+        refresh_started: Instant::now(),
+    }
+}
+
+/// cas-4491f review round 2 (M4 routing): an assignment wake whose
+/// re-check never reported is not injected unchecked. Its task moved on, so
+/// the store worker suppresses it: nothing reaches the recipient's queue.
+#[tokio::test]
+async fn c4491f_unread_assignment_wake_is_never_injected_unchecked() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut task = cas_types::Task::new("cas-c105".into(), "done".into());
+    task.status = cas_types::TaskStatus::Closed;
+    task.assignee = Some("relay-worker".into());
+    crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let store_worker = super::store_worker::global();
+    daemon
+        .inject_rechecked_batch(
+            unread_batch("You have been assigned a new task:\nTask ID: cas-c105"),
+            store_worker,
+        )
+        .await;
+    assert!(store_worker.wait_idle(Duration::from_secs(30)));
+    let queued: Vec<_> = crate::store::open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .peek_all(50)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.target == "relay-worker")
+        .collect();
+    assert!(queued.is_empty(), "a stale assignment wake reached the queue: {queued:?}");
+}
+
+/// cas-4491f review round 2: a live unread assignment is carried by its
+/// durable assignment row.
+#[test]
+fn c4491f_unread_live_assignment_writes_its_assignment_row() {
+    use crate::ui::factory::app::{UnreadAssignmentOutcome, resolve_unread_assignment};
+    let (_dir, cas_dir) = project_with_worker();
+    let mut task = cas_types::Task::new("cas-1a55".into(), "live".into());
+    task.assignee = Some("relay-worker".into());
+    crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
+    let wake = unread_batch("You have been assigned a new task:\nTask ID: cas-1a55").prompts.remove(0).0;
+    assert_eq!(
+        resolve_unread_assignment(&cas_dir, "provision-test", &wake),
+        UnreadAssignmentOutcome::AssignmentRow
+    );
+    assert!(
+        crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(50)
+            .unwrap()
+            .iter()
+            .any(|row| row.source == "task-assignment" && row.target == "relay-worker"),
+        "the assignment row carries the wake"
+    );
+}
+
+/// cas-4491f review L1: a finished snapshot is applied before a due one
+/// starts, so the due tick does not defer into a second, redundant read.
+#[tokio::test]
+async fn c4491f_due_tick_with_a_finished_snapshot_reads_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let progress = super::loop_watchdog::LoopProgress::new();
+    let store_worker = super::store_worker::global();
+    let mut refresh = DirectorRefresh::new();
+    refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !refresh.has_finished(&mut daemon.queue_jobs) {
+        assert!(Instant::now() < deadline, "the snapshot never finished");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The tick is due while that snapshot waits to be applied.
+    assert!(
+        daemon
+            .director_refresh_pass(&mut refresh, true, store_worker, &progress)
+            .await
+    );
+    assert!(
+        !refresh.refresh_requested(),
+        "the due tick started its read; no second read is owed"
+    );
+}
+
+/// cas-4491f review L3: a relay scan the runtime refused is not stamped, so
+/// the next pass scans again (and the first permission scan keeps its
+/// prune).
+#[tokio::test]
+async fn c4491f_refused_relay_scans_are_retried() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.queue_jobs.close_lanes_for_test();
+    daemon.relay_usage_limited_workers();
+    daemon.relay_auth_failed_workers();
+    daemon.relay_worker_permission_requests();
+    assert!(daemon.last_usage_limit_scan.is_none());
+    assert!(daemon.last_auth_failure_scan.is_none());
+    assert!(
+        daemon.last_permission_request_scan.is_none(),
+        "the first scan, with its prune, runs again"
+    );
+}
+
+/// cas-4491f review L5: the escalation write re-checks each candidate: a
+/// relay acknowledged since the read is not escalated.
+#[test]
+fn c4491f_escalation_rechecks_each_candidate_under_its_write() {
+    use cas_store::PromptQueueStore;
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    for n in 1..=2 {
+        queue
+            .enqueue_idempotent(
+                &format!("lifecycle-wake:{n}"),
+                "supervisor",
+                "a lifecycle relay",
+                Some("provision-test"),
+                None,
+                Some(cas_store::NotificationPriority::High),
+                &format!("c4491f-relay:{n}"),
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap();
+    }
+    let candidates = queue.peek_all(10).unwrap();
+    assert_eq!(candidates.len(), 2);
+    // The supervisor took the first after the read.
+    queue.ack(candidates[0].id).unwrap();
+    let still = super::queue_and_events::still_undelivered_relays(&cas_dir, queue.as_ref(), candidates.clone());
+    assert_eq!(
+        still.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![candidates[1].id]
+    );
+}
+
+/// cas-4491f review round 2: write records are kept only while a read that
+/// predates them is in flight.
+#[test]
+fn c4491f_write_records_do_not_accumulate() {
+    use super::relay_jobs::{Relay, RelayJobs, RelayOutput};
+    let mut jobs = super::prompt_queue_jobs::QueueJobs::inline();
+    let mut relays = RelayJobs::default();
+    for n in 0..5 {
+        let key = format!("permission-answer:req-{n}");
+        assert!(relays.submit_write(&mut jobs, &key, None, || RelayOutput::EscalationWritten(Vec::new())));
+        relays.take(&mut jobs);
+    }
+    assert!(relays.submit_read(&mut jobs, Relay::Permission, || RelayOutput::PermissionRead(Vec::new())));
+    relays.take(&mut jobs);
+    relays.take(&mut jobs);
+    assert_eq!(relays.write_records(), 0, "no read predates any of them");
+}

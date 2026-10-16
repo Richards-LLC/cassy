@@ -3095,23 +3095,45 @@ pub(super) fn undelivered_supervisor_relay_candidates(
     let task_store = crate::store::open_task_store_local(cas_dir).ok();
     candidates
         .into_iter()
+        .filter(|queued| relay_task_still_current(task_store.as_deref(), queued))
+        .collect()
+}
+
+/// Whether an undelivered relay's task still makes it worth an alert: a
+/// relay whose task moved on, or is gone, is not escalated. An unreadable
+/// task must not hide a lost relay.
+fn relay_task_still_current(
+    task_store: Option<&dyn cas_store::TaskStore>,
+    queued: &cas_store::QueuedPrompt,
+) -> bool {
+    let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
+    let (Some(envelope), Some(store)) = (envelope.as_ref(), task_store) else {
+        return true;
+    };
+    match store.get(&envelope.task_id) {
+        Ok(task) => matches!(
+            crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(&queued.prompt, &task),
+            crate::prompt_revalidation::LifecyclePromptDecision::Deliver
+        ),
+        Err(cas_store::StoreError::TaskNotFound(_)) => false,
+        Err(_) => true,
+    }
+}
+
+/// The escalation write's re-check of each candidate the read found
+/// (cas-4491f review L5): still undelivered, and its task still current.
+/// An unreadable row is kept: it must not hide a lost relay.
+pub(super) fn still_undelivered_relays(
+    cas_dir: &std::path::Path,
+    queue: &dyn cas_store::PromptQueueStore,
+    candidates: Vec<cas_store::QueuedPrompt>,
+) -> Vec<cas_store::QueuedPrompt> {
+    let task_store = crate::store::open_task_store_local(cas_dir).ok();
+    candidates
+        .into_iter()
         .filter(|queued| {
-            let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
-            let (Some(envelope), Some(store)) = (envelope.as_ref(), task_store.as_ref()) else {
-                return true;
-            };
-            match store.get(&envelope.task_id) {
-                Ok(task) => matches!(
-                    crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
-                        &queued.prompt,
-                        &task,
-                    ),
-                    crate::prompt_revalidation::LifecyclePromptDecision::Deliver
-                ),
-                Err(cas_store::StoreError::TaskNotFound(_)) => false,
-                // An unreadable task must not hide a lost relay.
-                Err(_) => true,
-            }
+            let _ = queue;
+            relay_task_still_current(task_store.as_deref(), queued)
         })
         .collect()
 }
@@ -3285,9 +3307,8 @@ impl FactoryDaemon {
                     .collect(),
             )
         });
-        if submitted {
-            self.last_usage_limit_scan = Some(now);
-        }
+        let _ = submitted;
+        self.last_usage_limit_scan = Some(now);
         self.drain_relay_jobs();
     }
 
@@ -4137,28 +4158,17 @@ impl FactoryDaemon {
             .submit_write(&mut self.queue_jobs, "escalation", Some(basis), move || {
                 let alerts = match crate::store::open_prompt_queue_store(&cas_dir) {
                     Ok(queue) => {
-                        // Review L5: a relay delivered (or a task moved on)
-                        // since the read is not escalated.
-                        let still: std::collections::HashSet<i64> =
-                            undelivered_supervisor_relay_candidates(
-                                &cas_dir,
-                                queue.as_ref(),
-                                &session,
-                                &supervisor_name,
-                            )
-                            .into_iter()
-                            .map(|queued| queued.id)
-                            .collect();
+                        // Review L5: a relay delivered (or whose task moved
+                        // on) since the read is not escalated; each candidate
+                        // is re-checked under the write.
+                        let candidates = still_undelivered_relays(&cas_dir, queue.as_ref(), candidates);
                         record_undelivered_relay_alerts(
                             queue.as_ref(),
                             &session,
                             &supervisor_name,
                             &harness,
                             chrono::Utc::now(),
-                            candidates
-                                .into_iter()
-                                .filter(|queued| still.contains(&queued.id))
-                                .collect(),
+                            candidates,
                         )
                     }
                     Err(error) => {

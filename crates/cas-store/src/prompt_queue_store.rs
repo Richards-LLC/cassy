@@ -2129,6 +2129,13 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Whether the supervisor relay `prompt_id` still has not reached the
+    /// supervisor, by the delivery conditions of
+    /// [`Self::undelivered_supervisor_lifecycle_relays`] (cas-4491f: the
+    /// escalation re-checks each candidate under its write). A row that is
+    /// gone is no longer undelivered.
+    fn supervisor_relay_still_undelivered(&self, prompt_id: i64) -> Result<bool>;
+
     /// Relay-watchdog alerts of `factory_session` (cas-e829): for each alert
     /// row, the supervisor relay it is about and whether that relay's problem
     /// is over. A relay is resolved once it reached the supervisor
@@ -5525,6 +5532,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             tx.commit()?;
             Ok((inserted > 0).then_some(bounce_id))
         })
+    }
+
+    fn supervisor_relay_still_undelivered(&self, prompt_id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let pending: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM prompt_queue q
+                 WHERE q.id = ?
+                   AND q.transport_delivered_at IS NULL
+                   AND q.acked_at IS NULL
+                   AND (
+                        COALESCE(q.highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
+                        OR (q.highest_stage = 'abandoned'
+                            AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines', 'abandoned_unknown_target', 'recipient_ended_unread'))
+                   )
+                   AND NOT EXISTS (
+                        SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = q.id
+                   )",
+                params![prompt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(pending.is_some())
     }
 
     fn undelivered_supervisor_lifecycle_relays(

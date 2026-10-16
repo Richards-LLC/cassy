@@ -141,6 +141,9 @@ pub(crate) struct RelayJobs {
     /// accepted. A read submitted before then may not see that write, so it
     /// cannot ask for the same write again (cas-4491f review M3).
     written_at: HashMap<String, u64>,
+    /// When a refusal was last logged at warn level (review L: one a minute,
+    /// not one a tick).
+    last_refusal_warning: Option<Instant>,
     /// Test hook: give up in-flight reads after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
@@ -244,7 +247,16 @@ impl RelayJobs {
             | Submitted::QueuedDroppedOldest { .. }
             | Submitted::Coalesced { .. } => true,
             refused => {
-                tracing::warn!(key = %key, ?refused, "relay job refused by the job runtime; retrying next scan");
+                const REFUSAL_WARNING_INTERVAL: Duration = Duration::from_secs(60);
+                if self
+                    .last_refusal_warning
+                    .is_none_or(|last| last.elapsed() >= REFUSAL_WARNING_INTERVAL)
+                {
+                    self.last_refusal_warning = Some(Instant::now());
+                    tracing::warn!(key = %key, ?refused, "relay job refused by the job runtime; retrying next scan");
+                } else {
+                    tracing::debug!(key = %key, ?refused, "relay job refused by the job runtime; retrying next scan");
+                }
                 self.in_flight.remove(&key);
                 false
             }
@@ -292,6 +304,30 @@ impl RelayJobs {
         });
         writes.extend(reads);
         writes
+    }
+
+    /// Drop the write records no read can still predate (review L: one per
+    /// permission request would otherwise accumulate). A record matters only
+    /// while a read submitted before it is in flight; every read submitted
+    /// later is newer than it. The previous batch's reads were applied before
+    /// this call.
+    fn forget_settled_writes(&mut self) {
+        let oldest_read = self
+            .in_flight
+            .iter()
+            .filter(|(key, _)| key.starts_with(RELAY_READ))
+            .map(|(_, (generation, _))| *generation)
+            .min();
+        match oldest_read {
+            Some(oldest) => self.written_at.retain(|_, written| *written >= oldest),
+            None => self.written_at.clear(),
+        }
+    }
+
+    /// Write records kept for reads in flight (tests).
+    #[cfg(test)]
+    pub(crate) fn write_records(&self) -> usize {
+        self.written_at.len()
     }
 
     fn accept(&mut self, result: JobResult<ExternalOutcome>) -> Option<RelayDone> {

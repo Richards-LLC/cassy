@@ -387,6 +387,9 @@ pub(crate) enum UnreadAssignmentOutcome {
     Suppressed,
     /// The durable assignment row carries the wake.
     AssignmentRow,
+    /// The assignment policy writes no row (the task is gated, or its
+    /// worker is not live), as on the read path.
+    Declined,
     /// The task or its row could not be written; the wake went to the
     /// durable prompt queue instead.
     Queued,
@@ -432,7 +435,8 @@ pub(crate) fn resolve_unread_assignment(
             UnreadAssignmentOutcome::Suppressed
         }
         AssignmentRead::Task(task) => match crate::task_assignment::enqueue(cas_dir, &task) {
-            Ok(_) => UnreadAssignmentOutcome::AssignmentRow,
+            Ok(Some(_)) => UnreadAssignmentOutcome::AssignmentRow,
+            Ok(None) => UnreadAssignmentOutcome::Declined,
             Err(error) => {
                 tracing::warn!(%error, "assignment enqueue failed; queueing the director wake instead");
                 queue_it()

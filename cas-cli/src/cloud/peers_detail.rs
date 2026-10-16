@@ -551,11 +551,7 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         }
         for detail in &report.peers {
             let peer = &detail.supervisor;
-            line(format!(
-                "{} [{}]",
-                peer.name,
-                if peer.live { "live" } else { "stale" }
-            ));
+            line(format!("[{}] Owner {}", detail.outcome, detail.owner));
             line(format!("  Machine {}", peer.machine));
             line(format!(
                 "  Session {}",
@@ -592,17 +588,16 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             }
             for claim in &detail.claims {
                 line(format!(
-                    "    {:>5} {} [{}]",
-                    claim.age_secs,
-                    claim.task_id,
+                    "    [{}] Owner {}",
                     claim
                         .status
                         .as_deref()
-                        .unwrap_or("claimed; title not synced")
+                        .unwrap_or("claimed; title not synced"),
+                    claim.agent_name.as_deref().unwrap_or("unknown agent")
                 ));
                 line(format!(
-                    "          Owner {}",
-                    claim.agent_name.as_deref().unwrap_or("unknown agent")
+                    "      {} | renewal age {}s",
+                    claim.task_id, claim.age_secs
                 ));
                 if let Some(title) = &claim.title {
                     line(format!("          {title}"));
@@ -638,6 +633,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .collect::<Vec<_>>()
                     .join(", ");
                 let task_label = match detail.claims_visibility {
+                    ClaimsVisibility::SameAccount if detail.work.claims_status.state != "ready" => {
+                        "unknown"
+                    }
                     ClaimsVisibility::SameAccount if task_ids.is_empty() => "none",
                     ClaimsVisibility::SameAccount => &task_ids,
                     _ => "not visible",

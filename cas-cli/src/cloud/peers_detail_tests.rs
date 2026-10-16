@@ -702,7 +702,10 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
     assert!(text.starts_with("[WARN] 1 peer supervisor"));
     assert!(text.contains("Claims unavailable at") && text.contains("claims offline"));
     assert!(!text.contains("Claims  0"));
-    assert!(text.contains("Tasks unknown") && !text.contains("Tasks none"), "{text}");
+    assert!(
+        text.contains("Tasks unknown") && !text.contains("Tasks none"),
+        "{text}"
+    );
     assert!(
         server
             .received_requests()

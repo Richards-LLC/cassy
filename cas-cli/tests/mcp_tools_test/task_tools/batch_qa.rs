@@ -158,8 +158,6 @@ async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
     git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     let mut task = tasks.get("cas-bq01").unwrap();
     task.assignee = None;
-    task.execution_note = Some("no-code".into());
-    task.external_ref = Some("https://example.test/batch-report".into());
     tasks.update(&task).unwrap();
     fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
     let refused = fx.close("cas-bq01").await;

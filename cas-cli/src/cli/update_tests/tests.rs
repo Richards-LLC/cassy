@@ -302,7 +302,9 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     assert_eq!(report.project_count, 2, "{output}");
     assert_eq!(report.failed_count, 0, "{output}");
     for root in &roots {
-        assert!(std::fs::read_to_string(root.join("proxy.toml")).unwrap().contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"), "{output}");
+        let raw = std::fs::read_to_string(root.join("proxy.toml")).unwrap();
+        let doc: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(doc["servers"]["violet"]["auth"].as_str(), Some("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"), "{output}");
         // pin: the installed builtin path proves sync progressed past Violet.
         assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
     }

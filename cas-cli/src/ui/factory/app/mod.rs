@@ -1041,6 +1041,14 @@ pub struct FactoryApp {
     /// cas-4491f: non-live worker panes whose teardown requests wait to be
     /// queued off the loop ([`Self::take_phantom_teardowns`]).
     pending_phantom_teardowns: Vec<String>,
+    /// cas-5e72: the daemon writes the session's epic focus off the loop.
+    /// Set, a focus change only records the write
+    /// ([`Self::take_epic_focus_write`]); unset, it writes in place.
+    deferred_epic_focus_writes: bool,
+    /// The latest epic-focus write not yet handed off: `(metadata path,
+    /// focused epic or None to clear)`. A later change replaces an earlier
+    /// one, so the last focus wins.
+    pending_epic_focus_write: Option<(PathBuf, Option<String>)>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1995,36 +2003,58 @@ impl FactoryApp {
         }
     }
 
-    fn persist_current_epic_id(&self) {
-        let Some(session_name) = self.factory_session.as_deref() else {
+    fn persist_current_epic_id(&mut self) {
+        let Some(epic_id) = self.current_epic_id.clone() else {
             return;
         };
-        let Some(epic_id) = self.current_epic_id.as_deref() else {
-            return;
-        };
-        let path = metadata_path(session_name);
-        if let Err(err) = persist_session_metadata_epic_id_at(&path, epic_id) {
-            tracing::warn!(
-                session = %session_name,
-                epic_id,
-                error = %err,
-                "failed to persist factory session epic focus"
-            );
-        }
+        self.write_epic_focus(Some(epic_id));
     }
 
-    fn clear_persisted_current_epic_id(&self) {
+    fn clear_persisted_current_epic_id(&mut self) {
+        self.write_epic_focus(None);
+    }
+
+    /// Persist the session's epic focus (`None` clears it). With deferred
+    /// writes (the daemon, cas-5e72) this only records the write, replacing
+    /// any earlier one not yet handed off; the daemon runs it on its store
+    /// worker, in order, so the last focus change wins.
+    fn write_epic_focus(&mut self, epic_id: Option<String>) {
         let Some(session_name) = self.factory_session.as_deref() else {
             return;
         };
         let path = metadata_path(session_name);
-        if let Err(err) = clear_session_metadata_epic_id_at(&path) {
-            tracing::warn!(
-                session = %session_name,
-                error = %err,
-                "failed to clear factory session epic focus"
-            );
+        if self.deferred_epic_focus_writes && false {
+            self.pending_epic_focus_write = Some((path, epic_id));
+            return;
         }
+        persist_epic_focus_at(&path, epic_id.as_deref());
+    }
+
+    /// Name the factory session without its registration side effects
+    /// (tests).
+    #[cfg(test)]
+    pub(crate) fn set_factory_session_name_for_test(&mut self, session: &str) {
+        self.factory_session = Some(session.to_string());
+    }
+
+    /// Set the epic focus the latest snapshot read (tests).
+    #[cfg(test)]
+    pub(crate) fn set_session_focus_for_test(&mut self, epic_id: &str, source: EpicFocusSource) {
+        self.session_focus = Some(SessionEpicFocus {
+            epic_id: Some(epic_id.to_string()),
+            source: Some(source),
+        });
+    }
+
+    /// Defer epic-focus writes to the caller (the daemon's store worker).
+    pub(crate) fn set_deferred_epic_focus_writes(&mut self, deferred: bool) {
+        self.deferred_epic_focus_writes = deferred;
+    }
+
+    /// The latest deferred epic-focus write, for [`persist_epic_focus_at`]
+    /// off the loop.
+    pub(crate) fn take_epic_focus_write(&mut self) -> Option<(PathBuf, Option<String>)> {
+        self.pending_epic_focus_write.take()
     }
 
     #[cfg(test)]
@@ -3218,6 +3248,24 @@ pub(crate) fn persist_session_metadata_epic_id_at(
     })
 }
 
+/// Write (or with `None`, clear) the session's epic focus. Blocks on the
+/// metadata file and its lock, so the daemon runs it on its store worker
+/// (cas-5e72).
+pub(crate) fn persist_epic_focus_at(path: &std::path::Path, epic_id: Option<&str>) {
+    let result = match epic_id {
+        Some(epic_id) => persist_session_metadata_epic_id_at(path, epic_id),
+        None => clear_session_metadata_epic_id_at(path),
+    };
+    if let Err(err) = result {
+        tracing::warn!(
+            path = %path.display(),
+            epic_id = ?epic_id,
+            error = %err,
+            "failed to persist factory session epic focus"
+        );
+    }
+}
+
 pub(crate) fn clear_session_metadata_epic_id_at(path: &std::path::Path) -> std::io::Result<()> {
     update_session_metadata_at(path, |metadata| {
         metadata.epic_id = None;
@@ -3385,6 +3433,12 @@ pub(crate) fn update_session_metadata_at(
     path: &std::path::Path,
     mutator: impl FnOnce(&mut SessionMetadata),
 ) -> std::io::Result<()> {
+    // cas-5e72: a locked read-modify-write of the session file; reported when
+    // it runs on a daemon lane.
+    cas_store::lane_guard::note_blocking_call(
+        cas_store::lane_guard::BlockingKind::Store,
+        "session metadata write",
+    );
     use fs2::FileExt;
 
     let parent = path.parent().ok_or_else(|| {

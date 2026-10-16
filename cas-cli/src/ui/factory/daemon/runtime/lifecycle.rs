@@ -2438,6 +2438,8 @@ impl FactoryDaemon {
         // running them.
         let mut director_refresh = super::director_refresh::DirectorRefresh::new();
         self.app.set_deferred_worker_health_probes(true);
+        // cas-5e72: the epic-focus metadata write runs on the store worker.
+        self.app.set_deferred_epic_focus_writes(true);
         let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
             self.app.cas_dir().to_path_buf(),
             Arc::clone(&self.shutdown),
@@ -3527,9 +3529,13 @@ impl FactoryDaemon {
         // Handle epic state transitions
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshFollowUp);
         let changes = crate::ui::factory::app::timed_refresh_step("epic events", || self.app.handle_epic_events(&delivery_events));
+        // cas-5e72: a focus change's metadata write goes to the store worker,
+        // which runs writes in order, so the last focus wins.
+        self.flush_epic_focus_write(store_worker);
         for change in changes {
             let _ = self.handle_epic_change(change).await;
         }
+        self.flush_epic_focus_write(store_worker);
 
         // Process reminders (time-based and event-based)
         crate::ui::factory::app::timed_refresh_step("reminders", || self.process_reminders(&delivery_events));
@@ -3641,6 +3647,15 @@ impl FactoryDaemon {
             }
             self.inject_director_prompt(prompt, &events, refresh_started, store_worker, Some(assignment))
                 .await;
+        }
+    }
+
+    /// Hand the latest epic-focus write to the store worker (cas-5e72).
+    pub(super) fn flush_epic_focus_write(&mut self, store_worker: &super::store_worker::StoreWorker) {
+        if let Some((path, epic_id)) = self.app.take_epic_focus_write() {
+            store_worker.submit("epic focus metadata", move || {
+                crate::ui::factory::app::persist_epic_focus_at(&path, epic_id.as_deref());
+            });
         }
     }
 

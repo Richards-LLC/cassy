@@ -945,7 +945,7 @@ the final-tree integration gate and the only gate to `main`; its required
 checks, including the Rust suite, run once on the exact merged tree. Commander
 journeys run there only when `hub-web/` product inputs change. Do not add
 lane-merge compile or fast-row checks, park receipts, or a separate assembly
-journey run. The normal epic close follows the green queue landing. Where the
+journey run. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.

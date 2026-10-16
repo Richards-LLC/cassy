@@ -99,5 +99,7 @@ count, rate), with or without a demo:
    missing), or `INCONCLUSIVE` (the pair exists but variance or a changed
    input hides the delta). `VERIFIED` meets the criterion, and so does
    `NOT VERIFIED` when the close names an owner by design (a factory worker's
-   full Rust execution goes to the merge queue's integration proof). Reject the
+   full-suite execution follows the ownership rule below). Reject the
    rest, naming the claim and the missing or ambiguous run.
+
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.

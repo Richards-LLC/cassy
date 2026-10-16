@@ -323,6 +323,57 @@ fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Option<&'static str> {
     }
 }
 
+/// Epic close reads the existing exact-default-SHA receipt. A skipped test
+/// alongside a green lint/preview is not a successfully executed suite.
+/// Share worktree_merge's bounded lookup and validation-job classifier; never
+/// fall back to an ancestor code SHA or trigger a workflow.
+pub(crate) fn epic_tip_ci_proof(sha: &str, cwd: &Path) -> Result<String, String> {
+    let binary = crate::github_repo::gh_binary();
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT)?;
+    let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    let runs = parsed
+        .as_ref()
+        .and_then(|value| value.get("check_runs"))
+        .and_then(serde_json::Value::as_array);
+    let complete = runs.is_some_and(|runs| {
+        !runs.is_empty()
+            && parsed
+                .as_ref()
+                .and_then(|value| value.get("total_count"))
+                .and_then(serde_json::Value::as_u64)
+                .is_none_or(|total| total <= runs.len() as u64)
+            && runs.iter().all(|run| {
+                run.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                    && run
+                        .get("conclusion")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                    && !run
+                        .get("head_sha")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|head| head != sha)
+                    && run
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|name| {
+                            !is_test_check_run(run, name)
+                                || run.get("conclusion").and_then(serde_json::Value::as_str)
+                                    == Some("success")
+                        })
+            })
+    });
+    match classify_branch_ci_response("", sha, output) {
+        BranchCiState::Green { test_checks, .. } if complete => Ok(format!(
+            "CI check-runs on exact SHA {sha} passed: {}",
+            test_checks.join(", ")
+        )),
+        _ => Err(format!(
+            "CI check-runs on exact SHA {sha} are missing, incomplete or not successful (cancelled, skipped and budget-blocked runs do not count)"
+        )),
+    }
+}
+
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
 /// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
 /// the tip for a pure docs delivery. Both lookups are bounded and never poll.

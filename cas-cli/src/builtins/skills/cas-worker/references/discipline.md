@@ -60,10 +60,11 @@ a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
 targeted-test exception, park and name the unverified crates for the supervisor.
 
-The full build and tests run once at the epic's final gate: the merge queue
-where base has one, otherwise the supervisor's assembly, which records
-`ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` on
-the epic. Child closes reference it; final-gate failures return as follow-up tasks.
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+For a supervisor's integrated run, record
+`ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
+the epic. Child closes reference the epic's integration proof; final-gate
+failures return as follow-up tasks.
 
 ## Browser checks
 
@@ -76,7 +77,7 @@ filters cannot substitute for the producer's selection. Manual named-spec or
 canonical-ID runs remain available for iteration and failure controls.
 
 The hook denies factory workers/reviewers `--full`, unfiltered Playwright and
-unfiltered journey npm scripts. The merge queue runs the full suite once; close
+unfiltered journey npm scripts. Full-suite ownership follows the rule above; close
 and QA do not require a journey receipt. Documentation/ledger-only rebinds must
 prove product/catalog/tool inputs are unchanged. A failure control runs only
 the failing spec with one worker and keeps the original failure; it never

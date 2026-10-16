@@ -35,8 +35,9 @@ Use a red → green loop to produce tests worth keeping. Keep durable decisions 
 - Use the project’s scoped test command and record the actual proof result in the task. Do not treat a zero-test success as proof.
 - Factory workers run the targeted tests for their change themselves. For Rust: one package, a named-test
   `-E` filter, through the capped runner; commit and run the failing test, then commit the fix and run the
-  same filter for green. JS, TS and Python suites run directly in the worker. The merge queue runs the
-  full suite once; never run it locally.
+  same filter for green. Targeted JS, TS and Python tests run directly in the worker.
+
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

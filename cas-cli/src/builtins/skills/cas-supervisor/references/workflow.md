@@ -383,7 +383,9 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
    suite before the PR: lane CI admits lanes, the epic PR
    enters the queue, and the queue proves the exact tree that becomes base. The
    epic closes once its tip is contained in base.
-   Without such a queue, run the project's assembly gate locally. In a project
+   With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+   Without such a queue, prefer existing CI check-runs on the exact default-branch SHA;
+   if unavailable, run the project's assembly gate on that SHA and record it on the epic. In a project
    with `scripts/assembly-proof.py` that gate, and the opt-in diagnostic after a
    failed queue run, is
    `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native

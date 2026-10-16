@@ -106,7 +106,9 @@ journey evaluation scores polish for it.
 For hub-web deliveries, run vitest, tsc and the source-impact-selected journeys
 while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
 affected, four workers) or `--affected <base>`. Close and QA do not require a
-journey receipt: the merge queue runs the full journey suite once.
+journey receipt.
+
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
 Workers produce affected-journey evidence; independent QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
 The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing

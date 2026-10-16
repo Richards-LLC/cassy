@@ -387,4 +387,59 @@ mod describe_dependency_tests {
             "an explicit non-default target remains task authority"
         );
     }
+
+    /// cas-96ab: `dep_add` and `dep_remove` read `dep_type` the same way.
+    /// `dep_add` used to coerce `extracted` (and the hyphenated spellings
+    /// `dep_remove` accepts) to Blocks, so the edge it wrote was not the one
+    /// a matching `dep_remove` looked for.
+    #[tokio::test]
+    async fn dep_add_and_dep_remove_accept_the_same_dep_type_spellings_cas_96ab() {
+        use tempfile::TempDir;
+
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        for (spelling, expected) in [
+            ("extracted", DependencyType::ExtractedFrom),
+            ("extractedfrom", DependencyType::ExtractedFrom),
+            ("extracted-from", DependencyType::ExtractedFrom),
+            ("extracted_from", DependencyType::ExtractedFrom),
+            ("parent-child", DependencyType::ParentChild),
+            ("discovered-from", DependencyType::DiscoveredFrom),
+            ("requires_start", DependencyType::RequiresStart),
+            ("related", DependencyType::Related),
+            ("blocks", DependencyType::Blocks),
+        ] {
+            let from = format!("cas-96ab-from-{spelling}");
+            let to = format!("cas-96ab-to-{spelling}");
+            store.add(&Task::new(from.clone(), "from".into())).unwrap();
+            store.add(&Task::new(to.clone(), "to".into())).unwrap();
+            core.cas_task_dep_add(Parameters(DependencyRequest {
+                from_id: from.clone(),
+                to_id: to.clone(),
+                dep_type: spelling.into(),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("dep_add {spelling}: {error:?}"));
+            let stored: Vec<DependencyType> = store
+                .get_dependencies(&from)
+                .unwrap()
+                .into_iter()
+                .map(|dep| dep.dep_type)
+                .collect();
+            assert_eq!(stored, vec![expected], "dep_add dep_type={spelling}");
+            core.cas_task_dep_remove(Parameters(DependencyRequest {
+                from_id: from.clone(),
+                to_id: to.clone(),
+                dep_type: spelling.into(),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("dep_remove {spelling}: {error:?}"));
+            assert!(
+                store.get_dependencies(&from).unwrap().is_empty(),
+                "dep_remove dep_type={spelling} removes the edge dep_add wrote"
+            );
+        }
+    }
 }

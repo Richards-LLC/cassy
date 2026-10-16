@@ -561,3 +561,62 @@ fn cas_7b6b_failed_wake_read_retains_raw_batch_until_recovery() {
     assert_eq!(ready.rows[0].id, id);
     assert!(!preparation.has_pending());
 }
+
+#[test]
+fn cas_7b6b_wake_inputs_prefer_active_registration_over_newer_stale_namesake() {
+    use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
+    use super::super::queue_control_jobs::PromptPreparation;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let now = chrono::Utc::now();
+    for (id, status, cli, age) in [
+        ("active-id", cas_types::AgentStatus::Active, "claude", 2),
+        ("stale-id", cas_types::AgentStatus::Stale, "codex", 1),
+    ] {
+        let mut agent = cas_types::Agent::new_with_role(
+            id.into(),
+            "worker-a".into(),
+            cas_types::AgentRole::Worker,
+        );
+        agent.status = status;
+        agent.registered_at = now - chrono::Duration::seconds(age);
+        agent.metadata.insert("worker_cli".into(), cli.into());
+        agent.metadata.insert(
+            "clone_path".into(),
+            temp.path().to_string_lossy().into_owned(),
+        );
+        agent.metadata.insert(
+            "worker_account_dir".into(),
+            temp.path().join(id).to_string_lossy().into_owned(),
+        );
+        agents.register(&agent).unwrap();
+    }
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let id = queue.enqueue("supervisor", "worker-a", "decision").unwrap();
+    let mut jobs = QueueJobs::inline();
+    let mut preparation = PromptPreparation::default();
+    assert!(
+        preparation
+            .advance(
+                &mut jobs,
+                Some(QueueSelection {
+                    rows: vec![queue.queued_prompt(id).unwrap().unwrap()],
+                    ..Default::default()
+                }),
+                root,
+                "lead".into(),
+                vec![],
+                Instant::now()
+            )
+            .is_some()
+    );
+    assert!(
+        preparation
+            .recipient("worker-a")
+            .unwrap()
+            .wake_evidence(now)
+            .awaiting_first_prompt,
+        "GH #160: use the Active Claude session rather than a newer Stale Codex namesake"
+    );
+}

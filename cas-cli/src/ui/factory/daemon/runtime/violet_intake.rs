@@ -29,6 +29,7 @@ struct ReaderDelivery {
     route_generation: i64,
     delivery_generation: i64,
     consumption: String,
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +196,7 @@ fn admission_input(
         || target.project_id != context.project_id
         || target.external_ref.provider != "slack"
         || delivery.consumption != "unread"
+        || delivery.status != "leased"
         || !matches!(delivery.route_kind.as_str(), "owner" | "unclaimed_fanout")
         || delivery.delivery_generation < 1
         || delivery.route_generation < 0
@@ -250,3 +252,6 @@ fn managed_activity_envelope(leased: &LeasedDelivery) -> String {
 #[cfg(test)]
 #[path = "violet_intake_tests.rs"]
 mod tests;
+
+#[path = "violet_recovery.rs"]
+pub(crate) mod recovery;

@@ -244,7 +244,10 @@ pub(crate) mod test_support {
         );
         let gh = std::env::var_os("CAS_GH_BIN").expect("guard must pin gh away from the host");
         assert!(
-            std::process::Command::new(gh).arg("--version").output().is_err(),
+            std::process::Command::new(gh)
+                .arg("--version")
+                .output()
+                .is_err(),
             "the default gh fixture must fail before any process or network call"
         );
         drop(guard);

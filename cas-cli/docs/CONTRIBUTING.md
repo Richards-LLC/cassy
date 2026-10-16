@@ -51,6 +51,10 @@ are retried rather than cached as merged.
 
 Worker quiet detection also counts authenticated MCP calls when they enter the
 server, and scoped dirty-file edits or commits in the registered worker checkout.
+MCP activity emits at most one event per server-bound worker every 30 seconds,
+with the throttle checked in memory before store access. This interval is much
+shorter than the default 600-second quiet threshold; concurrent calls share the
+same reservation and failed writes can retry.
 Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
 hide a quiet worker. Call activity uses the server's immutable registered actor;
 request fields naming another worker do not credit that worker. Open harness

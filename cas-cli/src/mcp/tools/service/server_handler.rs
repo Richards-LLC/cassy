@@ -17,6 +17,36 @@ use crate::mcp::tools::service::CasService;
 /// routing guidance, well under 200 characters.
 pub(crate) const SERVER_INSTRUCTIONS: &str = "Cassy: tasks, memory, search and factory coordination. If these tools are deferred, load task, coordination, search and memory together before first use.";
 
+const WORKER_MCP_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reserve before any identity/store lookup, without holding a mutex across
+/// SQLite. Concurrent clones skip an in-progress attempt; a failed attempt
+/// releases its reservation so registration or transient errors can recover.
+struct WorkerMcpActivityPermit<'a> {
+    state: &'a std::sync::Mutex<crate::mcp::server::WorkerMcpActivityState>,
+    recorded: bool,
+}
+
+impl<'a> WorkerMcpActivityPermit<'a> {
+    fn acquire(core: &'a CasCore) -> Option<Self> {
+        let mut state = core.worker_mcp_activity.lock().ok()?;
+        if state.recording || state.last_recorded_at.is_some_and(|at| at.elapsed() < WORKER_MCP_ACTIVITY_INTERVAL) {
+            return None;
+        }
+        state.recording = true;
+        Some(Self { state: &core.worker_mcp_activity, recorded: false })
+    }
+}
+
+impl Drop for WorkerMcpActivityPermit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            if self.recorded { state.last_recorded_at = Some(std::time::Instant::now()); }
+            state.recording = false;
+        }
+    }
+}
+
 /// Activity belongs to this server's authenticated caller, never a subject
 /// named by a tool payload. Heartbeat/registration telemetry is not progress.
 fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
@@ -27,6 +57,7 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
     {
         return;
     }
+    let Some(mut permit) = WorkerMcpActivityPermit::acquire(core) else { return };
     let already_bound = core.agent_id.get().is_some();
     let Ok(id) = core.get_registered_agent_id_read_only() else { return };
     // A first request can resolve the registered server session from its
@@ -45,8 +76,9 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
             format!("MCP activity: {tool} {action}"))
             .with_session(&id)
             .with_metadata(serde_json::json!({"source":"mcp_dispatch", "tool":tool, "action":action}));
-        if let Err(error) = events.record(&event) {
-            tracing::debug!(%error, "worker MCP activity could not be recorded");
+        match events.record(&event) {
+            Ok(()) => permit.recorded = true,
+            Err(error) => tracing::debug!(%error, "worker MCP activity could not be recorded"),
         }
     }
 }
@@ -659,7 +691,7 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 mod tests {
     use super::potentially_mutating_call;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cas_6eec_mcp_burst_records_one_activity_across_service_clones() {
         use crate::mcp::server::{CasCore, AgentIdentitySource};
         use crate::mcp::tools::service::CasService;
@@ -673,15 +705,41 @@ mod tests {
         let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
         let calls = (0..16).map(|_| {
             let service = service.clone();
-            async move {
+            tokio::spawn(async move {
                 service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5),
                     std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
-            }
+            })
         });
-        futures::future::join_all(calls).await;
+        for call in futures::future::join_all(calls).await { call.unwrap(); }
         let events = crate::store::open_event_store(&root).unwrap();
         let rows = events.list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap();
         assert_eq!(rows.len(), 1, "rapid concurrent MCP calls must share one throttled activity row");
+        service.inner.worker_mcp_activity.lock().unwrap().last_recorded_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
+        assert_eq!(events.list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().len(), 2,
+            "activity resumes when the 30-second interval expires");
+    }
+
+    #[test]
+    fn cas_6eec_activity_throttle_releases_failed_attempts_and_inflight_reservations() {
+        use crate::mcp::server::{CasCore, AgentIdentitySource};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.bind_agent_identity("late-worker".into(), AgentIdentitySource::ServerInternal).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        assert!(core.worker_mcp_activity.lock().unwrap().last_recorded_at.is_none());
+        let worker = cas_types::Agent::new_with_role("late-worker".into(), "late-worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let permit = super::WorkerMcpActivityPermit::acquire(&core).unwrap();
+        assert!(super::WorkerMcpActivityPermit::acquire(&core.clone()).is_none(), "inflight reservation is shared");
+        drop(permit);
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        assert_eq!(crate::store::open_event_store(&root).unwrap().list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().len(), 1,
+            "failed attempts must not silence a now-registered worker for 30s");
     }
 
     #[tokio::test]

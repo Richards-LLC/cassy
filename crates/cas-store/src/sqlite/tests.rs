@@ -10,6 +10,40 @@ use crate::{SqliteRuleStore, SqliteSkillStore, SqliteTaskStore};
 use cas_types::{Rule, Skill, Task};
 
 #[test]
+fn cas_25eb1_two_sqlite_checkouts_generate_distinct_memory_ids() {
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let a = SqliteStore::open(a.path()).unwrap();
+    let b = SqliteStore::open(b.path()).unwrap();
+    a.init().unwrap();
+    b.init().unwrap();
+    let first = Entry::new(a.generate_id().unwrap(), "checkout A memory".into());
+    let second = Entry::new(b.generate_id().unwrap(), "checkout B memory".into());
+    a.add(&first).unwrap();
+    b.add(&second).unwrap();
+    assert_ne!(first.id, second.id, "independent checkouts must not share a counter ID");
+    a.add(&second).unwrap();
+    assert_eq!(a.list().unwrap().len(), 2);
+}
+
+#[test]
+fn cas_25eb1_two_markdown_checkouts_generate_distinct_memory_ids() {
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let a = crate::MarkdownStore::open(a.path()).unwrap();
+    let b = crate::MarkdownStore::open(b.path()).unwrap();
+    a.init().unwrap();
+    b.init().unwrap();
+    let first = Entry::new(a.generate_id().unwrap(), "checkout A memory".into());
+    let second = Entry::new(b.generate_id().unwrap(), "checkout B memory".into());
+    a.add(&first).unwrap();
+    b.add(&second).unwrap();
+    assert_ne!(first.id, second.id, "legacy stores must also mint global IDs");
+    a.add(&second).unwrap();
+    assert_eq!(a.list().unwrap().len(), 2);
+}
+
+#[test]
 fn entry_and_rule_origins_are_stamped_on_add_and_preserved_on_update() {
     let temp = TempDir::new().unwrap();
     let entries =

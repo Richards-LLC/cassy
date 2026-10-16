@@ -6776,7 +6776,7 @@ mod cas_d5ab_send_outcome_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_row_the_daemon_set_aside_ends_the_wait_and_a_timeout_says_so() {
+    async fn a_row_the_daemon_set_aside_ends_the_wait_but_a_fresh_one_does_not() {
         let root = tempfile::tempdir().unwrap();
         let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
         queue.init().unwrap();

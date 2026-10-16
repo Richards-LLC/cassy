@@ -99,6 +99,15 @@ class OvercapProbeTest(unittest.TestCase):
             self.run_probe(corrupt=True)
 
 
+class HarnessWorkerCapabilitiesTest(unittest.TestCase):
+    def test_scripted_claude_help_advertises_supported_worker_isolation(self):
+        # pin: native Claude worker discovery requires these two external CLI switches.
+        result = subprocess.run([sys.executable, str(SCRIPTS / "live_check_peer_collab/harness.py"), "--help"],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True)
+        self.assertIn("--mcp-config", result.stdout)
+        self.assertIn("--strict-mcp-config", result.stdout)
+
+
 class TeamClaimsProbeTest(unittest.TestCase):
     def run_probe(self, visibility="team_project", missing=False, queued=False):
         from types import SimpleNamespace

@@ -670,8 +670,13 @@ def main():
         return 0
     if len(sys.argv) >= 2 and sys.argv[1] in MACHINE_COMMANDS:
         return machine_main(sys.argv[1:])
+    if sys.argv[1:] == ["--help"]:
+        # The scripted harness accepts these arguments. Native worker
+        # isolation probes must see them before it will launch the stub.
+        print("Scripted Claude harness: --mcp-config --strict-mcp-config --permission-mode --allowedTools --disallowedTools")
+        return 0
     if not sys.stdin.isatty():
-        # `claude --version`, `--help` and `cas init` probes.
+        # `claude --version` and `cas init` probes.
         return 0
     run_pane()
     return 0

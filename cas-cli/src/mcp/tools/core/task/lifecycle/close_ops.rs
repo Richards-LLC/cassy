@@ -18320,6 +18320,28 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     .unwrap_or_else(|| {
                         count_unmerged_factory_commits(repo_path, refname, parent_branch)
                     });
+                // cas-dbbf: the assignee's bare `factory/<assignee>` lane is
+                // reused for later tasks. When every commit it holds beyond
+                // the target claims another task, none of them is this
+                // child's work, so they strand nothing here (cas-73b8 and
+                // cas-93db applied the same rule to a single task's close).
+                // An unnamed commit, or one naming this child, still counts.
+                let count = if count > 0
+                    && live_factory_branch.as_deref() == Some(commit)
+                    && task_attribution::lane_commits_all_claim_other_tasks(
+                        repo_path,
+                        refname,
+                        parent_branch,
+                        &TaskCommitIdentity {
+                            task_id: Some(t.id.clone()),
+                            known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
+                        },
+                    ) == Some(true)
+                {
+                    0
+                } else {
+                    count
+                };
                 unmerged_count = unmerged_count.max(count);
                 latest_commit_unix = latest_commit_unix.max(
                     git_snapshot

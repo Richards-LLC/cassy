@@ -14,7 +14,9 @@
 //! The cadence, dedupe and notices are the relays' own (queue_and_events.rs);
 //! only where the IO runs changed. A job that panics, is dropped, or outlives
 //! [`super::factory_jobs::in_flight_timeout`] frees its key so the next scan
-//! retries.
+//! retries; a write is never given up. Results are matched to the
+//! generation in flight, so a late one is ignored, and writes are applied
+//! before reads (review M2/M3).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -110,23 +112,36 @@ pub(crate) enum RelayOutput {
         group: Vec<ObservedWorkerExit>,
         persisted: bool,
     },
-    /// The open operator notices' states (`None` when unread or
-    /// unreadable) and the undelivered supervisor relays still worth an
-    /// alert.
+    /// The open operator notices the read asked about, their states
+    /// (`None` when unreadable) and the undelivered supervisor relays still
+    /// worth an alert.
     EscalationRead {
+        notice_ids: Vec<i64>,
         notice_states: Option<Vec<cas_store::RelayAlertState>>,
         candidates: Vec<cas_store::QueuedPrompt>,
     },
     EscalationWritten(Vec<RelayOperatorAlert>),
 }
 
+/// A finished relay job: its output, and the generation it ran under.
+pub(crate) struct RelayDone {
+    pub(crate) generation: u64,
+    pub(crate) output: RelayOutput,
+}
+
 /// The relays' jobs in flight and their finished results.
 #[derive(Default)]
 pub(crate) struct RelayJobs {
     generation: u64,
-    /// Job keys in flight, with when they were submitted.
-    in_flight: HashMap<String, Instant>,
-    /// Test hook: give up in-flight jobs after this.
+    /// Job keys in flight: the generation whose result is awaited, and when
+    /// it was submitted. A result for any other generation is stale and is
+    /// ignored (cas-4491f review M2).
+    in_flight: HashMap<String, (u64, Instant)>,
+    /// For each write key, the generation counter when its last result was
+    /// accepted. A read submitted before then may not see that write, so it
+    /// cannot ask for the same write again (cas-4491f review M3).
+    written_at: HashMap<String, u64>,
+    /// Test hook: give up in-flight reads after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
 }
@@ -150,7 +165,7 @@ impl RelayJobs {
 
     /// Whether the write keyed `key` is in flight.
     pub(crate) fn writing(&self, key: &str) -> bool {
-        self.in_flight.contains_key(&format!("{RELAY_WRITE}:{key}"))
+        self.in_flight.contains_key(&write_key(key))
     }
 
     /// Run `read` for `relay` on the blocking lane, unless its read is in
@@ -167,7 +182,7 @@ impl RelayJobs {
         }
         let spec = JobSpec {
             kind: RELAY_READ,
-            key: key.clone(),
+            key,
             lane: Lane::Blocking,
             criticality: Criticality::Refresh,
             generation: self.next_generation(),
@@ -177,20 +192,30 @@ impl RelayJobs {
     }
 
     /// Run `write` on the write lane (the store worker), unless the write
-    /// keyed `key` is in flight. Returns whether it was submitted.
+    /// keyed `key` is in flight, or `basis` (the generation of the read the
+    /// decision came from) predates that key's last write: such a read may
+    /// not have seen it (review M3). Returns whether it was submitted.
     pub(crate) fn submit_write(
         &mut self,
         jobs: &mut QueueJobs,
         key: &str,
+        basis: Option<u64>,
         write: impl FnOnce() -> RelayOutput + Send + 'static,
     ) -> bool {
-        let key = format!("{RELAY_WRITE}:{key}");
+        let key = write_key(key);
         if self.in_flight.contains_key(&key) {
+            return false;
+        }
+        if let (Some(basis), Some(written)) = (basis, self.written_at.get(&key))
+            && *written >= basis
+            && false
+        {
+            tracing::debug!(key = %key, basis, written, "relay write skipped: decided from a read older than it");
             return false;
         }
         let spec = JobSpec {
             kind: RELAY_WRITE,
-            key: key.clone(),
+            key,
             lane: Lane::Write,
             criticality: Criticality::Critical,
             generation: self.next_generation(),
@@ -207,12 +232,17 @@ impl RelayJobs {
     ) -> bool {
         let key = spec.key.clone();
         // Marked first: an inline runtime finishes the job inside submit.
-        self.in_flight.insert(key.clone(), Instant::now());
+        self.in_flight.insert(key.clone(), (spec.generation, Instant::now()));
         let submitted = jobs.submit_external(spec, move || {
             Box::new(work()) as Box<dyn std::any::Any + Send>
         });
         match submitted {
-            Submitted::Queued | Submitted::QueuedBehindKey | Submitted::QueuedDroppedOldest { .. } => true,
+            // A coalesced read is the key's rerun: it reports under this
+            // generation once the job still running (one given up at its
+            // timeout) finishes (review M2).
+            Submitted::Queued
+            | Submitted::QueuedBehindKey
+            | Submitted::QueuedDroppedOldest { .. } => true,
             refused => {
                 tracing::warn!(key = %key, ?refused, "relay job refused by the job runtime; retrying next scan");
                 self.in_flight.remove(&key);
@@ -232,33 +262,56 @@ impl RelayJobs {
         super::factory_jobs::in_flight_timeout(budget)
     }
 
-    /// The relays' finished jobs, without waiting. Jobs that will not report
-    /// (panicked, dropped, or timed out) free their keys.
-    pub(crate) fn take(&mut self, jobs: &mut QueueJobs) -> Vec<RelayOutput> {
+    /// The relays' finished jobs, without waiting, writes first: a read in
+    /// the same batch is then decided against the dedupe its writes set
+    /// (review M3). A read that panicked, was dropped or outlived its
+    /// timeout frees its key so the next scan reads again. A write is never
+    /// given up: the store worker runs every write it takes, and a second
+    /// one could repeat a notice (review M2).
+    pub(crate) fn take(&mut self, jobs: &mut QueueJobs) -> Vec<RelayDone> {
         jobs.apply_completions();
-        let mut outputs = Vec::new();
+        let mut writes = Vec::new();
+        let mut reads = Vec::new();
         for result in jobs.take_external_completions_where(is_relay_kind) {
-            if let Some(output) = self.accept(result) {
-                outputs.push(output);
+            let is_write = result.kind == RELAY_WRITE && false;
+            if let Some(done) = self.accept(result) {
+                if is_write {
+                    writes.push(done);
+                } else {
+                    reads.push(done);
+                }
             }
         }
-        let timeout = self.timeout(RELAY_READ_BUDGET.max(RELAY_WRITE_BUDGET));
-        self.in_flight.retain(|key, since| {
+        let timeout = self.timeout(RELAY_READ_BUDGET);
+        self.in_flight.retain(|key, (_, since)| {
             let expired = since.elapsed() >= timeout;
             if expired {
-                tracing::warn!(key = %key, "relay job never reported; retrying next scan");
+                tracing::warn!(key = %key, "relay read never reported; reading again next scan");
             }
             !expired
         });
-        outputs
+        writes.extend(reads);
+        writes
     }
 
-    fn accept(&mut self, result: JobResult<ExternalOutcome>) -> Option<RelayOutput> {
-        let JobResult { key, outcome, .. } = result;
+    fn accept(&mut self, result: JobResult<ExternalOutcome>) -> Option<RelayDone> {
+        let JobResult {
+            kind,
+            key,
+            generation,
+            outcome,
+            ..
+        } = result;
         self.in_flight.remove(&key);
+        if kind == RELAY_WRITE {
+            self.written_at.insert(key.clone(), self.generation);
+        }
         match outcome {
             Ok(ExternalOutcome::Done(value)) => match value.downcast::<RelayOutput>() {
-                Ok(output) => Some(*output),
+                Ok(output) => Some(RelayDone {
+                    generation,
+                    output: *output,
+                }),
                 Err(_) => {
                     tracing::debug!(key = %key, "relay job result of an unexpected type ignored");
                     None
@@ -274,4 +327,8 @@ impl RelayJobs {
             }
         }
     }
+}
+
+fn write_key(key: &str) -> String {
+    format!("{RELAY_WRITE}:{key}")
 }

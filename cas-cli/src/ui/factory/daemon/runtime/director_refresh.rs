@@ -192,6 +192,8 @@ impl PendingDeliverability {
     /// Deliver every prompt: the re-check never reported.
     fn uncertain(self) -> DeliverabilityBatch {
         DeliverabilityBatch {
+            // Review M4: never read, so read on the store worker, never
+            // delivered without its stale check.
             assignments: vec![
                 crate::ui::factory::app::AssignmentRead::Unavailable;
                 self.prompts.len()

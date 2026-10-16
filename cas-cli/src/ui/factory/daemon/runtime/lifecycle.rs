@@ -3320,12 +3320,11 @@ impl FactoryDaemon {
         if let Some(evidence) = refresh.take_ci_status(&mut self.queue_jobs) {
             self.app.apply_ci_status(evidence);
         }
-        // cas-4491f (C2b review L4): a refresh deferred behind a busy read
-        // or liveness job starts on the first pass they are done.
-        if due || refresh.refresh_requested() {
-            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
-        }
         let mut refreshed = false;
+        // cas-4491f review L1: a finished snapshot is applied before a due one
+        // starts, so a pending result does not defer the due one into a
+        // second read. Its delivery read, if any, still goes first (the
+        // start below waits for it).
         if let Some(load) = refresh.take_director_read(&mut self.queue_jobs) {
             refreshed = true;
             let applied = crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load));
@@ -3377,6 +3376,11 @@ impl FactoryDaemon {
                     tracing::debug!(%error, "director refresh read failed; panels keep the last snapshot");
                 }
             }
+        }
+        // cas-4491f (C2b review L4): a refresh deferred behind a busy read
+        // or liveness job starts on the first pass they are done.
+        if due || refresh.refresh_requested() {
+            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
         }
         let mut delivery = refresh.take_delivery_read(&mut self.queue_jobs);
         // cas-223f review round 2, M3: a read without fresh data is retried
@@ -3630,7 +3634,7 @@ impl FactoryDaemon {
         for (prompt, deliverable) in prompts {
             let assignment = assignments
                 .next()
-                .unwrap_or(crate::ui::factory::app::AssignmentRead::Unavailable);
+                .unwrap_or(crate::ui::factory::app::AssignmentRead::Unread);
             if !deliverable {
                 log_dropped_stale_prompt(&prompt);
                 continue;
@@ -3722,7 +3726,21 @@ impl FactoryDaemon {
                 });
                 return;
             }
-            AssignmentRead::NotAssignment | AssignmentRead::Unavailable => {}
+            // Review M4 (GH #682): the re-check never read this wake's task.
+            // Read it, check it and write its row on the store worker; a
+            // wake that is not an assignment after all is delivered as usual.
+            AssignmentRead::Unread
+                if crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text)
+                    .is_some() =>
+            {
+                let cas_dir = self.app.cas_dir().to_path_buf();
+                let session = self.session_name.clone();
+                store_worker.submit("director assignment wake (unread)", move || {
+                    crate::ui::factory::app::resolve_unread_assignment(&cas_dir, &session, &prompt);
+                });
+                return;
+            }
+            AssignmentRead::NotAssignment | AssignmentRead::Unavailable | AssignmentRead::Unread => {}
         }
         // cas-ae6d (GH #100): a loss-intolerant prompt (today:
         // the assignment wake-up) bound for a PTY pane that is
@@ -3739,8 +3757,7 @@ impl FactoryDaemon {
         // cas-4491f: the queue write runs on the store worker. A write that
         // fails there is logged; injecting into a pane that is not ready
         // would only be swallowed by its startup input buffer.
-        let pane_was_unready = self.route_director_prompt_to_queue(&prompt);
-        if pane_was_unready {
+        if self.route_director_prompt_to_queue(&prompt) {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
             return;
         }
@@ -3782,19 +3799,12 @@ impl FactoryDaemon {
         let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
         // cas-ae6d: a durable prompt that did not actually land
         // (transport error, or a composer-dirty deferral this
-        // lane cannot retry) is re-queued rather than lost.
-        //
-        // `pane_was_unready` means we only reached this direct
-        // inject because the durable enqueue itself failed.
-        // `Mux::inject` reports Delivered as soon as the write
-        // syscall returns, so a pane still flushing its startup
-        // input buffer yields a delivered-looking write that the
-        // harness never sees. Do not let that count as durable
-        // delivery — retry it, and if the queue is still
-        // unwritable, say so loudly rather than silently.
+        // lane cannot retry) is re-queued rather than lost. An
+        // unready pane never reaches this direct inject
+        // (cas-4491f: its queue write is not retried here).
         let delivered = super::delivery::durable_delivery_landed(
             matches!(inject_result, Ok(cas_mux::InjectOutcome::Delivered)),
-            pane_was_unready,
+            false,
         );
         if super::delivery::needs_durable_followup(delivered, prompt.durable_retry)
         {

@@ -42,7 +42,7 @@ pub(crate) mod task_dialog_load;
 
 pub(crate) use director_refresh::{
     timed as timed_refresh_step, DeliverabilityRequest, DeliveryInputs, DeliveryRequest,
-    AssignmentRead, DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap,
+    AssignmentRead, UnreadAssignmentOutcome, resolve_unread_assignment, DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap,
     IdleLivenessRequest, prompt_needs_inject_read,
 };
 

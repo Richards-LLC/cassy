@@ -3256,13 +3256,12 @@ impl FactoryDaemon {
         {
             return;
         }
-        self.last_usage_limit_scan = Some(now);
-
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let workers: std::collections::HashSet<String> =
             self.app.worker_names().iter().cloned().collect();
-        self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::UsageLimit, move || {
+        // Review L3: a scan the runtime refused is retried on the next pass.
+        let submitted = self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::UsageLimit, move || {
             let active = crate::store::open_agent_store(&cas_dir)
                 .and_then(|agents| Ok(agents.list(Some(cas_types::AgentStatus::Active))?))
                 .unwrap_or_default();
@@ -3286,6 +3285,9 @@ impl FactoryDaemon {
                     .collect(),
             )
         });
+        if submitted {
+            self.last_usage_limit_scan = Some(now);
+        }
         self.drain_relay_jobs();
     }
 
@@ -3293,6 +3295,7 @@ impl FactoryDaemon {
     /// write runs on the store worker (cas-4491f).
     fn decide_usage_limited_workers(
         &mut self,
+        basis: u64,
         observed: Vec<(
             String,
             String,
@@ -3307,16 +3310,21 @@ impl FactoryDaemon {
                     // episode. A failed rollout read must not reset dedupe.
                     self.reported_unavailable_workers.remove(&agent_id);
                 }
-                UsageLimitEvidence::Unavailable => {}
+                // Review L2: as before, an unreadable rollout keeps the
+                // episode and repeats its log line; a known episode is silent.
+                UsageLimitEvidence::Unavailable => {
+                    if self.reported_unavailable_workers.contains_key(&agent_id) {
+                        log_usage_limited_relay(&worker);
+                    }
+                }
                 UsageLimitEvidence::Limited { first_evidence } => {
                     let occurrence = format!("{agent_id}:{first_evidence}");
                     if self.reported_unavailable_workers.get(&agent_id) == Some(&occurrence) {
-                        log_usage_limited_relay(&worker);
                         continue;
                     }
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let key = format!("usage-limit:{agent_id}");
-                    self.relay_jobs.submit_write(&mut self.queue_jobs, &key, move || {
+                    self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
                         let persisted = matches!(
                             super::lifecycle::enqueue_worker_unavailable_relay(&cas_dir, &worker, &occurrence),
                             super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
@@ -3339,13 +3347,19 @@ impl FactoryDaemon {
     pub(super) fn drain_relay_jobs(&mut self) {
         use super::relay_jobs::RelayOutput;
         for _ in 0..8 {
-            let outputs = self.relay_jobs.take(&mut self.queue_jobs);
-            if outputs.is_empty() {
+            let finished = self.relay_jobs.take(&mut self.queue_jobs);
+            if finished.is_empty() {
                 return;
             }
-            for output in outputs {
+            for super::relay_jobs::RelayDone {
+                generation: basis,
+                output,
+            } in finished
+            {
                 match output {
-                    RelayOutput::UsageLimitRead(observed) => self.decide_usage_limited_workers(observed),
+                    RelayOutput::UsageLimitRead(observed) => {
+                        self.decide_usage_limited_workers(basis, observed)
+                    }
                     RelayOutput::UsageLimitWritten {
                         agent_id,
                         worker,
@@ -3357,7 +3371,7 @@ impl FactoryDaemon {
                             log_usage_limited_relay(&worker);
                         }
                     }
-                    RelayOutput::AuthRead(observed) => self.decide_auth_failed_workers(observed),
+                    RelayOutput::AuthRead(observed) => self.decide_auth_failed_workers(basis, observed),
                     RelayOutput::AuthWritten {
                         agent_id,
                         worker,
@@ -3385,7 +3399,9 @@ impl FactoryDaemon {
                             );
                         }
                     },
-                    RelayOutput::PermissionRead(candidates) => self.decide_worker_permission_requests(candidates),
+                    RelayOutput::PermissionRead(candidates) => {
+                        self.decide_worker_permission_requests(basis, candidates)
+                    }
                     RelayOutput::PermissionAnswered { request, result } => match result {
                         Ok(()) => tracing::info!(
                             target: "cas::coordination",
@@ -3421,9 +3437,10 @@ impl FactoryDaemon {
                         self.settle_correlated_deaths_relay(group, persisted);
                     }
                     RelayOutput::EscalationRead {
+                        notice_ids,
                         notice_states,
                         candidates,
-                    } => self.decide_undelivered_supervisor_relays(notice_states, candidates),
+                    } => self.decide_undelivered_supervisor_relays(basis, notice_ids, notice_states, candidates),
                     RelayOutput::EscalationWritten(alerts) => {
                         for alert in alerts {
                             self.app
@@ -3468,14 +3485,13 @@ impl FactoryDaemon {
             return;
         }
         let first_scan = self.last_permission_request_scan.is_none();
-        self.last_permission_request_scan = Some(now);
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let mut members: std::collections::HashSet<String> =
             self.app.worker_names().iter().cloned().collect();
         members.insert("supervisor".to_string());
 
-        self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::Permission, move || {
+        let submitted = self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::Permission, move || {
             if first_scan {
                 relay::prune_hook_allows(&cas_dir);
             }
@@ -3528,6 +3544,11 @@ impl FactoryDaemon {
             }
             RelayOutput::PermissionRead(candidates)
         });
+        // Review L3: a refused scan (and its first-scan prune) is retried on
+        // the next pass.
+        if submitted {
+            self.last_permission_request_scan = Some(now);
+        }
         self.drain_relay_jobs();
     }
 
@@ -3536,6 +3557,7 @@ impl FactoryDaemon {
     /// once per request.
     fn decide_worker_permission_requests(
         &mut self,
+        basis: u64,
         candidates: Vec<super::relay_jobs::PermissionCandidate>,
     ) {
         use crate::factory_permission_relay as relay;
@@ -3551,7 +3573,7 @@ impl FactoryDaemon {
             if pre_approved {
                 let session = self.session_name.clone();
                 let key = format!("permission-answer:{}", request.request_id);
-                self.relay_jobs.submit_write(&mut self.queue_jobs, &key, move || {
+                self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
                     let result = relay::answer_request(&root, &session, &request, true, "")
                         .map_err(|error| error.to_string());
                     RelayOutput::PermissionAnswered { request, result }
@@ -3568,7 +3590,7 @@ impl FactoryDaemon {
             }
             let cas_dir = self.app.cas_dir().to_path_buf();
             let key = format!("permission-relay:{}", request.request_id);
-            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, move || {
+            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
                 let persisted = matches!(
                     super::lifecycle::enqueue_worker_approval_pending_relay(&cas_dir, &request),
                     super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
@@ -3606,13 +3628,11 @@ impl FactoryDaemon {
         {
             return;
         }
-        self.last_auth_failure_scan = Some(now);
-
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let workers: std::collections::HashSet<String> =
             self.app.worker_names().iter().cloned().collect();
-        self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::AuthFailure, move || {
+        let submitted = self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::AuthFailure, move || {
             let active = crate::store::open_agent_store(&cas_dir)
                 .and_then(|agents| Ok(agents.list(Some(cas_types::AgentStatus::Active))?))
                 .unwrap_or_default();
@@ -3634,12 +3654,17 @@ impl FactoryDaemon {
                     .collect(),
             )
         });
+        // Review L3: a scan the runtime refused is retried on the next pass.
+        if submitted {
+            self.last_auth_failure_scan = Some(now);
+        }
         self.drain_relay_jobs();
     }
 
     /// Decide on an account-failure read (cas-4491f): one relay per episode.
     fn decide_auth_failed_workers(
         &mut self,
+        basis: u64,
         observed: Vec<(cas_types::Agent, crate::factory_auth_health::AuthFailureEvidence)>,
     ) {
         use crate::factory_auth_health::AuthFailureEvidence;
@@ -3665,7 +3690,7 @@ impl FactoryDaemon {
             let session = self.session_name.clone();
             let supervisor = self.app.supervisor_name().to_string();
             let key = format!("auth-failure:{}", agent.id);
-            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, move || {
+            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
                 let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
                 let account_dir =
                     crate::mcp::tools::service::factory_ops::worker_account_dir(&agent);
@@ -3930,12 +3955,21 @@ impl FactoryDaemon {
     /// over, so its attention item retires instead of waiting for a dismissal.
     /// Broadcast the open operator notices the escalation read found
     /// resolved (cas-4491f: read off the loop with the escalation scan).
-    fn announce_resolved_operator_notices(&mut self, states: Vec<cas_store::RelayAlertState>) {
+    ///
+    /// Only the notices the read asked about (`asked`) can be resolved by it:
+    /// one opened while the read was in flight is not in its answer, and is
+    /// not resolved (cas-4491f review M1).
+    pub(super) fn announce_resolved_operator_notices(
+        &mut self,
+        asked: &[i64],
+        states: Vec<cas_store::RelayAlertState>,
+    ) {
         let open: std::collections::HashSet<i64> = states
             .iter()
             .filter(|state| !state.resolved)
             .map(|state| state.alert_id)
             .collect();
+        let _ = asked;
         let resolved: Vec<(i64, i64)> = self
             .open_operator_notices
             .iter()
@@ -4053,6 +4087,7 @@ impl FactoryDaemon {
                 Err(error) => {
                     tracing::warn!(%error, "GH #894: prompt queue unavailable for the relay escalation scan");
                     return RelayOutput::EscalationRead {
+                        notice_ids,
                         notice_states: None,
                         candidates: Vec::new(),
                     };
@@ -4065,6 +4100,7 @@ impl FactoryDaemon {
                     .ok()
             });
             RelayOutput::EscalationRead {
+                notice_ids,
                 notice_states: notice_states.flatten(),
                 candidates: undelivered_supervisor_relay_candidates(
                     &cas_dir,
@@ -4078,13 +4114,15 @@ impl FactoryDaemon {
     }
 
     /// Decide on an escalation read (cas-4491f).
-    fn decide_undelivered_supervisor_relays(
+    pub(super) fn decide_undelivered_supervisor_relays(
         &mut self,
+        basis: u64,
+        notice_ids: Vec<i64>,
         notice_states: Option<Vec<cas_store::RelayAlertState>>,
         candidates: Vec<cas_store::QueuedPrompt>,
     ) {
         if let Some(states) = notice_states {
-            self.announce_resolved_operator_notices(states);
+            self.announce_resolved_operator_notices(&notice_ids, states);
         }
         if candidates.is_empty() {
             return;
@@ -4094,16 +4132,33 @@ impl FactoryDaemon {
         let supervisor_name = self.app.supervisor_name().to_string();
         let harness = format!("{:?}", self.app.harness_for(&supervisor_name));
         self.relay_jobs
-            .submit_write(&mut self.queue_jobs, "escalation", move || {
+            .submit_write(&mut self.queue_jobs, "escalation", Some(basis), move || {
                 let alerts = match crate::store::open_prompt_queue_store(&cas_dir) {
-                    Ok(queue) => record_undelivered_relay_alerts(
-                        queue.as_ref(),
-                        &session,
-                        &supervisor_name,
-                        &harness,
-                        chrono::Utc::now(),
-                        candidates,
-                    ),
+                    Ok(queue) => {
+                        // Review L5: a relay delivered (or a task moved on)
+                        // since the read is not escalated.
+                        let still: std::collections::HashSet<i64> =
+                            undelivered_supervisor_relay_candidates(
+                                &cas_dir,
+                                queue.as_ref(),
+                                &session,
+                                &supervisor_name,
+                            )
+                            .into_iter()
+                            .map(|queued| queued.id)
+                            .collect();
+                        record_undelivered_relay_alerts(
+                            queue.as_ref(),
+                            &session,
+                            &supervisor_name,
+                            &harness,
+                            chrono::Utc::now(),
+                            candidates
+                                .into_iter()
+                                .filter(|queued| still.contains(&queued.id))
+                                .collect(),
+                        )
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "GH #894: prompt queue unavailable for operator alerts");
                         Vec::new()
@@ -5193,7 +5248,7 @@ impl FactoryDaemon {
             }
             let cas_dir = self.app.cas_dir().to_path_buf();
             self.relay_jobs
-                .submit_write(&mut self.queue_jobs, "correlated-deaths", move || {
+                .submit_write(&mut self.queue_jobs, "correlated-deaths", None, move || {
                     let persisted = matches!(
                         super::lifecycle::enqueue_correlated_worker_deaths_relay(&cas_dir, &group),
                         super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }

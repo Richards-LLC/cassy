@@ -244,3 +244,206 @@ fn c4491f_assignment_read_names_a_stale_task() {
         AssignmentRead::Unavailable
     ));
 }
+
+/// cas-4491f review M1: an escalation read answers only for the notices it
+/// asked about. A notice opened while the read was in flight is not
+/// announced resolved.
+#[test]
+fn c4491f_notice_opened_during_the_read_is_not_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.open_operator_notices.insert(1, 100);
+    // Opened after the read asked about notice 1.
+    daemon.open_operator_notices.insert(2, 200);
+    // The read asked about notice 1 only, and found it resolved (gone).
+    daemon.decide_undelivered_supervisor_relays(1, vec![1], Some(Vec::new()), Vec::new());
+    assert_eq!(
+        daemon.open_operator_notices.keys().copied().collect::<Vec<_>>(),
+        vec![2],
+        "notice 1 resolved; notice 2 was not asked about and stays open"
+    );
+}
+
+/// cas-4491f review M2: a read given up at its timeout is read again; the
+/// key's rerun reports under the new generation and the late result of the
+/// first is ignored, so one read is applied, not two.
+#[tokio::test]
+async fn c4491f_late_relay_read_is_ignored_and_its_rerun_reports() {
+    use super::relay_jobs::{Relay, RelayJobs, RelayOutput};
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let mut relays = RelayJobs::default();
+    relays.timeout_override = Some(Duration::ZERO);
+    assert!(relays.submit_read(&mut daemon.queue_jobs, Relay::UsageLimit, move || {
+        let _ = wait.recv();
+        RelayOutput::UsageLimitRead(vec![("late".into(), "late".into(), crate::mcp::tools::service::factory_ops::UsageLimitEvidence::Unavailable)])
+    }));
+    assert!(relays.take(&mut daemon.queue_jobs).is_empty());
+    assert!(!relays.reading(Relay::UsageLimit), "the timed-out read freed its key");
+    relays.timeout_override = Some(Duration::from_secs(30));
+    assert!(
+        relays.submit_read(&mut daemon.queue_jobs, Relay::UsageLimit, || {
+            RelayOutput::UsageLimitRead(vec![("rerun".into(), "rerun".into(), crate::mcp::tools::service::factory_ops::UsageLimitEvidence::Unavailable)])
+        }),
+        "a submit coalesced behind the running read is in flight"
+    );
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut applied = Vec::new();
+    while relays.reading(Relay::UsageLimit) {
+        for done in relays.take(&mut daemon.queue_jobs) {
+            if let RelayOutput::UsageLimitRead(observed) = done.output {
+                applied.extend(observed.into_iter().map(|(id, _, _)| id));
+            }
+        }
+        assert!(Instant::now() < deadline, "the rerun never reported");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(applied, vec!["rerun".to_string()], "only the rerun's result applies");
+}
+
+/// cas-4491f review M2: a write is never given up at a timeout, so it cannot
+/// be submitted twice (a second correlated-deaths write would drain a newer
+/// group).
+#[tokio::test]
+async fn c4491f_relay_write_is_never_given_up() {
+    use super::relay_jobs::{RelayJobs, RelayOutput};
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let mut relays = RelayJobs::default();
+    relays.timeout_override = Some(Duration::ZERO);
+    assert!(relays.submit_write(&mut daemon.queue_jobs, "correlated-deaths", None, move || {
+        let _ = wait.recv();
+        RelayOutput::DeathsRelayed { group: Vec::new(), persisted: true }
+    }));
+    assert!(relays.take(&mut daemon.queue_jobs).is_empty());
+    assert!(relays.writing("correlated-deaths"), "a slow write keeps its key");
+    assert!(
+        !relays.submit_write(&mut daemon.queue_jobs, "correlated-deaths", None, || {
+            RelayOutput::DeathsRelayed { group: Vec::new(), persisted: true }
+        }),
+        "no second write while the first runs"
+    );
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut reported = 0;
+    while relays.writing("correlated-deaths") {
+        reported += relays.take(&mut daemon.queue_jobs).len();
+        assert!(Instant::now() < deadline, "the write never reported");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    reported += relays.take(&mut daemon.queue_jobs).len();
+    assert_eq!(reported, 1);
+}
+
+/// cas-4491f review M3: a batch's writes are applied before its reads, and a
+/// read submitted before a write of the same key landed cannot ask for that
+/// write again (no duplicate notice, no second permission answer).
+#[test]
+fn c4491f_writes_apply_before_reads_and_stale_reads_do_not_rewrite() {
+    use super::relay_jobs::{Relay, RelayJobs, RelayOutput};
+    let mut jobs = super::prompt_queue_jobs::QueueJobs::inline();
+    let mut relays = RelayJobs::default();
+    // The read is submitted first and its write after: both finish inline.
+    assert!(relays.submit_read(&mut jobs, Relay::Permission, || RelayOutput::PermissionRead(Vec::new())));
+    let request = crate::factory_permission_relay::WorkerPermissionRequest {
+        worker: "w".into(),
+        request_id: "req-1".into(),
+        tool_name: "Bash".into(),
+        tool_use_id: None,
+        command_excerpt: String::new(),
+        age_secs: 1,
+    };
+    let answered = request.clone();
+    assert!(relays.submit_write(&mut jobs, "permission-answer:req-1", None, move || {
+        RelayOutput::PermissionAnswered { request: answered, result: Ok(()) }
+    }));
+    let finished = relays.take(&mut jobs);
+    let order: Vec<&str> = finished
+        .iter()
+        .map(|done| match done.output {
+            RelayOutput::PermissionAnswered { .. } => "written",
+            RelayOutput::PermissionRead(_) => "read",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(order, vec!["written", "read"], "the write applies first");
+    let read_basis = finished
+        .iter()
+        .find(|done| matches!(done.output, RelayOutput::PermissionRead(_)))
+        .map(|done| done.generation)
+        .unwrap();
+    assert!(
+        !relays.submit_write(&mut jobs, "permission-answer:req-1", Some(read_basis), move || {
+            RelayOutput::PermissionAnswered { request, result: Ok(()) }
+        }),
+        "the read predates the answer, so it cannot answer again"
+    );
+}
+
+/// cas-4491f review M4: an assignment wake whose re-check never reported is
+/// marked unread, not "unavailable": it is never delivered without its stale
+/// check.
+#[tokio::test]
+async fn c4491f_expired_recheck_leaves_the_assignment_unread() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let gate = Arc::new(super::director_refresh::ReadGate::default());
+    let mut refresh = DirectorRefresh::new()
+        .with_read_gate(Arc::clone(&gate))
+        .with_timeout(Duration::ZERO);
+    let wake = crate::ui::factory::director::Prompt {
+        target: "w".into(),
+        text: "You have been assigned a new task:\nTask ID: cas-a551".into(),
+        stall_nudge_task: None,
+        retract_worker: None,
+        retract_task: None,
+        retract_epic: None,
+        drop_if_worker_assigned: None,
+        durable_retry: true,
+    };
+    refresh
+        .start_deliverability_check(&daemon.app, &mut daemon.queue_jobs, vec![wake], Vec::new(), Instant::now())
+        .unwrap();
+    let batch = refresh.take_deliverability(&mut daemon.queue_jobs).pop().expect("given up at once");
+    gate.open();
+    assert!(
+        matches!(batch.assignments.first(), Some(crate::ui::factory::app::AssignmentRead::Unread)),
+        "{:?}",
+        batch.assignments
+    );
+}
+
+/// cas-4491f review M4 (GH #682): an unread assignment wake is read on the
+/// store worker before anything carries it, and a task that moved on
+/// suppresses it there.
+#[test]
+fn c4491f_unread_assignment_is_checked_before_it_is_delivered() {
+    use crate::ui::factory::app::{UnreadAssignmentOutcome, resolve_unread_assignment};
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut task = cas_types::Task::new("cas-c105".into(), "done".into());
+    task.status = cas_types::TaskStatus::Closed;
+    crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
+    let wake = crate::ui::factory::director::Prompt {
+        target: "w".into(),
+        text: "You have been assigned a new task:\nTask ID: cas-c105".into(),
+        stall_nudge_task: None,
+        retract_worker: None,
+        retract_task: None,
+        retract_epic: None,
+        drop_if_worker_assigned: None,
+        durable_retry: true,
+    };
+    assert_eq!(
+        resolve_unread_assignment(&cas_dir, "provision-test", &wake),
+        UnreadAssignmentOutcome::Suppressed
+    );
+}

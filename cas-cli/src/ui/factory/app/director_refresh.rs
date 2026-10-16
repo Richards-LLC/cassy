@@ -371,6 +371,79 @@ pub(crate) enum AssignmentRead {
     Task(Box<cas_types::Task>),
     /// The task could not be read: uncertainty delivers directly.
     Unavailable,
+    /// Not read at all: the re-check that would have read it failed or
+    /// timed out. The full read, the stale check and the assignment row then
+    /// happen on the store worker (cas-4491f review M4, GH #682).
+    Unread,
+}
+
+/// What [`resolve_unread_assignment`] did with an assignment wake whose task
+/// was never read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnreadAssignmentOutcome {
+    /// Not an assignment wake: deliver it as usual.
+    NotAssignment,
+    /// The task moved on for this recipient: suppressed (GH #682).
+    Suppressed,
+    /// The durable assignment row carries the wake.
+    AssignmentRow,
+    /// The task or its row could not be written; the wake went to the
+    /// durable prompt queue instead.
+    Queued,
+    /// Nothing could carry the wake.
+    Lost,
+}
+
+/// An assignment wake whose re-check never read its task (cas-4491f review
+/// M4): read it now, suppress a stale one, and hand a live one to the
+/// durable assignment row, as the inject path does after a successful
+/// re-check. Blocks on the stores, so the daemon runs it on its store
+/// worker.
+pub(crate) fn resolve_unread_assignment(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    prompt: &Prompt,
+) -> UnreadAssignmentOutcome {
+    let queue_it = || {
+        match crate::ui::factory::daemon::runtime::delivery::enqueue_director_prompt(
+            cas_dir,
+            factory_session,
+            &prompt.target,
+            &prompt.text,
+        ) {
+            Ok(_) => UnreadAssignmentOutcome::Queued,
+            Err(error) => {
+                tracing::warn!(%error, target_agent = %prompt.target, "assignment wake could not be queued; it may be lost");
+                UnreadAssignmentOutcome::Lost
+            }
+        }
+    };
+    if true {
+        return queue_it();
+    }
+    match AssignmentRead::read(cas_dir, None, prompt) {
+        AssignmentRead::NotAssignment => UnreadAssignmentOutcome::NotAssignment,
+        AssignmentRead::Stale(task_id, status) => {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "suppress_terminal_assignment",
+                target_agent = %prompt.target,
+                task_id = %task_id,
+                status = %status,
+                "cas-2b0b: suppressed a direct assignment for a terminal task"
+            );
+            UnreadAssignmentOutcome::Suppressed
+        }
+        AssignmentRead::Task(task) => match crate::task_assignment::enqueue(cas_dir, &task) {
+            Ok(_) => UnreadAssignmentOutcome::AssignmentRow,
+            Err(error) => {
+                tracing::warn!(%error, "assignment enqueue failed; queueing the director wake instead");
+                queue_it()
+            }
+        },
+        // Unreadable even now: the durable queue delivers it with retries.
+        AssignmentRead::Unavailable | AssignmentRead::Unread => queue_it(),
+    }
 }
 
 impl AssignmentRead {

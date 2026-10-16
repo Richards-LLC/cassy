@@ -730,6 +730,12 @@ pub(crate) fn run_external_git_command(
     project: &Path,
     args: &[String],
 ) -> Result<ExternalGitOutput, CiWatchError> {
+    // Reported when it runs on a daemon lane (cas-4491f): the reminder tests
+    // count these instead of timing the pass.
+    cas_store::lane_guard::note_blocking_call(
+        cas_store::lane_guard::BlockingKind::Command,
+        "git external reminder probe",
+    );
     let mut command = Command::new("git");
     command.args(args).current_dir(project);
     run_command(

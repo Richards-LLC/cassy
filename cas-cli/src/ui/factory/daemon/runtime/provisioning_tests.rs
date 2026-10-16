@@ -52,6 +52,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         open_operator_notices: std::collections::HashMap::new(),
         last_permission_request_scan: None,
         reported_permission_requests: std::collections::HashSet::new(),
+        relay_jobs: Default::default(),
         last_commander_mirror_scan: None,
         queue_jobs: super::prompt_queue_jobs::QueueJobs::inline(),
         reported_auth_failed_workers: std::collections::HashMap::new(),

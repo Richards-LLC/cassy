@@ -42,8 +42,8 @@ pub(crate) mod task_dialog_load;
 
 pub(crate) use director_refresh::{
     timed as timed_refresh_step, DeliverabilityRequest, DeliveryInputs, DeliveryRequest,
-    DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap, IdleLivenessRequest,
-    prompt_needs_fresh_recheck,
+    AssignmentRead, DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap,
+    IdleLivenessRequest, prompt_needs_fresh_recheck, prompt_needs_inject_read,
 };
 
 pub(crate) use branch_visibility::BranchAheadBehind;
@@ -945,6 +945,12 @@ pub struct FactoryApp {
     /// ([`Self::take_supervisor_stall_write`]).
     pending_supervisor_stall_write:
         Option<(PathBuf, crate::ui::factory::director::SupervisorStallTracker)>,
+    /// cas-4491f: the session's epic focus as the latest snapshot job read
+    /// it (`None` before the first one).
+    session_focus: Option<SessionEpicFocus>,
+    /// cas-4491f: non-live worker panes whose teardown requests wait to be
+    /// queued off the loop ([`Self::take_phantom_teardowns`]).
+    pending_phantom_teardowns: Vec<String>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1663,6 +1669,9 @@ impl FactoryApp {
         {
             tracing::warn!(%error, "failed to persist supervisor stall metric");
         }
+        if let Some((cas_dir, session, workers)) = self.take_phantom_teardowns() {
+            queue_phantom_worker_teardowns(&cas_dir, &session, &workers);
+        }
         events
     }
 
@@ -1816,59 +1825,39 @@ impl FactoryApp {
     /// Uses the shared [`crate::mcp::tools::service::agent_liveness`] classifier
     /// so pane grid, worker_status, and agent_list cannot disagree about dead
     /// workers. Names with **no** registry row yet are kept (spawn race).
-    fn reconcile_phantom_worker_panes(&mut self) {
-        use crate::mcp::tools::service::agent_liveness::should_keep_worker_pane;
-        use crate::store::{open_agent_store, open_spawn_queue_store};
-
-        let Ok(agent_store) = open_agent_store(&self.cas_dir) else {
-            return;
-        };
-        let Ok(all_agents) = agent_store.list(None) else {
-            return;
-        };
-
-        let to_drop: Vec<String> = self
-            .worker_names
-            .iter()
-            .filter(|name| !should_keep_worker_pane(name, all_agents.iter()))
-            .cloned()
+    /// The snapshot job classified `phantoms` (cas-4491f: the liveness check
+    /// reads `/proc`, so not here). Their teardown requests are queued off
+    /// the loop ([`Self::take_phantom_teardowns`]).
+    pub(super) fn reconcile_phantom_worker_panes_from(&mut self, phantoms: Vec<String>) {
+        // A pane closed since the job read is no longer anyone's to drop.
+        let to_drop: Vec<String> = phantoms
+            .into_iter()
+            .filter(|name| self.worker_names.contains(name))
             .collect();
 
         if to_drop.is_empty() {
             return;
         }
 
-        let Some(factory_session) = self.factory_session.as_deref() else {
+        if self.factory_session.is_none() {
             tracing::warn!(workers = ?to_drop, "stale worker panes retained: no factory session to queue teardown");
             return;
-        };
-        let Ok(queue) = open_spawn_queue_store(&self.cas_dir) else {
-            tracing::warn!(workers = ?to_drop, "stale worker panes retained: shutdown queue unavailable");
-            return;
-        };
-        let queued = queue.peek(512).unwrap_or_default();
-        for name in &to_drop {
-            if queued.iter().any(|request| {
-                request.action == cas_store::SpawnAction::Shutdown
-                    && request.factory_session.as_deref() == Some(factory_session)
-                    && request.worker_names.iter().any(|target| target == name)
-            }) {
-                continue;
-            }
-            match queue.enqueue_shutdown(
-                None,
-                std::slice::from_ref(name),
-                true,
-                Some(factory_session),
-            ) {
-                Ok(request_id) => {
-                    tracing::warn!(worker = %name, request_id, "cas-ca69: non-live worker pane retained until forced shutdown reaps its process tree")
-                }
-                Err(error) => {
-                    tracing::error!(worker = %name, %error, "stale worker pane retained because teardown request could not be queued")
-                }
-            }
         }
+        self.pending_phantom_teardowns = to_drop;
+    }
+
+    /// Phantom worker panes waiting for their teardown requests:
+    /// `(cas_dir, factory_session, workers)`.
+    pub(crate) fn take_phantom_teardowns(&mut self) -> Option<(PathBuf, String, Vec<String>)> {
+        if self.pending_phantom_teardowns.is_empty() {
+            return None;
+        }
+        let session = self.factory_session.clone()?;
+        Some((
+            self.cas_dir.clone(),
+            session,
+            std::mem::take(&mut self.pending_phantom_teardowns),
+        ))
     }
 
     fn set_active_epic(
@@ -1893,7 +1882,12 @@ impl FactoryApp {
     }
 
     fn source_for_detected_epic_started(&self, epic_id: &str) -> EpicFocusSource {
-        let focus = preferred_epic_focus_from_session_metadata();
+        // cas-4491f: the focus the latest snapshot job read; a caller that
+        // never applied one (a direct test, say) reads the metadata itself.
+        let focus = self
+            .session_focus
+            .clone()
+            .unwrap_or_else(preferred_epic_focus_from_session_metadata);
         if focus.epic_id.as_deref() == Some(epic_id) {
             focus.source.unwrap_or(EpicFocusSource::Inference)
         } else {
@@ -1942,8 +1936,16 @@ impl FactoryApp {
         }
     }
 
+    #[cfg(test)]
     fn apply_session_metadata_focus(&mut self) {
         let focus = preferred_epic_focus_from_session_metadata();
+        self.apply_epic_focus(focus);
+    }
+
+    /// Adopt the session's epic focus (cas-4491f: as read by the snapshot
+    /// job, never on the loop).
+    pub(super) fn apply_epic_focus(&mut self, focus: SessionEpicFocus) {
+        self.session_focus = Some(focus.clone());
 
         // cas-6945: only short-circuit when something is already tracked.
         // The event detector's `EpicStarted` is edge-triggered on the
@@ -3216,6 +3218,38 @@ pub(crate) fn supervisor_progress_from_session_metadata_named(
         metadata.last_supervisor_mcp_call_at,
         metadata.supervisor_stall,
     ))
+}
+
+/// Queue a forced shutdown for each phantom worker pane (cas-e98e, cas-ca69)
+/// unless one is already queued. Spawn-queue reads and writes, so the daemon
+/// runs it on its store worker (cas-4491f).
+pub(crate) fn queue_phantom_worker_teardowns(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    to_drop: &[String],
+) {
+    let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) else {
+        tracing::warn!(workers = ?to_drop, "stale worker panes retained: shutdown queue unavailable");
+        return;
+    };
+    let queued = queue.peek(512).unwrap_or_default();
+    for name in to_drop {
+        if queued.iter().any(|request| {
+            request.action == cas_store::SpawnAction::Shutdown
+                && request.factory_session.as_deref() == Some(factory_session)
+                && request.worker_names.iter().any(|target| target == name)
+        }) {
+            continue;
+        }
+        match queue.enqueue_shutdown(None, std::slice::from_ref(name), true, Some(factory_session)) {
+            Ok(request_id) => {
+                tracing::warn!(worker = %name, request_id, "cas-ca69: non-live worker pane retained until forced shutdown reaps its process tree")
+            }
+            Err(error) => {
+                tracing::error!(worker = %name, %error, "stale worker pane retained because teardown request could not be queued")
+            }
+        }
+    }
 }
 
 /// One read of the session metadata the supervisor-stall check and the
@@ -4619,6 +4653,65 @@ mod tests {
         let load = app.director_refresh_request().read(None);
         app.apply_director_refresh(load).unwrap();
         assert!(!app.event_detector.is_worker_held(worker));
+    }
+
+    /// cas-4491f: applying a full snapshot reads nothing on the loop. The
+    /// registered agents (session mappings, phantom panes) and the session's
+    /// epic focus arrive with the snapshot job, and a phantom pane's teardown
+    /// request waits to be queued off the loop.
+    #[test]
+    fn c4491f_applying_a_snapshot_reads_no_store_on_the_loop() {
+        use cas_store::{lane_guard, wait_budget};
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let session = "apply-off-loop";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", session),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session, 1, "supervisor", &[], None, None, None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        // A worker pane whose only registry row is shut down: a phantom.
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut gone = cas_types::Agent::new("gone-id".into(), "gone-worker".into());
+        gone.role = cas_types::AgentRole::Worker;
+        agents.register(&gone).unwrap();
+        gone.status = cas_types::AgentStatus::Shutdown;
+        agents.update(&gone).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.cas_dir = cas_dir.clone();
+        app.factory_session = Some(session.to_string());
+        app.worker_names = vec!["gone-worker".to_string()];
+
+        // The job reads; then the loop applies.
+        let load = app.director_refresh_request().read(None);
+        let store = wait_budget::store_access_violations();
+        let lane = lane_guard::thread_violations();
+        {
+            let _forbid = wait_budget::forbid_store_access();
+            let _control = lane_guard::enter_lane(lane_guard::Lane::Control);
+            app.apply_director_refresh(load).unwrap();
+        }
+        assert_eq!(
+            wait_budget::store_access_violations(),
+            store,
+            "applying the snapshot read the store on the loop: {:?}",
+            wait_budget::last_store_access_violation()
+        );
+        assert_eq!(lane_guard::thread_violations(), lane, "{:?}", lane_guard::last_thread_violation());
+        assert_eq!(
+            app.session_to_pane.get("gone-id").map(String::as_str),
+            Some("gone-worker"),
+            "session mappings came from the job's agents"
+        );
+        let (_, queued_for, workers) = app.take_phantom_teardowns().expect("a phantom pane");
+        assert_eq!((queued_for.as_str(), workers), (session, vec!["gone-worker".to_string()]));
     }
 
     /// cas-728b simplify pass: hoisted from two near-identical PTY scaffolds

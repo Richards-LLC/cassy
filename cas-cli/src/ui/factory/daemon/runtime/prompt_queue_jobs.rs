@@ -1441,6 +1441,20 @@ impl QueueJobs {
         std::mem::take(&mut self.external)
     }
 
+    /// The finished external jobs whose kind matches `owns`, leaving the
+    /// rest for their own owner (cas-4491f: the relays and the director
+    /// refresh share this runtime).
+    pub(crate) fn take_external_completions_where(
+        &mut self,
+        owns: impl Fn(&str) -> bool,
+    ) -> Vec<JobResult<ExternalOutcome>> {
+        let (taken, kept) = std::mem::take(&mut self.external)
+            .into_iter()
+            .partition(|result| owns(result.kind));
+        self.external = kept;
+        taken
+    }
+
     /// Close the lanes and wait up to `timeout` for queued critical work
     /// (stamps) to finish. Call before the StoreWorker drains (jobs.rs).
     pub(crate) fn drain_for_shutdown(&mut self, cas_dir: &Path, timeout: Duration) -> bool {

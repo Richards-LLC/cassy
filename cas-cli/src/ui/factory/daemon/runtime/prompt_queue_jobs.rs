@@ -1789,6 +1789,27 @@ impl QueueJobs {
         }
     }
 
+    /// Make sure a claim job for `(row, recipient)` is out or back, and say
+    /// whether it is back. A broadcast checks every member this way before
+    /// injecting any (cas-786a6).
+    pub(crate) fn claim_resolved(
+        &mut self,
+        cas_dir: &Path,
+        session: &str,
+        row: i64,
+        recipient: &str,
+        target: &str,
+    ) -> bool {
+        let key = (row, recipient.to_string());
+        if !self.claims.contains_key(&key) {
+            self.submit_claim(cas_dir, session, row, recipient, target);
+            if matches!(self.exec, Exec::Inline(_)) {
+                self.apply_completions();
+            }
+        }
+        matches!(self.claims.get(&key), Some(ClaimState::Ready(..)))
+    }
+
     /// Whether a claim job for `(row, recipient)` is out or came back
     /// untaken.
     pub(crate) fn claim_outstanding(&self, row: i64, recipient: &str) -> bool {

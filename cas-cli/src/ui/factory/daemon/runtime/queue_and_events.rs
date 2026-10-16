@@ -8362,6 +8362,25 @@ impl FactoryDaemon {
                 }
                 // cas-786a6: the tally outlives this pass while urgent
                 // members settle; it is finished when the last one reports.
+                // cas-786a6 (H3): every member's claim is taken by a
+                // `ClaimForInject` job first; the broadcast injects on the
+                // pass where all of them have come back.
+                let mut claims_back = true;
+                for name in &workers {
+                    if queued.urgent && !self.app.mux.pane_ready_for_injection(name) {
+                        continue;
+                    }
+                    claims_back &= self.queue_jobs.claim_resolved(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        queued.id,
+                        name,
+                        &queued.target,
+                    );
+                }
+                if !claims_back {
+                    continue;
+                }
                 let mut tally =
                     super::inject_commands::BroadcastTally::new(queued.clone(), attempted);
                 for name in &workers {
@@ -8374,10 +8393,25 @@ impl FactoryDaemon {
                     }
                     // The claim is taken just before the handoff, as before C3;
                     // its token lets the release drop only this claim.
-                    let Some(claim_token) = queue.claim_recipient_transport_token(queued.id, name)?
-                    else {
-                        tally.succeeded += 1;
-                        continue;
+                    let claim_token = match self.queue_jobs.claim_for_inject(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        queued.id,
+                        name,
+                        &queued.target,
+                    ) {
+                        super::prompt_queue_jobs::ClaimStep::Claimed(token) => token,
+                        // Another channel already holds it for this worker.
+                        super::prompt_queue_jobs::ClaimStep::NotClaimed => {
+                            tally.succeeded += 1;
+                            continue;
+                        }
+                        // A member whose pane just became ready: next pass.
+                        super::prompt_queue_jobs::ClaimStep::Waiting => {
+                            tally.failed += 1;
+                            tally.notes.push(format!("{name}: transport claim pending"));
+                            continue;
+                        }
                     };
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
@@ -8461,12 +8495,28 @@ impl FactoryDaemon {
                 // handoff that keeps its claim, holds the row. From here the
                 // row is in flight, holding the claim's token, until its
                 // stamps land.
-                let inject_generation = match self.queue_jobs.admit(
+                // cas-786a6 (H3): two phases. The claim is taken by a
+                // `ClaimForInject` job on the writer (QA retarget, re-read,
+                // compare-and-set claim); this pass submits it and moves on,
+                // and the row's next pass injects once the claim came back.
+                let claim_token = match self.queue_jobs.claim_for_inject(
+                    self.app.cas_dir(),
+                    &self.session_name,
                     queued.id,
                     &queued.target,
+                    &queued.target,
+                ) {
+                    super::prompt_queue_jobs::ClaimStep::Claimed(token) => token,
+                    super::prompt_queue_jobs::ClaimStep::Waiting
+                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
+                };
+                let inject_generation = match self.queue_jobs.admit_claimed(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    claim_token,
                     Instant::now(),
-                    || Ok(queue.claim_recipient_transport_token(queued.id, &queued.target)?),
-                )? {
+                ) {
                     super::prompt_queue_jobs::Admission::Inject { generation } => generation,
                     super::prompt_queue_jobs::Admission::InFlight
                     | super::prompt_queue_jobs::Admission::NotClaimed => continue,

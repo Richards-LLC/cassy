@@ -1998,6 +1998,11 @@ impl EmbeddedDaemon {
                     && !crate::cloud::shutdown::is_ended(&self.config.cas_root, &newest)
                         .unwrap_or(true)
                 {
+                    let mut owner = self.agent_id.write().await;
+                    if owner.as_deref() != Some(id.as_str()) {
+                        // A concurrent SessionStart already chose a new owner.
+                        return;
+                    }
                     tracing::info!(
                         worker = %newest.name,
                         previous_agent_id = %id,
@@ -2005,7 +2010,7 @@ impl EmbeddedDaemon {
                         "switching heartbeat to newest agent registration"
                     );
                     id = newest.id;
-                    *self.agent_id.write().await = Some(id.clone());
+                    *owner = Some(id.clone());
                 }
                 // Liveness gate (EPIC cas-9508 / cas-2749): before heartbeating,
                 // verify the Claude Code client process our agent record belongs
@@ -2098,7 +2103,9 @@ impl EmbeddedDaemon {
                                 );
                                 let _ = store.mark_stale(&id);
                                 let mut guard = self.agent_id.write().await;
-                                *guard = None;
+                                if guard.as_deref() == Some(id.as_str()) {
+                                    *guard = None;
+                                }
                                 drop(guard);
                                 self.kick_cloud_presence(String::new()).await;
                                 return;
@@ -2146,7 +2153,9 @@ impl EmbeddedDaemon {
                 if terminal {
                     // Clear agent_id so we stop heartbeating on future ticks
                     let mut guard = self.agent_id.write().await;
-                    *guard = None;
+                    if guard.as_deref() == Some(id.as_str()) {
+                        *guard = None;
+                    }
                 } else if !succeeded {
                     tracing::error!(
                         agent_id = %id.chars().take(8).collect::<String>(),

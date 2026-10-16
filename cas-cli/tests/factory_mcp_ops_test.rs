@@ -6718,7 +6718,8 @@ async fn cas_1485_inbox_poll_and_named_repeat_expire_closed_task_relays() {
         let mut task = Task::new("cas-1485-inbox".into(), "closed after enqueue".into());
         task.status = TaskStatus::AwaitingMerge;
         env.task_store().add(&task).unwrap();
-        let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id, chrono::Utc::now().to_rfc3339());
+        let occurrence = env.task_store().get(&task.id).unwrap().updated_at.to_rfc3339();
+        let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{occurrence}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id);
         let queue = env.prompt_queue();
         let id = queue.enqueue("lifecycle-wake:17717", "supervisor", &body).unwrap();
         if polled_before_close {

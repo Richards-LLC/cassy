@@ -87,6 +87,15 @@ and a terminal-task reconciliation acknowledgement. Hooks, named wakes, inbox
 polls and repeats of earlier polls share this atomic guard; notification ids
 are never interpreted as task ids. Current terminal reports and payloads with
 no positive terminal-task evidence remain eligible.
+The same atomic boundary expires verification-dispatch handoffs after their
+RFC3339 deadline or when their task is terminal. CI red-run and worker-attention
+snapshots expire after one hour, or sooner with positive terminal-task evidence.
+CI resolves a task from an explicit task id or an unambiguous local task branch /
+parked branch; it performs no Git or network lookup. Fresh alerts on unknown or
+shared branches remain eligible. Age/deadline expiry works without a task table;
+malformed envelopes and human messages retain normal delivery semantics.
+Expired rows keep their history, acknowledgement and `superseded_stale` reason.
+
 
 ## Factory cloud client (disabled by default)
 

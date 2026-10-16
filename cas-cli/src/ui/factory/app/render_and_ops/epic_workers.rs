@@ -1115,7 +1115,7 @@ fn refresh_epic_base_from_parent(
 
     if !publish_existing {
         return Ok(Some(format!(
-            "EPIC BASE FAST-FORWARDED (UNPUBLISHED): epic base '{epic_branch}' ({epic_sha}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({parent_sha}); publication is deferred or unverified; the refreshed local tip will be used."
+            "EPIC BASE FAST-FORWARDED (LOCAL): epic base '{epic_branch}' ({epic_sha}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({parent_sha}); publication is handled separately; the refreshed local tip will be used."
         )));
     }
 

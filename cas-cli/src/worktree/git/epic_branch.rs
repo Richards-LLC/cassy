@@ -82,10 +82,12 @@ impl GitOperations {
                 Err(error) => Err(format!("origin presence unverified: {error}")),
             }
         };
-        let base_fetched = self.has_origin_remote()
-            && self
-                .fetch_branch(base.strip_prefix("origin/").unwrap_or(base))
-                .is_ok();
+        let base_branch = base.strip_prefix("origin/").unwrap_or(base);
+        let base_fetched = if base_branch == branch {
+            matches!(remote, Ok(Some(true)))
+        } else {
+            self.has_origin_remote() && self.fetch_branch(base_branch).is_ok()
+        };
         EpicPublicationObservation {
             remote,
             base_fetched,

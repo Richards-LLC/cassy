@@ -284,6 +284,17 @@ fn cas_bfa1_spawn_closed_or_deleted_epic_is_not_republished() {
         );
     });
     with_fixture(|f| {
+        git(&f.repo, &["checkout", "epic/round2"]);
+        commit(&f.repo, "landed-epic-work");
+        git(&f.repo, &["push", "origin", "epic/round2"]);
+        git(&f.repo, &["checkout", "main"]);
+        git(&f.repo, &["merge", "--ff-only", "epic/round2"]);
+        git(&f.repo, &["push", "origin", "main"]);
+        git(&f.origin, &["update-ref", "-d", "refs/heads/epic/round2"]);
+        git(
+            &f.repo,
+            &["update-ref", "-d", "refs/remotes/origin/epic/round2"],
+        );
         git(&f.repo, &["branch", "-D", "epic/round2"]);
         let result = f
             .app

@@ -124,6 +124,7 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         self.assertEqual(result["cache_root"], str(expected))
         self.assertEqual((expected / "current").read_text().strip(), result["snapshot"])
         snapshot = expected / "snapshots" / result["snapshot"]
+        # pin: the fake Cargo's output must land in the relocated snapshot unchanged.
         self.assertEqual((snapshot / "artifact").read_text(), "complete artifact\n")
         # The in-tree baseline is untouched.
         self.assertEqual((self.cache / "current").read_text(), "old\n")

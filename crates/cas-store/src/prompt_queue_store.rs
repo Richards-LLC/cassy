@@ -1365,6 +1365,103 @@ fn agents_table_exists(conn: &Connection) -> Result<bool> {
     )?)
 }
 
+/// cas-5871: how old a terminal relay of a session with no running agent
+/// must be before the session counts as ended.
+pub const ENDED_SESSION_RELAY_AGE_SECS: i64 = 24 * 60 * 60;
+
+/// A lifecycle relay that ended without reaching its supervisor and has not
+/// been acknowledged (shared by the reconciliations below).
+const TERMINAL_UNACKED_RELAY_SQL: &str = "transport_delivered_at IS NULL
+       AND acked_at IS NULL
+       AND source LIKE 'lifecycle-wake:%'
+       AND highest_stage IN ('suppressed', 'dropped', 'abandoned')";
+
+/// ... whose task is closed or cancelled.
+const RELAY_TASK_CLOSED_SQL: &str = "EXISTS (
+           SELECT 1 FROM tasks
+           WHERE status IN ('closed', 'cancelled')
+             AND (prompt_queue.summary = tasks.id
+                  OR prompt_queue.summary LIKE '%: ' || tasks.id
+                  OR prompt_queue.summary LIKE '%: ' || tasks.id || ' (%')
+       )";
+
+/// ... whose session has no running agent and which is older than the bound
+/// (binds the cutoff).
+const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
+       AND created_at < ?
+       AND NOT EXISTS (
+           SELECT 1 FROM agents
+           WHERE agents.factory_session = prompt_queue.factory_session
+             AND agents.status <> 'shutdown'
+       )";
+
+impl SqlitePromptQueueStore {
+    /// cas-5871: reconcile terminal relays whose task closed and/or whose
+    /// session ended. A read-only existence check comes first, so a status
+    /// read with nothing to reconcile never takes the write lock; when there
+    /// is work, one transaction does both updates.
+    fn reconcile_relays(&self, task_closed: bool, session_ended: bool) -> Result<usize> {
+        let cutoff = (Utc::now() - chrono::Duration::seconds(ENDED_SESSION_RELAY_AGE_SECS))
+            .to_rfc3339();
+        let (task_closed, session_ended) = {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tasks_exist: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+                [],
+                |row| row.get(0),
+            )?;
+            // Without a registry there is no evidence a session ended.
+            let session_ended = session_ended && agents_table_exists(&conn)?;
+            let task_closed = task_closed && tasks_exist;
+            let due = |condition: &str, bind_cutoff: bool| -> Result<bool> {
+                let sql = format!(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE {TERMINAL_UNACKED_RELAY_SQL} AND {condition})"
+                );
+                Ok(if bind_cutoff {
+                    conn.query_row(&sql, params![cutoff], |row| row.get(0))?
+                } else {
+                    conn.query_row(&sql, [], |row| row.get(0))?
+                })
+            };
+            (
+                task_closed && due(RELAY_TASK_CLOSED_SQL, false)?,
+                session_ended && due(RELAY_SESSION_ENDED_SQL, true)?,
+            )
+        };
+        if !task_closed && !session_ended {
+            return Ok(0);
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            let now = Utc::now().to_rfc3339();
+            let mut reconciled = 0;
+            if task_closed {
+                reconciled += tx.execute(
+                    &format!(
+                        "UPDATE prompt_queue
+                         SET acked_at = ?, acked_via = 'terminal_task_reconciled'
+                         WHERE {TERMINAL_UNACKED_RELAY_SQL} AND {RELAY_TASK_CLOSED_SQL}"
+                    ),
+                    params![now],
+                )?;
+            }
+            if session_ended {
+                reconciled += tx.execute(
+                    &format!(
+                        "UPDATE prompt_queue
+                         SET acked_at = ?, acked_via = 'session_ended_reconciled'
+                         WHERE {TERMINAL_UNACKED_RELAY_SQL} AND {RELAY_SESSION_ENDED_SQL}"
+                    ),
+                    params![now, cutoff],
+                )?;
+            }
+            tx.commit()?;
+            Ok(reconciled)
+        })
+    }
+}
+
 /// The audience of an `all_workers` broadcast, for one draining `recipient`
 /// (cas-6853; communication contract v2, P1.5, P2.4, P3.7). Direct rows pass
 /// through untouched. A broadcast reaches the recipient only when all of these
@@ -2924,13 +3021,24 @@ pub trait PromptQueueStore: Send + Sync {
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize>;
 
     /// cas-5871: reconcile terminal lifecycle relays whose factory session
-    /// has ended (no registered agent of that session is still running). The
-    /// supervisor they were for is gone, so they leave the undelivered-relay
-    /// banner. Like [`Self::reconcile_terminal_lifecycle_relays`], the
-    /// forensic row and its stage are kept; a row that may still be delivered
-    /// (not yet terminal) is never touched. Returns the rows reconciled.
+    /// has ended: no agent row of that session is still running and the
+    /// relay is older than [`ENDED_SESSION_RELAY_AGE_SECS`]. SessionEnd
+    /// deletes agent rows and a crashed agent's row stays stale, so a missing
+    /// row is not evidence the session lives. The supervisor the relay was for
+    /// is gone, so it leaves the undelivered-relay banner. Like
+    /// [`Self::reconcile_terminal_lifecycle_relays`], the forensic row and its
+    /// stage are kept; a row that may still be delivered (not yet terminal) is
+    /// never touched. Returns the rows reconciled.
     fn reconcile_ended_session_lifecycle_relays(&self) -> Result<usize> {
         Ok(0)
+    }
+
+    /// cas-5871: both reconciliations for a status read. A read-only check
+    /// runs first; the write transaction opens only when a relay is due, so
+    /// an ordinary `worker_status` takes no write lock.
+    fn reconcile_lifecycle_relays(&self) -> Result<usize> {
+        Ok(self.reconcile_terminal_lifecycle_relays()?
+            + self.reconcile_ended_session_lifecycle_relays()?)
     }
 
     /// Count all unresolved terminal or >60s pending lifecycle relays without
@@ -7968,62 +8076,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize> {
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = ImmediateTx::new(&conn)?;
-            let now = Utc::now().to_rfc3339();
-            let reconciled = tx.execute(
-                "UPDATE prompt_queue
-                 SET acked_at = ?, acked_via = 'terminal_task_reconciled'
-                 WHERE transport_delivered_at IS NULL
-                   AND acked_at IS NULL
-                   AND source LIKE 'lifecycle-wake:%'
-                   AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
-                   AND EXISTS (
-                       SELECT 1 FROM tasks
-                       WHERE status IN ('closed', 'cancelled')
-                         AND (prompt_queue.summary = tasks.id
-                              OR prompt_queue.summary LIKE '%: ' || tasks.id
-                              OR prompt_queue.summary LIKE '%: ' || tasks.id || ' (%')
-                   )",
-                params![now],
-            )?;
-            tx.commit()?;
-            Ok(reconciled)
-        })
+        self.reconcile_relays(true, false)
     }
 
     fn reconcile_ended_session_lifecycle_relays(&self) -> Result<usize> {
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = ImmediateTx::new(&conn)?;
-            // Without a registry there is no evidence a session ended.
-            if !agents_table_exists(&tx)? {
-                return Ok(0);
-            }
-            let now = Utc::now().to_rfc3339();
-            let reconciled = tx.execute(
-                "UPDATE prompt_queue
-                 SET acked_at = ?, acked_via = 'session_ended_reconciled'
-                 WHERE transport_delivered_at IS NULL
-                   AND acked_at IS NULL
-                   AND source LIKE 'lifecycle-wake:%'
-                   AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
-                   AND NULLIF(factory_session, '') IS NOT NULL
-                   AND EXISTS (
-                       SELECT 1 FROM agents
-                       WHERE agents.factory_session = prompt_queue.factory_session
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM agents
-                       WHERE agents.factory_session = prompt_queue.factory_session
-                         AND agents.status <> 'shutdown'
-                   )",
-                params![now],
-            )?;
-            tx.commit()?;
-            Ok(reconciled)
-        })
+        self.reconcile_relays(false, true)
+    }
+
+    fn reconcile_lifecycle_relays(&self) -> Result<usize> {
+        self.reconcile_relays(true, true)
     }
 
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize> {
@@ -8047,8 +8108,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let prompt_id = conn
             .query_row(
-                "SELECT id FROM prompt_queue WHERE source = ? ORDER BY id DESC LIMIT 1",
-                params![format!("lifecycle-wake:{lifecycle_wake_id}")],
+                // cas-5871: a kind-prefixed relay (`lifecycle-wake:integration:<id>`,
+                // a sweep notice) is acknowledged by the same durable id.
+                "SELECT id FROM prompt_queue
+                 WHERE source = ?1 OR source LIKE 'lifecycle-wake:%:' || ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![format!("lifecycle-wake:{lifecycle_wake_id}"), lifecycle_wake_id.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -13740,9 +13805,10 @@ mod tests {
 
     /// cas-5871: worker_status listed nine undelivered relays from September
     /// sessions long ended (CI FAILED for kind-owl-50 on 2026-09-29, rolling
-    /// integration rows from 2026-09-11). A terminal relay whose session has
-    /// ended is reconciled; one from a live session, or one that may still be
-    /// delivered, stays.
+    /// integration rows from 2026-09-11). A terminal relay older than a day
+    /// whose session has no running agent is reconciled, whether its agent
+    /// rows were shut down or deleted at SessionEnd. One from a live session,
+    /// a recent one, or one that may still be delivered stays.
     #[test]
     fn terminal_relays_from_ended_sessions_leave_the_banner_cas_5871() {
         use crate::{AgentStore, SqliteAgentStore};
@@ -13760,37 +13826,63 @@ mod tests {
         gone.status = AgentStatus::Shutdown;
         agents.register(&gone).unwrap();
 
-        let relay = |session: &str, terminal: bool| {
+        let relay = |session: &str, terminal: bool, age: chrono::Duration| {
             let id = store
                 .enqueue_with_session("lifecycle-wake:ci-red-run:factory/kind-owl-50:e528", "supervisor", "CI FAILED", session)
                 .unwrap();
             if terminal {
                 store.mark_undelivered_lifecycle_relay(id, Some("expired")).unwrap();
             }
+            let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                params![(Utc::now() - age).to_rfc3339(), id],
+            )
+            .unwrap();
             id
         };
-        let ended_terminal = relay("ended-session", true);
-        let live_terminal = relay("live-session", true);
-        let ended_pending = relay("ended-session", false);
-        {
-            let aged = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
-            let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
-            conn.execute("UPDATE prompt_queue SET created_at = ?1", params![aged]).unwrap();
-        }
-        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 3);
+        let old = chrono::Duration::days(2);
+        let ended_terminal = relay("ended-session", true, old);
+        // SessionEnd deleted every agent row of this session.
+        let vanished_terminal = relay("vanished-session", true, old);
+        let live_terminal = relay("live-session", true, old);
+        let ended_pending = relay("ended-session", false, old);
+        let ended_recent = relay("vanished-session", true, chrono::Duration::hours(2));
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 5);
 
-        assert_eq!(store.reconcile_ended_session_lifecycle_relays().unwrap(), 1);
+        assert_eq!(store.reconcile_ended_session_lifecycle_relays().unwrap(), 2);
         let listed: Vec<i64> = store
             .list_undelivered_lifecycle_relays(10)
             .unwrap()
             .into_iter()
             .map(|row| row.prompt_id)
             .collect();
-        assert!(!listed.contains(&ended_terminal), "{listed:?}");
-        assert!(listed.contains(&live_terminal) && listed.contains(&ended_pending), "{listed:?}");
+        for gone in [ended_terminal, vanished_terminal] {
+            assert!(!listed.contains(&gone), "{listed:?}");
+        }
+        for kept in [live_terminal, ended_pending, ended_recent] {
+            assert!(listed.contains(&kept), "{kept} {listed:?}");
+        }
         let kept = store.queued_prompt(ended_terminal).unwrap().unwrap();
         assert!(kept.acked_at.is_some(), "the forensic row is kept, only reconciled");
-        assert_eq!(store.reconcile_ended_session_lifecycle_relays().unwrap(), 0, "once");
+        assert_eq!(store.reconcile_lifecycle_relays().unwrap(), 0, "once, and nothing else due");
+    }
+
+    /// cas-5871 review M2: a kind-prefixed relay
+    /// (`lifecycle-wake:integration:<id>`) is cleared by message_ack with its
+    /// durable id, as the banner's hint says.
+    #[test]
+    fn a_kind_prefixed_relay_is_acknowledged_by_its_durable_id_cas_5871() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("lifecycle-wake:integration:11259", "supervisor", "Rolling integration requires attention", "s")
+            .unwrap();
+        let near_miss = store
+            .enqueue_with_session("lifecycle-wake:integration:111259", "supervisor", "another", "s")
+            .unwrap();
+        assert_eq!(store.ack_lifecycle_wake(11259).unwrap(), Some(id));
+        assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_some());
+        assert!(store.queued_prompt(near_miss).unwrap().unwrap().acked_at.is_none());
     }
 
     #[test]

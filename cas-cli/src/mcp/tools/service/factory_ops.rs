@@ -1738,11 +1738,20 @@ fn format_undelivered_relay_section_at(
         }
     }
     if !stale.is_empty() {
-        let acks = stale
+        // Review M2: at most a handful of commands on one status line.
+        const STALE_ACK_HINTS: usize = 5;
+        let ack_ids = stale
             .iter()
             .filter_map(|row| row.source.rsplit(':').next()?.parse::<i64>().ok())
+            .collect::<Vec<_>>();
+        let mut acks = ack_ids
+            .iter()
+            .take(STALE_ACK_HINTS)
             .map(|id| format!("`coordination action=message_ack notification_id={id}`"))
             .collect::<Vec<_>>();
+        if ack_ids.len() > STALE_ACK_HINTS {
+            acks.push(format!("and {} more", ack_ids.len() - STALE_ACK_HINTS));
+        }
         out.push_str(&format!(
             "  + {} older than 24 h (oldest {}), not listed. Check each task, then clear it{}\n",
             stale.len(),
@@ -4145,10 +4154,10 @@ impl CasService {
                 // sampling the remaining actionable backlog. Scan the same
                 // bounded maximum as worker-death coalescing so task-free
                 // informational deaths cannot occupy the ten-row display cap.
-                let _ = queue.reconcile_terminal_lifecycle_relays();
                 // cas-5871: a relay to a supervisor whose session has ended
-                // can no longer be acted on by anyone it was for.
-                let _ = queue.reconcile_ended_session_lifecycle_relays();
+                // can no longer be acted on by anyone it was for either. One
+                // call; it takes the write lock only when a relay is due.
+                let _ = queue.reconcile_lifecycle_relays();
                 queue
                     .list_undelivered_lifecycle_relays(
                         super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
@@ -11388,6 +11397,25 @@ mod spawn_lifecycle_tests {
         );
         assert!(only_old.contains("1 older than 24 h"), "{only_old}");
         assert!(!only_old.contains("kind-owl-50"), "{only_old}");
+    }
+
+    /// cas-5871 review M2: the stale hint names at most five ack commands.
+    #[test]
+    fn the_stale_relay_hint_is_capped_cas_5871() {
+        let now = chrono::Utc::now();
+        let rows = (0..80)
+            .map(|n| {
+                let mut row = lost_relay("CI FAILED: factory/kind-owl-50 (e528)");
+                row.source = format!("lifecycle-wake:integration:{}", 30_000 + n);
+                row.prompt_id += n;
+                row.created_at = now - chrono::Duration::days(20);
+                row
+            })
+            .collect::<Vec<_>>();
+        let out = format_undelivered_relay_section_at(&rows, now);
+        assert_eq!(out.matches("message_ack").count(), 5, "{out}");
+        assert!(out.contains("and 75 more"), "{out}");
+        assert!(out.contains("80 older than 24 h"), "{out}");
     }
 
     /// The banner must be absent when there is nothing lost — a heading that

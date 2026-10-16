@@ -245,16 +245,26 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
                 assert!(accepted["decided_at"].is_string());
                 assert!(expired["reason"].as_str().unwrap().len() > 72);
             } else {
+                // The ownership board leads with its outcome. Presence is a
+                // receipt after the work, but must still precede local splits
+                // and mailbox health for both registered and failing states.
+                assert!(text.starts_with("[OK]"), "{text}");
+                let peers_at = text.find("[OK]").unwrap();
+                let presence_at = text.find(&format!("Cloud presence: {state}")).unwrap();
+                let splits_at = text.find("Local splits ").unwrap();
+                let mailbox_at = text.find("Peer mailbox:").unwrap();
                 assert!(
-                    text.starts_with(&format!("Cloud presence: {state}")),
+                    peers_at < presence_at && presence_at < splits_at && splits_at < mailbox_at,
                     "{text}"
                 );
-                let peers_at = text.find("[OK]").unwrap();
-                let splits_at = text.find("Epic splits:").unwrap();
-                let mailbox_at = text.find("Peer mailbox:").unwrap();
-                assert!(peers_at < splits_at && splits_at < mailbox_at, "{text}");
+                for label in ["  Observations ", "  Scope ", "  Worktree ", "  Scratch "] {
+                    let work_at = text.find(label).unwrap();
+                    assert!(peers_at < work_at && work_at < presence_at, "{label}: {text}");
+                }
                 assert!(
-                    text.contains("expired-proposal [expired, outgoing]"),
+                    text.contains("expired-proposal [expired] epic cas-shared")
+                        && text.contains("Peer sup-b@machine-beta | outgoing")
+                        && text.contains("Stored state pending"),
                     "{text}"
                 );
                 assert!(
@@ -279,13 +289,12 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
         .coordination(rmcp::handler::server::wrapper::Parameters(request))
         .await
         .unwrap();
-    assert!(
-        result.content[0]
-            .as_text()
-            .unwrap()
-            .text
-            .starts_with("Cloud presence: disabled (cloud.auto_sync=false)")
-    );
+    let text = &result.content[0].as_text().unwrap().text;
+    assert!(text.starts_with("[OK]"), "{text}");
+    let presence_at = text.find("Cloud presence: disabled (cloud.auto_sync=false)").unwrap();
+    let splits_at = text.find("Local splits ").unwrap();
+    let mailbox_at = text.find("Peer mailbox:").unwrap();
+    assert!(0 < presence_at && presence_at < splits_at && splits_at < mailbox_at, "{text}");
 }
 
 #[tokio::test]

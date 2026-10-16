@@ -131,7 +131,7 @@ impl CasCore {
                     } else {
                         entry.tags.join(", ")
                     },
-                    entry.created.format("%Y-%m-%d %H:%M"),
+                    entry.format_created("%Y-%m-%d %H:%M"),
                     entry.importance,
                     entry.content
                 ))

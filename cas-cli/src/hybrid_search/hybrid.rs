@@ -838,7 +838,9 @@ impl HybridSearch {
             .filter(|e| !e.archived)
             .map(|e| {
                 // Use last_accessed if available, otherwise created
-                let last_time = e.last_accessed.unwrap_or(e.created);
+                let Some(last_time) = e.last_accessed.or_else(|| e.known_creation()) else {
+                    return (e.id.clone(), 0.0);
+                };
                 let days_ago = (now - last_time).num_days().max(0) as f64;
 
                 // Exponential decay: score = 0.5^(days/30)
@@ -1078,6 +1080,19 @@ impl HybridSearch {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cas_e29c_recency_never_promotes_the_unknown_birth_placeholder() {
+        let unknown: Entry = serde_json::from_value(serde_json::json!({
+            "id":"unknown", "content":"body"
+        }))
+        .unwrap();
+        let known = Entry::new("known".into(), "body".into());
+        let hybrid = HybridSearch::new(SearchIndex::in_memory().unwrap());
+        let scores = hybrid.recency_scores(&[unknown, known], 2);
+        assert_eq!(scores[0].0, "known");
+        assert_eq!(scores[1], ("unknown".into(), 0.0));
+    }
+
     use crate::hybrid_search::hybrid::*;
 
     /// cas-e7ae: the BM25 channel HybridSearch fuses is the value

@@ -201,3 +201,47 @@ defaults retain their custom filters. Disabled hooks retain their behavior;
 Slack policy remains independent of ordinary PreToolUse enablement. Factory
 role settings and Codex's Bash-only tool-hook projection keep their own
 harness-specific coverage.
+
+### Cloud alias-fold memory IDs (rule v1)
+
+Cloud owns alias-family folding and computes `<old-id>-fold<12 lowercase hex>`
+from its scoped family and memory identity (petra-stella-cloud#163, PR #169).
+Cassy accepts the rewritten `data.id` as an opaque identity; it does not compute
+Cloud destinations. `cli/cloud.rs::execute_project_adopt_aliases` only adopts
+**task** origins. `cloud/project_aliases.rs` caches project registry aliases;
+neither path folds or renames memories.
+
+The memory identity paths are:
+
+- `cas-types::Entry::generate_id` creates random `mem-` IDs; SQLite, Markdown,
+  mocks and the CLI/MCP callers delegate to it. Existing IDs stay unchanged.
+- `cloud/syncer/entry_identity.rs::legacy_counter_id`, `recovery_id`,
+  `prepare_pulled_entry` and `verify_recovery_birth` implement the independent
+  local `-recovered-` namespace for colliding legacy counters. Known-birth hashes
+  remain unchanged. Unknown births use title/body instead of a synthetic date.
+- Both HTTP pull loops in `cloud/syncer/pull.rs` deserialize the rewritten ID,
+  then `upsert_entry_lww`/`merge_entry_lww` preserve it. The occupied-fold guard
+  recognizes only the final `-fold` plus 12 lowercase hex characters, without
+  stripping or reconstructing the ID. Sharing a known birth or identical
+  title/body remains ordinary last-write-wins.
+- If a fold destination holds a distinct memory, the incumbent remains intact
+  and `preserve_fold_conflict` journals both copies as `fold_conflict`. It is a
+  consumed local conflict: the watermark advances and later rows still sync.
+  Sync/status and doctor warn; `cas cloud conflicts --json` exposes both copies.
+- Missing/null `created` deserializes to a reserved year-1 UTC sentinel in typed
+  Entry/SQLite storage. It never proves a shared birth and is omitted on JSON
+  serialization, so an edit/push does not invent an immutable identity. Human
+  memory date text labels it `unknown`; search provenance uses a null creation
+  date, and chronological lists keep undated rows last in either direction.
+  Date-based retrieval/decay ignores the placeholder as creation evidence.
+- SQLite stores IDs verbatim, `SearchIndex::index_entry` indexes them verbatim,
+  memory MCP resolution uses the full store key, and `SyncingEntryStore` queues
+  edits under that same key. Personal/team push transports those queued IDs.
+  The search ID extractor recognizes task/rule/skill shortcuts only; it never
+  strips a memory's fold suffix. Legacy `p-`/`g-` context display prefixes are
+  presentation only.
+
+`cloud/syncer/cloud_rekey_vectors.json` contains actual Cloud 193102b function
+outputs, including its Alpha/Beta test vectors. Named `cas_e29c_` tests consume
+those rows through personal and team HTTP pulls, SQLite, Tantivy, editing,
+compressed HTTP pushes and replay. No client alias-fold calculator is added.

@@ -395,7 +395,7 @@ pub fn build_context_with_stores(
         context_parts.push(format!(
             "### {} — saved {}",
             current.id,
-            current.created.format("%Y-%m-%d %H:%MZ")
+            current.format_created("%Y-%m-%d %H:%MZ")
         ));
         if let Some(title) = current
             .title

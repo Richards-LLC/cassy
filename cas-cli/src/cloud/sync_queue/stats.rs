@@ -248,6 +248,20 @@ impl SyncQueue {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Opaque folded-memory IDs with retained conflict copies, newest first.
+    pub fn memory_fold_conflict_ids(&self) -> Result<Vec<String>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT entity_id FROM sync_conflicts WHERE entity_type = ?1 AND strategy = ?2
+             GROUP BY entity_id ORDER BY MAX(id) DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![EntityType::Entry.as_str(), super::MEMORY_FOLD_CONFLICT],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn unreviewed_conflict_count(&self) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         Ok(

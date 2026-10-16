@@ -276,6 +276,24 @@ fn build_candidate_facets(entry: &Entry) -> CandidateFacets {
     }
 }
 
+/// Unknown chronology stays last in either direction; a sentinel is not a date.
+fn compare_memory_dates(
+    a: Option<chrono::DateTime<chrono::Utc>>,
+    b: Option<chrono::DateTime<chrono::Utc>>,
+    order: cas_types::SortOrder,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Some(a), Some(b)) => match order {
+            cas_types::SortOrder::Asc => a.cmp(&b),
+            cas_types::SortOrder::Desc => b.cmp(&a),
+        },
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 impl CasCore {
     /// ID-targeted memory operations address both active and archived entries.
     /// Only a missing active entry warrants an archive lookup; preserve real
@@ -898,7 +916,7 @@ impl CasCore {
             } else {
                 entry.source_ids.join(", ")
             },
-            entry.created.format("%Y-%m-%d %H:%M"),
+            entry.format_created("%Y-%m-%d %H:%M"),
             entry.importance,
             entry.stability,
             entry.helpful_count,
@@ -1150,20 +1168,16 @@ impl CasCore {
         use cas_types::{EntrySortField, SortOrder};
         match sort_opts.field {
             EntrySortField::Created => {
-                entries.sort_by(|a, b| match sort_opts.order {
-                    SortOrder::Asc => a.created.cmp(&b.created),
-                    SortOrder::Desc => b.created.cmp(&a.created),
+                entries.sort_by(|a, b| {
+                    compare_memory_dates(a.known_creation(), b.known_creation(), sort_opts.order)
                 });
             }
             EntrySortField::Updated => {
                 // Use last_accessed as "updated" time, falling back to created
                 entries.sort_by(|a, b| {
-                    let a_time = a.last_accessed.as_ref().unwrap_or(&a.created);
-                    let b_time = b.last_accessed.as_ref().unwrap_or(&b.created);
-                    match sort_opts.order {
-                        SortOrder::Asc => a_time.cmp(b_time),
-                        SortOrder::Desc => b_time.cmp(a_time),
-                    }
+                    let a_time = a.last_accessed.or_else(|| a.known_creation());
+                    let b_time = b.last_accessed.or_else(|| b.known_creation());
+                    compare_memory_dates(a_time, b_time, sort_opts.order)
                 });
             }
             EntrySortField::Importance => {
@@ -1207,7 +1221,7 @@ impl CasCore {
                 "- [{}] {:?} {}{} - {}\n",
                 entry.id,
                 entry.entry_type,
-                entry.created.format("%Y-%m-%d"),
+                entry.format_created("%Y-%m-%d"),
                 branch_indicator,
                 entry.preview(40)
             ));

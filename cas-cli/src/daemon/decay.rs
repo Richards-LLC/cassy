@@ -99,8 +99,10 @@ pub(crate) fn apply_memory_decay_with_policy(
             needs_update = true;
         }
 
-        let days_old = (now - entry.created).num_days() as f32;
-        if days_old >= 3.0 {
+        let days_old = entry
+            .known_creation()
+            .map(|created| (now - created).num_days() as f32);
+        if let Some(days_old) = days_old.filter(|days| *days >= 3.0) {
             let days_since_access = entry
                 .last_accessed
                 .map(|time| (now - time).num_days() as f32)
@@ -223,6 +225,28 @@ pub(crate) fn run_consolidation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cas_e29c_unknown_birth_does_not_trigger_age_decay() {
+        use crate::store::{SqliteStore, Store};
+        use crate::types::MemoryTier;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let store: std::sync::Arc<dyn Store> =
+            std::sync::Arc::new(SqliteStore::open(dir.path()).unwrap());
+        store.init().unwrap();
+        let unknown: cas_types::Entry = serde_json::from_value(serde_json::json!({
+            "id":"unknown", "content":"body"
+        }))
+        .unwrap();
+        store.add(&unknown).unwrap();
+        let result = super::apply_memory_decay_with_policy(&store, 0.9, true).unwrap();
+        let restored = store.get(&unknown.id).unwrap();
+        assert_eq!(result.updated, 0);
+        assert_eq!(restored.memory_tier, MemoryTier::Working);
+        assert_eq!(restored.stability, unknown.stability);
+        assert!(!restored.archived);
+    }
+
     use super::consolidated_source_ids;
     use cas_types::Entry;
 

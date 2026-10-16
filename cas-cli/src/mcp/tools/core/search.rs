@@ -264,7 +264,9 @@ impl CasCore {
                                     origin: e.source_tool.clone(),
                                     scope: e.scope.to_string(),
                                     freshness: SearchFreshnessV1 {
-                                        created_at: Some(e.created.to_rfc3339()),
+                                        created_at: e
+                                            .known_creation()
+                                            .map(|created| created.to_rfc3339()),
                                         updated_at: None,
                                         valid_until: e.valid_until.map(|value| value.to_rfc3339()),
                                         review_after: e

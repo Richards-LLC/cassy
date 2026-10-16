@@ -2301,6 +2301,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
         .and_then(|queue| queue.unauthored_skipped_count().ok())
         .unwrap_or(0);
 
+    let memory_fold_conflicts = SyncQueue::open_read_only(cas_root)
+        .and_then(|queue| queue.memory_fold_conflict_ids())
+        .unwrap_or_default();
+
     if config.token.is_none() {
         if cli.json {
             println!(
@@ -2308,7 +2312,8 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 serde_json::json!({
                     "status": "not_logged_in", "team_only": config.team_only,
                     "personal_rows_held_team_only": held,
-                    "unauthored_skipped": unauthored_skipped
+                    "unauthored_skipped": unauthored_skipped,
+                    "memory_fold_conflicts": memory_fold_conflicts
                 })
             );
         } else {
@@ -2336,6 +2341,9 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 "  Local rows skipped (not authored here): {unauthored_skipped}"
             ))?;
             fmt.newline()?;
+            if !memory_fold_conflicts.is_empty() {
+                render_memory_fold_warning(&mut fmt, memory_fold_conflicts.len())?;
+            }
         }
         return Ok(());
     }
@@ -2355,6 +2363,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     let mut body = body.clone();
                     body["team_only"] = serde_json::json!(config.team_only);
                     body["unauthored_skipped"] = serde_json::json!(unauthored_skipped);
+                    body["memory_fold_conflicts"] = serde_json::json!(memory_fold_conflicts);
                     if let Some(count) = held {
                         body["personal_rows_held_team_only"] = serde_json::json!(count);
                     }
@@ -2417,6 +2426,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     if let Some(count) = held {
                         fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
                         fmt.newline()?;
+                    }
+
+                    if !memory_fold_conflicts.is_empty() {
+                        render_memory_fold_warning(&mut fmt, memory_fold_conflicts.len())?;
                     }
 
                     let active_team = config.active_team_id();
@@ -2897,6 +2910,7 @@ pub struct SyncSummary {
     pub conflicts_resolved_local: usize,
     pub conflicts_resolved_remote: usize,
     pub conflicts: Vec<crate::cloud::SyncConflict>,
+    pub memory_fold_conflicts: Vec<String>,
     pub team_conflicts_resolved: usize,
     pub team_conflicts_resolved_local: usize,
     pub team_conflicts_resolved_remote: usize,
@@ -2980,6 +2994,7 @@ impl SyncSummary {
             conflicts_resolved_local: result.conflicts_resolved_local,
             conflicts_resolved_remote: result.conflicts_resolved_remote,
             conflicts: result.conflicts.clone(),
+            memory_fold_conflicts: result.memory_fold_conflicts.clone(),
             team_conflicts_resolved: 0,
             team_conflicts_resolved_local: 0,
             team_conflicts_resolved_remote: 0,
@@ -3040,6 +3055,7 @@ impl SyncSummary {
             conflicts_resolved_local: result.conflicts_resolved_local,
             conflicts_resolved_remote: result.conflicts_resolved_remote,
             conflicts: result.conflicts.clone(),
+            memory_fold_conflicts: result.memory_fold_conflicts.clone(),
             team_conflicts_resolved: 0,
             team_conflicts_resolved_local: 0,
             team_conflicts_resolved_remote: 0,
@@ -3083,6 +3099,10 @@ impl SyncSummary {
         self.team_conflicts_resolved_local += team.conflicts_resolved_local;
         self.team_conflicts_resolved_remote += team.conflicts_resolved_remote;
         self.team_conflicts.extend(team.conflicts.clone());
+        self.memory_fold_conflicts
+            .extend(team.memory_fold_conflicts.clone());
+        self.memory_fold_conflicts.sort();
+        self.memory_fold_conflicts.dedup();
         self.team_healed_task_dependencies_to_cloud += team.healed_task_dependencies_to_cloud;
         self.team_healed_task_dependencies_from_cloud += team.healed_task_dependencies_from_cloud;
         self.deleted_task_dependencies += team.deleted_task_dependencies;
@@ -3141,6 +3161,14 @@ fn summary_count_labels(counts: &BTreeMap<String, usize>) -> Vec<String> {
         .iter()
         .map(|(key, count)| pull_summary_label(&key.replace('_', " "), *count))
         .collect()
+}
+
+fn render_memory_fold_warning(fmt: &mut Formatter, count: usize) -> std::io::Result<()> {
+    fmt.warning(&format!(
+        "{count} folded memory conflict(s); both copies retained"
+    ))?;
+    fmt.write_raw("  Inspect: cas cloud conflicts --json")?;
+    fmt.newline()
 }
 
 fn conflict_summary_line(conflict: &crate::cloud::SyncConflict) -> String {
@@ -3323,7 +3351,9 @@ pub(crate) fn render_sync_summary(
                     details.join(" · ")
                 )
             };
-            if error_count == 0 {
+            if error_count == 0 && !summary.memory_fold_conflicts.is_empty() {
+                render_memory_fold_warning(fmt, summary.memory_fold_conflicts.len())?;
+            } else if error_count == 0 {
                 fmt.success(&message)?;
             } else {
                 fmt.warning(&message)?;
@@ -3334,6 +3364,9 @@ pub(crate) fn render_sync_summary(
                         fmt.newline()?;
                     }
                 }
+            }
+            if error_count > 0 && !summary.memory_fold_conflicts.is_empty() {
+                render_memory_fold_warning(fmt, summary.memory_fold_conflicts.len())?;
             }
             if verbose {
                 for key in [
@@ -3961,6 +3994,7 @@ fn execute_pull_with_output(
                     "skipped_task_dependencies_by_tombstone":
                         pull_result.skipped_task_dependencies_by_tombstone,
                     "errors": &pull_result.errors,
+                    "memory_fold_conflicts": &pull_result.memory_fold_conflicts,
             });
             if !pull_result.task_status_transitions.is_empty() {
                 output["task_status_transitions"] =
@@ -5070,6 +5104,7 @@ fn team_pull_json(
             "pulled_tasks": result.pulled_tasks,
             "pulled_rules": result.pulled_rules,
             "pulled_skills": result.pulled_skills,
+            "memory_fold_conflicts": &result.memory_fold_conflicts,
             "conflicts_resolved": result.conflicts_resolved,
             "conflicts_resolved_local": result.conflicts_resolved_local,
             "conflicts_resolved_remote": result.conflicts_resolved_remote,
@@ -7799,6 +7834,40 @@ mod team_cmd_tests {
         assert!(records.iter().any(|record| {
             record.scope == UnlinkRemoteScope::Team(team_id.to_string()) && record.id == "team-task"
         }));
+    }
+
+    #[test]
+    fn cas_e29c_pull_warns_with_remedy_and_preserves_team_warning_ids() {
+        let result = crate::cloud::SyncResult {
+            memory_fold_conflicts: vec!["source-fold0123456789ab".into()],
+            conflicts_resolved: 1,
+            conflicts_resolved_local: 1,
+            ..Default::default()
+        };
+        let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+        summary.merge_team_pull(&result);
+        assert_eq!(summary.memory_fold_conflicts, result.memory_fold_conflicts);
+        for verbose in [false, true] {
+            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+            render_sync_summary(&mut tf.fmt(), &summary, verbose).unwrap();
+            let output = tf.output();
+            assert!(
+                output
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains("both copies retained")
+            );
+            assert!(
+                output
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .contains("cas cloud conflicts --json")
+            );
+            assert!(!output.contains("Pull incomplete"));
+            assert!(output.lines().all(|line| line.chars().count() <= 80));
+        }
     }
 
     #[test]

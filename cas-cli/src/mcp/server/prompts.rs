@@ -381,7 +381,7 @@ impl CasCore {
                 for entry in entries.iter().take(10) {
                     prompt.push_str(&format!(
                         "- {} {}\n",
-                        entry.created.format("%H:%M"),
+                        entry.format_created("%H:%M"),
                         entry.preview(50)
                     ));
                 }

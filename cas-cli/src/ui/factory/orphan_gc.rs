@@ -667,7 +667,10 @@ pub(crate) fn cleanup(cas_root: &Path, report: &OrphanReport, authorized: bool) 
         }
         let killed = match process.process_group {
             Some(pgid) => kill_process_group_fingerprinted(pgid, process.starttime),
-            None => super::server_registry::kill_process_tree_fingerprinted(process.pid, process.starttime),
+            None => super::server_registry::kill_process_tree_fingerprinted(
+                process.pid,
+                process.starttime,
+            ),
         };
         match killed {
             Ok(true) => summary.killed.push(process.pid),
@@ -1298,7 +1301,7 @@ mod tests {
 
             let done = cleanup(&cas_root, &report, true);
             if !done.killed.contains(&pid) {
-                // `kill_pid_fingerprinted` reports `Ok(false)` — skipped, not
+                // `kill_process_tree_fingerprinted` reports `Ok(false)` — skipped, not
                 // killed — for a pid that exited between scan and cleanup. A
                 // still-live pid means the GC genuinely refused to reap it.
                 assert!(

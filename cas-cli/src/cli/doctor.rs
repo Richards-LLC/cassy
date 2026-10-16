@@ -8444,25 +8444,44 @@ mod tests {
         let legacy = native.with_file_name("watches.json");
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         let claim = (now - chrono::Duration::seconds(30)).to_rfc3339();
-        let legacy_bytes = format!(r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#);
+        let legacy_bytes = format!(
+            r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
+        );
         std::fs::write(&legacy, &legacy_bytes).unwrap();
-        let check = violet_wake_check(dir.path(), now).expect("pre-migration legacy health remains visible");
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        let check = violet_wake_check(dir.path(), now)
+            .expect("pre-migration legacy health remains visible");
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("HTTP 503"), "{}", check.message);
         assert!(!native.exists(), "a doctor read must not migrate state");
         assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
 
-        let native_bytes = format!(r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#);
+        let native_bytes = format!(
+            r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#
+        );
         std::fs::write(&native, &native_bytes).unwrap();
         let check = violet_wake_check(dir.path(), now).unwrap();
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
-        assert!(check.message.contains("last claim 30s ago"), "{}", check.message);
+        assert!(
+            check.message.contains("last claim 30s ago"),
+            "{}",
+            check.message
+        );
         assert_eq!(std::fs::read(&native).unwrap(), native_bytes.as_bytes());
         assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
 
-        for invalid in [br#"{"format_version":999,"watches":[]}"#.as_slice(), b"{truncated".as_slice()] {
+        for invalid in [
+            br#"{"format_version":999,"watches":[]}"#.as_slice(),
+            b"{truncated".as_slice(),
+        ] {
             std::fs::write(&native, invalid).unwrap();
-            assert!(violet_wake_check(dir.path(), now).is_none(), "present unsupported/corrupt v2 must never revive stale legacy health");
+            assert!(
+                violet_wake_check(dir.path(), now).is_none(),
+                "present unsupported/corrupt v2 must never revive stale legacy health"
+            );
             assert_eq!(std::fs::read(&native).unwrap(), invalid);
             assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
         }
@@ -8472,31 +8491,43 @@ mod tests {
     fn violet_wake_check_reads_the_watch_book_cas_a897() {
         let dir = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now();
-        assert!(violet_wake_check(dir.path(), now).is_none(), "no book, no row");
+        assert!(
+            violet_wake_check(dir.path(), now).is_none(),
+            "no book, no row"
+        );
 
-        let book = dir.path().join("violet").join("watches.json");
+        let book =
+            crate::ui::factory::daemon::runtime::violet_activity::WatchBook::path(dir.path());
         std::fs::create_dir_all(book.parent().unwrap()).unwrap();
         let claim = (now - chrono::Duration::seconds(30)).to_rfc3339();
         std::fs::write(
             &book,
-            format!(r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#),
+            format!(r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#),
         )
         .unwrap();
         let check = violet_wake_check(dir.path(), now).unwrap();
         assert_eq!(check.name, "violet wake");
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
-        assert!(check.message.contains("last claim 30s ago"), "{}", check.message);
+        assert!(
+            check.message.contains("last claim 30s ago"),
+            "{}",
+            check.message
+        );
         assert!(matches!(check.group(), CheckGroup::Integrations));
 
         std::fs::write(
             &book,
             format!(
-                r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
+                r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
             ),
         )
         .unwrap();
         let check = violet_wake_check(dir.path(), now).unwrap();
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("HTTP 503"), "{}", check.message);
     }
 

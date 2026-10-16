@@ -226,7 +226,10 @@ also retires the old session's watches; unreadable listings or an existing but
 incomplete receipt do not prove a live daemon is gone.
 
 The first authenticated use migrates `violet/watches.json` into the v2 book
-without changing the legacy file. Later starts use only the v2 book. Daemons
+without changing the legacy file. Doctor and factory status can read legacy
+health until the v2 file exists, without writing or migrating either file. A
+present but invalid or unsupported v2 book never falls back to legacy health.
+Later daemon starts use only the v2 book. Daemons
 from 3.58 and older keep their own legacy watches until upgraded; upgrade and
 restart every daemon on a clone for coordinated watch behavior. Older binaries
 cannot overwrite the v2 path, and v2 readers refuse future format versions.

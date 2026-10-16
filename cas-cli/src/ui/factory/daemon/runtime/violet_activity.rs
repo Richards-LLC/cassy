@@ -1477,9 +1477,17 @@ pub(crate) enum WatchHealth {
     Warning,
 }
 
-/// Read the native v2 book. `None` when authenticated push-wake never ran here.
+/// Prefer native v2 state; before migration, read legacy health without writing.
+/// A present but unreadable/unsupported native book never revives legacy state.
 pub(crate) fn watch_status(cas_dir: &Path, now: DateTime<Utc>) -> Option<VioletWatchStatus> {
-    let book = WatchBook::read(&WatchBook::path(cas_dir))?;
+    let path = WatchBook::path(cas_dir);
+    let book = match std::fs::read(&path) {
+        Ok(bytes) => WatchBook::decode(&bytes).ok()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            WatchBook::read(&path.with_file_name("watches.json"))?
+        }
+        Err(_) => return None,
+    };
     let secs = |at: DateTime<Utc>| (now - at).num_seconds().max(0);
     let active = book
         .active()

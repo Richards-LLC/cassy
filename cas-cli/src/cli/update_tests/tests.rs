@@ -2056,10 +2056,8 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert_eq!(cas_6718_git(&project, &["status", "--porcelain"]), original);
     args.dry_run = false;
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
-    assert!(
-        cas_6718_git(&project, &["status", "--porcelain"]).is_empty(),
-        "update left managed drift"
-    );
+    let status = cas_6718_git(&project, &["status", "--porcelain"]);
+    assert!(status.is_empty(), "update left managed drift: {status}\n{}", cas_6718_git(&project, &["diff"]));
     assert!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).starts_with("chore(cassy):"));
     for path in [
         ".claude/skills/cas/SKILL.md",

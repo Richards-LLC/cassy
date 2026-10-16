@@ -508,6 +508,10 @@ recipient remains in the session) from a **delivery retry** (no held handoff
 recorded; transport retry budget still applies, including operator drafts).
 A fresh transport reservation clears any older inbox deferral before injecting,
 so a worker that changes harness cannot have its PTY delivery replayed by a hook.
+The actual primary channel decides whether a handoff can be held: a missing
+Teams folder falls back to PTY and never receives a new inbox deferral stamp.
+Status checks the deferral, current transport claim and absence of completed
+transport in one database snapshot; a stale marker alone cannot imply a hold.
 If the deferral stamp cannot be saved, the Teams copy remains available at the
 turn boundary and Cassy queues one supervisor warning per affected message.
 

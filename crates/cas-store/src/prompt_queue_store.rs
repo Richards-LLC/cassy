@@ -253,6 +253,14 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.processed_at DESC,
                                    q.id DESC";
 
+/// Current held-inbox evidence, checked in one snapshot. A durable deferral
+/// marker alone is insufficient after surfacing or a completed handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxHandoffState {
+    HeldTeamsInbox,
+    NotHeld,
+}
+
 /// cas-a1ed: the transport claim a tool boundary may take over. The daemon
 /// stamps `deferred_inbox_at` only after it wrote the Teams copy and left the
 /// row pending because the wake was declined; that handoff will not finish
@@ -2346,6 +2354,9 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Return the durable deferred-inbox handoff timestamp and pane baseline.
     fn deferred_inbox_state(&self, prompt_id: i64) -> Result<Option<(DateTime<Utc>, u64)>>;
+
+    /// Check the same active held-Teams claim predicate a tool boundary uses.
+    fn inbox_handoff_state(&self, prompt_id: i64) -> Result<InboxHandoffState>;
 
     /// Count the messages `recipient` has NOT yet seen, without consuming them.
     ///
@@ -4598,6 +4609,27 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             ))
         })?;
         Ok(Some((at, bytes.unwrap_or(0).try_into().unwrap_or(u64::MAX))))
+    }
+
+    fn inbox_handoff_state(&self, prompt_id: i64) -> Result<InboxHandoffState> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let held: bool = conn.query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM prompt_queue q
+                 JOIN prompt_queue_recipient_seen seen
+                   ON seen.prompt_id = q.id AND seen.recipient = q.target
+                 WHERE q.id = ? AND q.processed_at IS NULL AND ",
+                held_teams_claim_sql!(),
+                ")"
+            ),
+            params![prompt_id],
+            |row| row.get(0),
+        )?;
+        Ok(if held {
+            InboxHandoffState::HeldTeamsInbox
+        } else {
+            InboxHandoffState::NotHeld
+        })
     }
 
     fn enqueue(&self, source: &str, target: &str, prompt: &str) -> Result<i64> {
@@ -9121,6 +9153,26 @@ mod tests {
                     .len(),
                 1
             );
+        }
+    }
+
+    #[test]
+    fn cas_1ba0_typed_handoff_requires_a_current_undelivered_claim() {
+        let (_temp, store) = create_test_store();
+        for finish in [SurfacingSource::HookSurfaced, SurfacingSource::TransportDelivered] {
+            let id = store.enqueue("supervisor", "worker-1", "decision").unwrap();
+            store.record_deferred_inbox(id, 123).unwrap();
+            assert_eq!(store.inbox_handoff_state(id).unwrap(), InboxHandoffState::NotHeld);
+            assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+            store.record_deferred_inbox(id, 456).unwrap();
+            assert_eq!(store.inbox_handoff_state(id).unwrap(), InboxHandoffState::HeldTeamsInbox);
+            if finish == SurfacingSource::HookSurfaced {
+                store.record_recipient_surfaced(id, "worker-1", finish).unwrap();
+            } else {
+                store.mark_transport_delivered(id).unwrap();
+            }
+            assert!(store.deferred_inbox_state(id).unwrap().is_some(), "raw durable marker survives");
+            assert_eq!(store.inbox_handoff_state(id).unwrap(), InboxHandoffState::NotHeld);
         }
     }
 

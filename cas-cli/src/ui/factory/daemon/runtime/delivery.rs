@@ -68,7 +68,11 @@ pub(crate) struct NudgeReport {
 
 impl NudgeReport {
     /// A delivery where no wake was attempted, with the reason stated.
-    pub(crate) fn not_attempted(outcome: InjectOutcome, channel: DeliveryChannel, detail: &str) -> Self {
+    pub(crate) fn not_attempted(
+        outcome: InjectOutcome,
+        channel: DeliveryChannel,
+        detail: &str,
+    ) -> Self {
         Self {
             outcome,
             channel,

@@ -3588,27 +3588,26 @@ impl CasService {
                 // "in flight" from "already doomed" — two supervisors waited on
                 // exactly this. State the deadline while it is still pending,
                 // and say the reason out loud once it is terminal.
-                let held_inbox = if r.stage == cas_store::DeliveryStage::Gated
+                let handoff = if r.stage == cas_store::DeliveryStage::Gated
                     && r.pending_reason == Some(cas_store::PendingReason::GatedNotReady)
                 {
                     queue
-                        .deferred_inbox_state(notification_id)
+                        .inbox_handoff_state(notification_id)
                         .map_err(|error| {
                             Self::error(
                                 ErrorCode::INTERNAL_ERROR,
                                 format!("Failed to query deferred inbox status: {error}"),
                             )
                         })?
-                        .is_some()
                 } else {
-                    false
+                    cas_store::InboxHandoffState::NotHeld
                 };
                 let pending_deadline_line = pending_deadline_narrative(
                     r.stage,
                     r.pending_reason,
                     r.pending_detail.as_deref(),
                     undelivered_after_secs,
-                    held_inbox,
+                    handoff,
                 );
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
@@ -3755,7 +3754,7 @@ fn pending_deadline_narrative(
     pending_reason: Option<cas_store::PendingReason>,
     pending_detail: Option<&str>,
     undelivered_after_secs: Option<i64>,
-    held_inbox: bool,
+    handoff: cas_store::InboxHandoffState,
 ) -> String {
     use cas_store::DeliveryStage;
     // cas-d1659: a row parked for a busy recipient is neither doomed nor on
@@ -3775,7 +3774,7 @@ fn pending_deadline_narrative(
         && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
     {
         let detail = pending_detail.unwrap_or("no detail was recorded");
-        return if held_inbox {
+        return if handoff == cas_store::InboxHandoffState::HeldTeamsInbox {
             format!(
                 "held inbox: still pending — surfaces at its next tool call or turn start; \
                  does not expire while the recipient stays in the session — {detail}\n"
@@ -3887,13 +3886,13 @@ fn row_factory_session(
 #[cfg(test)]
 mod pending_deadline_tests {
     use super::pending_deadline_narrative;
-    use cas_store::DeliveryStage;
+    use cas_store::{DeliveryStage, InboxHandoffState};
 
     /// The 15 minutes two supervisors spent watching "awaiting_delivery" must
     /// now say how much of the budget is left.
     #[test]
     fn a_pending_row_states_how_long_before_it_is_abandoned() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60), false);
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60), InboxHandoffState::NotHeld);
         assert!(
             line.contains("abandoned as undeliverable in 840s"),
             "{line}"
@@ -3915,7 +3914,7 @@ mod pending_deadline_tests {
                 Some(cas_store::PendingReason::GatedNotReady),
                 Some("wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken"),
                 Some(waited),
-                true,
+                InboxHandoffState::HeldTeamsInbox,
             );
             assert!(line.contains("still pending"), "{line}");
             assert!(line.contains("next tool"), "{line}");
@@ -3927,7 +3926,7 @@ mod pending_deadline_tests {
 
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200), false);
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200), InboxHandoffState::NotHeld);
         assert!(line.contains("PAST"), "{line}");
         assert!(line.contains("not still in flight"), "{line}");
     }
@@ -3939,7 +3938,7 @@ mod pending_deadline_tests {
             None,
             Some("target no longer belongs to factory session"),
             Some(1800),
-            false,
+            InboxHandoffState::NotHeld,
         );
         assert!(line.contains("undeliverable"), "{line}");
         assert!(
@@ -3951,7 +3950,7 @@ mod pending_deadline_tests {
 
     #[test]
     fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None, false);
+        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None, InboxHandoffState::NotHeld);
         assert!(line.contains("no reason was recorded"), "{line}");
     }
 
@@ -3964,7 +3963,7 @@ mod pending_deadline_tests {
             Some(cas_store::PendingReason::AwaitingBusyRecipient),
             Some("recipient busy: wake budget spent after 3 attempts"),
             Some(1200),
-            false,
+            InboxHandoffState::NotHeld,
         );
         assert!(line.contains("busy recipient: still pending"), "{line}");
         assert!(line.contains("next turn start or tool call"), "{line}");
@@ -3975,7 +3974,7 @@ mod pending_deadline_tests {
     #[test]
     fn a_delivered_row_adds_no_deadline_noise() {
         assert!(
-            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30), false).is_empty()
+            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30), InboxHandoffState::NotHeld).is_empty()
         );
     }
 }

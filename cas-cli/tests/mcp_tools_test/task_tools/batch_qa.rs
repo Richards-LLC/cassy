@@ -551,7 +551,7 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
     let merged = git(&fx.repo, &["rev-parse", "HEAD"]);
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
     fx.record().await;
-    let mut req = TaskCloseRequest {
+    let req = TaskCloseRequest {
         id: "cas-bq01".into(),
         reason: Some("integrated reviewed batch".into()),
         commit_receipt: Some(merged),
@@ -560,12 +560,7 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         legacy_bypass_code_review: None,
         search_manifest: None,
     };
-    let closed = extract_text(
-        fx.core
-            .cas_task_close(Parameters(req.clone()))
-            .await
-            .unwrap(),
-    );
+    let closed = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());
     assert_eq!(
         open_task_store(&fx.repo.join(".cas"))
             .unwrap()
@@ -576,13 +571,21 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         "{closed}"
     );
     // A sibling's earlier anchor cannot stand in for the later task's delivery.
-    req.id = "cas-bq02".into();
-    req.commit_receipt = open_task_store(&fx.repo.join(".cas"))
+    let sibling = open_task_store(&fx.repo.join(".cas"))
         .unwrap()
         .get("cas-bq01")
         .unwrap()
         .deliverables
         .factory_branch_anchor;
+    let req = TaskCloseRequest {
+        id: "cas-bq02".into(),
+        reason: Some("wrong sibling receipt".into()),
+        commit_receipt: sibling,
+        stranded_branch_override: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+    };
     let refused = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());
     assert_ne!(
         open_task_store(&fx.repo.join(".cas"))

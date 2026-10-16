@@ -90,6 +90,7 @@ fn reminder_wake_authority_cannot_be_borrowed_cas_835e() {
             name: "swift-fox".into(),
         },
     ] {
+        // pin: the reminder delivery text exactly as fire_reminder renders it.
         assert_eq!(class(&sender, prompt), None, "{sender:?} must not wake with a reminder's words");
     }
     assert_eq!(

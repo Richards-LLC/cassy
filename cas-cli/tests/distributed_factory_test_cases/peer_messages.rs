@@ -1515,7 +1515,12 @@ async fn restart_peer_mail(unregister: bool, legacy: bool, fail_notice: bool) {
             // key rather than manufacture another notice under its new ID.
             register("b-next");
             mailbox.lock().unwrap()[0]["status"] = json!("queued");
-            let replay = tick(&beta.cas_dir, "b-next");
+            let replay = cas::cloud::peer_mailbox::PeerMailboxRuntime::start(
+                &beta.cas_dir,
+                "factory-b-new",
+            )
+            .unwrap()
+            .tick_blocking();
             assert_eq!(replay.rejected, 1);
             assert_eq!(
                 mailbox.lock().unwrap().len(),

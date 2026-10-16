@@ -1,7 +1,29 @@
-//! Known-admission recovery. Discovery on a fresh machine needs Cloud #167.
+//! Recover the same authoritative admission on existing and fresh machines.
 use super::*;
 use crate::coordination::external_work::{CloudCoordinationPort, SqliteRequestJournal};
 use cas_store::{VioletAdmissionRebind, VioletConsumption, VioletRecoveryReceipt};
+use super::cloud::ActivityRecoveryPort;
+
+pub(crate) struct ReaderDestination<'a> {
+    pub context: &'a OperationContext,
+    pub factory_session: &'a str,
+    pub recipient: &'a str,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RecoveryReport {
+    pub restored: usize,
+    pub next_cursor: Option<String>,
+    pub errors: Vec<String>,
+}
+
+pub(crate) fn recover_page(
+    _cloud: &dyn ActivityRecoveryPort, _journal: &SqliteRequestJournal,
+    _store: &SqliteVioletAdmissionStore, _destination: &ReaderDestination<'_>,
+    _evidence: &activation::BindingEvidence, _cursor: Option<&str>, _deadline: Instant,
+) -> RecoveryReport {
+    RecoveryReport { errors: vec!["remote discovery restoration is not implemented".into()], ..Default::default() }
+}
 
 pub(crate) struct KnownRebind {
     pub request_id: String,
@@ -401,3 +423,7 @@ mod tests {
         assert_ne!(pending[0].id, original_prompt);
     }
 }
+
+#[cfg(test)]
+#[path = "violet_discovery_tests.rs"]
+mod discovery_tests;

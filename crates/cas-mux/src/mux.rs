@@ -84,6 +84,35 @@ struct PendingInject {
     started: std::time::Instant,
     last_bytes: u64,
     last_change: std::time::Instant,
+    /// The pane this inject belongs to (cas-786a6 review L3): a same-name
+    /// respawn is a different pane and never receives this payload.
+    pane_spawned_at: std::time::Instant,
+    /// Set once the payload is queued; reports when it reached the PTY.
+    written: Option<(crate::pane::PayloadWrite, std::time::Instant)>,
+}
+
+/// How long an urgent inject waits for its payload's write receipt before
+/// it reports Delivered on the strength of the queued write. A failed write
+/// inside this window is reported (cas-786a6 review L1).
+const INJECT_WRITE_REPORT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Operator input most a pane holds while an urgent inject is in progress.
+const HELD_INPUT_CAP: usize = 64 * 1024;
+
+/// Operator input held for a pane while an urgent inject is in progress
+/// (cas-786a6 review M3).
+#[derive(Debug)]
+enum HeldInput {
+    Raw(Vec<u8>),
+    User(Vec<u8>, crate::pane::UserInputKind),
+}
+
+impl HeldInput {
+    fn len(&self) -> usize {
+        match self {
+            Self::Raw(data) | Self::User(data, _) => data.len(),
+        }
+    }
 }
 
 impl PendingInject {
@@ -240,6 +269,9 @@ pub struct Mux {
     /// Urgent injects waiting for their pane to settle (cas-786a6).
     pending_injects: Vec<PendingInject>,
     next_inject_ticket: u64,
+    /// Operator input held per pane from an urgent inject's turn break until
+    /// its payload is submitted, then delivered in order (review M3).
+    held_input: std::sync::Mutex<HashMap<String, Vec<HeldInput>>>,
 }
 
 impl Mux {
@@ -259,6 +291,7 @@ impl Mux {
             factory_session: None,
             pending_injects: Vec::new(),
             next_inject_ticket: 0,
+            held_input: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1164,8 +1197,14 @@ impl Mux {
             .capabilities()
             .supports_textbox_submit;
         let last_bytes = pane.bytes_received();
+        let pane_spawned_at = pane.spawned_at();
         // Shared targeted interrupt primitive (see `interrupt_and_inject`).
         pane.break_turn().await?;
+        // Operator keys typed from here until the payload is submitted are
+        // held and delivered after it (review M3): a destructive inject
+        // never absorbs a half-typed draft, and a draft never lands inside
+        // the payload. Before C4a the inline settle had the same effect.
+        self.held_input_lock().entry(pane_id.to_string()).or_default();
         self.next_inject_ticket += 1;
         let ticket = InjectTicket(self.next_inject_ticket);
         let now = std::time::Instant::now();
@@ -1179,6 +1218,8 @@ impl Mux {
             started: now,
             last_bytes,
             last_change: now,
+            pane_spawned_at,
+            written: None,
         });
         Ok(InjectStart::Started(ticket))
     }
@@ -1188,15 +1229,16 @@ impl Mux {
     /// returned; the rest keep waiting. Reads only in-memory pane state,
     /// the output counter the loop's PTY drain keeps current.
     pub async fn advance_injects(&mut self) -> Vec<InjectCompletion> {
-        if self.pending_injects.is_empty() {
-            return Vec::new();
-        }
-        let now = std::time::Instant::now();
         let mut done = Vec::new();
+        let now = std::time::Instant::now();
         let mut index = 0;
         while index < self.pending_injects.len() {
             let pane_id = self.pending_injects[index].pane_id.clone();
-            let Some(pane) = self.panes.get(&pane_id) else {
+            let same_pane = self.panes.get(&pane_id).filter(|pane| {
+                pane.spawned_at() == self.pending_injects[index].pane_spawned_at
+            });
+            let Some(pane) = same_pane else {
+                // Closed, or respawned under the same name (review L3).
                 let inject = self.pending_injects.remove(index);
                 done.push(InjectCompletion {
                     ticket: inject.ticket,
@@ -1206,26 +1248,56 @@ impl Mux {
                 });
                 continue;
             };
-            if !self.pending_injects[index].ready(pane.bytes_received(), now) {
+            let inject = &mut self.pending_injects[index];
+            let outcome = match &inject.written {
+                Some((receipt, queued_at)) => match receipt.result() {
+                    Some(Ok(())) => Some(Ok(InjectOutcome::Delivered)),
+                    Some(Err(error)) => Some(Err(Error::pty(format!(
+                        "urgent payload write failed: {error}"
+                    )))),
+                    None if now.saturating_duration_since(*queued_at) >= INJECT_WRITE_REPORT_WINDOW => {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "urgent_payload_write_slow",
+                            target_agent = %pane_id,
+                            "urgent payload still queued for the pane; reporting it delivered"
+                        );
+                        Some(Ok(InjectOutcome::Delivered))
+                    }
+                    None => None,
+                },
+                None if !inject.ready(pane.bytes_received(), now) => None,
+                None if inject.preserve_composer
+                    && (pane.is_composer_dirty() || pane.inject_submit_pending()) =>
+                {
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "urgent_composer_inject_deferred",
+                        target_agent = %pane_id,
+                        "an operator draft is in the composer at the end of the urgent settle; the payload waits"
+                    );
+                    Some(Ok(InjectOutcome::DeferredComposerDirty))
+                }
+                None => match pane.inject_prompt_tracked(&inject.prompt) {
+                    Ok(receipt) => {
+                        let finished = receipt.result();
+                        inject.written = Some((receipt, now));
+                        match finished {
+                            Some(Ok(())) => Some(Ok(InjectOutcome::Delivered)),
+                            Some(Err(error)) => Some(Err(Error::pty(format!(
+                                "urgent payload write failed: {error}"
+                            )))),
+                            None => None,
+                        }
+                    }
+                    Err(error) => Some(Err(error)),
+                },
+            };
+            let Some(result) = outcome else {
                 index += 1;
                 continue;
-            }
-            let inject = self.pending_injects.remove(index);
-            let result = if inject.preserve_composer
-                && (pane.is_composer_dirty() || pane.inject_submit_pending())
-            {
-                tracing::info!(
-                    target: "cas::coordination",
-                    stage = "urgent_composer_inject_deferred",
-                    target_agent = %pane_id,
-                    "an operator draft started during the urgent settle; the payload waits"
-                );
-                Ok(InjectOutcome::DeferredComposerDirty)
-            } else {
-                pane.inject_prompt(&inject.prompt)
-                    .await
-                    .map(|()| InjectOutcome::Delivered)
             };
+            let inject = self.pending_injects.remove(index);
             done.push(InjectCompletion {
                 ticket: inject.ticket,
                 pane_id,
@@ -1233,118 +1305,76 @@ impl Mux {
                 settled_after: now.saturating_duration_since(inject.started),
             });
         }
+        self.flush_held_input().await;
         done
     }
 
-    /// Compatibility no-op retained for callers from cas-1a4d.
-    ///
-    /// Deferred payloads now stay with their durable queue owner; the mux
-    /// intentionally has nothing to flush or carry across pane generations.
-    pub async fn flush_deferred_injections(&self) {}
-
-    /// Total bytes of PTY output observed for a pane by name.
-    ///
-    /// Returns `None` if the pane does not exist. Used by the urgent
-    /// interrupt-and-redirect path to detect output quiescence after a
-    /// turn-break before injecting the correction.
-    pub fn pane_bytes_received(&self, pane_id: &str) -> Option<u64> {
-        self.panes.get(pane_id).map(|p| p.bytes_received())
+    fn held_input_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<HeldInput>>> {
+        self.held_input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Whether an attached operator currently has an unsubmitted draft in this
-    /// pane's composer (cas-f02b / cas-eacc).
-    ///
-    /// `Mux::inject` defers for as long as this remains true. There is no
-    /// elapsed-time escape hatch: time does not make writing into a human draft
-    /// safe. An unknown pane reports `false`; the caller's own liveness checks
-    /// decide whether to proceed.
-    pub fn pane_composer_dirty(&self, pane_id: &str) -> bool {
-        self.panes
-            .get(pane_id)
-            .is_some_and(|p| p.is_composer_dirty())
+    /// Whether operator input for `pane_id` is being held (review M3).
+    pub fn input_held(&self, pane_id: &str) -> bool {
+        self.held_input_lock().contains_key(pane_id)
     }
 
-    /// Break a specific worker's current turn by name by sending a single
-    /// Esc (0x1b) — the canonical Claude Code "stop this turn" key.
-    ///
-    /// Distinct from [`Mux::interrupt`], which sends Ctrl+C (0x03). Targets a
-    /// pane by name independent of TUI focus.
-    pub async fn break_turn(&self, pane_id: &str) -> Result<()> {
-        let pane = self
-            .panes
-            .get(pane_id)
-            .ok_or_else(|| Error::pane_not_found(pane_id))?;
-        pane.break_turn().await
-    }
-
-    /// Urgent interrupt-and-redirect: break the target worker's in-flight turn
-    /// (Esc), wait for the turn to actually break, then inject the correction
-    /// as the worker's next prompt — by name, independent of TUI focus.
-    ///
-    /// `floor` is the minimum delay between the turn-break and the inject,
-    /// sized per-harness by the caller. For harnesses with a real textbox
-    /// submit (Claude, Grok) this floor alone is honored unconditionally, same
-    /// as before cas-4208 — the "Claude is unaffected" control group in that
-    /// task's report (7 live interrupts, 100% recovery) showed a flat sleep is
-    /// already sufficient there, so that path stays a zero-risk no-op.
-    ///
-    /// For Codex (`!supports_textbox_submit`) `floor` is only the minimum: see
-    /// [`Mux::wait_for_injection_readiness`] for why a flat sleep alone lost a
-    /// real race for that harness and what replaces it.
-    ///
-    /// Takes `&mut self` (not `&self`, as before cas-4208): the quiescence
-    /// poll needs to actively drain the pane via [`Mux::poll_batch`] — see
-    /// that method's doc for why passively reading
-    /// [`Mux::pane_bytes_received`] is not enough on its own.
-    pub async fn interrupt_and_inject(
-        &mut self,
-        pane_id: &str,
-        prompt: &str,
-        floor: std::time::Duration,
-    ) -> Result<()> {
-        // Shared targeted interrupt primitive: Commander pane interrupts and
-        // coordination urgent delivery must never drift into parallel cancel
-        // implementations.
-        self.break_turn(pane_id).await?;
-        self.wait_for_injection_readiness(pane_id, floor).await;
-        let pane = self
-            .panes
-            .get(pane_id)
-            .ok_or_else(|| Error::pane_not_found(pane_id))?;
-        pane.inject_prompt(prompt).await
-    }
-
-    /// Urgent queue delivery that preserves an attached operator's draft.
-    ///
-    /// Urgent still means "interrupt the agent's current turn", but only after
-    /// the human has submitted or cleared their composer. A dirty composer
-    /// returns [`InjectOutcome::DeferredComposerDirty`] without sending Esc or
-    /// payload bytes, allowing the durable queue owner to retry the same urgent
-    /// row at the next safe boundary without losing its priority or attribution.
-    ///
-    /// Deliberately separate from [`Self::interrupt_and_inject`]: explicit
-    /// destructive controls such as context reset still need the raw primitive.
-    pub async fn interrupt_and_inject_preserving_composer(
-        &mut self,
-        pane_id: &str,
-        prompt: &str,
-        floor: std::time::Duration,
-    ) -> Result<InjectOutcome> {
-        let pane = self
-            .panes
-            .get(pane_id)
-            .ok_or_else(|| Error::pane_not_found(pane_id))?;
-        if pane.is_composer_dirty() || pane.inject_submit_pending() {
-            tracing::info!(
-                target: "cas::coordination",
-                stage = "urgent_composer_inject_deferred",
-                target_agent = %pane_id,
-                "urgent queue delivery retained until the composer reaches a safe boundary"
-            );
-            return Ok(InjectOutcome::DeferredComposerDirty);
+    /// Hold `input` for `pane_id` when its urgent inject is in progress.
+    /// Returns the input back when it is not held.
+    fn hold_input(&self, pane_id: &str, input: HeldInput) -> std::result::Result<Result<()>, HeldInput> {
+        let mut held = self.held_input_lock();
+        let Some(queue) = held.get_mut(pane_id) else {
+            return Err(input);
+        };
+        let buffered: usize = queue.iter().map(HeldInput::len).sum();
+        if buffered + input.len() > HELD_INPUT_CAP {
+            return Ok(Err(Error::pty(
+                "pane input held while an urgent inject completes; held input is full",
+            )));
         }
-        self.interrupt_and_inject(pane_id, prompt, floor).await?;
-        Ok(InjectOutcome::Delivered)
+        queue.push(input);
+        Ok(Ok(()))
+    }
+
+    /// Deliver held operator input once its pane's urgent payload is typed
+    /// and submitted. Input for a pane that went away is dropped.
+    async fn flush_held_input(&mut self) {
+        let ready: Vec<String> = {
+            let held = self.held_input_lock();
+            held.keys()
+                .filter(|pane_id| {
+                    !self.inject_pending(pane_id)
+                        && self
+                            .panes
+                            .get(pane_id.as_str())
+                            .is_none_or(|pane| !pane.inject_submit_pending())
+                })
+                .cloned()
+                .collect()
+        };
+        for pane_id in ready {
+            let items = self.held_input_lock().remove(&pane_id).unwrap_or_default();
+            let Some(pane) = self.panes.get(&pane_id) else {
+                continue;
+            };
+            for item in items {
+                let result = match item {
+                    HeldInput::Raw(data) => pane.write(&data).await.map(|()| {
+                        pane.observe_raw_client_input(&data);
+                    }),
+                    HeldInput::User(data, kind) => pane.deliver_user_input(&data, kind).await,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        target_agent = %pane_id,
+                        %error,
+                        "held operator input could not be delivered"
+                    );
+                }
+            }
+        }
     }
 
     /// Bounded post-break-turn settle used by [`Mux::interrupt_and_inject`]
@@ -1482,6 +1512,9 @@ impl Mux {
         let pane = self
             .focused()
             .ok_or_else(|| Error::pty("No focused pane"))?;
+        if let Ok(held) = self.hold_input(pane.id(), HeldInput::Raw(data.to_vec())) {
+            return held;
+        }
         pane.write(data).await?;
         pane.observe_raw_client_input(data);
         Ok(())
@@ -1493,6 +1526,9 @@ impl Mux {
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        if let Ok(held) = self.hold_input(pane_id, HeldInput::Raw(data.to_vec())) {
+            return held;
+        }
         pane.write(data).await?;
         pane.observe_raw_client_input(data);
         Ok(())
@@ -1511,6 +1547,9 @@ impl Mux {
         let pane = self
             .focused()
             .ok_or_else(|| Error::pty("No focused pane"))?;
+        if let Ok(held) = self.hold_input(pane.id(), HeldInput::User(data.to_vec(), kind)) {
+            return held;
+        }
         pane.deliver_user_input(data, kind).await
     }
 
@@ -1525,6 +1564,9 @@ impl Mux {
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        if let Ok(held) = self.hold_input(pane_id, HeldInput::User(data.to_vec(), kind)) {
+            return held;
+        }
         pane.deliver_user_input(data, kind).await
     }
 

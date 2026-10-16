@@ -91,6 +91,22 @@ enum ComposerEscapeState {
     ControlSequence,
 }
 
+/// Whether an injected payload reached the PTY (cas-786a6 review L1).
+#[derive(Debug, Clone, Default)]
+pub struct PayloadWrite(std::sync::Arc<std::sync::Mutex<Option<std::result::Result<(), String>>>>);
+
+impl PayloadWrite {
+    fn finish(&self, result: std::result::Result<(), String>) {
+        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+    }
+
+    /// `None` while the bytes wait in the pane's input queue.
+    pub fn result(&self) -> Option<std::result::Result<(), String>> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+}
+
+
 /// A pane in the multiplexer
 pub struct Pane {
     /// Unique identifier (usually agent name)
@@ -1316,11 +1332,23 @@ impl Pane {
     /// into "usually, retry if not" rather than leaving it healthy: both paths
     /// were sampling the same swallow, with payload size as the variable.
     pub async fn inject_prompt(&self, prompt: &str) -> Result<()> {
+        self.inject_prompt_tracked(prompt).map(drop)
+    }
+
+    /// [`Self::inject_prompt`], returning a receipt that reports when the
+    /// payload's bytes were written to the PTY, or failed (cas-786a6 review
+    /// L1: a queued write is not yet a written one).
+    pub fn inject_prompt_tracked(&self, prompt: &str) -> Result<PayloadWrite> {
         match &self.backend {
             PaneBackend::Pty(pty) => {
                 let text = prompt.trim();
                 let framed = crate::harness::injection_payload_bytes(self.harness, text);
-                pty.write(&framed).await?;
+                let receipt = PayloadWrite::default();
+                let written = receipt.clone();
+                pty.input().write_then(
+                    &framed,
+                    Box::new(move |result| written.finish(result.map_err(|error| error.to_string()))),
+                )?;
                 // Send carriage return after a settle delay in a background task
                 // so we don't block the daemon event loop for 150-500ms. The CR
                 // goes through the pane's input queue (factory loop v2 C4a), so
@@ -1357,14 +1385,17 @@ impl Pane {
                         );
                     };
                     let on_failure = report.clone();
-                    let queued = input.write_then(
+                    // cas-786a6 review H1: a control write, taken past the
+                    // buffer cap, so a full buffer never strands the payload
+                    // unsubmitted.
+                    let queued = input.write_control_then(
                         b"\r",
-                        Box::new(move |result| match result {
+                        Some(Box::new(move |result| match result {
                             Ok(()) => {
                                 submit_pending.store(false, std::sync::atomic::Ordering::Release);
                             }
                             Err(error) => on_failure(error.to_string()),
-                        }),
+                        })),
                     );
                     if let Err(error) = queued {
                         report(error.to_string());
@@ -1373,9 +1404,31 @@ impl Pane {
                 self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).
                 self.mark_turn_in_flight();
-                Ok(())
+                Ok(receipt)
             }
             PaneBackend::None => Err(Error::pty("Pane has no backend")),
+        }
+    }
+
+    /// When this pane was created: its identity across a same-name respawn.
+    pub fn spawned_at(&self) -> std::time::Instant {
+        self.created_at
+    }
+
+    /// Test support: wait until the pane's queued input is written.
+    #[doc(hidden)]
+    pub fn input_drained_for_test(&self) {
+        if let PaneBackend::Pty(pty) = &self.backend {
+            pty.input().wait_drained(std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Test support: age the pane past its injection grace period without
+    /// sleeping (cas-786a6 review L4).
+    #[doc(hidden)]
+    pub fn backdate_spawn_for_test(&mut self, by: std::time::Duration) {
+        if let Some(at) = self.created_at.checked_sub(by) {
+            self.created_at = at;
         }
     }
 

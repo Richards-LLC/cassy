@@ -3565,3 +3565,152 @@ async fn urgent_inject_is_a_per_pane_state_machine() {
     assert!(!mux.inject_pending("urgent-pane"));
     assert!(!mux.has_pending_injects());
 }
+
+/// Records every byte the pane's writer thread writes; with a gate, blocks
+/// until opened, like a child that stopped reading.
+struct RecordingWriter {
+    out: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    gate: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl std::io::Write for RecordingWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let (open, cv) = &*self.gate;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+        self.out.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+type Recorded = (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+);
+
+async fn recording_pane(name: &str, cli: SupervisorCli, open: bool) -> (Pane, Recorded) {
+    let pty = spawn_test_pty(name, "exec sleep 60");
+    let pane = Pane::with_pty(name, PaneKind::Worker, pty, 24, 80, cli).expect("pane");
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(open), std::sync::Condvar::new()));
+    pane.replace_pty_writer_for_test(Box::new(RecordingWriter {
+        out: out.clone(),
+        gate: gate.clone(),
+    }))
+    .await
+    .expect("install recording writer");
+    (pane, (out, gate))
+}
+
+fn open_gate(recorded: &Recorded) {
+    *recorded.1.0.lock().unwrap() = true;
+    recorded.1.1.notify_all();
+}
+
+/// cas-786a6 review H1: a submit CR queued while the pane's input buffer is
+/// full is still taken, so the payload is submitted once the child reads and
+/// the pane is not left deaf.
+#[tokio::test]
+async fn a_full_input_buffer_never_strands_the_submit_cr() {
+    let (pane, recorded) = recording_pane("cr-full", SupervisorCli::Claude, false).await;
+    pane.inject_prompt("redirect").await.expect("payload queued");
+    // Operator input fills the buffer while the child is not reading.
+    let chunk = vec![b'k'; 64 * 1024];
+    let mut refused = false;
+    for _ in 0..16 {
+        if pane.write(&chunk).await.is_err() {
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused, "the buffer filled");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(pane.inject_submit_pending());
+    open_gate(&recorded);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while pane.inject_submit_pending() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !pane.inject_submit_pending(),
+        "the CR was written once the child read; the pane takes injects again"
+    );
+    assert_eq!(recorded.0.lock().unwrap().last(), Some(&b'\r'));
+}
+
+/// cas-786a6 review M3: operator keys typed during a destructive urgent
+/// inject's settle are held and delivered after the payload and its submit
+/// CR, never inside them.
+#[tokio::test]
+async fn operator_input_during_the_settle_is_held_until_the_payload_is_submitted() {
+    let mut mux = Mux::new(24, 80);
+    let (pane, recorded) = recording_pane("held", SupervisorCli::Claude, true).await;
+    mux.add_pane(pane);
+    let floor = std::time::Duration::from_millis(100);
+    assert!(matches!(
+        mux.begin_interrupt_and_inject("held", "/clear", floor, false)
+            .await
+            .unwrap(),
+        InjectStart::Started(_)
+    ));
+    mux.send_input_to("held", b"fix the").await.unwrap();
+    mux.deliver_user_input_to("held", b"\r", crate::pane::UserInputKind::KeyStream)
+        .await
+        .unwrap();
+    assert!(mux.input_held("held"));
+    tokio::time::sleep(floor).await;
+    let done = mux.advance_injects().await;
+    let done = if done.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        mux.advance_injects().await
+    } else {
+        done
+    };
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
+    // The submit CR follows 150 ms later; held input waits for it.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    mux.advance_injects().await;
+    assert!(!mux.input_held("held"));
+    mux.get("held").unwrap().input_drained_for_test();
+    let written = String::from_utf8_lossy(&recorded.0.lock().unwrap()).to_string();
+    let payload = written.find("/clear").expect("payload written");
+    let cr = written[payload..].find('\r').map(|at| payload + at).expect("submit CR");
+    let typed = written.find("fix the").expect("held input delivered");
+    assert!(payload < cr && cr < typed, "Esc, payload, CR, then the operator's keys: {written:?}");
+}
+
+/// cas-786a6 review L3/L4: an inject whose pane closes, or is respawned
+/// under the same name, mid-settle fails; the new pane is never typed into.
+#[tokio::test]
+async fn a_pane_closed_or_respawned_mid_settle_fails_its_inject() {
+    let mut mux = Mux::new(24, 80);
+    let (pane, _) = recording_pane("gone", SupervisorCli::Claude, true).await;
+    mux.add_pane(pane);
+    let floor = std::time::Duration::from_millis(50);
+    mux.begin_interrupt_and_inject("gone", "redirect", floor, true).await.unwrap();
+    mux.remove_pane("gone");
+    tokio::time::sleep(floor).await;
+    let done = mux.advance_injects().await;
+    assert_eq!(done.len(), 1);
+    assert!(done[0].result.is_err());
+
+    let (pane, _) = recording_pane("same", SupervisorCli::Claude, true).await;
+    mux.add_pane(pane);
+    mux.begin_interrupt_and_inject("same", "old payload", floor, true).await.unwrap();
+    mux.remove_pane("same");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (respawned, recorded) = recording_pane("same", SupervisorCli::Claude, true).await;
+    mux.add_pane(respawned);
+    tokio::time::sleep(floor).await;
+    let done = mux.advance_injects().await;
+    assert_eq!(done.len(), 1);
+    assert!(done[0].result.is_err(), "a respawned pane is a different pane");
+    mux.get("same").unwrap().input_drained_for_test();
+    assert!(!String::from_utf8_lossy(&recorded.0.lock().unwrap()).contains("old payload"));
+}

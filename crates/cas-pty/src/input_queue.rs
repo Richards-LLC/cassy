@@ -22,6 +22,9 @@ use crate::error::{Error, Result};
 /// Bytes a pane may hold unwritten before it stops taking input.
 pub const PTY_INPUT_BUFFER_CAP: usize = 256 * 1024;
 
+/// The largest write [`PtyInput::write_control_then`] takes.
+pub const CONTROL_WRITE_MAX: usize = 64;
+
 /// Called on the writer thread once a chunk is written, or failed.
 pub type WriteDone = Box<dyn FnOnce(std::io::Result<()>) + Send + 'static>;
 
@@ -103,16 +106,25 @@ impl PtyInput {
 
     /// Queue `data`. Never blocks on the PTY.
     pub fn write(&self, data: &[u8]) -> Result<()> {
-        self.enqueue(data, None)
+        self.enqueue(data, None, false)
     }
 
     /// Queue `data` and call `done` on the writer thread once it is written
     /// (or failed). `done` is not called when this returns an error.
     pub fn write_then(&self, data: &[u8], done: WriteDone) -> Result<()> {
-        self.enqueue(data, Some(done))
+        self.enqueue(data, Some(done), false)
     }
 
-    fn enqueue(&self, data: &[u8], done: Option<WriteDone>) -> Result<()> {
+    /// Queue a few control bytes past the cap: a prompt's submit CR, or a
+    /// terminal reply (CPR). Refusing them would leave a queued payload
+    /// unsubmitted, or a child waiting on its reply, for good (cas-786a6
+    /// review H1, L2). Still refused once the pane failed or closed.
+    pub fn write_control_then(&self, data: &[u8], done: Option<WriteDone>) -> Result<()> {
+        debug_assert!(data.len() <= CONTROL_WRITE_MAX, "control writes are a few bytes");
+        self.enqueue(data, done, true)
+    }
+
+    fn enqueue(&self, data: &[u8], done: Option<WriteDone>, control: bool) -> Result<()> {
         let mut state = self.shared.lock();
         if let Some(error) = &state.failed {
             return Err(Error::pty(format!("Write failed: {error}")));
@@ -122,7 +134,7 @@ impl PtyInput {
         }
         // An empty buffer takes one chunk of any size (a large paste), so a
         // pane that is reading is never refused for good.
-        if state.buffered > 0 && state.buffered + data.len() > self.shared.cap {
+        if !control && state.buffered > 0 && state.buffered + data.len() > self.shared.cap {
             return Err(Error::InputFull {
                 buffered: state.buffered,
                 cap: self.shared.cap,
@@ -267,6 +279,31 @@ mod tests {
         assert_eq!(&*out.lock().unwrap(), b"0123456789abcdef", "bytes keep their order");
         input.write(b"!").unwrap();
         assert!(input.wait_drained(Duration::from_secs(5)));
+    }
+
+    /// cas-786a6 review H1: a submit CR queued while the buffer is full is
+    /// still taken, so the payload ahead of it is submitted once the child
+    /// reads; ordinary input stays refused.
+    #[test]
+    fn a_submit_cr_is_taken_past_the_cap_and_written_after_its_payload() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(Box::new(Gate(
+            Arc::clone(&gate),
+            Arc::clone(&out),
+        ))));
+        let owner = PtyInput::start("cr", writer, 8).unwrap();
+        let input = owner.input().clone();
+        input.write(b"payload!").unwrap();
+        assert!(matches!(input.write(b"x"), Err(Error::InputFull { .. })));
+        let (tx, rx) = std::sync::mpsc::channel();
+        input
+            .write_control_then(b"\r", Some(Box::new(move |result| tx.send(result.is_ok()).unwrap())))
+            .expect("the submit CR is never refused for a full buffer");
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true));
+        assert_eq!(&*out.lock().unwrap(), b"payload!\r");
     }
 
     #[test]

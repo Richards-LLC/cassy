@@ -2614,6 +2614,15 @@ impl Pty {
             .map_err(|e| Error::pty(format!("Failed to get writer: {e}")))?;
 
         let writer = Arc::new(Mutex::new(writer));
+        // Factory loop v2 C4a: every write, including the terminal replies
+        // below, goes through the pane's input queue. Only its writer thread
+        // locks `writer`, so a write blocked on a full PTY can never stall
+        // the reader's CPR reply (cas-786a6 review L2).
+        let input = crate::input_queue::PtyInput::start(
+            &id,
+            Arc::clone(&writer),
+            crate::input_queue::PTY_INPUT_BUFFER_CAP,
+        )?;
 
         if is_codex {
             // Codex blocks at startup until it gets a reply to its cursor-position
@@ -2628,13 +2637,10 @@ impl Pty {
             // mirroring `reader_loop` below, so the keep-alive has zero runtime
             // dependency. `blocking_lock` is safe here because this is a fresh OS
             // thread, never a Tokio worker thread.
-            let writer = Arc::clone(&writer);
+            let input = input.input().clone();
             std::thread::spawn(move || {
                 for _ in 0..10 {
-                    let mut locked = writer.blocking_lock();
-                    let _ = locked.write_all(b"\x1b[1;1R");
-                    let _ = locked.flush();
-                    drop(locked);
+                    let _ = input.write_control_then(b"\x1b[1;1R", None);
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
             });
@@ -2645,23 +2651,19 @@ impl Pty {
 
         // Spawn reader thread - sends raw bytes, no parsing
         let reader_handle = std::thread::spawn({
-            let writer = Arc::clone(&writer);
+            let input = input.input().clone();
             move || {
                 Self::reader_loop(
                     reader,
-                    writer,
+                    Box::new(move |reply: &[u8]| {
+                        let _ = input.write_control_then(reply, None);
+                    }),
                     event_tx,
                     #[cfg(unix)]
                     idle_read_fd,
                 );
             }
         });
-
-        let input = crate::input_queue::PtyInput::start(
-            &id,
-            Arc::clone(&writer),
-            crate::input_queue::PTY_INPUT_BUFFER_CAP,
-        )?;
 
         Ok(Self {
             id,
@@ -2680,7 +2682,7 @@ impl Pty {
     /// Reader loop that forwards raw PTY output
     fn reader_loop(
         mut reader: Box<dyn Read + Send>,
-        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+        reply: Box<dyn Fn(&[u8]) + Send>,
         event_tx: mpsc::Sender<PtyEvent>,
         #[cfg(unix)] idle_read_fd: std::os::fd::OwnedFd,
     ) {
@@ -2722,9 +2724,7 @@ impl Pty {
                     carry = new_carry;
 
                     if saw_cpr {
-                        let mut locked = writer.blocking_lock();
-                        let _ = locked.write_all(b"\x1b[1;1R");
-                        let _ = locked.flush();
+                        reply(b"\x1b[1;1R");
                     }
 
                     if !data.is_empty() && event_tx.blocking_send(PtyEvent::Output(data)).is_err() {
@@ -3178,8 +3178,7 @@ mod cpr_tests {
             let (output, stream) = std::os::unix::net::UnixStream::pair().unwrap();
             let idle_fd = stream.as_fd().try_clone_to_owned().unwrap();
             let replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let writer: Box<dyn std::io::Write + Send> = Box::new(CapturedReplies(replies.clone()));
-            let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
+            let captured = replies.clone();
             let (tx, events) = tokio::sync::mpsc::channel(64);
             let thread = std::thread::spawn(move || {
                 Pty::reader_loop(
@@ -3187,7 +3186,10 @@ mod cpr_tests {
                         stream,
                         limit: read_limit,
                     }),
-                    writer,
+                    Box::new(move |reply: &[u8]| {
+                        let mut writer = CapturedReplies(captured.clone());
+                        let _ = std::io::Write::write_all(&mut writer, reply);
+                    }),
                     tx,
                     idle_fd,
                 );

@@ -4048,21 +4048,11 @@ impl FactoryDaemon {
                 UrgentProbeAction::KeepProbing => {}
                 UrgentProbeAction::ConsumeRow => {
                     self.forget_row_delivery_state(row_id);
-                    // cas-1a54 pairing (strong observed-wake receipt, then the
-                    // transport stamp), as `consume_urgent_wake_row` does.
-                    // cas-786a6: QueueStamps in order on the row's key.
-                    self.queue_jobs.stamp(
-                        self.app.cas_dir(),
-                        row_id,
-                        &target,
-                        super::prompt_queue_jobs::QueueStamp::ObservedWakeReceipt,
-                    );
-                    self.queue_jobs.stamp(
-                        self.app.cas_dir(),
-                        row_id,
-                        &target,
-                        super::prompt_queue_jobs::QueueStamp::TransportDelivered,
-                    );
+                    // cas-1a54 pairing; cas-786a6: QueueStamps in order on
+                    // the row's key.
+                    for stamp in Self::urgent_wake_consumed_stamps() {
+                        self.queue_jobs.stamp(self.app.cas_dir(), row_id, &target, stamp);
+                    }
                     {
                         tracing::info!(
                             target: "cas::coordination",
@@ -4398,12 +4388,9 @@ impl FactoryDaemon {
         crate::mcp::tools::service::harness_observation::turn_completion_after(&path, cli, after)
     }
 
-    /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
-    /// this daemon's own transport put in front of `recipient`.
-    ///
-    /// Retain the pre-write channel claim after a successful handoff. This
-    /// helper also repairs historical success paths without weakening another
-    /// channel's receipt. The reservation itself must succeed before sending.
+    /// The daemon transport-handoff receipt (tests; the delivery path uses
+    /// `QueueStamp::TransportReceipt`, cas-786a6).
+    #[cfg(test)]
     fn record_transport_receipt(
         queue: &dyn cas_store::PromptQueueStore,
         prompt_id: i64,
@@ -4418,58 +4405,9 @@ impl FactoryDaemon {
         );
     }
 
-    /// Record a strong receipt after the daemon observed the recipient take a
-    /// turn containing this row. Unlike the transport handoff receipt, this
-    /// must retire the row from the unread view (cas-1a54/cas-5255).
-    fn record_observed_wake_receipt(
-        queue: &dyn cas_store::PromptQueueStore,
-        prompt_id: i64,
-        recipient: &str,
-    ) {
-        Self::record_surfacing_receipt(
-            None,
-            queue,
-            prompt_id,
-            recipient,
-            cas_store::SurfacingSource::ObservedWake,
-        );
-    }
-
-    /// [`Self::record_transport_receipt`] for the delivery path: a busy store
-    /// defers the receipt to the store worker instead of dropping it (GH #1165).
-    fn record_transport_receipt_durable(
-        &self,
-        queue: &dyn cas_store::PromptQueueStore,
-        prompt_id: i64,
-        recipient: &str,
-    ) {
-        Self::record_surfacing_receipt(
-            Some(self.app.cas_dir()),
-            queue,
-            prompt_id,
-            recipient,
-            cas_store::SurfacingSource::TransportClaimed,
-        );
-    }
-
-    /// [`Self::record_observed_wake_receipt`], deferred when the store is busy.
-    fn record_observed_wake_receipt_durable(
-        &self,
-        queue: &dyn cas_store::PromptQueueStore,
-        prompt_id: i64,
-        recipient: &str,
-    ) {
-        Self::record_surfacing_receipt(
-            Some(self.app.cas_dir()),
-            queue,
-            prompt_id,
-            recipient,
-            cas_store::SurfacingSource::ObservedWake,
-        );
-    }
-
     /// With `cas_dir`, a failed write is deferred to the store worker so a
     /// busy store never drops the receipt (GH #1165).
+    #[cfg(test)]
     fn record_surfacing_receipt(
         cas_dir: Option<&std::path::Path>,
         queue: &dyn cas_store::PromptQueueStore,
@@ -4650,20 +4588,26 @@ impl FactoryDaemon {
     /// under; see [`UrgentWakeProbe::target`]. The receipt is best-effort and
     /// never propagates; only the stamp's failure is returned, preserving the
     /// arm's original error behaviour.
+    #[cfg(test)]
     fn consume_urgent_wake_row(
         queue: &dyn cas_store::PromptQueueStore,
         row_id: i64,
         recipient: &str,
     ) -> anyhow::Result<()> {
-        Self::record_surfacing_receipt(
-            None,
-            queue,
-            row_id,
-            recipient,
-            cas_store::SurfacingSource::ObservedWake,
-        );
-        queue.mark_transport_delivered(row_id)?;
+        for stamp in Self::urgent_wake_consumed_stamps() {
+            stamp.apply(queue, row_id, recipient)?;
+        }
         Ok(())
+    }
+
+    /// cas-1a54: the stamps that consume an urgent row whose wake the pane
+    /// corroborated, in order: the strong observed-wake receipt, then the
+    /// transport stamp. cas-786a6: the ConsumeRow arm queues exactly these.
+    fn urgent_wake_consumed_stamps() -> [super::prompt_queue_jobs::QueueStamp; 2] {
+        [
+            super::prompt_queue_jobs::QueueStamp::ObservedWakeReceipt,
+            super::prompt_queue_jobs::QueueStamp::TransportDelivered,
+        ]
     }
 
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
@@ -7089,8 +7033,6 @@ impl FactoryDaemon {
         &mut self,
         selection: super::prompt_queue_jobs::QueueSelection,
     ) -> anyhow::Result<()> {
-        use cas_store::SqliteEventStore;
-
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: roster"));
         let queue = self.queue_jobs.store(self.app.cas_dir())?;
         let super::prompt_queue_jobs::QueueSelection {
@@ -7352,7 +7294,6 @@ impl FactoryDaemon {
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)
             {
-                use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
                 use crate::prompt_revalidation::{
                     MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
                     merge_request_anchor_invalidated_guidance, merge_request_delivery_decision,

@@ -153,7 +153,7 @@ impl QueueStamp {
         }
     }
 
-    fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
+    pub(crate) fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
             Self::ReleaseClaim { claim_token } => queue
                 .release_recipient_transport_claim(row, recipient, *claim_token)
@@ -804,6 +804,7 @@ pub(crate) enum Admission {
     /// An earlier inject of this row has not settled.
     InFlight,
     /// Another channel, or an earlier handoff that keeps its claim, holds it.
+    #[cfg_attr(not(test), allow(dead_code))]
     NotClaimed,
 }
 
@@ -1091,6 +1092,7 @@ impl QueueJobs {
     /// fresh per-row check (review round 1, H2): it fails for a row a hook,
     /// poll or earlier handoff already holds. On `Inject` the row is in
     /// flight from `now` and holds the claim's token.
+    #[cfg(test)]
     pub(crate) fn admit(
         &mut self,
         row: i64,
@@ -1808,12 +1810,6 @@ impl QueueJobs {
             }
         }
         matches!(self.claims.get(&key), Some(ClaimState::Ready(..)))
-    }
-
-    /// Whether a claim job for `(row, recipient)` is out or came back
-    /// untaken.
-    pub(crate) fn claim_outstanding(&self, row: i64, recipient: &str) -> bool {
-        self.claims.contains_key(&(row, recipient.to_string()))
     }
 
     fn submit_claim(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str) {

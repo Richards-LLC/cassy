@@ -509,7 +509,10 @@ impl SqliteVioletAdmissionStore {
             } else {
                 // Preserve transport/recipient history and its monotonic stage.
                 // A retired ask is history, never an inbox item for either process.
-                SqlitePromptQueueStore::atomic_stage_stamp_in_tx(tx, prompt_id, DeliveryStage::Suppressed,
+                let stage = SqlitePromptQueueStore::read_highest_stage(tx, prompt_id)?;
+                let stage = if stage.rank() >= DeliveryStage::Suppressed.rank() { stage }
+                    else { DeliveryStage::Suppressed };
+                SqlitePromptQueueStore::atomic_stage_stamp_in_tx(tx, prompt_id, stage,
                     AtomicStampOpts { reason: Some(PendingReason::SupersededStale),
                         detail: Some("Violet successor recovery retired the original ask"), set_processed: true,
                         broadcast_attempted: None, broadcast_succeeded: None, broadcast_failed: None })?;

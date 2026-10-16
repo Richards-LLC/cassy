@@ -328,9 +328,6 @@ pub enum DeliveryHold {
     EvidencePending,
 }
 
-/// Red-first stub (cas-03ff).
-const CAS_03FF_RED_STUB: bool = true;
-
 /// cas-03ff: whether the supervisor has a pending external reminder waiting
 /// on this delivery: `ci_completed` for its tip, or `branch_contained_in`
 /// for its tip or branch. Waiting on CI or on a merge to land is not a stall.
@@ -341,9 +338,6 @@ pub(crate) fn supervisor_reminder_watches_delivery(
     branch: &str,
     tip: Option<&str>,
 ) -> bool {
-    if CAS_03FF_RED_STUB {
-        return false;
-    }
     let supervisor_ids: HashSet<&str> = data
         .agents
         .iter()

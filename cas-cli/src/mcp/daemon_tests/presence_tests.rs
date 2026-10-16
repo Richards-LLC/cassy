@@ -915,7 +915,7 @@ async fn cas_4ac8_same_session_resume_can_end_again() {
     Mock::given(method("POST"))
         .and(path(format!("/api/agents/{id}/shutdown")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"released_locks": 0})))
-        .expect(2).mount(&fx._server).await;
+        .with_priority(1).expect(2).mount(&fx._server).await;
     session_start(&daemon, id, "resuming").await;
     let original = crate::store::open_agent_store(&fx.cas_root).unwrap().get(id).unwrap();
     for incarnation in 0..2 {

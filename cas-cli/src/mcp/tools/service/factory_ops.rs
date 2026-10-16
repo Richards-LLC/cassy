@@ -431,6 +431,54 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+/// How a confirmed context reset was recorded on the worker's row (cas-e9fc).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResetRegistration {
+    /// The row names the new session (it may already have been rebound).
+    Recorded,
+    /// The row exists but the new session id could not be written.
+    Unrecorded(String),
+    /// The row was gone; Cassy re-registered the worker under its name.
+    Restored,
+    /// The row was gone and could not be re-registered.
+    RestoreFailed(String),
+}
+
+/// Record a confirmed context reset on the worker's row as it is now, never
+/// from the pre-reset copy: the new conversation's SessionStart may have
+/// rebound the row already. If the row is gone (the process kept running but
+/// its registration did not survive), re-register the worker under the same
+/// name so messages and shutdown_workers reach it again (cas-e9fc AC3).
+pub(crate) fn record_reset_registration(
+    store: &dyn crate::store::AgentStore,
+    pre_reset: &cas_types::Agent,
+    new_session: &str,
+) -> ResetRegistration {
+    match store.get(&pre_reset.id) {
+        Ok(mut current) => {
+            if current.cc_session_id.as_deref() == Some(new_session) {
+                return ResetRegistration::Recorded;
+            }
+            current.cc_session_id = Some(new_session.to_string());
+            match store.update(&current) {
+                Ok(()) => ResetRegistration::Recorded,
+                Err(error) => ResetRegistration::Unrecorded(error.to_string()),
+            }
+        }
+        Err(cas_store::StoreError::NotFound(_)) => {
+            let mut restored = pre_reset.clone();
+            restored.cc_session_id = Some(new_session.to_string());
+            restored.status = cas_types::AgentStatus::Active;
+            restored.last_heartbeat = chrono::Utc::now();
+            match store.register(&restored) {
+                Ok(()) => ResetRegistration::Restored,
+                Err(error) => ResetRegistration::RestoreFailed(error.to_string()),
+            }
+        }
+        Err(error) => ResetRegistration::Unrecorded(error.to_string()),
+    }
+}
+
 /// First 8 characters of a session UUID — enough to compare two sessions at a
 /// glance without wrapping the line (cas-dffe).
 fn short_session(session_id: &str) -> &str {
@@ -5749,6 +5797,9 @@ impl CasService {
         // enough (GH #145).
         let deadline = std::time::Instant::now() + reset::confirmation_timeout();
         let mut confirmed: Vec<(String, reset::ContextResetEvidence, String)> = Vec::new();
+        // cas-e9fc: resets whose worker row was gone once the new session
+        // appeared, and whether Cassy could restore the registration.
+        let mut lost: Vec<(String, reset::ContextResetEvidence, Result<(), String>)> = Vec::new();
         let mut outstanding: Vec<PendingReset> = pending;
         while !outstanding.is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(reset::CONFIRMATION_POLL).await;
@@ -5763,17 +5814,26 @@ impl CasService {
                         // Point Cassy's transcript resolution at the live session
                         // so worker_status/worker_activity/is-wedged stop
                         // reading the pre-reset file (AC4).
-                        let mut updated = item.agent.clone();
-                        updated.cc_session_id = Some(evidence.session_id.clone());
-                        if let Err(e) = agent_store.update(&updated) {
-                            tracing::warn!(
-                                agent = %item.agent.name,
-                                error = %e,
-                                "cas-dffe: context reset confirmed but recording the new session \
-                                 id failed; worker_status will keep resolving the old transcript"
-                            );
+                        match record_reset_registration(agent_store.as_ref(), &item.agent, &evidence.session_id) {
+                            ResetRegistration::Recorded => {
+                                confirmed.push((item.agent.name.clone(), evidence, previous));
+                            }
+                            ResetRegistration::Unrecorded(error) => {
+                                tracing::warn!(
+                                    agent = %item.agent.name,
+                                    %error,
+                                    "cas-dffe: context reset confirmed but recording the new session \
+                                     id failed; worker_status will keep resolving the old transcript"
+                                );
+                                confirmed.push((item.agent.name.clone(), evidence, previous));
+                            }
+                            ResetRegistration::Restored => {
+                                lost.push((item.agent.name.clone(), evidence, Ok(())));
+                            }
+                            ResetRegistration::RestoreFailed(error) => {
+                                lost.push((item.agent.name.clone(), evidence, Err(error)));
+                            }
                         }
-                        confirmed.push((item.agent.name.clone(), evidence, previous));
                         false
                     }
                     None => true,
@@ -5807,11 +5867,29 @@ impl CasService {
                     .join(", "),
             ));
         }
+        for (name, evidence, outcome) in &lost {
+            match outcome {
+                Ok(()) => output.push_str(&format!(
+                    "❌ {name}: context reset landed (new session {}), but the worker's registration \
+                     was gone afterwards. Cassy restored it under the same name, so messages and \
+                     shutdown_workers reach it again; its task leases may have been released, so \
+                     check its assignment with worker_status before relying on it.\n",
+                    short_session(&evidence.session_id),
+                )),
+                Err(error) => output.push_str(&format!(
+                    "❌ {name}: context reset landed (new session {}), but the worker's registration \
+                     was gone afterwards and could not be restored ({error}). Its process is still \
+                     running unregistered: stop it (ps for --agent-name {name}) and spawn_workers \
+                     the same name with its task.\n",
+                    short_session(&evidence.session_id),
+                )),
+            }
+        }
         for refusal in &refusals {
             output.push_str(&format!("❌ {refusal}\n"));
         }
 
-        if !outstanding.is_empty() || !refusals.is_empty() {
+        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() {
             // Never report success for a reset that was not observed.
             return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
         }
@@ -11854,6 +11932,48 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-e9fc AC3: a confirmed clear_context records the new session on the
+    /// row as it is now (keeping a SessionStart rebind), and a worker whose row
+    /// vanished is re-registered under its name, never left a silent orphan.
+    #[test]
+    fn cas_e9fc_reset_registration_keeps_or_restores_the_worker_row() {
+        let project = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let store = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "cd08c932-old".into(),
+            "smooth-robin-87".into(),
+            cas_types::AgentRole::Worker,
+        );
+        worker.cc_session_id = Some("cd08c932-old".into());
+        worker.pid = Some(4242);
+        store.register(&worker).unwrap();
+
+        // A SessionStart rebind changed the PID; recording keeps it.
+        let mut rebound = store.get(&worker.id).unwrap();
+        rebound.pid = Some(5151);
+        store.update(&rebound).unwrap();
+        assert_eq!(
+            record_reset_registration(store.as_ref(), &worker, "34398e29-new"),
+            ResetRegistration::Recorded
+        );
+        let current = store.get(&worker.id).unwrap();
+        assert_eq!(current.cc_session_id.as_deref(), Some("34398e29-new"));
+        assert_eq!(current.pid, Some(5151), "the stale pre-reset copy never overwrites the row");
+
+        // The row vanished while the process kept running: restored, by name.
+        store.unregister(&worker.id).unwrap();
+        assert_eq!(
+            record_reset_registration(store.as_ref(), &worker, "34398e29-new"),
+            ResetRegistration::Restored
+        );
+        let restored = store.get(&worker.id).unwrap();
+        assert_eq!(restored.name, "smooth-robin-87");
+        assert_eq!(restored.role, cas_types::AgentRole::Worker);
+        assert_eq!(restored.status, cas_types::AgentStatus::Active);
+        assert_eq!(restored.cc_session_id.as_deref(), Some("34398e29-new"));
+    }
 
     #[test]
     fn cas_6eec_stall_evidence_counts_only_the_workers_scoped_edits_and_commits() {

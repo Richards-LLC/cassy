@@ -1394,7 +1394,8 @@ pub fn handle_session_end(
     }
 
     // Clean up agent leases and reset task status - ALWAYS do this regardless of observation count
-    cleanup_agent_leases(cas_root, &input.session_id);
+    // cas-e9fc: a worker's `/clear` keeps its identity; see the function docs.
+    cleanup_agent_leases_for_end(cas_root, &input.session_id, input.reason.as_deref());
 
     // A default reminder is a one-shot thought attached to this exact session.
     // Cancel it synchronously at SessionEnd so a later session never receives

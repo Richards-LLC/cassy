@@ -461,6 +461,8 @@ fn cas_7b6b_wake_completion_remains_ready_after_another_owner_applies_results() 
         jobs.apply_completions();
         jobs.has_ready()
     });
+    let mut director = super::super::director_refresh::DirectorRefresh::new();
+    director.has_finished(&mut jobs);
     jobs.apply_completions();
     assert!(
         jobs.has_ready(),
@@ -474,4 +476,70 @@ fn cas_7b6b_wake_completion_remains_ready_after_another_owner_applies_results() 
         1
     );
     assert!(!jobs.has_ready());
+}
+
+#[test]
+fn cas_7b6b_failed_wake_read_retains_raw_batch_until_recovery() {
+    use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
+    use super::super::queue_control_jobs::PromptPreparation;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    crate::store::open_agent_store(&root)
+        .unwrap()
+        .register(&cas_types::Agent::new(
+            "worker-id".into(),
+            "worker-a".into(),
+        ))
+        .unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let id = queue
+        .enqueue("supervisor", "worker-a", "retained decision")
+        .unwrap();
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    conn.execute("UPDATE agents SET name=x'00' WHERE id='worker-id'", [])
+        .unwrap();
+    let mut jobs = QueueJobs::inline();
+    let mut preparation = PromptPreparation::default();
+    let batch = QueueSelection {
+        rows: vec![queue.queued_prompt(id).unwrap().unwrap()],
+        ..Default::default()
+    };
+    assert!(
+        preparation
+            .advance(
+                &mut jobs,
+                Some(batch),
+                root.clone(),
+                "lead".into(),
+                vec![],
+                Instant::now()
+            )
+            .is_none()
+    );
+    assert!(
+        preparation.has_pending(),
+        "failed evidence read must retain selected work"
+    );
+    assert!(
+        queue
+            .queued_prompt(id)
+            .unwrap()
+            .unwrap()
+            .processed_at
+            .is_none()
+    );
+    conn.execute("UPDATE agents SET name='worker-a' WHERE id='worker-id'", [])
+        .unwrap();
+    let ready = preparation
+        .advance(
+            &mut jobs,
+            None,
+            root,
+            "lead".into(),
+            vec![],
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("recovered read returns the held batch");
+    assert_eq!(ready.rows[0].id, id);
+    assert!(!preparation.has_pending());
 }

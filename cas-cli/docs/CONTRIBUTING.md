@@ -55,11 +55,21 @@ MCP activity emits at most one event per server-bound worker every 30 seconds,
 with the throttle checked in memory before store access. This interval is much
 shorter than the default 300-second quiet threshold; concurrent calls share the
 same reservation and failed writes can retry.
+Confirmed authenticated non-worker roles are cached per immutable server core,
+so supervisor calls skip further activity-related store reads. Missing sessions
+and inactive workers remain retryable.
 Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
 hide a quiet worker. Call activity uses the server's immutable registered actor;
 request fields naming another worker do not credit that worker. Open harness
 tool calls and live worker-owned child processes continue to count as activity;
 unrelated process trees and persistent MCP sidecars do not.
+
+For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
+project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty
+database at a guessed path. Writable prompt-queue opens remove a regular empty
+`.cas/prompt_queue.db` artifact when it has no SQLite recovery sidecars; nonempty
+files, symlinks and sidecar-backed artifacts remain untouched for investigation.
+Read-only queue opens never perform this cleanup.
 
 ## Factory cloud client (disabled by default)
 

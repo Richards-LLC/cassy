@@ -25,6 +25,9 @@ pub use operator_cloud::{
     session_routing_id,
 };
 mod operator_delivery;
+#[path = "violet_body_store.rs"]
+mod violet_body;
+pub use violet_body::{VIOLET_BODY_SCHEMA_STATEMENTS, VioletConsumptionJob};
 pub use operator_delivery::{
     OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
     OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorRelayReceipt,
@@ -2897,6 +2900,11 @@ pub trait PromptQueueStore: Send + Sync {
         recipient: &str,
     ) -> Result<Option<ClaimToken>>;
 
+    /// Final body boundary, after any pointer-only reservation. Managed bodies
+    /// consume their remotely confirmed permit once; failed handoffs do not
+    /// replenish it. Caller must revalidate every fetched body here.
+    fn authorize_body_handoff(&self, prompt_id: i64, recipient: &str, session: Option<&str>) -> Result<bool>;
+
     /// Release exactly the transport claim `token` names, if it is still a
     /// `transport_claimed` receipt. A late release can therefore never drop a
     /// newer claim, nor a receipt a hook or poll took over. Returns whether a
@@ -4964,6 +4972,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(PROMPT_QUEUE_SCHEMA)?;
+            for sql in VIOLET_BODY_SCHEMA_STATEMENTS {
+                conn.execute(sql, [])?;
+            }
+            conn.execute_batch(violet_body::BODY_OUTBOX_IDENTITY_TRIGGER)?;
             crate::communication_slo::ensure_schema(&conn)?;
             for sql in OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS {
                 conn.execute(sql, [])?;
@@ -6963,6 +6975,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             Self::claim_recipient_transport_on_conn(&conn, prompt_id, recipient)
+        })
+    }
+
+    fn authorize_body_handoff(&self, prompt_id: i64, recipient: &str, session: Option<&str>) -> Result<bool> {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            violet_body::spend_body_in_tx(tx, prompt_id, recipient, session)
         })
     }
 
@@ -9009,6 +9027,7 @@ impl SqlitePromptQueueStore {
             } else {
                 ""
             };
+            let managed_body_sql = violet_body::BODY_ELIGIBLE_SQL;
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
@@ -9114,6 +9133,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {managed_body_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -9161,6 +9181,7 @@ impl SqlitePromptQueueStore {
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
+                           {managed_body_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -9226,6 +9247,13 @@ impl SqlitePromptQueueStore {
                 }
             };
 
+            let mut authorized = Vec::with_capacity(prompts.len());
+            for prompt in prompts {
+                if violet_body::spend_body_in_tx(&tx, prompt.id, recipient, factory_session)? {
+                    authorized.push(prompt);
+                }
+            }
+            let prompts = authorized;
             if !prompts.is_empty() {
                 let seen_at = Utc::now().to_rfc3339();
                 let mut stmt = tx.prepare_cached(

@@ -97,6 +97,7 @@ mod worktree_lease_test;
 
 // Re-export error types
 pub use error::{Result, StoreError};
+pub use prompt_queue_store::{VIOLET_BODY_SCHEMA_STATEMENTS, VioletConsumptionJob};
 pub use prompt_queue_store::violet_admission::{
     VIOLET_ADMISSION_SCHEMA_STATEMENTS, VioletAdmissionAck, VioletAdmissionInput, VioletAdmissionReceipt, VioletAdmissionRebind, SqliteVioletAdmissionStore, VioletConsumption, VioletRecoveryReceipt, VioletLeaseFence,
 };

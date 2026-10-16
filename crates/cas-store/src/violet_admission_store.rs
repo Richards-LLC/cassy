@@ -2,6 +2,8 @@
 use super::*;
 
 pub const VIOLET_ADMISSION_SCHEMA_STATEMENTS: &[&str] = &[
+    super::VIOLET_BODY_SCHEMA_STATEMENTS[0],
+    super::VIOLET_BODY_SCHEMA_STATEMENTS[1],
     r#"
 CREATE TABLE IF NOT EXISTS violet_admissions (
     delivery_id TEXT PRIMARY KEY,
@@ -765,7 +767,7 @@ pub struct VioletAdmissionRebind {
 }
 
 pub struct SqliteVioletAdmissionStore {
-    queue: SqlitePromptQueueStore,
+    pub(super) queue: SqlitePromptQueueStore,
 }
 
 impl SqliteVioletAdmissionStore {
@@ -898,6 +900,11 @@ impl SqliteVioletAdmissionStore {
                 conn.execute(statement, [])?;
             }
             conn.execute_batch(VIOLET_ADMISSION_TRIGGER)?;
+            // Upgrade prior preparation rows without making any body visible.
+            conn.execute("INSERT OR IGNORE INTO violet_body_permits
+                (prompt_id,delivery_id,registration_id,delivery_generation,factory_session,recipient)
+                SELECT prompt_id,delivery_id,registration_id,delivery_generation,factory_session,recipient
+                FROM violet_admissions", [])?;
             Ok(())
         })?;
         Ok(Self { queue })
@@ -953,6 +960,8 @@ impl SqliteVioletAdmissionStore {
                 }
                 let untouched: bool = tx.query_row(
                 "SELECT processed_at IS NULL AND selected_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM violet_body_permits WHERE prompt_id=q.id
+                        AND (request_id IS NOT NULL OR state IN ('spent','revoked')))
                     AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen WHERE prompt_id=q.id)
                     AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_transport WHERE prompt_id=q.id)
                  FROM prompt_queue q WHERE id=?1 AND target=?2 AND factory_session=?3",
@@ -978,6 +987,10 @@ impl SqliteVioletAdmissionStore {
                         binding.recipient
                     ],
                 )?;
+                tx.execute("UPDATE violet_body_permits SET registration_id=?2,delivery_generation=?3,
+                    factory_session=?4,recipient=?5,state='blocked' WHERE prompt_id=?1",
+                    params![prompt_id,binding.registration_id,binding.delivery_generation,
+                        binding.factory_session,binding.recipient])?;
                 Ok((receipt, true))
             },
         )?;
@@ -1166,6 +1179,11 @@ impl SqliteVioletAdmissionStore {
                 params![source,input.recipient,input.prompt,Utc::now().to_rfc3339(),input.factory_session,
                     i32::from(NotificationPriority::High),key])?;
             let prompt_id = tx.last_insert_rowid();
+            tx.execute("INSERT INTO violet_body_permits
+                (prompt_id,delivery_id,registration_id,delivery_generation,factory_session,recipient)
+                VALUES (?1,?2,?3,?4,?5,?6)",
+                params![prompt_id,input.delivery_id,input.registration_id,input.delivery_generation,
+                    input.factory_session,input.recipient])?;
             tx.execute("INSERT INTO violet_admissions
                 (delivery_id,occurrence_id,reader_slot_id,registration_id,delivery_generation,
                  route_generation,project_id,target_json,factory_session,recipient,prompt_id,lease_token,ack_pending)
@@ -1288,7 +1306,17 @@ fn recover_known_in_tx(
     } else {
         VioletConsumption::Queued
     };
+    let permit_touched: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM violet_body_permits
+        WHERE prompt_id=?1 AND (request_id IS NOT NULL OR state IN ('spent','revoked')))",
+        [prompt_id], |r|r.get(0))?;
+    let evidence = if permit_touched { evidence.max(VioletConsumption::DispatchUncertain) } else { evidence };
     let consumption = remote.max(VioletConsumption::parse(&stored)?).max(evidence);
+    // Recovery never renews a dispatch attempt, including a late local apply.
+    tx.execute("UPDATE violet_body_permits SET state=CASE WHEN ?2='queued' THEN 'blocked' ELSE 'revoked' END,
+        registration_id=?3,delivery_generation=?4,factory_session=?5,recipient=?6
+        WHERE prompt_id=?1",
+        params![prompt_id,consumption.as_str(),binding.registration_id,binding.delivery_generation,
+            binding.factory_session,binding.recipient])?;
     if consumption == VioletConsumption::Queued {
         tx.execute(
             "UPDATE prompt_queue SET target=?2,factory_session=?3 WHERE id=?1",

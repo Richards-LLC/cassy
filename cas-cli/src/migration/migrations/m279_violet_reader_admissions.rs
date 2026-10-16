@@ -9,7 +9,7 @@ pub const MIGRATION: Migration = Migration {
     up: cas_store::VIOLET_ADMISSION_SCHEMA_STATEMENTS,
     detect: Some("SELECT CASE WHEN
         (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN
-         ('violet_admissions','violet_admission_cursors'))=2
+         ('violet_admissions','violet_admission_cursors','violet_body_permits','violet_consumption_outbox'))=4
         THEN 1 ELSE 0 END"),
 };
 

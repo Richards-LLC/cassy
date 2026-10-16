@@ -629,3 +629,7 @@ pub(crate) async fn run_worker_operation(
 #[cfg(test)]
 #[path = "fleet_supervisor_notices_tests.rs"]
 mod supervisor_notice_tests;
+
+#[cfg(test)]
+#[path = "fleet_epic_publication_tests.rs"]
+mod epic_publication_tests;

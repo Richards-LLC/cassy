@@ -1375,7 +1375,7 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
 }
 
 
-async fn restart_peer_mail(unregister: bool) {
+async fn restart_peer_mail(unregister: bool, legacy: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
     let endpoint = server.uri();
@@ -1405,6 +1405,11 @@ async fn restart_peer_mail(unregister: bool) {
         let agents = open_agent_store(&beta.cas_dir).unwrap();
         if unregister {
             agents.unregister("b-old").unwrap();
+            if legacy {
+                // A pre-upgrade SessionEnd row had no typed retirement metadata.
+                rusqlite::Connection::open(beta.cas_dir.join("cas.db")).unwrap()
+                    .execute("UPDATE events SET metadata = NULL WHERE entity_id = 'b-old'", []).unwrap();
+            }
         } else {
             let mut old = agents.get("b-old").unwrap();
             old.status = cas::types::AgentStatus::Shutdown;
@@ -1423,6 +1428,26 @@ async fn restart_peer_mail(unregister: bool) {
         assert!(inbox(&beta.cas_dir).is_empty());
         register("b-new");
         let report = tick(&beta.cas_dir, "b-new");
+        if legacy {
+            assert_eq!((report.delivered, report.rejected), (0, 1), "{report:?}");
+            assert!(inbox(&beta.cas_dir).is_empty(), "unverified body is never admitted");
+            assert_eq!(mailbox.lock().unwrap()[0]["status"], "rejected");
+            assert_eq!(tick(&alpha.cas_dir, "a").delivered, 1);
+            let notices = inbox(&alpha.cas_dir);
+            assert_eq!(notices.len(), 1);
+            assert_eq!(parse_envelope(&notices[0].prompt).unwrap().in_reply_to.as_deref(), Some(receipt.id.as_str()));
+            assert!(notices[0].prompt.contains("b-new"));
+            assert!(notices[0].prompt.to_ascii_lowercase().contains("resend"));
+            // pin: a routing failure notice must not forward the unverified original body.
+            assert!(!notices[0].prompt.contains("mail while down"));
+            mailbox.lock().unwrap()[0]["status"] = json!("queued");
+            let replay = tick(&beta.cas_dir, "b-new");
+            assert_eq!(replay.rejected, 1);
+            assert_eq!(mailbox.lock().unwrap().len(), 2, "notice send is idempotent on redelivery");
+            assert_eq!(tick(&alpha.cas_dir, "a").claimed, 0);
+            assert_eq!(inbox(&alpha.cas_dir).len(), 1);
+            return;
+        }
         assert_eq!(
             (report.claimed, report.delivered, report.rejected),
             (1, 1, 0),
@@ -1465,10 +1490,15 @@ async fn restart_peer_mail(unregister: bool) {
 
 #[tokio::test]
 async fn ct2_p3_peer_mail_survives_restart() {
-    restart_peer_mail(false).await;
+    restart_peer_mail(false, false).await;
 }
 
 #[tokio::test]
 async fn cas_8063_peer_mail_survives_unregister_restart() {
-    restart_peer_mail(true).await;
+    restart_peer_mail(true, false).await;
+}
+
+#[tokio::test]
+async fn cas_8063_legacy_deleted_address_notifies_sender_to_resend_without_forwarding_body() {
+    restart_peer_mail(true, true).await;
 }

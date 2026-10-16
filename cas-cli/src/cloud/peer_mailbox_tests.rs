@@ -460,6 +460,7 @@ fn cas_8063_name_at_machine_prefers_live_successor_and_disambiguates_live_twins(
 
 #[test]
 fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "")]);
     for case in [
         "name",
         "machine",

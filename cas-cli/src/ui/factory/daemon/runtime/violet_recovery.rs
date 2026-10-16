@@ -8,6 +8,7 @@ pub(crate) struct ReaderDestination<'a> {
     pub context: &'a OperationContext,
     pub factory_session: &'a str,
     pub recipient: &'a str,
+    pub instance_id: &'a str,
 }
 
 #[derive(Debug, Default)]
@@ -166,6 +167,7 @@ pub(crate) fn recover_page(
                     context,
                     destination.factory_session,
                     destination.recipient,
+                    Some(destination.instance_id),
                     admission.delivery.delivery_generation,
                     &fresh,
                 )?;
@@ -276,6 +278,7 @@ fn restore_rebound(
         context,
         &request.factory_session,
         &request.recipient,
+        None,
         request.expected_generation,
         &fresh,
     )
@@ -286,6 +289,7 @@ fn restore_lookup(
     context: &OperationContext,
     session: &str,
     recipient: &str,
+    live_instance: Option<&str>,
     expected_generation: i64,
     admission: &RecoverableAdmission,
 ) -> Result<(), String> {
@@ -318,7 +322,7 @@ fn restore_lookup(
             &input,
             expected_generation,
             consumption(&delivery.consumption)?,
-            None,
+            live_instance,
         )
         .map_err(|e| e.to_string())?;
     Ok(())

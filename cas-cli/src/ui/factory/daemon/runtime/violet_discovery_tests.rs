@@ -117,6 +117,7 @@ fn cas_c423_discovery_on_empty_machine_reconciles_same_request_and_restores_once
         context: &context,
         factory_session: "successor-factory",
         recipient: "successor-supervisor",
+        instance_id: "discovery-instance",
     };
     let evidence = activation::validate_activation(&activation_fixture(), &context).unwrap();
     let cloud = DiscoveryCloud {
@@ -197,6 +198,7 @@ fn cas_c423_discovery_refuses_foreign_lookup_target_before_sqlite_restore() {
         context: &context,
         factory_session: "successor-factory",
         recipient: "successor-supervisor",
+        instance_id: "discovery-instance",
     };
     let evidence = activation::validate_activation(&activation_fixture(), &context).unwrap();
     let cloud = DiscoveryCloud {
@@ -240,6 +242,7 @@ fn cas_c423_discovery_crash_before_post_retries_original_id_after_lookup() {
         context: &context,
         factory_session: "successor-factory",
         recipient: "successor-supervisor",
+        instance_id: "discovery-instance",
     };
     let evidence = activation::validate_activation(&activation_fixture(), &context).unwrap();
     let cloud = DiscoveryCloud {
@@ -308,6 +311,7 @@ fn cas_c423_discovery_terminal_receipt_retries_only_sqlite_apply_after_failure()
         context: &context,
         factory_session: "successor-factory",
         recipient: "successor-supervisor",
+        instance_id: "discovery-instance",
     };
     let evidence = activation::validate_activation(&activation_fixture(), &context).unwrap();
     let cloud = DiscoveryCloud {

@@ -21844,19 +21844,38 @@ pub(crate) fn run_declared_pre_close_hook(
         });
     let (execution_root, worktree_branch, task_tip, lint_parent) = match worker_worktree_path {
         Some(path) => {
-            let branch = git_branch_name(path).ok_or_else(|| {
+            let head_branch = git_branch_name(path).ok_or_else(|| {
                 "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
                     .to_string()
             })?;
+            // cas-a7ed: a parked task is measured on its own delivery branch.
+            // While it awaits merge the worker's shared worktree may already
+            // be on its next task's per-task branch; that checkout is neither
+            // this task's evidence nor a history rewrite, and its tip is
+            // never offered as this task's receipt.
+            let own_ref: Option<String> = if task.status == TaskStatus::AwaitingMerge
+                && !task_delivery_branch_candidates(task).contains(&head_branch)
+            {
+                task_delivery_branch(path, task)
+            } else {
+                Some("HEAD".to_string())
+            };
+            let measure_ref = own_ref.clone().unwrap_or_else(|| "HEAD".to_string());
+            let branch = if measure_ref == "HEAD" {
+                head_branch
+            } else {
+                measure_ref.trim_start_matches("origin/").to_string()
+            };
+            let own_tip = || own_ref.as_deref().and_then(|own| resolve_branch_sha(path, own));
             let parked_anchor = task.deliverables.factory_branch_anchor.as_deref();
             let mut reanchored = false;
             let tip = normalized_receipt
                 .clone()
                 .or_else(|| {
                     let anchor = parked_anchor?;
-                    let current_tip = resolve_branch_sha(path, "HEAD");
+                    let current_tip = resolve_branch_sha(path, &measure_ref);
                     let anchor_reachable = git_ref_exists(path, anchor)
-                        && git_commit_is_ancestor(path, anchor, "HEAD");
+                        && git_commit_is_ancestor(path, anchor, &measure_ref);
                     if anchor_reachable {
                         return Some(anchor.to_string());
                     }
@@ -21880,7 +21899,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     }
                     Some(anchor.to_string())
                 })
-                .or_else(|| resolve_branch_sha(path, "HEAD"))
+                .or_else(|| resolve_branch_sha(path, &measure_ref))
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve task-owned commit tip"
                         .to_string()
@@ -21892,7 +21911,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     return Err(stale_rebased_anchor_rejection(
                         &task.id,
                         anchor,
-                        resolve_branch_sha(path, "HEAD").as_deref(),
+                        own_tip().as_deref(),
                         &repo_context.target_branch,
                     ));
                 }
@@ -21908,7 +21927,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     live_target_source,
                 ));
             }
-            let reachable_from_worktree = git_commit_is_ancestor(path, &tip, "HEAD");
+            let reachable_from_worktree = git_commit_is_ancestor(path, &tip, &measure_ref);
             let receipt_reachable_from_target =
                 normalized_receipt.as_deref().is_some_and(|receipt| {
                     target_contains(path, receipt)
@@ -21920,7 +21939,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     return Err(stale_rebased_anchor_rejection(
                         &task.id,
                         anchor,
-                        resolve_branch_sha(path, "HEAD").as_deref(),
+                        own_tip().as_deref(),
                         &repo_context.target_branch,
                     ));
                 }

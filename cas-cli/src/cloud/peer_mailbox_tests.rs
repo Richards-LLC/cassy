@@ -538,7 +538,8 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         );
         assert!(machine.rows().is_empty(), "{case}: {report:?}");
         if case == "ambiguous" {
-            assert!(!report.errors.is_empty());
+            assert!(report.errors.is_empty());
+            assert!(!report.warnings.is_empty());
         }
     }
 }

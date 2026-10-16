@@ -110,11 +110,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Fired reminders and lifecycle rows are marked processed, and the
   undelivered-relay banner is capped and ages out.
 
-### Changed — the factory loop does no store or file I/O on the input path (#1211 in part; cas-4491f, cas-7b6b, cas-5e72, cas-54a2, cas-9db0b)
+### Changed — the factory loop does no store or file I/O on the input path (#1211 in part; cas-4491f, cas-7b6b, cas-031e, cas-5e72, cas-54a2, cas-9db0b)
 
 - Relay, director-inject and director-refresh store I/O, the per-pass
-  spawn-queue poll, the prompt-queue wake gate and the epic-focus write all run
-  off the daemon loop. Key-to-echo p99 under write pressure drops from 77.7 ms
+  spawn-queue poll, the prompt-queue wake gate, the idle-unacked and
+  normal-delivery turn probes, and the epic-focus write all run off the daemon
+  loop. Key-to-echo p99 under write pressure drops from 77.7 ms
   to 12.8 ms.
 - Daemon shutdown flushes a pending epic-focus write and drains the store
   worker, so a last-moment focus change is kept.

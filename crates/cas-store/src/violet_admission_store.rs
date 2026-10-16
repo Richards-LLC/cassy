@@ -490,6 +490,54 @@ mod tests {
     }
 
     #[test]
+    fn cas_c423_store_fresh_restore_is_atomic_idempotent_and_never_reacks() {
+        for consumption in [VioletConsumption::Queued, VioletConsumption::DispatchUncertain, VioletConsumption::Consumed] {
+            let root = tempfile::tempdir().unwrap();
+            let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+            let mut row = input();
+            row.lease_token.clear();
+            row.delivery_generation = 2;
+            let first = store.restore_admitted(&row, 1, consumption).unwrap();
+            let duplicate = store.restore_admitted(&row, 1, consumption).unwrap();
+            assert!(first.admission.created);
+            assert!(!duplicate.admission.created);
+            assert_eq!(duplicate.admission.prompt_id, first.admission.prompt_id);
+            assert_eq!(duplicate.recovery_prompt_id, first.recovery_prompt_id);
+            assert_eq!(duplicate.consumption, consumption);
+            assert!(store.pending_acknowledgements(&row.registration_id, &row.project_id).unwrap().is_empty());
+            let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+            let inbox = queue.peek_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10).unwrap();
+            match consumption {
+                VioletConsumption::Queued => assert_eq!(inbox[0].id, first.admission.prompt_id),
+                VioletConsumption::DispatchUncertain => {
+                    assert_eq!(inbox.len(), 1);
+                    assert_eq!(Some(inbox[0].id), first.recovery_prompt_id);
+                    assert!(!inbox[0].prompt.contains(&row.prompt));
+                }
+                VioletConsumption::Consumed => assert!(inbox.is_empty()),
+            }
+            let db = Connection::open(root.path().join("cas.db")).unwrap();
+            let cursor: String = db.query_row("SELECT message_ts FROM violet_admission_cursors", [], |r|r.get(0)).unwrap();
+            assert_eq!(cursor, row.message_ts);
+        }
+    }
+
+    #[test]
+    fn cas_c423_store_fresh_restore_cursor_failure_rolls_back_everything() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_restore BEFORE INSERT ON violet_admission_cursors
+            BEGIN SELECT RAISE(ABORT,'restore cursor failed'); END;").unwrap();
+        let mut row = input();
+        row.lease_token.clear();
+        assert!(store.restore_admitted(&row, 1, VioletConsumption::DispatchUncertain).is_err());
+        let counts: (i64,i64) = db.query_row("SELECT (SELECT COUNT(*) FROM violet_admissions),
+            (SELECT COUNT(*) FROM prompt_queue)", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(counts, (0,0));
+    }
+
+    #[test]
     fn cas_c423_store_recovery_notice_and_retirement_roll_back_together() {
         let root = tempfile::tempdir().unwrap();
         let row = input();
@@ -672,6 +720,12 @@ pub struct SqliteVioletAdmissionStore {
 }
 
 impl SqliteVioletAdmissionStore {
+    /// Restore Cloud's existing admission on a successor machine. No lease
+    /// token or new admission acknowledgement is invented by this path.
+    pub fn restore_admitted(&self, _input: &VioletAdmissionInput, _expected_generation: i64,
+        _consumption: VioletConsumption) -> Result<VioletRecoveryReceipt> {
+        Err(StoreError::Other("fresh admission restoration is not implemented".into()))
+    }
     pub fn pending_lease_fences(&self, project: &str) -> Result<Vec<VioletLeaseFence>> {
         let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
         let mut stmt = conn.prepare_cached(

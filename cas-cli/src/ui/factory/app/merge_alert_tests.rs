@@ -255,10 +255,12 @@ fn cas_9efb_missing_ci_retries_without_a_new_worker_idle_event() {
     f.ci(None);
     f.app.merge_alert_retries.now = Some(now);
     assert!(f.relay().is_empty());
-    assert!(f.app.merge_alert_retry_events_at(now + chrono::Duration::seconds(59)).is_empty());
+    let before_minute = now + chrono::Duration::seconds(59);
+    assert!(f.app.merge_alert_retry_events_at(before_minute).is_empty());
     let retries = f.app.merge_alert_retry_events_at(now + chrono::Duration::minutes(1));
     assert_eq!(retries.len(), 1, "the consumed WorkerIdle event must be retried each minute");
-    assert!(f.app.merge_alert_retry_events_at(now + chrono::Duration::minutes(1)).is_empty());
+    let at_minute = now + chrono::Duration::minutes(1);
+    assert!(f.app.merge_alert_retry_events_at(at_minute).is_empty());
     f.ci(Some("success"));
     let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(prompts.len(), 1);

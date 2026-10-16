@@ -1044,3 +1044,90 @@ async fn cas_4ac8_round3_heartbeat_kicks_once_with_and_without_owned_agent() {
     assert_eq!(daemon.presence_kick_count.load(Ordering::Relaxed) - before, 1);
     assert_eq!(fx.cloud.state().heartbeats.len() - requests, 1);
 }
+
+#[tokio::test]
+async fn cas_4ac8_round4_panicked_presence_pass_does_not_disable_later_kick() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    // A real failed blocking pass leaves the same pending/handle state as an
+    // unexpected panic in store/presence work. The next public heartbeat recovers.
+    *daemon.presence_pending.lock().unwrap() = Some(Default::default());
+    let failed = tokio::task::spawn_blocking(|| panic!("injected presence pass panic"));
+    while !failed.is_finished() { tokio::task::yield_now().await; }
+    *daemon.presence_task.lock().await = Some(failed);
+    let id = "panic-recovery";
+    let agent = crate::types::Agent::new(id.into(), id.into());
+    crate::store::open_agent_store(&fx.cas_root).unwrap().register(&agent).unwrap();
+    daemon.kick_cloud_presence(id.into()).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), daemon.await_cloud_presence()).await
+        .expect("a panicked pass must not leave presence permanently pending");
+    assert!(fx.cloud.state().agents.contains_key(id));
+}
+
+#[tokio::test]
+async fn cas_4ac8_round4_unicode_id_presence_completes() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    let id = "ééé中-agent";
+    let agent = crate::types::Agent::new(id.into(), id.into());
+    crate::store::open_agent_store(&fx.cas_root).unwrap().register(&agent).unwrap();
+    daemon.kick_cloud_presence(id.into()).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), daemon.await_cloud_presence()).await
+        .expect("Unicode id must not panic in presence logging");
+    assert!(fx.cloud.state().agents.contains_key(id));
+}
+
+#[tokio::test]
+async fn cas_4ac8_round4_resume_after_failed_shutdown_or_revive() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    for failure in ["shutdown-fails", "revived", "auto-active"] {
+        let id = format!("resume-{failure}");
+        let initial = daemon_for(&fx.cas_root);
+        session_start(&initial, &id, &id).await;
+        let agents = crate::store::open_agent_store(&fx.cas_root).unwrap();
+        let old = agents.get(&id).unwrap();
+        let db = rusqlite::Connection::open(fx.cas_root.join("cas.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON agents BEGIN SELECT RAISE(FAIL, 'injected delete failure'); END;").unwrap();
+        if failure == "shutdown-fails" {
+            db.execute_batch("CREATE TRIGGER fail_shutdown BEFORE UPDATE OF status ON agents WHEN NEW.status = 'shutdown' BEGIN SELECT RAISE(FAIL, 'injected shutdown failure'); END;").unwrap();
+        }
+        let root = fx.cas_root.clone();
+        let ended = id.clone();
+        tokio::task::spawn_blocking(move || crate::hooks::handlers::cleanup_agent_leases(&root, &ended)).await.unwrap();
+        if failure == "shutdown-fails" { db.execute_batch("DROP TRIGGER fail_shutdown;").unwrap(); }
+        if failure == "revived" { agents.revive(&id).unwrap(); }
+        if failure == "auto-active" {
+            let mut automatic = crate::types::Agent::new(id.clone(), id.clone());
+            automatic.cc_session_id = None;
+            agents.register(&automatic).unwrap();
+        }
+        db.execute_batch("DROP TRIGGER fail_delete;").unwrap();
+        assert_eq!(agents.get(&id).unwrap().status, crate::types::AgentStatus::Active);
+        assert!(crate::cloud::shutdown::is_ended(&fx.cas_root, &agents.get(&id).unwrap()).unwrap());
+        let resumed = daemon_for(&fx.cas_root);
+        session_start(&resumed, &id, &id).await;
+        let current = agents.get(&id).unwrap();
+        assert!(current.registered_at > old.registered_at, "{failure}: resume must advance the intent-owned incarnation");
+        assert!(!crate::cloud::shutdown::is_ended(&fx.cas_root, &current).unwrap(), "{failure}");
+    }
+    drop(daemon);
+}
+
+#[tokio::test]
+async fn cas_4ac8_round4_delete_failure_preserves_interruption_note() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    let id = "interrupted-delete";
+    session_start(&daemon, id, id).await;
+    let tasks = crate::store::open_task_store(&fx.cas_root).unwrap();
+    let mut task = Task::new("cas-interrupted".into(), "Work interrupted by SessionEnd".into());
+    task.status = crate::types::TaskStatus::InProgress;
+    tasks.add(&task).unwrap();
+    let agents = crate::store::open_agent_store(&fx.cas_root).unwrap();
+    agents.try_claim(&task.id, id, 300, None).unwrap();
+    assert!(!agents.list_agent_leases(id).unwrap().is_empty());
+    let db = rusqlite::Connection::open(fx.cas_root.join("cas.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON agents BEGIN SELECT RAISE(FAIL, 'injected delete failure'); END;").unwrap();
+    let root = fx.cas_root.clone();
+    let result = tokio::task::spawn_blocking(move || crate::hooks::handlers::cleanup_agent_leases(&root, id)).await.unwrap();
+    assert!(result.is_none());
+    assert!(agents.list_agent_leases(id).unwrap().is_empty());
+    assert!(tasks.get(&task.id).unwrap().notes.contains("INTERRUPTED"), "released work needs its interruption note even if row deletion fails");
+}

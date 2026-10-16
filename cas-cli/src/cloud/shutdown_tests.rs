@@ -335,7 +335,7 @@ fn cas_4ac8_round3_scheduled_intent_is_superseded_before_due() {
 }
 
 #[test]
-fn cas_4ac8_round3_only_a_new_harness_can_supersede_without_session_id() {
+fn cas_4ac8_round4_wrapped_or_reparented_mcp_cannot_supersede_without_session_id() {
     let temp = tempfile::tempdir().unwrap();
     let mut old = ended_agent("pid-bound", "same");
     old.pid = Some(42);
@@ -345,5 +345,30 @@ fn cas_4ac8_round3_only_a_new_harness_can_supersede_without_session_id() {
     automatic.ppid = Some(42);
     assert!(is_ended(temp.path(), &automatic).unwrap());
     automatic.ppid = Some(43);
-    assert!(!is_ended(temp.path(), &automatic).unwrap());
+    assert!(is_ended(temp.path(), &automatic).unwrap(), "PID mismatch is not proof of a new harness session");
+}
+
+#[test]
+fn cas_4ac8_round4_future_supersession_does_not_need_exclusive_lease() {
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(env.home()).unwrap();
+    enqueue(&root, "future-resume", "same", "http://example.invalid").unwrap();
+    let file = path(&root, "future-resume", "same");
+    let mut intent = read(&file).unwrap();
+    intent.next_retry_at = Utc::now() + chrono::Duration::minutes(10);
+    write(&file, &intent, false).unwrap();
+    let mut resumed = ended_agent("future-resume", "same");
+    resumed.registered_at = Utc::now();
+    open_agent_store(&root).unwrap().register(&resumed).unwrap();
+    let _reader = presence_lease(&root).unwrap().unwrap();
+    drain(&root, &client("http://example.invalid"), Utc::now()).unwrap();
+    assert!(read(&file).unwrap().completed_at.is_some(), "future supersession must proceed while presence readers hold the lease");
+}
+
+#[test]
+fn cas_4ac8_round4_directory_failure_does_not_fence_unrelated_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(DIR), "not a directory").unwrap();
+    let agent = ended_agent("unrelated", "live");
+    assert!(!is_ended(temp.path(), &agent).expect("unrelated presence must survive a failed intent listing"));
 }

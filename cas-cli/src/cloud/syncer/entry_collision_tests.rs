@@ -473,7 +473,8 @@ async fn cas_e29c_fold_same_memory_keeps_lww_and_custom_suffixes_stay_opaque() {
                 let f = Fixture::new(team, &a, &b).await;
                 assert!(f.pull().unwrap().errors.is_empty());
                 assert_eq!(f.entries.list().unwrap().len(), 1);
-                assert_eq!(f.entries.get(id).unwrap().created, b.created);
+                // SQLite preserves the incumbent birth while applying LWW content.
+                assert_eq!(f.entries.get(id).unwrap().created, a.created);
                 assert_eq!(f.entries.get(id).unwrap().content, b.content);
                 assert!(
                     f.syncer

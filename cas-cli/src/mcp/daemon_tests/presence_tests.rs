@@ -1146,7 +1146,7 @@ async fn cas_4ac8_round4_unicode_session_start_and_heartbeat_complete() {
 /// recovery must not replace the daemon's newer hook-announced heartbeat owner.
 #[tokio::test]
 async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
-    for retained in [false, true] {
+    for (retained, pending) in [(false, false), (true, false), (false, true), (true, true)] {
         let (mut fx, daemon) = fixture("cas-9735").await;
         fx._env.set("CAS_AGENT_ROLE", "supervisor");
         let daemon = Arc::new(daemon);
@@ -1154,16 +1154,20 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
         let new_id = "post-clear-session";
         session_start(&daemon, old_id, "supervisor").await;
         let cloud = fx.cloud.clone();
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
         Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path(format!(
                 "/api/agents/{old_id}/shutdown"
             )))
             .respond_with(move |_: &Request| {
+                if pending && attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return ResponseTemplate::new(503);
+                }
                 cloud.state().agents.remove(old_id);
                 ResponseTemplate::new(200).set_body_json(json!({"released_locks":0}))
             })
             .with_priority(1)
-            .expect(1)
+            .expect(if pending { 2 } else { 1 })
             .mount(&fx._server)
             .await;
         let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
@@ -1235,11 +1239,23 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
                 .unwrap(),
             "automatic recovery must not remove S's fence"
         );
+        if pending {
+            assert!(fx.cloud.state().agents.contains_key(old_id), "failed cleanup must remain pending until after old-core activity");
+            let root = fx.cas_root.clone();
+            tokio::task::spawn_blocking(move || {
+                let coordinator = crate::cloud::presence::project_coordinator(&root).unwrap();
+                // Exercise the real retry after its injected clock passes the
+                // backoff, without sleeping or editing the durable intent.
+                crate::cloud::shutdown::drain(&root, &coordinator, chrono::Utc::now() + chrono::Duration::seconds(31)).unwrap();
+            }).await.unwrap();
+        }
+        let old_heartbeat = store.get(old_id).unwrap().last_heartbeat;
         let before = store.get(new_id).unwrap().last_heartbeat;
         tokio::time::timeout(std::time::Duration::from_secs(2), heartbeat_tick(&daemon))
             .await
             .unwrap();
         assert!(store.get(new_id).unwrap().last_heartbeat > before);
+        assert_eq!(store.get(old_id).unwrap().last_heartbeat, old_heartbeat, "daemon must not keep S locally alive");
         assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id));
         assert_eq!(
             fx.cloud
@@ -1263,7 +1279,7 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
             1,
             "old core must not resurrect S in Cloud"
         );
-        fx._server.verify().await; // The real drain completed exactly one shutdown.
+        fx._server.verify().await; // All expected cleanup attempts completed.
         assert!(
             crate::cloud::shutdown::is_ended(&fx.cas_root, &store.get(old_id).unwrap()).unwrap()
         );

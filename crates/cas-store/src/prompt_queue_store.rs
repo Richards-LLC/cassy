@@ -9009,7 +9009,11 @@ mod tests {
                     store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap()
                 };
                 if case == "fresh" {
-                    assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec![body.as_str()], "fresh {kind} must surface");
+                    assert_eq!(
+                        rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(),
+                        vec![body.as_str()],
+                        "fresh {kind} must surface"
+                    );
                 } else {
                     assert!(rows.is_empty(), "stale {kind} {case} leaked (repeat={repeat})");
                     let report = store.message_delivery_report(id).unwrap().unwrap();

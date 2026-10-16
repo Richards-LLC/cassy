@@ -162,5 +162,9 @@ fn cas_4ac8_shutdown_health_footer() {
             .chain(expired.lines())
             .all(|line| line.chars().count() <= 72)
     );
-    eprintln!("CLEANUP_HEALTH_BEGIN\n{pending}{expired}CLEANUP_HEALTH_END");
+    // pin: operator-facing cleanup counts, named cause and retry/inspection actions.
+    assert_eq!(
+        format!("{pending}{expired}"),
+        include_str!("../../../docs/design/cli/cloud-shutdown.capture.txt")
+    );
 }

@@ -942,6 +942,18 @@ impl QueueJobs {
         Self::with_exec(Exec::Lanes(Arc::new(JobRuntime::start_with(LANE_CAPACITY, wiring))))
     }
 
+    /// The daemon's queue jobs with a writer of their own (tests, cas-a8dc).
+    /// A daemon process owns the global StoreWorker, but in a test binary
+    /// every test daemon shares it, so this daemon's claims and stamps would
+    /// queue behind other tests' writes. Each deferred write against a test
+    /// directory that has since been deleted retries for about 3.1 s.
+    #[cfg(test)]
+    pub(crate) fn start_with_private_writer(cas_dir: PathBuf, project_id: Option<String>) -> Self {
+        let mut wiring = LaneWiring::daemon(cas_dir, project_id);
+        wiring.writer = Arc::new(super::store_worker::StoreWorker::start());
+        Self::start_with(wiring)
+    }
+
     /// Jobs on explicit wiring with a small lane capacity (tests: drops).
     #[cfg(test)]
     pub(crate) fn start_with_capacity(wiring: LaneWiring, capacity: usize) -> Self {

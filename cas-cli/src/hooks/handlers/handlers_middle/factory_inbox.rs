@@ -84,14 +84,14 @@ const DIGEST_NAMED: usize = 6;
 /// operator traffic leads the block with its own label and is never folded;
 /// everything else keeps its delivery order behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum InboxLane {
+pub(crate) enum InboxLane {
     Operator,
     PeerSupervisor,
     Ordinary,
 }
 
 impl InboxLane {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Operator => "[operator] ",
             Self::PeerSupervisor => "[peer supervisor] ",
@@ -107,7 +107,7 @@ impl InboxLane {
 /// is a peer supervisor. The same stamps the daemon's wake gate reads
 /// (`FactoryDaemon::supervisor_wake_class`), so the label cannot be forged by
 /// spelling a name.
-fn inbox_lane(
+pub(crate) fn inbox_lane(
     row: &QueuedPrompt,
     supervisor_ids: &std::collections::HashMap<String, String>,
     own_names: &[String],

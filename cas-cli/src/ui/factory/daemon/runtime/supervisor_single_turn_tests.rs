@@ -488,3 +488,72 @@ async fn cas_3f90_quiet_batch_does_not_starve_a_later_action() {
         "parking spends no wake budget or read receipt"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3f90_framing_over_cap_still_delivers_the_whole_teams_body() {
+    if !fixture_child("cas_3f90_framing_over_cap_still_delivers_the_whole_teams_body") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = fixture().await;
+    let padding = "x".repeat(
+        cas_store::HOOK_SURFACE_BUDGET_CHARS
+            - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS
+            - BODY.len(),
+    );
+    let body = BODY.replace(
+        "CI failed; review the lane.",
+        &format!("CI failed; review the lane.{padding}"),
+    );
+    assert!(cas_store::fits_hook_surface(&body));
+    event(&daemon, &body);
+    daemon.process_prompt_queue().await.unwrap();
+    let inbox = teams_messages(&daemon);
+    assert_eq!(inbox.len(), 1);
+    assert!(
+        inbox[0]["text"].as_str().unwrap().contains(&body),
+        "framing must not send this down the pointer path"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
+    if !fixture_child("cas_3f90_inline_peer_retains_the_shared_inbox_label") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let mut peer = cas_types::Agent::new_with_role(
+        "peer-id".into(),
+        "far-heron".into(),
+        cas_types::AgentRole::Supervisor,
+    );
+    peer.factory_session = Some(daemon.session_name.clone());
+    crate::store::open_agent_store(daemon.app.cas_dir())
+        .unwrap()
+        .register(&peer)
+        .unwrap();
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let body = "Please coordinate this delivery with me.";
+    queue
+        .enqueue_idempotent(
+            &peer.name,
+            "supervisor",
+            body,
+            Some(&daemon.session_name),
+            None,
+            None,
+            "peer",
+            Some(&cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: peer.id.clone(),
+            }),
+        )
+        .unwrap();
+    daemon.process_prompt_queue().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert!(typed.contains("[peer supervisor]"), "{typed:?}");
+    assert!(typed.contains(body));
+    assert_eq!(typed.matches('\r').count(), 1);
+    assert!(teams_messages(&daemon).is_empty());
+}

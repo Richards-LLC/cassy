@@ -8205,6 +8205,12 @@ impl FactoryDaemon {
             facts: row_facts,
             operator_replies,
         } = selection;
+        // Reuse the hook's message-class seam for inline operator/peer labels.
+        // The roster arrived from QueueSelect; there is no loop-thread read.
+        let supervisor_senders: HashMap<String, String> = registered_agents.iter()
+            .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            .map(|agent| (agent.id.clone(), agent.name.clone())).collect();
+        let supervisor_aliases = vec!["supervisor".to_string(), self.app.supervisor_name().to_string()];
         tracing::trace!(target: "cas::coordination", generation, rows = prompts.len(), "delivering a QueueSelect batch");
         for id in retargeted_rows
             .into_iter()
@@ -8779,10 +8785,15 @@ impl FactoryDaemon {
             // was queued at spawn but reaches the worker after a supervisor
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
-                "{}\n{}\n{}",
+                "{}\n{}{}\n{}",
                 crate::mcp::tools::service::agent_search_system::message::first_message_provenance(
                     &queued
                 ),
+                if target == "supervisor" || target == self.app.supervisor_name() {
+                    crate::hooks::handlers::handlers_middle::factory_inbox::inbox_lane(
+                        &queued, &supervisor_senders, &supervisor_aliases,
+                    ).label()
+                } else { "" },
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
                     &queued,
                 )
@@ -9920,7 +9931,13 @@ impl FactoryDaemon {
                             wake_decision,
                             merge_request_task.as_deref(),
                             Some(queued.id),
-                            Some(&queued.prompt),
+                            // A new oversized supervisor event must carry its
+                            // whole text, even if only the framing pushed it
+                            // over the inline cap. Held legacy copies keep
+                            // their pointer so their dedup probe still matches.
+                            if is_supervisor_target && !deferred_inbox_recorded {
+                                None
+                            } else { Some(&queued.prompt) },
                         )
                         .await
                     }

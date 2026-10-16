@@ -1390,7 +1390,11 @@ impl FactoryDaemon {
             } else {
                 WakeAttempt::NotAttempted
             },
-            wake_detail: Some("bounded supervisor event delivered inline; no Teams relay copy".into()),
+            wake_detail: Some(if outcome == InjectOutcome::Delivered {
+                "bounded supervisor event delivered inline; no Teams relay copy"
+            } else {
+                "inline supervisor event deferred by composer or prior submit"
+            }.into()),
         })
     }
 

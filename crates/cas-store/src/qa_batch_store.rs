@@ -1,0 +1,104 @@
+//! Immutable, project-scoped staging QA receipts (GH #1203).
+use crate::{Result, error::StoreError};
+use chrono::Utc;
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+pub const QA_BATCH_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS qa_batch_receipts (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, receipt_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS idx_qa_batch_receipts_project
+        ON qa_batch_receipts(project_id, recorded_at DESC)",
+    "CREATE TABLE IF NOT EXISTS qa_batch_deferrals (
+        task_id TEXT PRIMARY KEY, delivered_head TEXT NOT NULL, deferred_at TEXT NOT NULL)",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QaBatchReceipt {
+    pub schema_version: u32,
+    pub id: String,
+    pub project_id: String,
+    pub ledger_artifact_id: String,
+    pub ledger_path: String,
+    pub ledger_sha256: String,
+    pub ledger_size_bytes: u64,
+    pub staging_sha: String,
+    /// Only PASS tasks, each bound to its own delivery anchor.
+    pub task_heads: BTreeMap<String, String>,
+    pub recorder_agent_id: String,
+    pub recorded_at: String,
+}
+
+fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
+    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
+    {
+        let guard = crate::shared_db::lock_connection(&conn)?;
+        for sql in QA_BATCH_SCHEMA_STATEMENTS {
+            guard.execute(sql, [])?;
+        }
+    }
+    Ok(conn)
+}
+
+pub fn record_qa_batch_receipt(root: &Path, receipt: &QaBatchReceipt) -> Result<()> {
+    if receipt.schema_version != 1
+        || receipt.id.is_empty()
+        || receipt.project_id.is_empty()
+        || receipt.task_heads.is_empty()
+        || receipt.ledger_size_bytes == 0
+        || receipt.recorder_agent_id.is_empty()
+    {
+        return Err(StoreError::Parse("incomplete QA batch receipt".into()));
+    }
+    let json = serde_json::to_string(receipt).map_err(|e| StoreError::Parse(e.to_string()))?;
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    // INSERT only: corrections create a new receipt, never rewrite an attestation.
+    guard.execute(
+        "INSERT INTO qa_batch_receipts (id, project_id, receipt_json, recorded_at)
+        VALUES (?1, ?2, ?3, ?4)",
+        params![receipt.id, receipt.project_id, json, receipt.recorded_at],
+    )?;
+    Ok(())
+}
+
+pub fn list_qa_batch_receipts(root: &Path, project: &str) -> Result<Vec<QaBatchReceipt>> {
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let mut stmt = guard.prepare(
+        "SELECT receipt_json FROM qa_batch_receipts
+        WHERE project_id=?1 ORDER BY recorded_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map([project], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|json| serde_json::from_str(&json).map_err(|e| StoreError::Parse(e.to_string())))
+        .collect()
+}
+
+/// A park creates an obligation that classification changes cannot erase.
+pub fn defer_qa_batch_evidence(root: &Path, task: &str, head: &str) -> Result<()> {
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    guard.execute(
+        "INSERT INTO qa_batch_deferrals (task_id, delivered_head, deferred_at)
+        VALUES (?1, ?2, ?3) ON CONFLICT(task_id) DO UPDATE SET
+        delivered_head=excluded.delivered_head, deferred_at=excluded.deferred_at",
+        params![task, head, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+pub fn has_qa_batch_deferral(root: &Path, task: &str) -> Result<bool> {
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    Ok(guard.query_row(
+        "SELECT EXISTS(SELECT 1 FROM qa_batch_deferrals WHERE task_id=?1)",
+        [task],
+        |row| row.get(0),
+    )?)
+}

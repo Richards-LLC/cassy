@@ -355,6 +355,18 @@ pub struct SystemRequest {
 /// Unified verification operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct VerificationRequest {
+    /// PASS tasks covered by one staging walk; duplicates are collapsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: task IDs that passed the staging walk")]
+    pub task_ids: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: published ledger artifact ID in this project")]
+    pub ledger_artifact_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: full 40-hex staging commit SHA, contained in each task's configured target")]
+    pub staging_sha: Option<String>,
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
     #[schemars(

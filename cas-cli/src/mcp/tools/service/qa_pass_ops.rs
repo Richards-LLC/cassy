@@ -11,6 +11,29 @@ use crate::qa_pass::PreExistingIssue;
 use cas_types::{Dependency, DependencyType, QaPass, QaVerdict, TaskStatus};
 
 impl CasService {
+    pub(super) async fn verification_batch_receipt(&self, req: VerificationRequest)
+        -> Result<CallToolResult, McpError> {
+        let reject = |reason: String| Self::error(ErrorCode::INVALID_PARAMS,
+            format!("batch_receipt rejected: {reason}"));
+        let recorder = self.inner.resolve_live_supervisor_authority()
+            .map_err(|_| reject("requires a live registered supervisor".into()))?;
+        let config = crate::config::Config::load(&self.inner.cas_root).map_err(|e| reject(e.to_string()))?;
+        if config.qa().mode != crate::config::QaMode::Batch {
+            return Err(reject("requires qa.mode=batch".into()));
+        }
+        let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
+            req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
+            required(req.staging_sha.as_deref(), "staging_sha")?,
+            required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
+            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?))
+            .map_err(reject)?;
+        cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
+            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+            receipt.id, receipt.task_heads.len(), receipt.staging_sha,
+            receipt.ledger_artifact_id, receipt.ledger_path)))
+    }
+
     pub(super) async fn verification_qa_record(
         &self,
         req: VerificationRequest,

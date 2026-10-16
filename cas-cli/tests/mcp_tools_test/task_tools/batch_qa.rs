@@ -1,7 +1,7 @@
 //! GH #1203: a staging walk is one receipt for its listed deliveries.
 use crate::support::*;
-use cas::mcp::{CasCore, CasService};
 use cas::mcp::tools::TaskCloseRequest;
+use cas::mcp::{CasCore, CasService};
 use cas::store::{open_agent_store, open_task_store};
 use cas::types::{Agent, AgentRole, Task, TaskStatus};
 use cas_mcp::types::VerificationRequest;
@@ -10,12 +10,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn git(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(repo)
-        .env("GIT_AUTHOR_NAME", "Test").env("GIT_AUTHOR_EMAIL", "test@example.test")
-        .env("GIT_COMMITTER_NAME", "Test").env("GIT_COMMITTER_EMAIL", "test@example.test")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .output().unwrap();
-    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.test")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().into()
 }
 
@@ -57,17 +67,47 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
     let staging = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["branch", "-f", "main", &staging]);
     let supervisor_id = "batch-supervisor";
-    open_agent_store(&repo.join(".cas")).unwrap().register(&Agent::new_with_role(
-        supervisor_id.into(), "batch-supervisor".into(), AgentRole::Supervisor)).unwrap();
+    open_agent_store(&repo.join(".cas"))
+        .unwrap()
+        .register(&Agent::new_with_role(
+            supervisor_id.into(),
+            "batch-supervisor".into(),
+            AgentRole::Supervisor,
+        ))
+        .unwrap();
     let supervisor = CasCore::with_daemon(repo.join(".cas"), None, None);
     supervisor.set_agent_id_for_testing(supervisor_id.into());
     let ledger = repo.join("LEDGER.md");
-    std::fs::write(&ledger, "# Staging QA\ncas-bq01 PASS at 390/1440\ncas-bq02 PASS at 390/1440\n").unwrap();
+    std::fs::write(
+        &ledger,
+        "# Staging QA\ncas-bq01 PASS at 390/1440\ncas-bq02 PASS at 390/1440\n",
+    )
+    .unwrap();
     let store = cas_store::SqliteArtifactStore::open(&repo.join(".cas")).unwrap();
-    let roots = cas::artifacts::paths::PublishRoots::new(&repo.join(".cas"), &repo.join("artifacts"), "cas-bq01");
-    let context = cas::artifacts::PublishContext { store: &store, roots, task_id: "cas-bq01".into(), cloud: None };
-    let artifact = cas::artifacts::publish(&context, &ledger).unwrap().artifact.id;
-    Fx { _temp: temp, core, supervisor: CasService::new(supervisor, None), repo, staging, artifact, ledger }
+    let roots = cas::artifacts::paths::PublishRoots::new(
+        &repo.join(".cas"),
+        &repo.join("artifacts"),
+        "cas-bq01",
+    );
+    let context = cas::artifacts::PublishContext {
+        store: &store,
+        roots,
+        task_id: "cas-bq01".into(),
+        cloud: None,
+    };
+    let artifact = cas::artifacts::publish(&context, &ledger)
+        .unwrap()
+        .artifact
+        .id;
+    Fx {
+        _temp: temp,
+        core,
+        supervisor: CasService::new(supervisor, None),
+        repo,
+        staging,
+        artifact,
+        ledger,
+    }
 }
 
 impl Fx {
@@ -76,16 +116,26 @@ impl Fx {
             "action":"batch_receipt", "task_ids":["cas-bq01","cas-bq02","cas-bq01"],
             "staging_sha":self.staging, "ledger_artifact_id":self.artifact,
             "ledger_path":self.ledger,
-        })).unwrap()
+        }))
+        .unwrap()
     }
     async fn close(&self, id: &str) -> String {
-        let task = open_task_store(&self.repo.join(".cas")).unwrap().get(id).unwrap();
-        let req = TaskCloseRequest { id: id.into(), reason: Some("staging QA complete".into()),
+        let task = open_task_store(&self.repo.join(".cas"))
+            .unwrap()
+            .get(id)
+            .unwrap();
+        let req = TaskCloseRequest {
+            id: id.into(),
+            reason: Some("staging QA complete".into()),
             commit_receipt: task.deliverables.factory_branch_anchor,
-            stranded_branch_override: None, supervisor_override: None,
-            legacy_bypass_code_review: None, search_manifest: None };
+            stranded_branch_override: None,
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+        };
         match self.core.cas_task_close(Parameters(req)).await {
-            Ok(out) => extract_text(out), Err(err) => err.message.to_string(),
+            Ok(out) => extract_text(out),
+            Err(err) => err.message.to_string(),
         }
     }
 }
@@ -94,17 +144,37 @@ impl Fx {
 async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
-    let recorded = fx.supervisor.verification(Parameters(fx.request())).await
+    let recorded = fx
+        .supervisor
+        .verification(Parameters(fx.request()))
+        .await
         .expect("one supervisor receipt must cover the staging walk");
     assert!(extract_text(recorded).contains("Batch QA receipt"));
     for id in ["cas-bq01", "cas-bq02"] {
         let result = fx.close(id).await;
-        assert_eq!(open_task_store(&fx.repo.join(".cas")).unwrap().get(id).unwrap().status,
-            TaskStatus::Closed, "{id}: {result}");
+        assert_eq!(
+            open_task_store(&fx.repo.join(".cas"))
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .status,
+            TaskStatus::Closed,
+            "{id}: {result}"
+        );
     }
     let unlisted = fx.close("cas-bq03").await;
     assert!(unlisted.contains("QA EVIDENCE"), "{unlisted}");
-    assert_ne!(open_task_store(&fx.repo.join(".cas")).unwrap().get("cas-bq03").unwrap().status,
-        TaskStatus::Closed);
-    assert!(cas_store::list_qa_passes(&fx.repo.join(".cas"), "cas-bq01").unwrap().is_empty());
+    assert_ne!(
+        open_task_store(&fx.repo.join(".cas"))
+            .unwrap()
+            .get("cas-bq03")
+            .unwrap()
+            .status,
+        TaskStatus::Closed
+    );
+    assert!(
+        cas_store::list_qa_passes(&fx.repo.join(".cas"), "cas-bq01")
+            .unwrap()
+            .is_empty()
+    );
 }

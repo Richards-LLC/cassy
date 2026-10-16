@@ -299,6 +299,20 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         deployed_origins: &qa.deployed_origins,
     };
     let tier = evidence_tier(&reasons, terminal_render);
+    let batch_mode = qa.mode == crate::config::QaMode::Batch;
+    let batch_receipt = if batch_mode {
+        crate::qa_batch::satisfying_receipt(cas_root, task, repo, target_branch, &head)
+            .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch receipts: {e}"))?
+    } else { None };
+    let integrated = batch_mode.then(|| crate::qa_batch::target_tip(repo, target_branch)
+        .and_then(|tip| crate::qa_batch::ancestor(repo, &head, &tip))).flatten();
+    let deferred = batch_mode && cas_store::has_qa_batch_deferral(cas_root, &task.id)
+        .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch deferral: {e}"))?;
+    if deferred && integrated != Some(false) && batch_receipt.is_none() {
+        return Err(format!("QA EVIDENCE REJECTED: {} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor on the configured target is required before close", task.id));
+    }
+    // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
+    let batch_defer = batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
     // A supervisor waiver covers implementer evidence at this exact delivered
     // commit, including bundles (GH #1199). Independent QA PASS and ancestor
     // waivers do not do so; skip/focus markers still run below.
@@ -312,7 +326,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     };
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
-        if waiver.is_some() {
+        if waiver.is_some() || batch_receipt.is_some() || batch_defer {
             EvidenceTier::None
         } else {
             tier
@@ -321,6 +335,16 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         &markers,
         &paths.task_dirs(&task.id)[0],
     )?;
+    if batch_defer {
+        cas_store::defer_qa_batch_evidence(cas_root, &task.id, &head)
+            .map_err(|e| format!("QA EVIDENCE REJECTED: cannot record batch deferral: {e}"))?;
+        pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
+    }
+    if let Some(receipt) = batch_receipt {
+        pass.notes.push(format!("QA batch evidence PASS: receipt={} staging={} ledger={} task={} anchor={}",
+            receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, task.id,
+            receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or("")));
+    }
     if let Some(waiver) = waiver {
         let evidence = if matches!(tier, EvidenceTier::Bundle) { "bundle" } else { "ledger" };
         pass.notes.push(format!(

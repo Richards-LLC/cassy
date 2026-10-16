@@ -539,6 +539,7 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     // operator-authenticated CLIs and tools again.
     "factory.worker_denied_clis",
     "factory.worker_denied_mcp_tools",
+    "qa.mode",
     "qa.evidence_gate",
     "qa.independent_pass",
     "release.claude_account_allowlist",

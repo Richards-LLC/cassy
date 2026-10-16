@@ -63,6 +63,7 @@ pub mod markdown;
 mod prompt_queue_store;
 mod prompt_store;
 mod qa_pass_store;
+mod qa_batch_store;
 mod epic_split_store;
 mod recording_store;
 mod recording_text_store;
@@ -140,6 +141,8 @@ pub use qa_pass_store::{
     satisfying_qa_passes, set_qa_task,
     waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
 };
+pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
+    list_qa_batch_receipts, defer_qa_batch_evidence, has_qa_batch_deferral};
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,

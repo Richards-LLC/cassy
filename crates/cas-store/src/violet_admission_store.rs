@@ -151,6 +151,13 @@ pub struct VioletAdmissionReceipt {
     pub created: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct VioletAdmissionAck {
+    pub delivery_id: String,
+    pub delivery_generation: i64,
+    pub lease_token: String,
+}
+
 pub struct SqliteVioletAdmissionStore {
     queue: SqlitePromptQueueStore,
 }
@@ -168,6 +175,56 @@ impl SqliteVioletAdmissionStore {
             Ok(())
         })?;
         Ok(Self { queue })
+    }
+
+    /// Includes admissions already acknowledged remotely: a lost response must
+    /// not depend on Cloud leasing that admitted row again.
+    pub fn pending_acknowledgements(
+        &self,
+        registration: &str,
+        project: &str,
+    ) -> Result<Vec<VioletAdmissionAck>> {
+        let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT delivery_id,delivery_generation,lease_token FROM violet_admissions
+             WHERE registration_id=?1 AND project_id=?2 AND ack_pending=1
+             ORDER BY rowid LIMIT 25",
+        )?;
+        let rows = stmt.query_map(params![registration, project], |row| {
+            Ok(VioletAdmissionAck {
+                delivery_id: row.get(0)?,
+                delivery_generation: row.get(1)?,
+                lease_token: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// A late response from a previous lease or registration cannot settle a
+    /// replacement's pending work. The caller verifies the individual remote
+    /// result is completed/admitted before invoking this compare-and-set.
+    pub fn settle_acknowledgement(
+        &self,
+        ack: &VioletAdmissionAck,
+        registration: &str,
+        project: &str,
+    ) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
+            Ok(conn.execute(
+                "UPDATE violet_admissions SET ack_pending=0
+                 WHERE delivery_id=?1 AND delivery_generation=?2 AND lease_token=?3
+                   AND registration_id=?4 AND project_id=?5 AND ack_pending=1",
+                params![
+                    ack.delivery_id,
+                    ack.delivery_generation,
+                    ack.lease_token,
+                    registration,
+                    project
+                ],
+            )? == 1)
+        })
     }
 
     /// Only a committed receipt may authorize an admission acknowledgement.

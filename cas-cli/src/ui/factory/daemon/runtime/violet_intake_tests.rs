@@ -156,8 +156,11 @@ fn cas_c423_failed_sqlite_cursor_commit_never_acks_or_leaks_an_admission() {
 fn cas_c423_ack_retries_durable_admission_when_cloud_no_longer_leases_it() {
     let root = tempfile::tempdir().unwrap();
     let relay = Relay {
-        response: RefCell::new(claim_fixture()), acks: RefCell::new(vec![]),
-        fail_ack: true, database: Some(root.path().join("cas.db")), ack_response: None,
+        response: RefCell::new(claim_fixture()),
+        acks: RefCell::new(vec![]),
+        fail_ack: true,
+        database: Some(root.path().join("cas.db")),
+        ack_response: None,
     };
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let first = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
@@ -168,20 +171,31 @@ fn cas_c423_ack_retries_durable_admission_when_cloud_no_longer_leases_it() {
     let mut empty = claim_fixture();
     empty["deliveries"] = json!([]);
     let relay = Relay {
-        response: RefCell::new(empty), acks: RefCell::new(vec![]),
-        fail_ack: false, database: Some(root.path().join("cas.db")), ack_response: None,
+        response: RefCell::new(empty),
+        acks: RefCell::new(vec![]),
+        fail_ack: false,
+        database: Some(root.path().join("cas.db")),
+        ack_response: None,
     };
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let resumed = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
     assert!(resumed.errors.is_empty(), "{resumed:?}");
-    assert_eq!(relay.acks.borrow().len(), 1, "retry durable pending ack even without a fresh lease");
+    assert_eq!(
+        relay.acks.borrow().len(),
+        1,
+        "retry durable pending ack even without a fresh lease"
+    );
     let db = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
     let (pending, prompts): (i64,i64) = db.query_row(
         "SELECT (SELECT SUM(ack_pending) FROM violet_admissions), (SELECT COUNT(*) FROM prompt_queue)",
         [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!((pending,prompts), (0,1));
+    assert_eq!((pending, prompts), (0, 1));
     poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
-    assert_eq!(relay.acks.borrow().len(), 1, "settled acknowledgement stops retrying");
+    assert_eq!(
+        relay.acks.borrow().len(),
+        1,
+        "settled acknowledgement stops retrying"
+    );
 }
 
 #[test]
@@ -194,9 +208,12 @@ fn cas_c423_ack_checks_each_delivery_result_and_retains_failures() {
     claim["deliveries"].as_array_mut().unwrap().push(second);
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/coordination_contract/v1/violet_activity--ack_v2.json"
-    )).unwrap();
+    ))
+    .unwrap();
     let relay = Relay {
-        response: RefCell::new(claim), acks: RefCell::new(vec![]), fail_ack: false,
+        response: RefCell::new(claim),
+        acks: RefCell::new(vec![]),
+        fail_ack: false,
         database: Some(root.path().join("cas.db")),
         ack_response: Some(fixture["cases"][0]["response"]["payload"].clone()),
     };
@@ -204,10 +221,23 @@ fn cas_c423_ack_checks_each_delivery_result_and_retains_failures() {
     let report = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
     assert_eq!(report.created, 2);
     let db = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
-    let mut statement = db.prepare("SELECT delivery_id,ack_pending FROM violet_admissions ORDER BY delivery_id").unwrap();
-    let rows: Vec<(String,i64)> = statement.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap()
-        .collect::<Result<_,_>>().unwrap();
-    assert_eq!(rows, vec![("0000de1b-1111-4111-8111-00000000de1b".into(),1),
-        ("0000de2a-1111-4111-8111-00000000de2a".into(),0)]);
-    assert!(report.errors.iter().any(|e|e.contains("stale_generation")), "{report:?}");
+    let mut statement = db
+        .prepare("SELECT delivery_id,ack_pending FROM violet_admissions ORDER BY delivery_id")
+        .unwrap();
+    let rows: Vec<(String, i64)> = statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("0000de1b-1111-4111-8111-00000000de1b".into(), 1),
+            ("0000de2a-1111-4111-8111-00000000de2a".into(), 0)
+        ]
+    );
+    assert!(
+        report.errors.iter().any(|e| e.contains("stale_generation")),
+        "{report:?}"
+    );
 }

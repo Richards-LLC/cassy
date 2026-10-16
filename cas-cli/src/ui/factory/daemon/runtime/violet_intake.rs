@@ -16,10 +16,8 @@ pub(crate) trait ActivityDeliveryPort {
     fn acknowledge(&self, request: &Value, timeout: Duration) -> Result<Value, RemoteError>;
 }
 
-/// Owned Violet boundary: the Cloud observe endpoint refuses a user bearer.
-pub(crate) trait VioletObservationPort {
-    fn observe(&self, observation: &Value, timeout: Duration) -> Result<Value, RemoteError>;
-}
+// Violet performs managed sweep observation after an ordinary read. There is
+// no standalone observe tool and a read receipt is not an observe acknowledgement.
 
 #[derive(Debug, Deserialize)]
 struct ReaderDelivery {
@@ -96,7 +94,6 @@ pub(crate) fn poll_once(
                 .ok_or("claim has no deliveries")?,
         )
         .map_err(|error| error.to_string())?;
-        let mut acks = Vec::new();
         for leased in deliveries {
             match admission_input(&leased, context, factory_session, recipient)
                 .and_then(|input| store.admit(&input).map_err(|error| error.to_string()))
@@ -104,30 +101,73 @@ pub(crate) fn poll_once(
                 Ok(receipt) => {
                     report.admitted += 1;
                     report.created += usize::from(receipt.created);
-                    acks.push(json!({"delivery_id": receipt.delivery_id,
-                        "lease_token": leased.lease_token,
-                        "delivery_generation": leased.delivery.delivery_generation,
-                        "outcome": "admitted"}));
                 }
                 Err(error) => report.errors.push(error),
             }
         }
-        if !acks.is_empty() {
-            if budget().is_zero() {
-                return Err("remote budget exhausted; durable admissions await ack".into());
-            }
-            let result = relay
-                .acknowledge(
-                    &json!({"schema": CONTRACT_SCHEMA, "actor": actor,
-                "acks": acks}),
-                    budget(),
-                )
-                .map_err(|error| error.message)?;
-            require_completed(&result)?;
-        }
         Ok(())
     })();
     if let Err(error) = result {
+        report.errors.push(error);
+    }
+    // Reconcile durable acks even after a failed/empty claim. Each pending row
+    // was committed atomically with its queue entry and cursor before it appears.
+    let settled = (|| -> Result<(), String> {
+        let pending = store
+            .pending_acknowledgements(&context.registration_id, &context.project_id)
+            .map_err(|error| error.to_string())?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if budget().is_zero() {
+            return Err("remote budget exhausted; durable admissions await ack".into());
+        }
+        let acks: Vec<Value> = pending
+            .iter()
+            .map(|ack| {
+                json!({
+                    "delivery_id": ack.delivery_id, "lease_token": ack.lease_token,
+                    "delivery_generation": ack.delivery_generation, "outcome": "admitted"
+                })
+            })
+            .collect();
+        let response = relay
+            .acknowledge(
+                &json!({"schema": CONTRACT_SCHEMA, "actor": actor, "acks": acks}),
+                budget(),
+            )
+            .map_err(|error| error.message)?;
+        require_completed(&response)?;
+        let results = response["results"]
+            .as_array()
+            .ok_or("ack has no per-delivery results")?;
+        for ack in &pending {
+            let matching: Vec<_> = results
+                .iter()
+                .filter(|row| row["delivery_id"].as_str() == Some(ack.delivery_id.as_str()))
+                .collect();
+            if matching.len() != 1 {
+                report.errors.push(format!(
+                    "ack {} has missing or ambiguous result",
+                    ack.delivery_id
+                ));
+                continue;
+            }
+            let row = matching[0];
+            if row["code"] != "completed" || row["status"] != "admitted" {
+                report.errors.push(format!(
+                    "ack {} refused: {} {}",
+                    ack.delivery_id, row["code"], row["status"]
+                ));
+                continue;
+            }
+            store
+                .settle_acknowledgement(ack, &context.registration_id, &context.project_id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = settled {
         report.errors.push(error);
     }
     report

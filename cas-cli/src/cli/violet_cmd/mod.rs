@@ -15,7 +15,7 @@
 //! non-zero.
 
 #[cfg(feature = "mcp-proxy")]
-mod credentials;
+pub(crate) mod credentials;
 pub mod files;
 pub mod hub;
 

@@ -1167,7 +1167,7 @@ fn area_score(text: &str, words: &[&str]) -> usize {
         .filter(|word| {
             Regex::new(&format!(
                 r"(^|[^a-z0-9]){}(s|es|d|ed|ing)?([^a-z0-9]|$)",
-                regex::escape(word)
+                regex::escape(&word.replace('-', " "))
             ))
                 .is_ok_and(|regex| regex.is_match(text))
         })
@@ -1175,7 +1175,9 @@ fn area_score(text: &str, words: &[&str]) -> usize {
 }
 
 fn classify_area(title: &str, body: &str) -> String {
-    for text in [title.to_ascii_lowercase(), format!("{title} {body}").to_ascii_lowercase()] {
+    // "merge-queue" and "merge queue" are the same words.
+    for text in [title.to_string(), format!("{title} {body}")] {
+        let text = text.to_ascii_lowercase().replace('-', " ");
         let mut best: Option<(&str, usize)> = None;
         for (area, words) in AREAS {
             let score = area_score(&text, words);
@@ -1678,7 +1680,7 @@ fn assemble_markdown(
             )
         })
         .collect::<Vec<_>>();
-    let source_refs = source_reference_line(sources, tag);
+    let source_refs = source_reference_line(sources, tag, project_root);
     let release_pr_label = sources
         .release_pr
         .as_ref()
@@ -2015,7 +2017,9 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
             for article in articles {
                 output.push_str(&format!(
                     "#### {}\n\nWas: {}\n\nNow: {}\n\n",
-                    article.title, article.was, article.now
+                    article.title,
+                    article.was.trim().trim_end_matches('→').trim_end(),
+                    article.now
                 ));
             }
         }
@@ -2075,13 +2079,16 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
     output
 }
 
-fn source_reference_line(sources: &AcquiredSources, tag: &str) -> String {
+fn source_reference_line(sources: &AcquiredSources, tag: &str, project_root: &Path) -> String {
     let mut refs = Vec::new();
     if let Some(path) = &sources.changelog_path {
-        refs.push(format!("CHANGELOG `{}`", path.display()));
+        refs.push(format!("CHANGELOG `{}`", display_path(path, project_root)));
     }
     if let Some((path, _)) = &sources.release_notes {
-        refs.push(format!("release-notes `{}`", path.display()));
+        refs.push(format!(
+            "release-notes draft `{}`",
+            display_path(path, project_root)
+        ));
     }
     if let Some(repo) = &sources.github_repo {
         refs.push(format!("GitHub `{repo}` release {tag}"));

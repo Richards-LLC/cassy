@@ -16,7 +16,14 @@ type Directories = Vec<Option<PathBuf>>;
 
 pub(super) fn collect(command: &str, cwd: &Path) -> Result<ShellEffects, &'static str> {
     let mut effects = ShellEffects::default();
-    collect_script(command, vec![Some(cwd.to_path_buf())], cwd, &HashMap::new(), 0, &mut effects)?;
+    collect_script(
+        command,
+        vec![Some(cwd.to_path_buf())],
+        cwd,
+        &HashMap::new(),
+        0,
+        &mut effects,
+    )?;
     Ok(effects)
 }
 
@@ -46,7 +53,11 @@ fn rooted(raw: &str, cwd: Option<&Path>, original: &Path) -> Result<String, &'st
         return Ok(raw.to_string());
     }
     let cwd = cwd.ok_or("a write with an unresolved effective working directory")?;
-    Ok(if cwd == original { raw.to_string() } else { cwd.join(raw).display().to_string() })
+    Ok(if cwd == original {
+        raw.to_string()
+    } else {
+        cwd.join(raw).display().to_string()
+    })
 }
 
 fn add_directory(dirs: &mut Directories, directory: Option<PathBuf>) {
@@ -72,6 +83,17 @@ fn collect_script(
     let tokens = factory_shell_tokens(&shell_command_without_heredoc_bodies(script));
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
+    // Directory operands use only bindings visible before that cd. The
+    // legacy file-target expander above also collects finite loop values.
+    let mut directory_values = inherited.clone();
+    for name in ["HOME", "CDPATH"] {
+        if let Ok(value) = std::env::var(name) {
+            directory_values
+                .entry(name.into())
+                .or_insert_with(|| vec![value]);
+        }
+    }
+    let mut alternatives = Vec::new();
     let mut heredocs = shell_heredoc_bodies(script).into_iter();
     let mut scopes = Vec::new();
     let mut start = 0;
@@ -81,8 +103,16 @@ fn collect_script(
             None => None,
             _ => continue,
         };
-        let statement = &tokens[start..end];
+        let mut statement = &tokens[start..end];
         start = end + 1;
+        while matches!(statement.first(), Some(ShellToken::Word(word))
+            if matches!(word.as_str(), "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"))
+        {
+            statement = &statement[1..];
+        }
+        let incoming = dirs.clone();
+        let and_then =
+            separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
         if !statement.is_empty() {
             let mut command = render(statement);
             // The existing script-write recognizer needs the body attached to
@@ -95,10 +125,13 @@ fn collect_script(
                     command.push('\n');
                 }
             }
-            let words: Vec<String> = statement.iter().filter_map(|token| match token {
-                ShellToken::Word(word) => Some(word.clone()),
-                _ => None,
-            }).collect();
+            let words: Vec<String> = statement
+                .iter()
+                .filter_map(|token| match token {
+                    ShellToken::Word(word) => Some(word.clone()),
+                    _ => None,
+                })
+                .collect();
             let index = unwrapped_command_index(&words);
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
@@ -107,9 +140,14 @@ fn collect_script(
             // computed directory cannot be attributed to the hook's cwd.
             let wrapper_changes_directory = words.iter().take(index.unwrap_or(0)).any(|word| {
                 matches!(word.as_str(), "-C" | "--chdir" | "-D" | "--chroot" | "-R")
-                    || word.starts_with("--chdir=") || word.starts_with("--chroot=")
+                    || word.starts_with("--chdir=")
+                    || word.starts_with("--chroot=")
             });
-            let statement_dirs = if wrapper_changes_directory { vec![None] } else { dirs.clone() };
+            let statement_dirs = if wrapper_changes_directory {
+                vec![None]
+            } else {
+                dirs.clone()
+            };
 
             for directory in &statement_dirs {
                 let base = directory.as_deref();
@@ -125,11 +163,14 @@ fn collect_script(
                 }
                 for (raw, recursive) in bash_delete_targets(&command) {
                     for raw in expand_factory_shell_word(&raw, &values) {
-                        effects.deletes.push((rooted(&raw, base, original)?, recursive));
+                        effects
+                            .deletes
+                            .push((rooted(&raw, base, original)?, recursive));
                     }
                 }
                 if matches!(name, Some("ln" | "link" | "cp")) {
-                    let base = base.ok_or("a link with an unresolved effective working directory")?;
+                    let base =
+                        base.ok_or("a link with an unresolved effective working directory")?;
                     for link in bash_link_creations(&command, base) {
                         effects.links.push((link, base.to_path_buf()));
                     }
@@ -137,10 +178,18 @@ fn collect_script(
             }
 
             if name == Some("cd") {
-                let operands: Vec<_> = args.iter().filter(|arg| arg.as_str() != "--" && arg.as_str() != "-L").collect();
+                let operands: Vec<_> = args
+                    .iter()
+                    .filter(|arg| arg.as_str() != "--" && arg.as_str() != "-L")
+                    .collect();
                 let targets = match operands.as_slice() {
-                    [] => values.get("HOME").cloned().unwrap_or_else(|| vec!["$HOME".into()]),
-                    [target] if !target.starts_with('-') => expand_factory_shell_word(target, &values),
+                    [] => directory_values
+                        .get("HOME")
+                        .cloned()
+                        .unwrap_or_else(|| vec!["$HOME".into()]),
+                    [target] if !target.starts_with('-') => {
+                        expand_factory_shell_word(target, &directory_values)
+                    }
                     _ => vec!["$UNRESOLVED_CWD".into()],
                 };
                 let mut changed = Vec::new();
@@ -149,7 +198,9 @@ fn collect_script(
                         let path = if target.contains(['$', '`', '*', '?', '[']) {
                             None
                         } else if target == "~" || target.starts_with("~/") {
-                            std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(target.strip_prefix("~/").unwrap_or("")))
+                            std::env::var_os("HOME")
+                                .map(PathBuf::from)
+                                .map(|home| home.join(target.strip_prefix("~/").unwrap_or("")))
                         } else if Path::new(target).is_absolute() {
                             Some(PathBuf::from(target))
                         } else {
@@ -159,21 +210,53 @@ fn collect_script(
                         // parent traversal through a symlink. Neither grants
                         // authority the other would refuse.
                         if let Some(path) = &path {
-                            add_directory(&mut changed, Some(lexically_normalize_path(path.clone())));
+                            add_directory(
+                                &mut changed,
+                                Some(lexically_normalize_path(path.clone())),
+                            );
                         }
                         add_directory(&mut changed, path);
                     }
                 }
-                // `cd` can fail, or be conditional. Retaining the old cwd
-                // conservatively covers ;, ||, pipelines and conditionals.
-                for directory in changed {
-                    add_directory(&mut dirs, directory);
+                // The next && statement requires cd to have succeeded.
+                // Keep failed/skipped alternatives for later ;/|| joins.
+                if and_then {
+                    dirs = changed;
+                } else {
+                    for directory in changed {
+                        add_directory(&mut dirs, directory);
+                    }
                 }
             }
 
-            let payload = if matches!(name, Some("sh" | "bash" | "dash" | "zsh" | "ksh" | "script" | "su" | "runuser")) {
-                args.iter().position(|arg| arg == "--command" || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')))
-                    .map(|position| args.get(position + 1).cloned().ok_or("a shell command without a resolvable payload"))
+            let assignments = if name == Some("export") {
+                args
+            } else {
+                &words[..index.unwrap_or(words.len())]
+            };
+            for word in assignments {
+                if let Some((name, value)) = word.split_once('=')
+                    && is_shell_variable_name(name)
+                {
+                    let expanded = expand_factory_shell_word(value, &directory_values);
+                    directory_values.insert(name.into(), expanded);
+                }
+            }
+
+            let payload = if matches!(
+                name,
+                Some("sh" | "bash" | "dash" | "zsh" | "ksh" | "script" | "su" | "runuser")
+            ) {
+                args.iter()
+                    .position(|arg| {
+                        arg == "--command"
+                            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
+                    })
+                    .map(|position| {
+                        args.get(position + 1)
+                            .cloned()
+                            .ok_or("a shell command without a resolvable payload")
+                    })
                     .transpose()?
             } else if name == Some("eval") {
                 Some(args.join(" "))
@@ -184,7 +267,14 @@ fn collect_script(
                 if payload.contains(['$', '`']) {
                     return Err("an unresolved shell payload");
                 }
-                let nested = collect_script(&payload, statement_dirs, original, &values, depth + 1, effects)?;
+                let nested = collect_script(
+                    &payload,
+                    statement_dirs,
+                    original,
+                    &values,
+                    depth + 1,
+                    effects,
+                )?;
                 if name == Some("eval") {
                     for directory in nested {
                         add_directory(&mut dirs, directory);
@@ -193,8 +283,30 @@ fn collect_script(
             }
         }
         match separator {
-            Some('(') => scopes.push(dirs.clone()),
-            Some(')') => dirs = scopes.pop().ok_or("an unmatched shell scope")?,
+            Some('(') => {
+                scopes.push((dirs.clone(), alternatives.clone(), directory_values.clone()))
+            }
+            Some(')') => {
+                let parent = scopes.pop().ok_or("an unmatched shell scope")?;
+                dirs = parent.0;
+                alternatives = parent.1;
+                directory_values = parent.2;
+            }
+            Some('&') if and_then => {
+                for directory in incoming {
+                    add_directory(&mut alternatives, directory);
+                }
+            }
+            Some(';') | Some('|') | None => {
+                for directory in std::mem::take(&mut alternatives) {
+                    add_directory(&mut dirs, directory);
+                }
+            }
+            Some('&') if tokens.get(end.wrapping_sub(1)) != Some(&ShellToken::Operator('&')) => {
+                for directory in std::mem::take(&mut alternatives) {
+                    add_directory(&mut dirs, directory);
+                }
+            }
             _ => {}
         }
     }

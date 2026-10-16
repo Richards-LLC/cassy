@@ -2046,8 +2046,8 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     let project = cas_6718_drifted_project(env.home());
     let root = project.join(".cas");
     env.set("CAS_ROOT", &root);
-    let harnesses = crate::project_files::harnesses(&project);
-    assert!(crate::project_files::drift(&project, &harnesses).unwrap() > 0);
+    let harnesses = crate::cli::project_files::harnesses(&project);
+    assert!(crate::cli::project_files::drift(&project, &harnesses).unwrap() > 0);
     let mut args = update_test_args();
     args.sync = true;
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
@@ -2079,7 +2079,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
             .starts_with("Project instructions stay.\n\n")
     );
     assert_eq!(
-        crate::project_files::drift(&project, &harnesses).unwrap(),
+        crate::cli::project_files::drift(&project, &harnesses).unwrap(),
         0
     );
     // pin: project TOML comments outside the managed MCP table must survive.

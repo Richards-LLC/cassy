@@ -12208,8 +12208,8 @@ mod prompt_hook_tests {
 }
 
 fn managed_file_drift_check(root: &Path) -> Check {
-    let harnesses = crate::project_files::harnesses(root);
-    match crate::project_files::drift(root, &harnesses) {
+    let harnesses = crate::cli::project_files::harnesses(root);
+    match crate::cli::project_files::drift(root, &harnesses) {
         Ok(0) => Check::new(
             "managed file drift",
             CheckStatus::Ok,

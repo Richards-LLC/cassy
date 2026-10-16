@@ -30,7 +30,6 @@ pub mod async_runtime;
 mod bounded_process;
 pub mod bridge;
 pub mod builtins;
-pub(crate) mod project_files;
 pub mod cli;
 pub mod cloud;
 pub mod capability;

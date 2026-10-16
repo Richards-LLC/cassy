@@ -56,6 +56,7 @@ pub mod foreign_rows;
 pub(crate) mod hook;
 pub use hook::{execute_native_pre_tool_use, is_native_codex_pre_tool};
 mod init;
+pub(crate) mod project_files;
 pub mod integrate;
 pub mod interactive;
 mod limits;

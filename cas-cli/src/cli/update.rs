@@ -1153,7 +1153,7 @@ fn refresh_all_projects_with_user_refresh(
     let started_at = Instant::now();
     let mut discovery = discover_local_projects(current_cas_root);
     for project in std::mem::take(&mut discovery.projects) {
-        if crate::project_files::git_root(&project) {
+        if crate::cli::project_files::git_root(&project) {
             discovery.projects.push(project);
         } else {
             discovery.skipped_unregistered.push(SkippedProject {
@@ -2155,8 +2155,8 @@ fn sync_claude_files_into(
     // Builtin files are generated into consumer projects and should not be
     // committed there. The authoring checkout is exempted inside the helper
     // because its rendered files are intentional tracked fixtures.
-    let builtin_harnesses = crate::project_files::harnesses(project_root);
-    let reconciliation = crate::project_files::Reconcile::begin(project_root, &builtin_harnesses)?;
+    let builtin_harnesses = crate::cli::project_files::harnesses(project_root);
+    let reconciliation = crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)?;
     if let Some(plan) = &reconciliation {
         if plan.blocked() {
             report_managed_files(cli, &plan.report)?;
@@ -2461,7 +2461,7 @@ fn sync_claude_files_into(
         builtin_gitignore.tracked_paths.clear();
         report
     } else {
-        crate::project_files::Report {
+        crate::cli::project_files::Report {
             outcome: "skipped",
             ..Default::default()
         }
@@ -4241,7 +4241,7 @@ fn write_skill_sync_sentinel(cas_root: &std::path::Path) {
 #[path = "update_tests/tests.rs"]
 mod tests;
 
-fn report_managed_files(cli: &Cli, report: &crate::project_files::Report) -> anyhow::Result<()> {
+fn report_managed_files(cli: &Cli, report: &crate::cli::project_files::Report) -> anyhow::Result<()> {
     if cli.json {
         println!("{}", serde_json::json!({"managed_files": report}));
     } else {

@@ -3506,7 +3506,7 @@ pub fn ensure_builtin_gitignore(
     project_root: &Path,
     harnesses: &[SupervisorCli],
 ) -> std::io::Result<BuiltinGitignoreReport> {
-    let entries = crate::project_files::ignored_paths(project_root, harnesses);
+    let entries = crate::cli::project_files::ignored_paths(project_root, harnesses);
     if entries.is_empty() {
         return Ok(BuiltinGitignoreReport::default());
     }

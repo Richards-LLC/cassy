@@ -121,9 +121,8 @@ async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
         "{unrelated}"
     );
     assert!(
-        unrelated.contains("no `qa-bundle:` note")
-            || unrelated.contains("INVALID TASK COMMIT RECEIPT"),
-        "unrelated receipt must fail its evidence/receipt gate: {unrelated}"
+        unrelated.contains("QA evidence ledger is missing: no ledger at"),
+        "unrelated receipt must not inherit the reviewed task's QA: {unrelated}"
     );
 }
 

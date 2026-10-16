@@ -52,7 +52,7 @@ Do not correct the count by hand; rerun with `--refresh-sources` if a source
 was wrong.
 
 Supported Markdown: paragraphs, inline code, links, emphasis, strong text,
-unnested `- ` lists, fenced code, tables and the headings above. Raw HTML is
+unnested dash lists, fenced code, tables and the headings above. Raw HTML is
 escaped. Avoid pipes inside table cells and multiline link destinations. Normalize
 arbitrary changelog Markdown into this source contract before invoking the script.
 Malformed sections, inconsistent counts and unsafe URL schemes fail before writing.

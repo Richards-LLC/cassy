@@ -32,7 +32,7 @@ const GH_TIMEOUT: Duration = Duration::from_secs(20);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
 const PDF_TIMEOUT: Duration = Duration::from_secs(120);
 /// Issues are closed by hand a few minutes after the release PR merges
-/// (6–7 minutes for v3.58.0 and v3.59.0). A closure up to this long after
+/// (6–7 minutes in the October 2026 releases). A closure up to this long after
 /// the merge belongs to the release.
 const CLOSURE_WINDOW_MINUTES: i64 = 15;
 const CLOSURE_POLL: Duration = Duration::from_secs(30);
@@ -3033,17 +3033,17 @@ mod tests {
     #[test]
     fn release_closures_count_issues_closed_after_generation_starts() {
         let prs = serde_json::json!([
-            {"number": 1226, "title": "Release v3.58.0: epic/burn-down-v43",
+            {"number": 1226, "title": "Release v9.99.1: epic/burn-down-v43",
              "body": "### Fixed (#1225)", "url": "https://github.com/o/r/pull/1226",
              "createdAt": "2026-10-16T03:47:00Z", "mergedAt": "2026-10-16T05:04:14Z",
              "closingIssuesReferences": []},
-            {"number": 1227, "title": "Release v3.59.0: epic/burn-down-v44",
+            {"number": 1227, "title": "Release v9.99.2: epic/burn-down-v44",
              "body": "### Added — batch QA (#1203)\n### Fixed — a (#1204)\n### Fixed — b (#1205)\n### Fixed — c (#1225 follow-up)\n### Changed — d (#1211 in part)",
              "url": "https://github.com/o/r/pull/1227",
              "createdAt": "2026-10-16T08:56:17Z", "mergedAt": "2026-10-16T09:29:58Z",
              "closingIssuesReferences": []}
         ]);
-        let pr = select_release_pr(&prs, "3.59.0").expect("release PR");
+        let pr = select_release_pr(&prs, "9.99.2").expect("release PR");
         assert_eq!(pr.number, 1227);
         let window = ClosureWindow {
             opened: pr.created_at,
@@ -3706,7 +3706,7 @@ Was: reports lacked evidence. Now: reports include verification evidence.
     #[test]
     fn changelog_changes_group_by_area_without_zero_rows() {
         let section = parse_changelog_section(
-            "## [3.59.0] - 2026-10-16\n\n\
+            "## [9.99.2] - 2026-10-16\n\n\
              ### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697)\n\n\
              - With `qa.mode = \"batch\"`, one walk covers the batch.\n\n\
              ### Fixed — Commander renders its designed type on every machine (cas-4427)\n\n\
@@ -3717,7 +3717,7 @@ Was: reports lacked evidence. Now: reports include verification evidence.
              - Boot skips a retired intent.\n\n\
              ### Tests and docs\n\n\
              - Flaky daemon tests are deterministic (cas-a8dc).\n",
-            "3.59.0",
+            "9.99.2",
         )
         .expect("section");
         let changes = changelog_changes(&section.body);
@@ -3739,12 +3739,12 @@ Was: reports lacked evidence. Now: reports include verification evidence.
 
         // Untitled headings: each bullet is a change, titled by its bold lead-in.
         let section = parse_changelog_section(
-            "## [3.60.0] - 2026-10-16\n\n### Fixed\n\n\
+            "## [9.99.3] - 2026-10-16\n\n### Fixed\n\n\
              - **Typing during cleanup** — Was: slow. → Now: off the input loop.\n\
              - **Loaded-proof receipts** — Was: a number could be borrowed. → Now: fields own them.\n\n\
              ### Added\n\n- **Peer ownership board** — Was: little context. → Now: owners are shown.\n\n\
-             ### Documentation\n\n- **3.59.0 release report** — committed.\n",
-            "3.60.0",
+             ### Documentation\n\n- **9.99.2 release report** — committed.\n",
+            "9.99.3",
         )
         .expect("section");
         let titles = changelog_changes(&section.body)

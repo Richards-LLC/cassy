@@ -3252,6 +3252,48 @@ fn script_write_targets_from_command(command: &str) -> Vec<String> {
     targets
 }
 
+/// cas-a673: the command position a `)` returns to. A `$(…)` substitution
+/// closes back into the position its `$` word started in: inside an argument
+/// (`echo $(cat f) touch x`) the following words are still arguments, while
+/// at command position (`$(true) touch x`, which runs `touch` when the
+/// substitution expands to nothing) they may be the command. A bare group or
+/// subshell, and an unmatched `)` such as a `case` pattern, return to command
+/// position as before.
+#[derive(Default)]
+struct ParenPositions {
+    open: Vec<bool>,
+    /// Command position in effect when the previous word token began.
+    word_entry: Option<bool>,
+}
+
+impl ParenPositions {
+    fn word(&mut self, command_position: bool) {
+        self.word_entry = Some(command_position);
+    }
+
+    fn open(&mut self, tokens: &[ShellToken], index: usize) {
+        let substitution = index
+            .checked_sub(1)
+            .and_then(|previous| tokens.get(previous))
+            .is_some_and(|token| matches!(token, ShellToken::Word(word) if word.ends_with('$')));
+        let resume = match self.word_entry {
+            Some(entry) if substitution => entry,
+            _ => true,
+        };
+        self.open.push(resume);
+        self.word_entry = None;
+    }
+
+    fn close(&mut self) -> bool {
+        self.word_entry = None;
+        self.open.pop().unwrap_or(true)
+    }
+
+    fn operator(&mut self) {
+        self.word_entry = None;
+    }
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
@@ -3286,18 +3328,29 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     // command. This is intentionally a small recognizer, not a shell parser.
     let mut index = 0;
     let mut command_position = true;
+    let mut parens = ParenPositions::default();
     while index < tokens.len() {
         match &tokens[index] {
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                parens.open(&tokens, index);
                 command_position = true;
                 index += 1;
             }
-            ShellToken::Operator(_) => index += 1,
+            ShellToken::Operator(')') => {
+                command_position = parens.close();
+                index += 1;
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                parens.operator();
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => {
+                parens.operator();
+                index += 1;
+            }
             ShellToken::Word(command) if command_position => {
+                parens.word(true);
                 // `do`/`then` introduce a new command position without an
                 // operator token. Recognising them lets the small parser see
                 // commands inside `for` loops and shell conditionals.
@@ -3356,9 +3409,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                         add_target(&operand);
                     }
                 }
+                // The operands were consumed here; a `$(` among them resumes
+                // at command position, as before (conservative).
+                parens.operator();
                 index = cursor;
             }
             ShellToken::Word(_) => {
+                parens.word(false);
                 command_position = false;
                 index += 1;
             }
@@ -3442,18 +3499,30 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
     let mut targets = Vec::new();
     let mut index = 0;
     let mut command_position = true;
+    // cas-a673: a `)` closing an argument substitution keeps argument position.
+    let mut parens = ParenPositions::default();
     while index < tokens.len() {
         match &tokens[index] {
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                parens.open(&tokens, index);
                 command_position = true;
                 index += 1;
             }
-            ShellToken::Operator(_) => index += 1,
+            ShellToken::Operator(')') => {
+                command_position = parens.close();
+                index += 1;
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                parens.operator();
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => {
+                parens.operator();
+                index += 1;
+            }
             ShellToken::Word(word) if command_position => {
+                parens.word(true);
                 if matches!(word.as_str(), "do" | "then" | "else" | "elif")
                     || word.starts_with('-')
                     || word.contains('=')
@@ -3496,9 +3565,11 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
                         targets.push((expanded, recursive));
                     }
                 }
+                parens.operator();
                 index = cursor;
             }
             ShellToken::Word(_) => {
+                parens.word(false);
                 command_position = false;
                 index += 1;
             }
@@ -6228,6 +6299,70 @@ mod workspace_contract_tests {
             ("cas config set", bash_input("cas config set issues.repo a/b", &main)),
         ] {
             assert_eq!(cas_config_file_write_denial(&input), None, "{case}");
+        }
+    }
+
+    /// cas-a673: through the real PreToolUse, words after an argument
+    /// substitution's `)` are still that command's arguments, so filename data
+    /// is not a config write. A real write stays refused, whether it follows an
+    /// operator, sits inside the substitution, or follows a substitution in
+    /// command position (`$(true) touch x` runs `touch`).
+    #[cfg(unix)]
+    #[test]
+    fn cas_a673_argument_substitution_data_is_not_a_config_write() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/a673");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/lively-puma-3");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-a673");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "lively-puma-3");
+        env.set("CAS_CLONE_PATH", &worktree);
+        let decide = |command: &str| -> (String, String) {
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()),
+                ..bash_input(command, &worktree)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        for command in [
+            "echo $(cat src/new.rs) touch ../../config.toml",
+            "echo $(cat src/new.rs) rm ../../config.toml",
+            "printf '%s\\n' $(cat src/new.rs) mv src/new.rs ../../config.toml",
+            "echo $(cat $(ls src)) tee ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert!(
+                decision != "deny" && !reason.contains("CASSY CONFIG"),
+                "read-only `{command}` must be allowed: {decision} {reason}"
+            );
+        }
+        for command in [
+            "touch ../../config.toml",
+            "echo $(touch ../../config.toml)",
+            "echo $(cat src/new.rs) $(rm ../../config.toml)",
+            "$(true) touch ../../config.toml",
+            "echo $(cat src/new.rs); touch ../../config.toml",
+            "echo $(cat src/new.rs) && mv src/new.rs ../../config.toml",
+            "(cd src) ; rm ../../config.toml",
+            "case x in x) touch ../../config.toml ;; esac",
+        ] {
+            let (decision, reason) = decide(command);
+            assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
+            assert!(reason.contains("CASSY CONFIG"), "`{command}`: {reason}");
         }
     }
 

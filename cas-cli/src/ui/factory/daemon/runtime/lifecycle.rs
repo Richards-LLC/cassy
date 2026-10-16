@@ -2402,25 +2402,9 @@ impl FactoryDaemon {
         // the director apply reach the watchdog, and blocking calls made on
         // this thread are reported (report mode).
         // cas-786a6: the loop's prompt-queue handle is opened (schema init
-        // once) before this thread becomes a lane; later passes reuse it.
-        match self.queue_jobs.store(self.app.cas_dir()) {
-            // cas-786a6 review M2 (spec §4.5 rule 5): claims a previous
-            // daemon took but never handed off are released before this one
-            // claims anything, so its rows are offered again.
-            Ok(queue) => match queue.release_orphaned_transport_claims(&self.session_name) {
-                Ok(0) => {}
-                Ok(released) => tracing::warn!(
-                    target: "cas::coordination",
-                    released,
-                    factory_session = %self.session_name,
-                    "released transport claims a previous daemon never handed off"
-                ),
-                Err(error) => tracing::warn!(%error, "could not release orphaned transport claims"),
-            },
-            Err(error) => {
-                tracing::warn!(%error, "prompt queue store unavailable at loop start; opened on first use");
-            }
-        }
+        // once) before this thread becomes a lane, and claims a previous
+        // daemon never handed off are released.
+        self.release_orphaned_claims_at_start();
         let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
         // GH #1165: store writes whose result the loop does not need on the

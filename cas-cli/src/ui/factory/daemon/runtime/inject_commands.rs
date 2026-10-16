@@ -9,7 +9,11 @@
 //! context reset's bookkeeping, or an operator's log line. No pass waits
 //! for a settle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+/// Operator urgent injects queued behind one settling on the same pane
+/// (cas-786a6 review M4), at most this many.
+const OPERATOR_BACKLOG_CAP: usize = 16;
 
 use super::delivery::NudgeReport;
 use super::queue_and_events::UrgentWakeProbe;
@@ -83,6 +87,9 @@ pub(crate) enum UrgentInject {
 pub(crate) struct UrgentInjects {
     pub(crate) owners: HashMap<cas_mux::InjectTicket, UrgentInject>,
     pub(crate) broadcasts: HashMap<i64, BroadcastTally>,
+    /// Operator urgent injects waiting for their pane's settling inject
+    /// (review M4): pane, payload, settle. Started in order.
+    pub(crate) operator_backlog: VecDeque<(String, String, std::time::Duration)>,
 }
 
 impl UrgentInjects {
@@ -105,6 +112,7 @@ impl FactoryDaemon {
     /// pass; never waits.
     pub(crate) async fn advance_urgent_injects(&mut self) {
         let completions = self.app.mux.advance_injects().await;
+        self.start_operator_backlog().await;
         for completion in completions {
             let Some(owner) = self.urgent_injects.owners.remove(&completion.ticket) else {
                 tracing::warn!(
@@ -206,10 +214,91 @@ impl FactoryDaemon {
         }
     }
 
+    /// Open the loop's prompt-queue handle and release the transport claims
+    /// a previous daemon of this session took but never handed off (review
+    /// M2, spec §4.5 rule 5), before this daemon claims anything. Runs once,
+    /// before the loop thread becomes a lane.
+    pub(crate) fn release_orphaned_claims_at_start(&mut self) {
+        let queue = match self.queue_jobs.store(self.app.cas_dir()) {
+            Ok(queue) => queue,
+            Err(error) => {
+                tracing::warn!(%error, "prompt queue store unavailable at loop start; opened on first use");
+                return;
+            }
+        };
+        match queue.release_orphaned_transport_claims(&self.session_name) {
+            Ok(0) => {}
+            Ok(released) => tracing::warn!(
+                target: "cas::coordination",
+                released,
+                factory_session = %self.session_name,
+                "released transport claims a previous daemon never handed off"
+            ),
+            Err(error) => tracing::warn!(%error, "could not release orphaned transport claims"),
+        }
+    }
+
     /// An operator's urgent inject (GUI or WebSocket `Inject { urgent }`):
     /// the turn break now, the payload after the settle. Raw semantics, as
-    /// before: no composer preservation.
+    /// before: no composer preservation. One that arrives while another
+    /// urgent inject settles on the pane waits for it (review M4).
     pub(crate) async fn begin_operator_urgent_inject(
+        &mut self,
+        pane: &str,
+        payload: &str,
+        settle: std::time::Duration,
+    ) {
+        let queued_behind = self
+            .urgent_injects
+            .operator_backlog
+            .iter()
+            .any(|(queued, _, _)| queued == pane);
+        if queued_behind || self.app.mux.inject_pending(pane) {
+            self.queue_operator_urgent_inject(pane, payload, settle);
+            return;
+        }
+        self.start_operator_urgent_inject(pane, payload, settle).await;
+    }
+
+    fn queue_operator_urgent_inject(&mut self, pane: &str, payload: &str, settle: std::time::Duration) {
+        if self.urgent_injects.operator_backlog.len() >= OPERATOR_BACKLOG_CAP {
+            tracing::error!(
+                target: "cas::coordination",
+                stage = "operator_urgent_inject",
+                target_agent = %pane,
+                "operator urgent inject refused: too many already waiting for their panes"
+            );
+            return;
+        }
+        tracing::info!(
+            target: "cas::coordination",
+            stage = "operator_urgent_inject",
+            target_agent = %pane,
+            "operator urgent inject queued behind the one settling on this pane"
+        );
+        self.urgent_injects.operator_backlog.push_back((
+            pane.to_string(),
+            payload.to_string(),
+            settle,
+        ));
+    }
+
+    /// Start queued operator injects whose pane is free, in order per pane.
+    async fn start_operator_backlog(&mut self) {
+        let mut waiting = std::mem::take(&mut self.urgent_injects.operator_backlog);
+        let mut busy = std::collections::HashSet::new();
+        while let Some((pane, payload, settle)) = waiting.pop_front() {
+            if busy.contains(&pane) || self.app.mux.inject_pending(&pane) {
+                busy.insert(pane.clone());
+                self.urgent_injects.operator_backlog.push_back((pane, payload, settle));
+                continue;
+            }
+            busy.insert(pane.clone());
+            self.start_operator_urgent_inject(&pane, &payload, settle).await;
+        }
+    }
+
+    async fn start_operator_urgent_inject(
         &mut self,
         pane: &str,
         payload: &str,
@@ -229,12 +318,9 @@ impl FactoryDaemon {
                     },
                 );
             }
-            Ok(cas_mux::InjectStart::Deferred) => tracing::info!(
-                target: "cas::coordination",
-                stage = "operator_urgent_inject",
-                target_agent = %pane,
-                "operator urgent inject skipped: another urgent inject is settling on this pane"
-            ),
+            Ok(cas_mux::InjectStart::Deferred) => {
+                self.queue_operator_urgent_inject(pane, payload, settle);
+            }
             Err(error) => tracing::warn!(
                 target: "cas::coordination",
                 stage = "operator_urgent_inject",

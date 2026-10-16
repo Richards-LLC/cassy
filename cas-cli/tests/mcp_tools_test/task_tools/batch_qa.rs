@@ -9,6 +9,158 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[tokio::test]
+async fn cas_d697_round2_stale_origin_cannot_defer_integrated_delivery() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let seed = git(&fx.repo, &["rev-parse", "main"]);
+    git(&fx.repo, &["update-ref", "refs/remotes/origin/main", &seed]);
+    let parked = fx.close("cas-bq01").await;
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let refused = fx.close("cas-bq01").await;
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{refused}"
+    );
+    assert!(refused.contains("deferred evidence"), "{refused}");
+    let direct = fx.close("cas-bq03").await;
+    assert_ne!(
+        tasks.get("cas-bq03").unwrap().status,
+        TaskStatus::Closed,
+        "{direct}"
+    );
+    assert!(!cas_store::has_qa_batch_deferral(&fx.repo.join(".cas"), "cas-bq03").unwrap());
+    fx.record().await;
+    let closed = fx.close("cas-bq01").await;
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
+}
+
+#[tokio::test]
+async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let mut task = tasks.get("cas-bq01").unwrap();
+    task.assignee = None;
+    task.execution_note = Some("no-code".into());
+    tasks.update(&task).unwrap();
+    fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
+    let refused = fx.close("cas-bq01").await;
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{refused}"
+    );
+    assert!(refused.contains("deferred evidence"), "{refused}");
+}
+
+#[tokio::test]
+async fn cas_d697_round2_mode_switch_retains_batch_debt() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
+    let refused = fx.close("cas-bq01").await;
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{refused}"
+    );
+    assert!(refused.contains("deferred evidence"), "{refused}");
+    fx.reconfigure("mode='batch'");
+    fx.record().await;
+    fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
+    let closed = fx.close("cas-bq01").await;
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
+}
+
+#[tokio::test]
+async fn cas_d697_round2_passed_explicit_qa_satisfies_deferred_close() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    let request = serde_json::from_value(serde_json::json!({
+        "action":"qa_request", "task_id":"cas-bq01", "summary":"Walk this delivery explicitly"
+    }))
+    .unwrap();
+    fx.supervisor
+        .verification(Parameters(request))
+        .await
+        .unwrap();
+    // Seed the trusted persisted reviewer verdict at the store seam. Existing
+    // qa_record tests separately cover its full evidence-bundle validation.
+    cas_store::claim_qa_pass(
+        &root,
+        "cas-bq01",
+        "independent-reviewer",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    cas_store::resolve_qa_pass(
+        &root,
+        "cas-bq01",
+        "independent-reviewer",
+        cas::types::QaVerdict::Approved,
+        "Explicit delivery walk passed",
+        None,
+        fx.ledger.to_str().unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let closed = fx.close("cas-bq01").await;
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
+    assert!(
+        cas_store::list_qa_batch_receipts(&root, "batch-project")
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn git(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

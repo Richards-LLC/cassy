@@ -8971,6 +8971,74 @@ mod tests {
         (temp, store)
     }
 
+    fn cas_7af8_assert_relay_expiry(kind: &str) {
+        // Fresh controls run first, so every red proves that live work still surfaces.
+        for case in ["fresh", "aged", "closed", "cancelled", "deadline"] {
+            if case == "deadline" && kind != "verification" { continue; }
+            if case == "aged" && kind == "verification" { continue; }
+            for repeat in [false, true] {
+                let (temp, store) = create_test_store();
+                let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+                tasks.init().unwrap();
+                let mut task = Task::new("cas-7af8-target".into(), "current lane".into());
+                task.status = TaskStatus::InProgress;
+                task.deliverables.parked_branch = Some("factory/test-delivery".into());
+                tasks.add(&task).unwrap();
+                let deadline = Utc::now() + chrono::Duration::hours(if case == "deadline" { -1 } else { 1 });
+                let (source, body) = match kind {
+                    "verification" => ("verification-dispatch:vd-test", format!("<cas-verification-dispatch dispatch_id=\"vd-test\" task_id=\"{}\" owner=\"supervisor-id\" deadline=\"{}\">VERIFY</cas-verification-dispatch>", task.id, deadline.to_rfc3339())),
+                    "ci" => ("lifecycle-wake:ci-red-run:factory/test-delivery:abc", "<ci-red-run branch=\"factory/test-delivery\" head_sha=\"abc\" run_id=\"42\">CI FAILED</ci-red-run>".into()),
+                    _ => ("lifecycle-wake:worker-attention:42", format!("<worker-attention kind=\"worker_stalled\" worker=\"test-worker\" task_id=\"{}\" notification_id=\"42\">WORKER QUIET</worker-attention>", task.id)),
+                };
+                let id = store.enqueue_with_session(source, "supervisor", &body, "session").unwrap();
+                if repeat && case != "deadline" {
+                    assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
+                }
+                if case == "aged" {
+                    crate::shared_db::lock_connection(&store.conn).unwrap().execute(
+                        "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                        params![(Utc::now() - chrono::Duration::hours(8)).to_rfc3339(), id],
+                    ).unwrap();
+                } else if matches!(case, "closed" | "cancelled") {
+                    task.status = if case == "closed" { TaskStatus::Closed } else { TaskStatus::Cancelled };
+                    tasks.update(&task).unwrap();
+                }
+                let rows = if repeat && case != "deadline" {
+                    store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::PolledBefore(Utc::now() + chrono::Duration::seconds(1)), 10, HOOK_SURFACE_BUDGET_CHARS).unwrap().rows
+                } else {
+                    store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap()
+                };
+                if case == "fresh" {
+                    assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec![body.as_str()], "fresh {kind} must surface");
+                } else {
+                    assert!(rows.is_empty(), "stale {kind} {case} leaked (repeat={repeat})");
+                    let report = store.message_delivery_report(id).unwrap().unwrap();
+                    assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
+                    assert!(report.confirmed_at.is_some(), "expiry must retire replay eligibility");
+                    assert!(report.pending_detail.as_deref().is_some_and(|detail| !detail.is_empty()));
+                    assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(),
+                        (repeat && case != "deadline").then_some(SurfacingSource::InboxPoll), "expiry must not fabricate a recipient receipt");
+                    assert!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty(), "expiry must survive another drain");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cas_7af8_verification_dispatch_expires_at_deadline_or_terminal_task() {
+        cas_7af8_assert_relay_expiry("verification");
+    }
+
+    #[test]
+    fn cas_7af8_ci_red_run_expires_by_age_or_terminal_branch_task() {
+        cas_7af8_assert_relay_expiry("ci");
+    }
+
+    #[test]
+    fn cas_7af8_worker_attention_expires_by_age_or_terminal_task() {
+        cas_7af8_assert_relay_expiry("attention");
+    }
+
     #[test]
     fn cas_1485_terminal_task_relay_never_surfaces_through_any_atomic_drain() {
         for status in [TaskStatus::Closed, TaskStatus::Cancelled] {

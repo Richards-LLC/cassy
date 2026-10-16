@@ -100,15 +100,175 @@ fn structured_targets_accept_non_rust_runners_and_parallelism_forms_without_sha(
         "whole target under -j16, 3 loops; result: PASS",
         "non-Rust target: pnpm test -j16; 3 runs; PASS",
         "entire suite; -j 16; runs 1 2 3; status=0",
-        // Existing numeric adjacency accepts this; preserve AC4 until the
-        // separately approved cas-69b4 repair narrows that grammar.
-        "whole target parallelism=16 loops=2 result=PASS",
     ] {
         let task = concurrency_task(receipt);
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .unwrap_or_else(|error| panic!("valid receipt {receipt}: {error}"));
         assert!(declared_risk_close_gaps(&task, &[]).is_empty());
     }
+}
+
+// GH #1222 quotes one full receipt and the shorthand `-j16 x3`. The other
+// rows isolate its documented forms; they are derived fixtures, not quotes.
+const ISSUE_FORMS: &[(&str, &str)] = &[
+    ("GH #1222 verbatim full line", ISSUE_RECEIPT),
+    (
+        "GH #1222 shorthand in whole-target receipt",
+        "whole target; -j16 x3; PASS",
+    ),
+    (
+        "derived jobs option",
+        "target=explicit non-Rust (vitest <file> + jest <file>) --jobs 16 loops=3 result=PASS",
+    ),
+    (
+        "derived parallelism option",
+        "target=explicit non-Rust (vitest <file> + jest <file>) parallelism=-j16 loops=3 result=PASS",
+    ),
+];
+
+async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], accepted: bool) {
+    use crate::mcp::CasService;
+    use crate::store::{
+        open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+    };
+    use crate::test_support::TestEnvGuard;
+    use cas_types::{Agent, AgentRole};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    let mut env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    env.set_current_dir(dir.path());
+    std::fs::write(
+        root.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .unwrap();
+    open_store(&root).unwrap().init().unwrap();
+    open_rule_store(&root).unwrap().init().unwrap();
+    open_skill_store(&root).unwrap().init().unwrap();
+    let store = open_task_store(&root).unwrap();
+    store.init().unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    agents.init().unwrap();
+    let caller = Agent::new_with_role(
+        "receipt-caller".into(),
+        "receipt-caller".into(),
+        AgentRole::Standard,
+    );
+    agents.register(&caller).unwrap();
+    let core = CasCore::with_daemon(root, None, None);
+    core.set_agent_id_for_testing(caller.id);
+    let service = CasService::new(core, None);
+
+    for (index, (name, receipt)) in receipts.iter().enumerate() {
+        let mut task = concurrency_task("");
+        task.id = format!("cas-69b4-{index}");
+        task.status = TaskStatus::InProgress;
+        task.notes.clear();
+        store.add(&task).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "notes", "id": task.id, "notes": receipt, "note_type": "loaded_proof"
+        }))
+        .unwrap();
+        let note = service.task(Parameters(request)).await.unwrap();
+        assert_ne!(note.is_error, Some(true), "{name}: {note:?}");
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "Validated receipt fixture"
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let text = response
+            .content
+            .iter()
+            .filter_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let persisted = store.get(&task.id).unwrap();
+        if accepted {
+            assert_ne!(response.is_error, Some(true), "{name}: {receipt}: {text}");
+            assert_eq!(persisted.status, TaskStatus::Closed, "{name}: {text}");
+            assert!(
+                declared_risk_close_gaps(&persisted, &[]).is_empty(),
+                "{name}: audit differs"
+            );
+        } else {
+            assert_eq!(
+                response.is_error,
+                Some(true),
+                "{name}: accepted {receipt}: {text}"
+            );
+            assert_eq!(persisted.status, TaskStatus::InProgress, "{name}: {text}");
+            assert!(
+                text.contains("loaded_proof") && text.contains("missing=[loops]"),
+                "{name}: {text}"
+            );
+            assert!(
+                text.contains("parsed=[target, parallelism, result]"),
+                "{name}: {text}"
+            );
+            assert!(text.contains("Accepted example:"), "{name}: {text}");
+            assert!(
+                declared_risk_close_gaps(&persisted, &[])
+                    .join(";")
+                    .contains("missing=[loops]"),
+                "{name}: audit differs"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_69b4_close_handler_refuses_borrowed_loop_counts() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            (
+                "parallelism before loops",
+                "whole target parallelism=16 loops=2 result=PASS",
+            ),
+            (
+                "loops before parallelism",
+                "whole target loops=2 parallelism=16 result=PASS",
+            ),
+            (
+                "jobs before loop",
+                "whole target jobs=16 loop=2 result=PASS",
+            ),
+            (
+                "loop before jobs",
+                "whole target loop=2 jobs=16 result=PASS",
+            ),
+            (
+                "structured jobs",
+                "target=vitest jobs=16 loops=2 result=PASS",
+            ),
+            (
+                "colon fields",
+                "whole target concurrency: 16 runs: 2 result=PASS",
+            ),
+            (
+                "prose label order",
+                "whole target parallelism 16 loops 2 result=PASS",
+            ),
+            (
+                "other assigned field",
+                "whole target -j16 receipt=48 loops=2 result=PASS",
+            ),
+        ],
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cas_69b4_close_handler_accepts_issue_receipt_forms() {
+    exercise_close_receipts_cas_69b4(ISSUE_FORMS, true).await;
 }
 
 #[test]

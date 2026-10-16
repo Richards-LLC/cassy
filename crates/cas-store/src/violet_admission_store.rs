@@ -481,17 +481,27 @@ mod tests {
         let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
         queue.ack(first.prompt_id).unwrap();
         let binding = successor(&row);
-        let recovered = store.recover_known(&binding, VioletConsumption::Queued).unwrap();
+        let recovered = store
+            .recover_known(&binding, VioletConsumption::Queued)
+            .unwrap();
         assert_eq!(recovered.admission.prompt_id, first.prompt_id);
         assert_eq!(recovered.consumption, VioletConsumption::Consumed);
         assert_eq!(recovered.recovery_prompt_id, None);
-        assert!(queue.peek_unseen_for_recipient(&binding.recipient,
-            Some(&binding.factory_session), 10).unwrap().is_empty());
+        assert!(
+            queue
+                .peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn cas_c423_store_fresh_restore_is_atomic_idempotent_and_never_reacks() {
-        for consumption in [VioletConsumption::Queued, VioletConsumption::DispatchUncertain, VioletConsumption::Consumed] {
+        for consumption in [
+            VioletConsumption::Queued,
+            VioletConsumption::DispatchUncertain,
+            VioletConsumption::Consumed,
+        ] {
             let root = tempfile::tempdir().unwrap();
             let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
             let mut row = input();
@@ -504,9 +514,16 @@ mod tests {
             assert_eq!(duplicate.admission.prompt_id, first.admission.prompt_id);
             assert_eq!(duplicate.recovery_prompt_id, first.recovery_prompt_id);
             assert_eq!(duplicate.consumption, consumption);
-            assert!(store.pending_acknowledgements(&row.registration_id, &row.project_id).unwrap().is_empty());
+            assert!(
+                store
+                    .pending_acknowledgements(&row.registration_id, &row.project_id)
+                    .unwrap()
+                    .is_empty()
+            );
             let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-            let inbox = queue.peek_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10).unwrap();
+            let inbox = queue
+                .peek_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+                .unwrap();
             match consumption {
                 VioletConsumption::Queued => assert_eq!(inbox[0].id, first.admission.prompt_id),
                 VioletConsumption::DispatchUncertain => {
@@ -517,7 +534,11 @@ mod tests {
                 VioletConsumption::Consumed => assert!(inbox.is_empty()),
             }
             let db = Connection::open(root.path().join("cas.db")).unwrap();
-            let cursor: String = db.query_row("SELECT message_ts FROM violet_admission_cursors", [], |r|r.get(0)).unwrap();
+            let cursor: String = db
+                .query_row("SELECT message_ts FROM violet_admission_cursors", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
             assert_eq!(cursor, row.message_ts);
         }
     }
@@ -527,14 +548,27 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
         let db = Connection::open(root.path().join("cas.db")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_restore BEFORE INSERT ON violet_admission_cursors
-            BEGIN SELECT RAISE(ABORT,'restore cursor failed'); END;").unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_restore BEFORE INSERT ON violet_admission_cursors
+            BEGIN SELECT RAISE(ABORT,'restore cursor failed'); END;",
+        )
+        .unwrap();
         let mut row = input();
         row.lease_token.clear();
-        assert!(store.restore_admitted(&row, 1, VioletConsumption::DispatchUncertain).is_err());
-        let counts: (i64,i64) = db.query_row("SELECT (SELECT COUNT(*) FROM violet_admissions),
-            (SELECT COUNT(*) FROM prompt_queue)", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
-        assert_eq!(counts, (0,0));
+        assert!(
+            store
+                .restore_admitted(&row, 1, VioletConsumption::DispatchUncertain)
+                .is_err()
+        );
+        let counts: (i64, i64) = db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM violet_admissions),
+            (SELECT COUNT(*) FROM prompt_queue)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0));
     }
 
     #[test]
@@ -722,10 +756,16 @@ pub struct SqliteVioletAdmissionStore {
 impl SqliteVioletAdmissionStore {
     /// Restore Cloud's existing admission on a successor machine. No lease
     /// token or new admission acknowledgement is invented by this path.
-    pub fn restore_admitted(&self, input: &VioletAdmissionInput, expected_generation: i64,
-        consumption: VioletConsumption) -> Result<VioletRecoveryReceipt> {
+    pub fn restore_admitted(
+        &self,
+        input: &VioletAdmissionInput,
+        expected_generation: i64,
+        consumption: VioletConsumption,
+    ) -> Result<VioletRecoveryReceipt> {
         if !input.lease_token.is_empty() || expected_generation < 1 {
-            return Err(StoreError::Other("restore requires an admitted delivery without a lease".into()));
+            return Err(StoreError::Other(
+                "restore requires an admitted delivery without a lease".into(),
+            ));
         }
         self.persist(input, Some((expected_generation, consumption)))
     }
@@ -985,13 +1025,18 @@ impl SqliteVioletAdmissionStore {
     /// Only a committed receipt may authorize an admission acknowledgement.
     pub fn admit(&self, input: &VioletAdmissionInput) -> Result<VioletAdmissionReceipt> {
         if input.lease_token.trim().is_empty() {
-            return Err(StoreError::Other("Violet admission requires a lease token".into()));
+            return Err(StoreError::Other(
+                "Violet admission requires a lease token".into(),
+            ));
         }
         self.persist(input, None).map(|receipt| receipt.admission)
     }
 
-    fn persist(&self, input: &VioletAdmissionInput,
-        recovery: Option<(i64, VioletConsumption)>) -> Result<VioletRecoveryReceipt> {
+    fn persist(
+        &self,
+        input: &VioletAdmissionInput,
+        recovery: Option<(i64, VioletConsumption)>,
+    ) -> Result<VioletRecoveryReceipt> {
         for value in [
             &input.delivery_id,
             &input.occurrence_id,
@@ -1016,13 +1061,22 @@ impl SqliteVioletAdmissionStore {
         }
         slack_timestamp_parts(&input.message_ts)?;
         let recover = |tx: &Connection, expected_generation, consumption| {
-            recover_known_in_tx(tx, &VioletAdmissionRebind {
-                delivery_id: input.delivery_id.clone(), occurrence_id: input.occurrence_id.clone(),
-                reader_slot_id: input.reader_slot_id.clone(), project_id: input.project_id.clone(),
-                registration_id: input.registration_id.clone(), expected_generation,
-                delivery_generation: input.delivery_generation,
-                factory_session: input.factory_session.clone(), recipient: input.recipient.clone(),
-            }, consumption, RecoveryAuthority::Rebind)
+            recover_known_in_tx(
+                tx,
+                &VioletAdmissionRebind {
+                    delivery_id: input.delivery_id.clone(),
+                    occurrence_id: input.occurrence_id.clone(),
+                    reader_slot_id: input.reader_slot_id.clone(),
+                    project_id: input.project_id.clone(),
+                    registration_id: input.registration_id.clone(),
+                    expected_generation,
+                    delivery_generation: input.delivery_generation,
+                    factory_session: input.factory_session.clone(),
+                    recipient: input.recipient.clone(),
+                },
+                consumption,
+                RecoveryAuthority::Rebind,
+            )
         };
         let receipt = crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
             let existing: Option<(String, i64, String, i64, String, String, String, String)> = tx
@@ -1056,10 +1110,13 @@ impl SqliteVioletAdmissionStore {
                 recipient,
             )) = existing
             {
-                if id != input.delivery_id || project != input.project_id
+                if id != input.delivery_id
+                    || project != input.project_id
                     || target != input.target_json
                 {
-                    return Err(StoreError::Other("conflicting restored Violet identity or target".into()));
+                    return Err(StoreError::Other(
+                        "conflicting restored Violet identity or target".into(),
+                    ));
                 }
                 if let Some((expected, consumption)) = recovery {
                     return recover(tx, expected, consumption);
@@ -1074,11 +1131,14 @@ impl SqliteVioletAdmissionStore {
                 }
                 tx.execute("UPDATE violet_admissions SET lease_token=?2,ack_pending=1 WHERE delivery_id=?1",
                     params![id,input.lease_token])?;
-                return Ok(VioletRecoveryReceipt { admission: VioletAdmissionReceipt {
-                    delivery_id: id,
-                    prompt_id,
-                    created: false,
-                }, consumption: VioletConsumption::Queued, recovery_prompt_id: None
+                return Ok(VioletRecoveryReceipt {
+                    admission: VioletAdmissionReceipt {
+                        delivery_id: id,
+                        prompt_id,
+                        created: false,
+                    },
+                    consumption: VioletConsumption::Queued,
+                    recovery_prompt_id: None,
                 });
             }
             let key =
@@ -1120,11 +1180,15 @@ impl SqliteVioletAdmissionStore {
             let mut receipt = if let Some((expected, consumption)) = recovery {
                 recover(tx, expected, consumption)?
             } else {
-                VioletRecoveryReceipt { admission: VioletAdmissionReceipt {
-                delivery_id: input.delivery_id.clone(),
-                prompt_id,
-                created: false,
-                }, consumption: VioletConsumption::Queued, recovery_prompt_id: None }
+                VioletRecoveryReceipt {
+                    admission: VioletAdmissionReceipt {
+                        delivery_id: input.delivery_id.clone(),
+                        prompt_id,
+                        created: false,
+                    },
+                    consumption: VioletConsumption::Queued,
+                    recovery_prompt_id: None,
+                }
             };
             receipt.admission.created = true;
             Ok(receipt)

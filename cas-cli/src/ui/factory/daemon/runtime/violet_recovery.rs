@@ -1,8 +1,8 @@
 //! Recover the same authoritative admission on existing and fresh machines.
+use super::cloud::ActivityRecoveryPort;
 use super::*;
 use crate::coordination::external_work::{CloudCoordinationPort, SqliteRequestJournal};
 use cas_store::{VioletAdmissionRebind, VioletConsumption, VioletRecoveryReceipt};
-use super::cloud::ActivityRecoveryPort;
 
 pub(crate) struct ReaderDestination<'a> {
     pub context: &'a OperationContext,
@@ -18,73 +18,159 @@ pub(crate) struct RecoveryReport {
 }
 
 pub(crate) fn recover_page(
-    cloud: &dyn ActivityRecoveryPort, journal: &SqliteRequestJournal,
-    store: &SqliteVioletAdmissionStore, destination: &ReaderDestination<'_>,
-    evidence: &activation::BindingEvidence, cursor: Option<&str>, deadline: Instant,
+    cloud: &dyn ActivityRecoveryPort,
+    journal: &SqliteRequestJournal,
+    store: &SqliteVioletAdmissionStore,
+    destination: &ReaderDestination<'_>,
+    evidence: &activation::BindingEvidence,
+    cursor: Option<&str>,
+    deadline: Instant,
 ) -> RecoveryReport {
     let context = destination.context;
-    let mut report = RecoveryReport { next_cursor:cursor.map(str::to_owned), ..Default::default() };
-    let result = (|| -> Result<(),String> {
+    let mut report = RecoveryReport {
+        next_cursor: cursor.map(str::to_owned),
+        ..Default::default()
+    };
+    let result = (|| -> Result<(), String> {
         // Finish the original operation before consulting a new snapshot. A
         // commit-then-timeout may already have changed rebind_required to false.
-        if journal.has_unapplied_rebind(context).map_err(|e|e.to_string())? {
-            for operation in journal.lease_rebind_due(chrono::Utc::now().timestamp_millis(),context).map_err(|e|e.to_string())? {
-                let input: Value = serde_json::from_str(&operation.input_json).map_err(|e|e.to_string())?;
-                let text = |key:&str| input[key].as_str().map(str::to_owned).ok_or_else(||format!("rebind journal has no {key}"));
-                let request = KnownRebind {
-                    request_id:operation.request_id.clone(), delivery_id:text("delivery_id")?,
-                    occurrence_id:text("occurrence_id")?, reader_slot_id:text("reader_slot_id")?,
-                    expected_generation:input["wire"]["expected_delivery_generation"].as_i64().ok_or("rebind journal has no generation")?,
-                    factory_session:text("factory_session")?, recipient:text("recipient")?,
+        if journal
+            .has_unapplied_rebind(context)
+            .map_err(|e| e.to_string())?
+        {
+            for operation in journal
+                .lease_rebind_due(chrono::Utc::now().timestamp_millis(), context)
+                .map_err(|e| e.to_string())?
+            {
+                let input: Value =
+                    serde_json::from_str(&operation.input_json).map_err(|e| e.to_string())?;
+                let text = |key: &str| {
+                    input[key]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("rebind journal has no {key}"))
                 };
-                let applied = restore_rebound(cloud,journal,store,context,&request,evidence,deadline);
+                let request = KnownRebind {
+                    request_id: operation.request_id.clone(),
+                    delivery_id: text("delivery_id")?,
+                    occurrence_id: text("occurrence_id")?,
+                    reader_slot_id: text("reader_slot_id")?,
+                    expected_generation: input["wire"]["expected_delivery_generation"]
+                        .as_i64()
+                        .ok_or("rebind journal has no generation")?,
+                    factory_session: text("factory_session")?,
+                    recipient: text("recipient")?,
+                };
+                let applied =
+                    restore_rebound(cloud, journal, store, context, &request, evidence, deadline);
                 if applied.is_ok() {
-                    journal.mark_rebind_applied(&request.request_id,context).map_err(|e|e.to_string())?;
-                    report.restored+=1;
+                    journal
+                        .mark_rebind_applied(&request.request_id, context)
+                        .map_err(|e| e.to_string())?;
+                    report.restored += 1;
                 } else {
                     // Terminal refusals authorize no local effect. Retire their
                     // job so a later fresh discovery can observe a new generation.
-                    if journal.get(&request.request_id).map_err(|e|e.to_string())?.is_some_and(|op|op.stage=="terminal" && op.response_json.as_deref().and_then(|s|serde_json::from_str::<Value>(s).ok()).is_some_and(|v|v["code"]!="completed")) {
-                        journal.mark_rebind_applied(&request.request_id,context).map_err(|e|e.to_string())?;
+                    if journal
+                        .get(&request.request_id)
+                        .map_err(|e| e.to_string())?
+                        .is_some_and(|op| {
+                            op.stage == "terminal"
+                                && op
+                                    .response_json
+                                    .as_deref()
+                                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                                    .is_some_and(|v| v["code"] != "completed")
+                        })
+                    {
+                        journal
+                            .mark_rebind_applied(&request.request_id, context)
+                            .map_err(|e| e.to_string())?;
                     } else {
-                        journal.clear_lease(&request.request_id).map_err(|e|e.to_string())?;
+                        journal
+                            .clear_lease(&request.request_id)
+                            .map_err(|e| e.to_string())?;
                     }
                     applied?;
                 }
             }
             return Ok(());
         }
-        let response = cloud.recover(context,cursor,remaining(deadline)?).map_err(|e|e.message)?;
+        let response = cloud
+            .recover(context, cursor, remaining(deadline)?)
+            .map_err(|e| e.message)?;
         require_completed(&response)?;
-        let admissions: Vec<RecoverableAdmission> = serde_json::from_value(response["admissions"].clone()).map_err(|e|e.to_string())?;
-        if admissions.len()>25 { return Err("recovery page exceeds its bounded admission limit".into()); }
+        let admissions: Vec<RecoverableAdmission> =
+            serde_json::from_value(response["admissions"].clone()).map_err(|e| e.to_string())?;
+        if admissions.len() > 25 {
+            return Err("recovery page exceeds its bounded admission limit".into());
+        }
         for admission in admissions {
             validate_admission(&admission, context, evidence)?;
             if admission.recovery.rebind_required {
                 let d = &admission.delivery;
-                let identity = serde_json::to_vec(&json!(["delivery_rebind",context.project_id,
-                    context.registration_id,d.id,d.delivery_generation,destination.factory_session,destination.recipient]))
-                    .map_err(|e|e.to_string())?;
+                let identity = serde_json::to_vec(&json!([
+                    "delivery_rebind",
+                    context.project_id,
+                    context.registration_id,
+                    d.id,
+                    d.delivery_generation,
+                    destination.factory_session,
+                    destination.recipient
+                ]))
+                .map_err(|e| e.to_string())?;
                 use sha2::Digest;
                 let digest = sha2::Sha256::digest(identity);
-                let mut bytes = [0;16]; bytes.copy_from_slice(&digest[..16]);
+                let mut bytes = [0; 16];
+                bytes.copy_from_slice(&digest[..16]);
                 // A stable UUID is an operation key, never a reader identity.
-                let request = KnownRebind {request_id:uuid::Builder::from_random_bytes(bytes).into_uuid().to_string(),
-                    delivery_id:d.id.clone(),occurrence_id:d.occurrence_id.clone(),reader_slot_id:d.reader_slot_id.clone(),
-                    expected_generation:d.delivery_generation,factory_session:destination.factory_session.into(),recipient:destination.recipient.into()};
-                restore_rebound(cloud,journal,store,context,&request,evidence,deadline)?;
-                journal.mark_rebind_applied(&request.request_id,context).map_err(|e|e.to_string())?;
+                let request = KnownRebind {
+                    request_id: uuid::Builder::from_random_bytes(bytes)
+                        .into_uuid()
+                        .to_string(),
+                    delivery_id: d.id.clone(),
+                    occurrence_id: d.occurrence_id.clone(),
+                    reader_slot_id: d.reader_slot_id.clone(),
+                    expected_generation: d.delivery_generation,
+                    factory_session: destination.factory_session.into(),
+                    recipient: destination.recipient.into(),
+                };
+                restore_rebound(cloud, journal, store, context, &request, evidence, deadline)?;
+                journal
+                    .mark_rebind_applied(&request.request_id, context)
+                    .map_err(|e| e.to_string())?;
             } else {
-                let response = cloud.delivery(context,&admission.delivery.id,remaining(deadline)?).map_err(|e|e.message)?;
-                let fresh = decode_lookup(&response,context,evidence)?;
-                if fresh.delivery.id!=admission.delivery.id || fresh.delivery.occurrence_id!=admission.delivery.occurrence_id
-                    || fresh.delivery.reader_slot_id!=admission.delivery.reader_slot_id || fresh.target!=admission.target {
-                    return Err("delivery lookup changed immutable admission identity or target".into());
+                let response = cloud
+                    .delivery(context, &admission.delivery.id, remaining(deadline)?)
+                    .map_err(|e| e.message)?;
+                let fresh = decode_lookup(&response, context, evidence)?;
+                if fresh.delivery.id != admission.delivery.id
+                    || fresh.delivery.occurrence_id != admission.delivery.occurrence_id
+                    || fresh.delivery.reader_slot_id != admission.delivery.reader_slot_id
+                    || fresh.target != admission.target
+                {
+                    return Err(
+                        "delivery lookup changed immutable admission identity or target".into(),
+                    );
                 }
-                restore_lookup(store,context,destination.factory_session,destination.recipient,
-                    admission.delivery.delivery_generation,&fresh)?;
+                if fresh.delivery.delivery_generation != admission.delivery.delivery_generation
+                    || fresh.delivery.route_generation != admission.delivery.route_generation
+                    || fresh.delivery.route_kind != admission.delivery.route_kind
+                    || consumption(&fresh.delivery.consumption)?
+                        < consumption(&admission.delivery.consumption)?
+                {
+                    return Err("delivery lookup generation or consumption regressed".into());
+                }
+                restore_lookup(
+                    store,
+                    context,
+                    destination.factory_session,
+                    destination.recipient,
+                    admission.delivery.delivery_generation,
+                    &fresh,
+                )?;
             }
-            report.restored+=1;
+            report.restored += 1;
         }
         report.next_cursor = match &response["next_cursor"] {
             Value::Null => None,
@@ -93,70 +179,147 @@ pub(crate) fn recover_page(
         };
         Ok(())
     })();
-    if let Err(error)=result { report.errors.push(error); }
+    if let Err(error) = result {
+        report.errors.push(error);
+    }
     report
 }
 
 #[derive(Debug, Deserialize)]
-struct RecoverableAdmission { delivery:ReaderDelivery, target:ActivityTarget, recovery:RecoveryMode }
+struct RecoverableAdmission {
+    delivery: ReaderDelivery,
+    target: ActivityTarget,
+    recovery: RecoveryMode,
+}
 #[derive(Debug, Deserialize)]
-struct RecoveryMode { rebind_required:bool, mode:String }
+struct RecoveryMode {
+    rebind_required: bool,
+    mode: String,
+}
 
-fn validate_admission(admission:&RecoverableAdmission, context:&OperationContext,
-    evidence:&activation::BindingEvidence) -> Result<(),String> {
-    let d=&admission.delivery; let t=&admission.target;
-    if t.project_id!=context.project_id || t.external_ref.provider!="slack" {
+fn validate_admission(
+    admission: &RecoverableAdmission,
+    context: &OperationContext,
+    evidence: &activation::BindingEvidence,
+) -> Result<(), String> {
+    let d = &admission.delivery;
+    let t = &admission.target;
+    if t.project_id != context.project_id || t.external_ref.provider != "slack" {
         return Err("recovery target project/provider mismatch".into());
     }
-    evidence.require_managed(&t.external_ref.workspace_id,&t.external_ref.channel_id)?;
-    for id in [&d.id,&d.occurrence_id,&d.reader_slot_id,&t.resource_id] {
-        uuid::Uuid::parse_str(id).map_err(|_|"invalid recovery delivery identity")?;
+    evidence.require_managed(&t.external_ref.workspace_id, &t.external_ref.channel_id)?;
+    for id in [&d.id, &d.occurrence_id, &d.reader_slot_id, &t.resource_id] {
+        uuid::Uuid::parse_str(id).map_err(|_| "invalid recovery delivery identity")?;
     }
-    let state=consumption(&d.consumption)?;
-    let expected_mode=match state { VioletConsumption::Queued=>"resume",VioletConsumption::DispatchUncertain=>"recovery_notice",VioletConsumption::Consumed=>"none" };
-    if d.status!="admitted" || d.registration_id.is_empty() || d.delivery_generation<1 || d.route_generation<0
-        || !matches!(d.route_kind.as_str(),"owner"|"unclaimed_fanout") || admission.recovery.mode!=expected_mode
-        || (admission.recovery.rebind_required == (d.registration_id==context.registration_id)) {
+    let state = consumption(&d.consumption)?;
+    let expected_mode = match state {
+        VioletConsumption::Queued => "resume",
+        VioletConsumption::DispatchUncertain => "recovery_notice",
+        VioletConsumption::Consumed => "none",
+    };
+    if d.status != "admitted"
+        || d.registration_id.is_empty()
+        || d.delivery_generation < 1
+        || d.route_generation < 0
+        || !matches!(d.route_kind.as_str(), "owner" | "unclaimed_fanout")
+        || admission.recovery.mode != expected_mode
+        || (admission.recovery.rebind_required == (d.registration_id == context.registration_id))
+    {
         return Err("recovery registration/generation/mode mismatch".into());
     }
     Ok(())
 }
 
-fn decode_lookup(response:&Value, context:&OperationContext,evidence:&activation::BindingEvidence) -> Result<RecoverableAdmission,String> {
+fn decode_lookup(
+    response: &Value,
+    context: &OperationContext,
+    evidence: &activation::BindingEvidence,
+) -> Result<RecoverableAdmission, String> {
     require_completed(response)?;
-    let admission:RecoverableAdmission=serde_json::from_value(response["admission"].clone()).map_err(|e|e.to_string())?;
-    validate_admission(&admission,context,evidence)?;
-    let receipt:ReaderDelivery=serde_json::from_value(response["receipt"]["delivery"].clone()).map_err(|e|e.to_string())?;
-    if receipt!=admission.delivery || admission.recovery.rebind_required {
+    let admission: RecoverableAdmission =
+        serde_json::from_value(response["admission"].clone()).map_err(|e| e.to_string())?;
+    validate_admission(&admission, context, evidence)?;
+    let receipt: ReaderDelivery = serde_json::from_value(response["receipt"]["delivery"].clone())
+        .map_err(|e| e.to_string())?;
+    if receipt != admission.delivery || admission.recovery.rebind_required {
         return Err("delivery lookup lacks current registration receipt".into());
     }
     Ok(admission)
 }
 
-fn restore_rebound(cloud:&dyn ActivityRecoveryPort,journal:&SqliteRequestJournal,store:&SqliteVioletAdmissionStore,
-    context:&OperationContext,request:&KnownRebind,evidence:&activation::BindingEvidence,deadline:Instant) -> Result<(),String> {
-    let rebound=rebind_remote(cloud,journal,context,request,deadline)?;
-    let response=cloud.delivery(context,&request.delivery_id,remaining(deadline)?).map_err(|e|e.message)?;
-    let fresh=decode_lookup(&response,context,evidence)?;
-    if fresh.delivery.id!=rebound.id || fresh.delivery.occurrence_id!=rebound.occurrence_id
-        || fresh.delivery.reader_slot_id!=rebound.reader_slot_id || fresh.delivery.delivery_generation!=rebound.delivery_generation
-        || fresh.delivery.route_generation!=rebound.route_generation || fresh.delivery.route_kind!=rebound.route_kind
-        || consumption(&fresh.delivery.consumption)?<consumption(&rebound.consumption)? {
+fn restore_rebound(
+    cloud: &dyn ActivityRecoveryPort,
+    journal: &SqliteRequestJournal,
+    store: &SqliteVioletAdmissionStore,
+    context: &OperationContext,
+    request: &KnownRebind,
+    evidence: &activation::BindingEvidence,
+    deadline: Instant,
+) -> Result<(), String> {
+    let rebound = rebind_remote(cloud, journal, context, request, deadline)?;
+    let response = cloud
+        .delivery(context, &request.delivery_id, remaining(deadline)?)
+        .map_err(|e| e.message)?;
+    let fresh = decode_lookup(&response, context, evidence)?;
+    if fresh.delivery.id != rebound.id
+        || fresh.delivery.occurrence_id != rebound.occurrence_id
+        || fresh.delivery.reader_slot_id != rebound.reader_slot_id
+        || fresh.delivery.delivery_generation != rebound.delivery_generation
+        || fresh.delivery.route_generation != rebound.route_generation
+        || fresh.delivery.route_kind != rebound.route_kind
+        || consumption(&fresh.delivery.consumption)? < consumption(&rebound.consumption)?
+    {
         return Err("rebind lookup identity/generation regressed".into());
     }
-    restore_lookup(store,context,&request.factory_session,&request.recipient,request.expected_generation,&fresh)
+    restore_lookup(
+        store,
+        context,
+        &request.factory_session,
+        &request.recipient,
+        request.expected_generation,
+        &fresh,
+    )
 }
 
-fn restore_lookup(store:&SqliteVioletAdmissionStore,context:&OperationContext,session:&str,recipient:&str,
-    expected_generation:i64,admission:&RecoverableAdmission) -> Result<(),String> {
-    let leased=LeasedDelivery {delivery:admission.delivery.clone(),target:admission.target.clone(),lease_token:String::new()};
-    let target=&admission.target; let delivery=&admission.delivery;
-    let input=VioletAdmissionInput { delivery_id:delivery.id.clone(),occurrence_id:delivery.occurrence_id.clone(),
-        reader_slot_id:delivery.reader_slot_id.clone(),registration_id:context.registration_id.clone(),delivery_generation:delivery.delivery_generation,
-        route_generation:delivery.route_generation,project_id:context.project_id.clone(),target_json:serde_json::to_string(target).map_err(|e|e.to_string())?,
-        workspace_id:target.external_ref.workspace_id.clone(),channel_id:target.external_ref.channel_id.clone(),message_ts:target.message_ts.clone(),
-        factory_session:session.into(),recipient:recipient.into(),prompt:managed_activity_envelope(&leased),lease_token:String::new() };
-    store.restore_admitted(&input,expected_generation,consumption(&delivery.consumption)?).map_err(|e|e.to_string())?;
+fn restore_lookup(
+    store: &SqliteVioletAdmissionStore,
+    context: &OperationContext,
+    session: &str,
+    recipient: &str,
+    expected_generation: i64,
+    admission: &RecoverableAdmission,
+) -> Result<(), String> {
+    let leased = LeasedDelivery {
+        delivery: admission.delivery.clone(),
+        target: admission.target.clone(),
+        lease_token: String::new(),
+    };
+    let target = &admission.target;
+    let delivery = &admission.delivery;
+    let input = VioletAdmissionInput {
+        delivery_id: delivery.id.clone(),
+        occurrence_id: delivery.occurrence_id.clone(),
+        reader_slot_id: delivery.reader_slot_id.clone(),
+        registration_id: context.registration_id.clone(),
+        delivery_generation: delivery.delivery_generation,
+        route_generation: delivery.route_generation,
+        project_id: context.project_id.clone(),
+        target_json: serde_json::to_string(target).map_err(|e| e.to_string())?,
+        workspace_id: target.external_ref.workspace_id.clone(),
+        channel_id: target.external_ref.channel_id.clone(),
+        message_ts: target.message_ts.clone(),
+        factory_session: session.into(),
+        recipient: recipient.into(),
+        prompt: managed_activity_envelope(&leased),
+        lease_token: String::new(),
+    };
+    store
+        .restore_admitted(
+            &input,
+            expected_generation,
+            consumption(&delivery.consumption)?,
+        )
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -177,18 +340,36 @@ pub(crate) fn rebind_known(
     context: &OperationContext,
     request: &KnownRebind,
 ) -> Result<VioletRecoveryReceipt, String> {
-    let delivery = rebind_remote(cloud, journal, context, request, Instant::now()+TOTAL_REMOTE_BUDGET)?;
-    store.recover_known(&binding(&delivery, context, request), consumption(&delivery.consumption)?)
-        .map_err(|error|error.to_string())
+    let delivery = rebind_remote(
+        cloud,
+        journal,
+        context,
+        request,
+        Instant::now() + TOTAL_REMOTE_BUDGET,
+    )?;
+    store
+        .recover_known(
+            &binding(&delivery, context, request),
+            consumption(&delivery.consumption)?,
+        )
+        .map_err(|error| error.to_string())
 }
 
-fn binding(delivery: &ReaderDelivery, context: &OperationContext, request: &KnownRebind) -> VioletAdmissionRebind {
+fn binding(
+    delivery: &ReaderDelivery,
+    context: &OperationContext,
+    request: &KnownRebind,
+) -> VioletAdmissionRebind {
     VioletAdmissionRebind {
-        delivery_id: delivery.id.clone(), occurrence_id: delivery.occurrence_id.clone(),
-        reader_slot_id: delivery.reader_slot_id.clone(), project_id: context.project_id.clone(),
-        registration_id: context.registration_id.clone(), expected_generation:request.expected_generation,
-        delivery_generation:delivery.delivery_generation, factory_session:request.factory_session.clone(),
-        recipient:request.recipient.clone(),
+        delivery_id: delivery.id.clone(),
+        occurrence_id: delivery.occurrence_id.clone(),
+        reader_slot_id: delivery.reader_slot_id.clone(),
+        project_id: context.project_id.clone(),
+        registration_id: context.registration_id.clone(),
+        expected_generation: request.expected_generation,
+        delivery_generation: delivery.delivery_generation,
+        factory_session: request.factory_session.clone(),
+        recipient: request.recipient.clone(),
     }
 }
 
@@ -202,12 +383,23 @@ fn consumption(state: &str) -> Result<VioletConsumption, String> {
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, String> {
-    let timeout = deadline.saturating_duration_since(Instant::now()).min(CALL_REMOTE_BUDGET);
-    if timeout.is_zero() { Err("recovery remote budget exhausted".into()) } else { Ok(timeout) }
+    let timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .min(CALL_REMOTE_BUDGET);
+    if timeout.is_zero() {
+        Err("recovery remote budget exhausted".into())
+    } else {
+        Ok(timeout)
+    }
 }
 
-fn rebind_remote(cloud: &dyn CloudCoordinationPort, journal: &SqliteRequestJournal,
-    context: &OperationContext, request: &KnownRebind, deadline: Instant) -> Result<ReaderDelivery, String> {
+fn rebind_remote(
+    cloud: &dyn CloudCoordinationPort,
+    journal: &SqliteRequestJournal,
+    context: &OperationContext,
+    request: &KnownRebind,
+    deadline: Instant,
+) -> Result<ReaderDelivery, String> {
     // UUIDs are path inputs, not caller-controlled endpoint fragments.
     for id in [&request.request_id, &request.delivery_id] {
         uuid::Uuid::parse_str(id).map_err(|_| "invalid rebind request/delivery UUID")?;
@@ -258,7 +450,27 @@ fn rebind_remote(cloud: &dyn CloudCoordinationPort, journal: &SqliteRequestJourn
         } else {
             // Dispatch might have committed. Reconcile its original identity;
             // never issue another rebind or invent a new request ID.
-            cloud.lookup(&request.request_id, &context.registration_id, budget)
+            let lookup = cloud.lookup(&request.request_id, &context.registration_id, budget);
+            match lookup {
+                Ok(response)
+                    if response["schema"] == CONTRACT_SCHEMA
+                        && response["code"] == "not_found"
+                        && response["reason"] == "unknown_request" =>
+                {
+                    // A crash may precede the actual HTTP call. Cloud's
+                    // authoritative absence permits the SAME frozen request,
+                    // never a replacement UUID or changed input.
+                    cloud.post(
+                        &format!(
+                            "/api/coordination/activity/deliveries/{}/rebind",
+                            request.delivery_id
+                        ),
+                        &wire,
+                        remaining(deadline)?,
+                    )
+                }
+                other => other,
+            }
         };
         let response = remote.unwrap_or_else(|error| {
             json!({"schema":CONTRACT_SCHEMA,

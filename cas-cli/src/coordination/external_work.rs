@@ -298,34 +298,62 @@ impl SqliteRequestJournal {
         self.lease_scoped(limit, now_ms, lease_for, context, false)
     }
 
-    pub(crate) fn lease_rebind_due(&self, now_ms: i64, context: &OperationContext) -> Result<Vec<JournalOperation>, JournalError> {
+    pub(crate) fn lease_rebind_due(
+        &self,
+        now_ms: i64,
+        context: &OperationContext,
+    ) -> Result<Vec<JournalOperation>, JournalError> {
         self.lease_scoped(1, now_ms, Duration::from_secs(30), context, true)
     }
 
-    pub(crate) fn has_unapplied_rebind(&self, context: &OperationContext) -> Result<bool, JournalError> {
-        let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
-        conn.query_row("SELECT EXISTS(SELECT 1 FROM external_work_operations
+    pub(crate) fn has_unapplied_rebind(
+        &self,
+        context: &OperationContext,
+    ) -> Result<bool, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_work_operations
             WHERE kind='delivery_rebind' AND stage<>'applied'
               AND json_extract(input_json,'$.actor.registration_id')=?1
               AND json_extract(input_json,'$.project_id')=?2)",
-            params![context.registration_id,context.project_id], |r|r.get(0))
-            .map_err(|error|JournalError::Storage(error.to_string()))
+            params![context.registration_id, context.project_id],
+            |r| r.get(0),
+        )
+        .map_err(|error| JournalError::Storage(error.to_string()))
     }
 
-    pub(crate) fn mark_rebind_applied(&self, request_id: &str, context: &OperationContext) -> Result<(), JournalError> {
-        let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+    pub(crate) fn mark_rebind_applied(
+        &self,
+        request_id: &str,
+        context: &OperationContext,
+    ) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
         let changed = conn.execute("UPDATE external_work_operations SET stage='applied',lease_token=NULL,lease_until_ms=NULL
             WHERE request_id=?1 AND kind='delivery_rebind' AND stage IN ('terminal','applied')
               AND json_extract(input_json,'$.actor.registration_id')=?2
               AND json_extract(input_json,'$.project_id')=?3",
             params![request_id,context.registration_id,context.project_id])
             .map_err(|error|JournalError::Storage(error.to_string()))?;
-        if changed != 1 { return Err(JournalError::Missing(request_id.into())); }
+        if changed != 1 {
+            return Err(JournalError::Missing(request_id.into()));
+        }
         Ok(())
     }
 
-    fn lease_scoped(&self, limit: usize, now_ms: i64, lease_for: Duration,
-        context: &OperationContext, rebind: bool) -> Result<Vec<JournalOperation>, JournalError> {
+    fn lease_scoped(
+        &self,
+        limit: usize,
+        now_ms: i64,
+        lease_for: Duration,
+        context: &OperationContext,
+        rebind: bool,
+    ) -> Result<Vec<JournalOperation>, JournalError> {
         let limit = limit.clamp(1, RECONCILE_BATCH_LIMIT);
         let token = Uuid::new_v4().to_string();
         let mut conn = self
@@ -336,9 +364,15 @@ impl SqliteRequestJournal {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| JournalError::Storage(error.to_string()))?;
         let (stages, kinds) = if rebind {
-            ("('prepared','ready','retry_wait','dispatching','terminal')", "('delivery_rebind')")
+            (
+                "('prepared','ready','retry_wait','dispatching','terminal')",
+                "('delivery_rebind')",
+            )
         } else {
-            ("('prepared','retry_wait','dispatching')", "('claim','release_claim','transfer_claim','accept_claim')")
+            (
+                "('prepared','retry_wait','dispatching')",
+                "('claim','release_claim','transfer_claim','accept_claim')",
+            )
         };
         let request_ids = {
             let mut statement = transaction
@@ -350,7 +384,8 @@ impl SqliteRequestJournal {
                        AND json_extract(input_json, '$.project_id') = ?4
                        AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                        AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
-                     ORDER BY COALESCE(next_retry_ms, 0), created_at LIMIT ?2"))
+                     ORDER BY COALESCE(next_retry_ms, 0), created_at LIMIT ?2"
+                ))
                 .map_err(|error| JournalError::Storage(error.to_string()))?;
             statement
                 .query_map(
@@ -577,14 +612,23 @@ impl HttpCloudCoordinationPort {
         }
     }
 
-    pub(crate) fn get(&self, path: &str, query: &[(&str, &str)], timeout: Duration) -> Result<Value, RemoteError> {
+    pub(crate) fn get(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<Value, RemoteError> {
         if timeout.is_zero() || timeout > CALL_REMOTE_BUDGET {
-            return Err(RemoteError::unavailable("invalid bounded coordination GET budget"));
+            return Err(RemoteError::unavailable(
+                "invalid bounded coordination GET budget",
+            ));
         }
         let mut request = ureq::get(&format!("{}{path}", self.endpoint))
             .timeout(timeout)
             .set("Authorization", &format!("Bearer {}", self.token));
-        for (name, value) in query { request = request.query(name, value); }
+        for (name, value) in query {
+            request = request.query(name, value);
+        }
         match request.call() {
             Ok(response) | Err(ureq::Error::Status(_, response)) => Self::decode_response(response),
             Err(ureq::Error::Transport(error)) => {

@@ -78,6 +78,21 @@ mod tests {
     }
 
     #[test]
+    fn cas_c423_store_admitted_body_waits_for_confirmed_remote_uncertainty() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let admitted = store.admit(&row).unwrap();
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        assert!(queue.poll_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+            .unwrap().is_empty(), "admission ack alone must not authorize a body");
+        assert!(queue.surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+            .unwrap().is_empty(), "hooks must share the managed body barrier");
+        assert!(queue.queued_prompt(admitted.prompt_id).unwrap().is_some(),
+            "blocked body remains durable for the background receipt job");
+    }
+
+    #[test]
     fn cas_c423_store_admission_is_stable_across_lost_ack_restart_and_reader_fanout() {
         let root = tempfile::tempdir().unwrap();
         let row = input();

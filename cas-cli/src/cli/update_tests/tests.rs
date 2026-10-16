@@ -10,6 +10,68 @@ use std::thread;
 use crate::cli::Cli;
 use crate::ui::components::{Formatter, OutputMode};
 
+#[cfg(feature = "mcp-proxy")]
+fn cas_8235_fixture() -> crate::test_support::TestEnvGuard {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    for name in std::env::vars_os().map(|(name, _)| name).collect::<Vec<_>>() {
+        if name.to_string_lossy().starts_with("VIOLET_")
+            || name.to_string_lossy().starts_with(
+                cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix.as_str(),
+            )
+        {
+            env.remove(name);
+        }
+    }
+    let home = env.home().to_path_buf();
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    env.set("CAS_SKIP_FACTORY_TOOLING", "1");
+    env.set("SHELL", "/bin/bash");
+    env.set("VIOLET_SLACK_TOKEN_SOUNDWAVE", "cas-8235-private-fixture");
+    std::fs::write(home.join(".claude.json"), serde_json::json!({
+        "mcpServers": {"violet": {
+            "type": "http",
+            "url": cas_types::violet_compatibility::violet_hub_url(),
+            "headers": {"Authorization": "Bearer ${VIOLET_SLACK_TOKEN_SOUNDWAVE}"}
+        }}
+    }).to_string()).unwrap();
+    env
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn cas_8235_proxy(auth: &str) -> String {
+    format!("# keep this unmarked file\nallowlist = ['violet.violet_read', 'violet.violet_post']\n[servers.violet]\ntransport = 'http'\nurl = '{}'\nauth = '{auth}' # keep auth comment\n\n[servers.custom]\ntransport = 'http'\nurl = 'https://custom.example/mcp'\nauth = 'env:CUSTOM_TOKEN'\n",
+        cas_types::violet_compatibility::violet_hub_url())
+}
+
+#[test]
+#[cfg(feature = "mcp-proxy")]
+fn cas_8235_update_sync_repairs_unmarked_project_and_user_proxy_references() {
+    let mut env = cas_8235_fixture();
+    let project = env.home().join("project");
+    let root = crate::store::init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    let project_proxy = root.join("proxy.toml");
+    let user_proxy = cmcp_core::config::Scope::User.config_path().unwrap();
+    std::fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+    let original = cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY");
+    for path in [&project_proxy, &user_proxy] {
+        std::fs::write(path, &original).unwrap();
+    }
+    let mut args = update_test_args();
+    args.sync = true;
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    assert!(!output.contains("cas-8235-private-fixture"));
+    for path in [&project_proxy, &user_proxy] {
+        assert_eq!(std::fs::read_to_string(path).unwrap(),
+            original.replace("env:VIOLET_SLACK_TOKEN_CASSY_PROXY", "env:VIOLET_SLACK_TOKEN_SOUNDWAVE"),
+            "update left stale proxy reference in {}", path.display());
+    }
+    // Repeat the actual update operation: repairs must be idempotent.
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+}
+
 #[test]
 fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
     let env = crate::test_support::TestEnvGuard::temp_home();

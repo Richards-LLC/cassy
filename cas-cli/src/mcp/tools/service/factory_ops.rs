@@ -12292,7 +12292,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn upgraded_binary_under_a_pinned_daemon_still_queues_spawn_cas_cef2() {
-        use cas_store::SpawnQueueStore;
         use cas_types::TaskType;
         use std::os::unix::fs::PermissionsExt;
 
@@ -12357,7 +12356,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn pinned_provisioner_of_another_build_is_still_refused_cas_cef2() {
-        use cas_store::SpawnQueueStore;
         use std::os::unix::fs::PermissionsExt;
 
         let _env = crate::test_support::TestEnvGuard::temp_home();

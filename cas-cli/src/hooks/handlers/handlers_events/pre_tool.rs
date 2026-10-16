@@ -7181,6 +7181,102 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-7d68 (GH #1182 QA): a link the command itself creates does not
+    /// exist when the hook runs, so a single-command link-then-write
+    /// (`ln -s ../../.. up && echo x >> up/.cas/operator/write-policy.toml`)
+    /// used to resolve inside the worktree and pass. Through the real
+    /// PreToolUse handler, for worker and supervisor: every write is judged at
+    /// the destination the command's own links give it, a link may never
+    /// point at, into or above a Cassy policy path, a hard link is a write to
+    /// its target, and the link path itself is a write. Links and writes that
+    /// stay inside the permitted roots are unaffected.
+    #[cfg(unix)]
+    #[test]
+    fn cas_7d68_single_command_link_then_write_cannot_reach_policy_or_escape_roots() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let outside = home.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let project = home.join("projects/a");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::create_dir_all(cas_root.join("operator")).unwrap();
+        let worktree = cas_root.join("worktrees/brisk-otter-7");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-7d68");
+
+        let mut decide = |role: &str, command: &str| -> (String, String) {
+            env.set("CAS_AGENT_ROLE", role);
+            env.set("CAS_AGENT_NAME", format!("{role}-cas-7d68"));
+            let cwd = if role == "worker" {
+                env.set("CAS_CLONE_PATH", &worktree);
+                worktree.clone()
+            } else {
+                env.remove("CAS_CLONE_PATH");
+                project.clone()
+            };
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some(role.to_string()),
+                ..bash_input(command, &cwd)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        let outside_dir = outside.display().to_string();
+        // Worker cwd: <project>/.cas/worktrees/brisk-otter-7.
+        let worker_denied = [
+            "ln -s ../../.. up && echo x >> up/.cas/operator/write-policy.toml".to_string(),
+            "ln -s ../../.. up && echo x >> up/.cas/config.toml".to_string(),
+            "ln -s ../../config.toml cfg && echo x >> cfg".to_string(),
+            "ln -s ../../operator op; printf x > op/write-policy.toml".to_string(),
+            "ln -sfn ../.. c && cp /tmp/forged.toml c/config.toml".to_string(),
+            "ln -s ../../.. up && rm -rf up/.cas/operator".to_string(),
+            "ln ../../config.toml cfg".to_string(),
+            "mkdir -p d && ln -s ../../../.. d/up && echo x | tee -a d/up/.cas/operator/write-policy.toml".to_string(),
+            "sh -c 'ln -s ../../config.toml cfg && echo x >> cfg'".to_string(),
+            format!("ln -s {outside_dir} o && echo x > o/escaped.txt"),
+            format!("ln -s {outside_dir}/target.txt t && echo x > t"),
+            "ln -s \"$TARGET\" t && echo x > t".to_string(),
+        ];
+        for command in &worker_denied {
+            let (decision, reason) = decide("worker", command);
+            assert_eq!(decision, "deny", "worker must be refused `{command}`: {reason}");
+        }
+        // Supervisor cwd: the project's main checkout, which it may write.
+        let supervisor_denied = [
+            "ln -s .cas/operator op && echo x > op/write-policy.toml",
+            "ln -s .cas c && echo x >> c/config.toml",
+            "ln .cas/config.toml cfg && echo x >> cfg",
+            "ln -sf /tmp/forged.toml .cas/config.toml",
+            "ln -s ../.. up && echo x >> up/projects/a/.cas/operator/write-policy.toml",
+            "cd src && ln -s ../.cas/operator op",
+        ];
+        for command in supervisor_denied {
+            let (decision, reason) = decide("supervisor", command);
+            assert_eq!(decision, "deny", "supervisor must be refused `{command}`: {reason}");
+        }
+        for (role, command) in [
+            ("worker", "ln -s src s && echo x > s/new.rs"),
+            ("worker", "ln -sf ../src/lib.rs src/alias.rs"),
+            ("worker", "ln src/existing.rs src/hard.rs"),
+            ("supervisor", "ln -s src s && echo x > s/new.rs"),
+            ("supervisor", "cat .cas/config.toml"),
+        ] {
+            std::fs::write(worktree.join("src/existing.rs"), "x").unwrap();
+            let (decision, reason) = decide(role, command);
+            assert_ne!(decision, "deny", "{role} `{command}` stays allowed: {reason}");
+        }
+    }
+
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside
     /// its sanctioned roots and stale Cassy runtime files (sockets, locks,
     /// pid and session files) under ~/.cas; the supervisor may also clear

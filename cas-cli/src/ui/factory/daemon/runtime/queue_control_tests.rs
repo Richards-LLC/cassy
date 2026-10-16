@@ -64,17 +64,18 @@ fn cas_7b6b_reset_accounts_for_dequeued_completion_before_control_applies_it() {
             .iter()
             .any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed)
     });
-    assert!(
+    settle_until(|| {
         crate::store::open_prompt_queue_store(daemon.app.cas_dir())
             .unwrap()
             .peek_all(20)
             .unwrap()
             .iter()
-            .any(|row| row.target == daemon.app.supervisor_name()
-                && row.prompt.contains(&id.to_string())
-                && row.prompt.contains("re-issue")),
-        "late cancelled requests must be named to the supervisor"
-    );
+            .any(|row| {
+                row.target == daemon.app.supervisor_name()
+                    && row.prompt.contains(&id.to_string())
+                    && row.prompt.contains("re-issue")
+            })
+    });
 }
 
 #[test]
@@ -106,6 +107,11 @@ fn cas_7b6b_spawn_poll_touches_no_store_on_control() {
         super::super::prompt_queue_jobs::QueueJobs::start(root, daemon.app.project_scope());
     let before = wait_budget::store_access_violations();
     {
+        let progress = super::super::loop_watchdog::LoopProgress::new();
+        let _lane = super::super::loop_watchdog::enforced_daemon_step(
+            &progress,
+            super::super::loop_watchdog::LoopPhase::SpawnQueue,
+        );
         let _forbid = wait_budget::forbid_store_access();
         for _ in 0..8 {
             daemon.enqueue_spawn_requests().unwrap();
@@ -135,6 +141,8 @@ fn cas_7b6b_prompt_wake_gate_touches_no_store_on_control() {
     };
     let before = wait_budget::store_access_violations();
     {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
         let _forbid = wait_budget::forbid_store_access();
         let _ = daemon.worker_wait_state_for(&sender, "worker-a");
     }
@@ -168,6 +176,8 @@ fn cas_7b6b_held_writer_does_not_block_control_or_duplicate_spawn_requests() {
     }
     let before = wait_budget::store_access_violations();
     {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
         let _forbid = wait_budget::forbid_store_access();
         for _ in 0..8 {
             daemon.enqueue_spawn_requests().unwrap();
@@ -181,6 +191,8 @@ fn cas_7b6b_held_writer_does_not_block_control_or_duplicate_spawn_requests() {
     );
     writer.open();
     settle_until(|| {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
         let _forbid = wait_budget::forbid_store_access();
         daemon.enqueue_spawn_requests().unwrap();
         daemon.pending_spawns.len() == 2
@@ -294,6 +306,8 @@ fn cas_7b6b_carried_batch_gets_fresh_authority_and_wait_inputs_off_control() {
     let before = wait_budget::store_access_violations();
     let mut prepared = None;
     settle_until(|| {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
         let _forbid = wait_budget::forbid_store_access();
         prepared = preparation.advance(
             &mut daemon.queue_jobs,
@@ -308,6 +322,8 @@ fn cas_7b6b_carried_batch_gets_fresh_authority_and_wait_inputs_off_control() {
     assert_eq!(prepared.unwrap().rows[0].id, id);
     daemon.queue_jobs.prompt_preparation = preparation;
     {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
         let _forbid = wait_budget::forbid_store_access();
         let sender = daemon.wake_sender_for(Some(&origin));
         assert!(matches!(
@@ -402,6 +418,8 @@ fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
     // A second batch needs no new store read inside the bounded cadence.
     let before = wait_budget::store_access_violations();
     {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
         let _forbid = wait_budget::forbid_store_access();
         assert!(
             preparation

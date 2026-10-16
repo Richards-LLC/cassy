@@ -9665,7 +9665,10 @@ impl FactoryDaemon {
             reported: self.reported_stalled_spawn_requests.clone(),
         };
         let mut ingress = std::mem::take(&mut self.queue_jobs.spawn_ingress);
-        let submitted = ingress.advance(&mut self.queue_jobs, request, now);
+        let submitted = {
+            let _enforced_ingress = cas_store::lane_guard::enforce_here();
+            ingress.advance(&mut self.queue_jobs, request, now)
+        };
         let ready = ingress.take_ready();
         self.queue_jobs.spawn_ingress = ingress;
         if submitted && scan_stalls { self.last_spawn_queue_stall_scan = Some(now); }

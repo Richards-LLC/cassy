@@ -3002,7 +3002,7 @@ impl FactoryDaemon {
             }
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
-            // Completion-driven acceptance; the ingress owns the100ms cadence.
+            // Completion-driven acceptance; the ingress owns the 100ms cadence.
             let _ = self.enqueue_spawn_requests();
 
             // Process pending spawns (non-blocking: git ops run on background thread)

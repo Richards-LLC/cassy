@@ -542,6 +542,7 @@ class Run:
         evidence["assignment"] = assigned
         if assigned.get("is_error"):
             raise StepFailed("could not assign the scratch task to the sandbox worker")
+        evidence["worker_inbox"] = self.b.tool(self.names["bw"], "coordination", action="inbox_poll")
         before = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
         for action, agent, tool, arguments in [
             ("start", self.names["bw"], "task", {"action": "start", "id": task_id}),

@@ -6127,6 +6127,105 @@ mod workspace_contract_tests {
         }
     }
 
+    #[test]
+    fn cas_3b2f_policy_mentions_require_positive_tool_flags() {
+        let allowed = [
+            "grep -rn grant-write docs", "egrep -n grant-write docs",
+            "fgrep -n grant-write docs", "rg -n --hidden grant-write docs",
+            "cat -n grant-write.md", "head -n 20 grant-write.md",
+            "tail -n 20 grant-write.md", "wc -l grant-write.md",
+            "sort -nr grant-write.md", "uniq -c grant-write.md",
+            "cut -f 1 grant-write.md", "ls -la grant-write.md",
+            "echo -n grant-write", "printf '%s' grant-write",
+            "cd docs && grep grant-write .", "pwd -P; grep grant-write docs",
+            "true; grep grant-write docs", "false; grep grant-write docs",
+            "test -n grant-write", "[ -n grant-write ]",
+            "set -euo pipefail; grep grant-write docs",
+        ];
+        for command in allowed {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let tools = ["grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc",
+            "sort", "uniq", "cut", "ls", "echo", "printf", "cd", "pwd", "true",
+            "false", "test", "[", "set", "less", "more", "ag", "ack"];
+        let admitted: Vec<_> = tools.into_iter().map(|tool| format!("{tool} --zz-not-a-flag grant-write"))
+            .filter(|command| operator_policy_command_denial(command).is_none()).collect();
+        assert!(admitted.is_empty(), "unknown flags must fail closed: {admitted:?}");
+    }
+
+    #[test]
+    fn cas_3b2f_git_policy_mentions_require_subcommand_flags() {
+        for command in [
+            "git log --oneline -5 --grep grant-write",
+            "git show --stat HEAD -- grant-write.md",
+            "git diff --stat --name-only -- grant-write.md",
+            "git status --short -- grant-write.md", "git grep -n grant-write",
+            "git commit -m 'document grant-write' -q -s --allow-empty",
+            "git commit --message='document grant-write' --quiet --signoff",
+        ] {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let mut refused: Vec<String> = ["log", "show", "diff", "status", "grep", "commit"]
+            .into_iter().map(|sub| format!("git {sub} --zz-not-a-flag grant-write")).collect();
+        refused.extend([
+            "git -c color.ui=never log --grep grant-write",
+            "git --zz-not-a-global log --grep grant-write",
+            "git zz-not-a-subcommand grant-write",
+            "env git log --grep grant-write",
+        ].map(str::to_string));
+        let admitted: Vec<_> = refused.into_iter().filter(|command| operator_policy_command_denial(command).is_none()).collect();
+        assert!(admitted.is_empty(), "unlisted git forms must fail closed: {admitted:?}");
+    }
+
+    #[test]
+    fn cas_3b2f_only_tiny_xargs_search_prefix_is_allowed() {
+        for command in [
+            "find docs -name '*.md' | xargs grep -n grant-write",
+            "xargs -0 -r -n 2 -P 1 rg -n grant-write docs",
+            "xargs --null --no-run-if-empty grep -l grant-write",
+        ] {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let mut refused = vec![
+            "xargs --zz-not-a-flag grep grant-write".to_string(),
+            "xargs -zz grep grant-write".to_string(),
+            "xargs -n2 grep grant-write".to_string(),
+            "xargs cat grant-write.md".to_string(),
+            "xargs grep --zz-not-a-flag grant-write".to_string(),
+        ];
+        refused.extend(["env", "nice", "timeout 1", "sudo", "command", "exec", "stdbuf -oL"]
+            .map(|prefix| format!("{prefix} grep -n grant-write docs")));
+        let admitted: Vec<_> = refused.into_iter().filter(|command| operator_policy_command_denial(command).is_none()).collect();
+        assert!(admitted.is_empty(), "unlisted wrappers must fail closed: {admitted:?}");
+    }
+
+    #[test]
+    fn cas_3b2f_nonempty_statement_needs_a_command_word() {
+        assert!(read_only_statement(&[]));
+        for words in [vec!["command"], vec!["env", "--"], vec!["MODE=value"]] {
+            let words: Vec<String> = words.into_iter().map(str::to_string).collect();
+            assert!(!read_only_statement(&words), "nonempty statement: {words:?}");
+        }
+    }
+
+    #[test]
+    fn cas_3b2f_structural_reader_visits_benign_env_payload() {
+        let found = shell_invocations("env --split-string 'printf sample'");
+        assert!(found.iter().any(|(name, args)| name == "printf" && args == &["sample"]));
+    }
+
+    #[test]
+    fn cas_3b2f_duration_words_belong_only_to_timeout() {
+        for (words, expected) in [
+            (vec!["timeout", "2m", "printf", "sample"], 2),
+            (vec!["nohup", "2m", "sample"], 1),
+            (vec!["nice", "2", "sample"], 1),
+        ] {
+            let words: Vec<String> = words.into_iter().map(str::to_string).collect();
+            assert_eq!(unwrapped_command_index(&words), Some(expected), "{words:?}");
+        }
+    }
+
     /// cas-b7b2: read-only searches that merely mention grant-write are
     /// allowed (cas-1768 QA round 2, Normal F01), while every way of RUNNING a
     /// policy command through the same tools stays refused. Security review

@@ -14,9 +14,6 @@ use crate::coordination::external_work::{
 pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let journal = SqliteRequestJournal::open(cas_dir).map_err(|error| error.to_string())?;
-    if !journal.has_due(now_ms).map_err(|error| error.to_string())? {
-        return Ok(0);
-    }
 
     use crate::store::AgentStore;
     let session_id = std::env::var("CAS_SESSION_ID")
@@ -33,6 +30,13 @@ pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
     }
     let project_id = crate::cloud::resolve_canonical_id(cas_dir)
         .ok_or_else(|| "project has no canonical Cloud identity".to_string())?;
+    let context = OperationContext {
+        project_id,
+        registration_id: agent.id.clone(),
+    };
+    if !journal.has_due(now_ms, &context).map_err(|error| error.to_string())? {
+        return Ok(0);
+    }
     let cloud = crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_dir)
         .map_err(|error| error.to_string())?;
     let token = cloud
@@ -45,10 +49,7 @@ pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
         journal,
         Arc::new(HttpCloudCoordinationPort::new(cloud.endpoint, token)),
         violet,
-        OperationContext {
-            project_id,
-            registration_id: agent.id,
-        },
+        context,
     );
     reconcile_service_due(&service, now_ms)
 }

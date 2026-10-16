@@ -266,7 +266,7 @@ impl SqliteRequestJournal {
         load_operation(&*conn, request_id)
     }
 
-    pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {
+    pub fn has_due(&self, now_ms: i64, context: &OperationContext) -> Result<bool, JournalError> {
         let conn = self
             .conn
             .lock()
@@ -275,10 +275,13 @@ impl SqliteRequestJournal {
             "SELECT EXISTS(
                 SELECT 1 FROM external_work_operations
                 WHERE stage IN ('prepared','retry_wait','dispatching')
+                  AND kind IN ('claim','release_claim','transfer_claim','accept_claim')
+                  AND json_extract(input_json, '$.actor.registration_id') = ?2
+                  AND json_extract(input_json, '$.project_id') = ?3
                   AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                   AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
              )",
-            [now_ms],
+            params![now_ms, context.registration_id, context.project_id],
             |row| row.get(0),
         )
         .map_err(|error| JournalError::Storage(error.to_string()))
@@ -290,6 +293,7 @@ impl SqliteRequestJournal {
         limit: usize,
         now_ms: i64,
         lease_for: Duration,
+        context: &OperationContext,
     ) -> Result<Vec<JournalOperation>, JournalError> {
         let limit = limit.clamp(1, RECONCILE_BATCH_LIMIT);
         let token = Uuid::new_v4().to_string();
@@ -305,13 +309,16 @@ impl SqliteRequestJournal {
                 .prepare(
                     "SELECT request_id FROM external_work_operations
                      WHERE stage IN ('prepared','retry_wait','dispatching')
+                       AND kind IN ('claim','release_claim','transfer_claim','accept_claim')
+                       AND json_extract(input_json, '$.actor.registration_id') = ?3
+                       AND json_extract(input_json, '$.project_id') = ?4
                        AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                        AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
                      ORDER BY COALESCE(next_retry_ms, 0), created_at LIMIT ?2",
                 )
                 .map_err(|error| JournalError::Storage(error.to_string()))?;
             statement
-                .query_map(params![now_ms, limit as i64], |row| row.get::<_, String>(0))
+                .query_map(params![now_ms, limit as i64, context.registration_id, context.project_id], |row| row.get::<_, String>(0))
                 .map_err(|error| JournalError::Storage(error.to_string()))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| JournalError::Storage(error.to_string()))?
@@ -979,7 +986,7 @@ impl ExternalWorkService {
     pub fn reconcile_due(&self, now_ms: i64) -> Result<Vec<Value>, ExternalWorkError> {
         let rows = self
             .journal
-            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, Duration::from_secs(15))
+            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, Duration::from_secs(15), &self.context)
             .map_err(journal_error)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {

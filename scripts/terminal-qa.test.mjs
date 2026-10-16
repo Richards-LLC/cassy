@@ -19,6 +19,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, "terminal-qa.mjs");
 const fixture = (name) => path.join(here, "fixtures", "terminal-qa", name);
 
+function symlinkedBuiltinScript(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-qa-skills-link-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const skills = path.join(dir, "skills");
+  fs.symlinkSync(path.resolve(here, "../cas-cli/src/builtins/skills"), skills, "dir");
+  return path.join(skills, "cas-cli-craft", "scripts", "terminal-qa.mjs");
+}
+
 function tmpOut(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-qa-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -248,6 +256,17 @@ test("report.md opens with the receipt line and the receipt is the last stdout l
   assert.ok(json.runs.every((r) => fs.existsSync(path.resolve(r.files.ansi)) && fs.existsSync(path.resolve(r.files.txt))));
 });
 
+test("the built-in CLI craft runner prints its receipt through a symlinked skills directory", (t) => {
+  const linkedScript = symlinkedBuiltinScript(t);
+  const out = tmpOut(t);
+  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
+  assert.equal(cli.status, 0, cli.stderr + cli.stdout);
+  assert.match(cli.stdout, /^terminal-qa: PASS symlinked-runner · 4 runs · 0 fail · 0 warn · 0 allowed · .*report\.json/m);
+  const report = JSON.parse(fs.readFileSync(path.join(out, "report.json"), "utf8"));
+  assert.equal(report.verdict, "PASS");
+  assert.equal(report.runs.length, 4);
+});
+
 test("a FAIL verdict exits 1 and lists findings above the receipt", async (t) => {
   const out = tmpOut(t);
   const cli = spawnSync(process.execPath, [script, "--out", out, "--", fixture("wrapped-table.sh")], { encoding: "utf8" });
@@ -353,6 +372,20 @@ for (const [name, body] of [
     assert.doesNotMatch(cli.stdout, /terminal-qa: PASS/);
   });
 }
+
+test("an unavailable runner through a symlink exits nonzero and removes stale PASS", (t) => {
+  fakeScript(t, 'printf "script runner failed\\n" >&2; exit 1');
+  const linkedScript = symlinkedBuiltinScript(t);
+  const out = tmpOut(t);
+  fs.writeFileSync(path.join(out, "report.md"), "terminal-qa: PASS stale\n");
+  fs.writeFileSync(path.join(out, "report.json"), '{"verdict":"PASS"}');
+  const cli = spawnSync(process.execPath, [linkedScript, "--out", out, "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
+  assert.equal(cli.status, 2, cli.stderr + cli.stdout);
+  assert.match(cli.stderr, /pty unavailable/i);
+  assert.doesNotMatch(cli.stdout, /terminal-qa: PASS/);
+  assert.ok(!fs.existsSync(path.join(out, "report.md")));
+  assert.ok(!fs.existsSync(path.join(out, "report.json")));
+});
 
 test("JSON analysis retains stdout separately from diagnostic stderr", async (t) => {
   const out = tmpOut(t);

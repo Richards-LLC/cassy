@@ -77,7 +77,7 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
             .with_session(&id)
             .with_metadata(serde_json::json!({"source":"mcp_dispatch", "tool":tool, "action":action}));
         match events.record(&event) {
-            Ok(()) => permit.recorded = true,
+            Ok(_) => permit.recorded = true,
             Err(error) => tracing::debug!(%error, "worker MCP activity could not be recorded"),
         }
     }

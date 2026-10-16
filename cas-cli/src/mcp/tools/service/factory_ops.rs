@@ -7454,23 +7454,35 @@ fn eligible_artifact_tasks(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<std::collections::BTreeSet<String>, String> {
     let cutoff = now - chrono::Duration::days(7);
-    let references = serde_json::to_string(&tasks.iter()
-        .filter(|task| !task.is_terminal() || task.updated_at >= cutoff)
-        .collect::<Vec<_>>()).map_err(|error| error.to_string())?;
-    let artifacts = cas_store::SqliteArtifactStore::open(cas_root)
-        .map_err(|error| error.to_string())?;
+    let references = serde_json::to_string(
+        &tasks
+            .iter()
+            .filter(|task| !task.is_terminal() || task.updated_at >= cutoff)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+    let artifacts =
+        cas_store::SqliteArtifactStore::open(cas_root).map_err(|error| error.to_string())?;
     let mut eligible = std::collections::BTreeSet::new();
-    for task in tasks.iter().filter(|task| task.status == cas_types::TaskStatus::Closed
-        && task.closed_at.is_some_and(|closed| closed <= cutoff)) {
+    for task in tasks.iter().filter(|task| {
+        task.status == cas_types::TaskStatus::Closed
+            && task.closed_at.is_some_and(|closed| closed <= cutoff)
+    }) {
         if references.contains(&task.id) {
             continue;
         }
-        let published = artifacts.list_for_task(&task.id).map_err(|error| error.to_string())?;
+        let published = artifacts
+            .list_for_task(&task.id)
+            .map_err(|error| error.to_string())?;
         let referenced = published.iter().any(|artifact| {
             std::iter::once(Some(artifact.id.as_str()))
-                .chain([artifact.cloud_artifact_id.as_deref(), artifact.cloud_url.as_deref(),
-                        artifact.slack_permalink.as_deref()])
-                .flatten().any(|alias| !alias.is_empty() && references.contains(alias))
+                .chain([
+                    artifact.cloud_artifact_id.as_deref(),
+                    artifact.cloud_url.as_deref(),
+                    artifact.slack_permalink.as_deref(),
+                ])
+                .flatten()
+                .any(|alias| !alias.is_empty() && references.contains(alias))
         });
         if !referenced {
             eligible.insert(task.id.clone());
@@ -7489,7 +7501,11 @@ fn factory_artifact_cleanup(
     inventory.dry_run = !authorized;
     if authorized {
         for path in &inventory.closed {
-            if !path.file_name().and_then(|name| name.to_str()).is_some_and(|id| eligible.contains(id)) {
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|id| eligible.contains(id))
+            {
                 continue;
             }
             if std::fs::remove_dir_all(path).is_ok() {

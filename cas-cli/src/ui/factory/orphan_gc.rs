@@ -1086,16 +1086,23 @@ mod tests {
 
         // A wrapper sharing the runner's group must lose its child without
         // signalling that shared group (the npm-exec/node shape from GH #1248).
-        let pid = plant_orphan_command(&worktree,
-            "sh -c 'sleep 120 & echo $! > gc-child.pid; wait' >/dev/null 2>&1 </dev/null & echo $!");
+        let pid = plant_orphan_command(
+            &worktree,
+            "sh -c 'sleep 120 & echo $! > gc-child.pid; wait' >/dev/null 2>&1 </dev/null & echo $!",
+        );
         let _wrapper = PlantedProcess(pid);
         let deadline = Instant::now() + Duration::from_secs(5);
         let child = loop {
             if let Some(child) = std::fs::read_to_string(worktree.join("gc-child.pid"))
-                .ok().and_then(|pid| pid.trim().parse::<u32>().ok()) {
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+            {
                 break child;
             }
-            assert!(Instant::now() < deadline, "wrapper did not publish its child pid");
+            assert!(
+                Instant::now() < deadline,
+                "wrapper did not publish its child pid"
+            );
             std::thread::sleep(Duration::from_millis(25));
         };
         let _child = PlantedProcess(child);
@@ -1124,7 +1131,10 @@ mod tests {
             "a preview must never kill: pid {pid} should still be alive"
         );
 
-        assert!(crate::mcp::daemon::pid_alive(child), "preview killed the child");
+        assert!(
+            crate::mcp::daemon::pid_alive(child),
+            "preview killed the child"
+        );
 
         // Authorized run reaps the wrapper and its fingerprinted child.
         let done = cleanup(&cas_root, &report, true);
@@ -1132,11 +1142,15 @@ mod tests {
 
         for victim in [pid, child] {
             let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline && read_proc_stat(victim).is_some_and(|s| s.state != 'Z') {
+            while Instant::now() < deadline
+                && read_proc_stat(victim).is_some_and(|s| s.state != 'Z')
+            {
                 std::thread::sleep(Duration::from_millis(25));
             }
-            assert!(read_proc_stat(victim).is_none_or(|s| s.state == 'Z'),
-                "wrapper {pid} and child {child} must both be dead; survivor {victim}");
+            assert!(
+                read_proc_stat(victim).is_none_or(|s| s.state == 'Z'),
+                "wrapper {pid} and child {child} must both be dead; survivor {victim}"
+            );
         }
     }
 

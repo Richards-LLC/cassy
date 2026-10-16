@@ -5885,7 +5885,11 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
 
     let legacy = base.join(&closed_id);
     std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("historical-proof.txt"), "possibly shared evidence").unwrap();
+    std::fs::write(
+        legacy.join("historical-proof.txt"),
+        "possibly shared evidence",
+    )
+    .unwrap();
     let report = env
         .service
         .factory_request(Parameters(factory_req("gc_report")))
@@ -5904,10 +5908,15 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
     preview.dry_run = Some(false);
-    let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
+    let preview = env
+        .service
+        .factory_request(Parameters(preview))
+        .await
+        .unwrap();
     assert!(
         root.join(&closed_id).exists(),
-        "process-only force=true dry_run=false deleted durable evidence: {}", get_text(&preview)
+        "process-only force=true dry_run=false deleted durable evidence: {}",
+        get_text(&preview)
     );
 
     assert!(
@@ -5918,8 +5927,10 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         root.join("operator-review-stray").exists(),
         "stray inventory must never delete"
     );
-    assert!(legacy.join("historical-proof.txt").is_file(), "ambiguous legacy proof must never be cleaned by a project");
-
+    assert!(
+        legacy.join("historical-proof.txt").is_file(),
+        "ambiguous legacy proof must never be cleaned by a project"
+    );
 }
 
 #[tokio::test]
@@ -5927,9 +5938,14 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
     let env = FactoryTestEnv::new();
     let base = env.cas_root.join("durable-artifacts");
     let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
-    std::fs::write(env.cas_root.join("config.toml"), format!(
-        "[factory]\nartifacts_root = {:?}\n", base.display().to_string()
-    )).unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n",
+            base.display().to_string()
+        ),
+    )
+    .unwrap();
     let now = chrono::Utc::now();
     let old = now - chrono::Duration::days(8);
     let store = env.task_store();
@@ -5949,24 +5965,42 @@ async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248()
     let mut open = Task::new("cas-a005".into(), "open review".into());
     open.notes = "Review artifact://art-7a82".into();
     store.add(&open).unwrap();
-    cas_store::SqliteArtifactStore::open(&env.cas_root).unwrap().record_local(
-        &cas_store::NewArtifact {
-            id: "art-7a82".into(), task_id: "cas-a003".into(), name: "proof.txt".into(),
-            mime: "text/plain".into(), size_bytes: 16, sha256: "a".repeat(64),
-        }
-    ).unwrap();
+    cas_store::SqliteArtifactStore::open(&env.cas_root)
+        .unwrap()
+        .record_local(&cas_store::NewArtifact {
+            id: "art-7a82".into(),
+            task_id: "cas-a003".into(),
+            name: "proof.txt".into(),
+            mime: "text/plain".into(),
+            size_bytes: 16,
+            sha256: "a".repeat(64),
+        })
+        .unwrap();
 
     let mut request = factory_req("gc_cleanup");
     request.force = Some(true);
     request.dry_run = Some(false);
     request.artifacts = Some(true);
-    let result = env.service.factory_request(Parameters(request)).await.unwrap();
+    let result = env
+        .service
+        .factory_request(Parameters(request))
+        .await
+        .unwrap();
     let output = get_text(&result);
-    for (id, guard) in [("cas-a002", "7-day floor"), ("cas-a003", "open artifact reference"),
-                         ("cas-a004", "recent note reference")] {
-        assert!(root.join(id).join("proof.txt").is_file(), "{guard} lost evidence: {output}");
+    for (id, guard) in [
+        ("cas-a002", "7-day floor"),
+        ("cas-a003", "open artifact reference"),
+        ("cas-a004", "recent note reference"),
+    ] {
+        assert!(
+            root.join(id).join("proof.txt").is_file(),
+            "{guard} lost evidence: {output}"
+        );
     }
-    assert!(!root.join("cas-a001").exists(), "expired unreferenced evidence must be reclaimed: {output}");
+    assert!(
+        !root.join("cas-a001").exists(),
+        "expired unreferenced evidence must be reclaimed: {output}"
+    );
 }
 
 // Linux reclamation requires readable process evidence; unavailable evidence

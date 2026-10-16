@@ -114,4 +114,37 @@ fn cas_5c2c_review_pending_lifecycle_does_not_follow_unrelated_peer() {
     assert_eq!(report.recovered, 0);
     let rows = pq.peek_all(10).unwrap();
     assert!(rows.is_empty());
+    let result = emit_task_lifecycle_transition(
+        sq.as_ref(),
+        Some(pq.as_ref()),
+        agents.as_ref(),
+        "cas-fresh",
+        "Fresh",
+        cas_types::TaskStatus::Open,
+        cas_types::TaskStatus::InProgress,
+        "worker",
+        None,
+        LifecycleTransition::Started,
+        "fresh",
+    )
+    .unwrap();
+    assert!(matches!(result, crate::mcp::tools::core::task::lifecycle::supervisor_push::LifecyclePushResult::NoSupervisor));
+    assert!(sq.peek("operator", 10).unwrap().is_empty());
+    let mut successor = Agent::new_with_role(
+        "successor".into(),
+        owner.name.clone(),
+        AgentRole::Supervisor,
+    );
+    successor.factory_session = Some("successor-session".into());
+    agents.register(&successor).unwrap();
+    let report =
+        drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 10).unwrap();
+    assert_eq!(
+        report.recovered, 1,
+        "the same owner's successor may receive the saved transition"
+    );
+    let rows = pq.peek_all(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target, successor.name);
+    assert_eq!(rows[0].factory_session, successor.factory_session);
 }

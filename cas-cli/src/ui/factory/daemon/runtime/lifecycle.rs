@@ -1726,7 +1726,10 @@ mod worker_attention_tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target, "operator");
-        assert!(rows[0].prompt.contains("`factory action=worker_status`"));
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&rows[0].prompt).unwrap();
+        // pin: operator fallback must provide the harness-neutral recovery command.
+        assert!(payload.message.contains("`factory action=worker_status`"));
         assert!(!rows[0].prompt.contains("mcp__"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }

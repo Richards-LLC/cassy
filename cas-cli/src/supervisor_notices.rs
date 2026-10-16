@@ -151,11 +151,11 @@ pub(crate) fn adopt_operator_notices(
 ) -> Result<(), crate::error::CasError> {
     let sq = open_supervisor_queue_store(root)?;
     let pq = open_prompt_queue_store(root)?;
+    let mut adopted = 0;
     for notice in sq
         .list_pending("operator")?
         .into_iter()
         .filter(|n| n.event_type == "supervisor_notice" && n.prompt_delivered_at.is_none())
-        .take(10)
     {
         let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
         let Some(kind) = payload.get("kind").and_then(|v| v.as_str()) else {
@@ -181,6 +181,10 @@ pub(crate) fn adopt_operator_notices(
         )?;
         sq.mark_prompt_delivered(notice.id)?;
         sq.ack(notice.id)?;
+        adopted += 1;
+        if adopted == 10 {
+            break;
+        }
     }
     Ok(())
 }

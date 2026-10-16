@@ -4,6 +4,36 @@ use serde_json::json;
 
 const REPO: &str = "github.com/acme/widgets";
 
+#[test]
+fn cas_cd42_board_exposes_claim_owned_epic_target_roots_and_unknown_prs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut epic = crate::types::Task::new("cas-epic".into(), "Epic lane".into());
+    epic.task_type = crate::types::TaskType::Epic;
+    epic.branch = Some("epic/lane".into());
+    tasks.add(&epic).unwrap();
+    let mut owner = agent("sup", "supervisor", "lane", "alpha", REPO, 1);
+    owner.metadata.insert("clone_path".into(), "/alpha/worktree".into());
+    owner.metadata.insert("scratch_root".into(), "/alpha/scratch".into());
+    let agents = vec![owner, agent("remote", "supervisor", "lane", "beta", REPO, 400)];
+    let locks = vec![lease("cas-epic", "sup", LeaseStatus::Active, 600)];
+    let details = assemble_peer_details(
+        peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
+        &agents, &locks, &[], tasks.as_ref(), Some("test-user"), Utc::now(),
+    );
+    let data = serde_json::to_value(&details).unwrap();
+    assert_eq!(data[0]["worktree_root"], "/alpha/worktree");
+    assert_eq!(data[0]["scratch_root"], "/alpha/scratch");
+    assert_eq!(data[0]["epics"][0]["task_id"], "cas-epic");
+    assert_eq!(data[0]["epics"][0]["target_branch"], "epic/lane");
+    assert_eq!(data[0]["epics"][0]["owner"], "sup");
+    assert_eq!(data[0]["prs_status"]["state"], "unavailable");
+    assert!(data[0]["prs"].as_array().unwrap().is_empty());
+    assert_eq!(data[1]["observations_status"]["state"], "stale");
+    assert!(data[1]["observations_status"]["observed_at"].is_string());
+}
+
 fn agent(id: &str, role: &str, session: &str, machine: &str, repo: &str, age: i64) -> AgentInfo {
     serde_json::from_value(json!({
         "id": id, "name": id, "agent_type": "worker", "status": "active",

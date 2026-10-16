@@ -480,6 +480,9 @@ fn worker_credential_grant_nonce() -> &'static str {
         .as_str()
 }
 
+/// Red-first stub (cas-033a).
+const CAS_033A_RED_STUB: bool = true;
+
 fn push_factory_worker_metadata_env(
     env: &mut Vec<(String, String)>,
     role: &str,
@@ -1310,6 +1313,13 @@ impl PtyConfig {
                 "CLAUDE_PROJECT_DIR".to_string(),
                 cwd.to_string_lossy().to_string(),
             ));
+            // cas-033a: like the Codex, Grok and OpenCode workers, a Claude
+            // worker names its own harness. Without this it inherited the
+            // supervisor's default worker CLI (e.g. codex), its registry row
+            // recorded that, and recycle relaunched it on the wrong harness.
+            if !CAS_033A_RED_STUB {
+                env.push(("CAS_FACTORY_WORKER_CLI".to_string(), "claude".to_string()));
+            }
         }
 
         // Set CAS_ROOT env var if provided (enables workers in clones to use main's .cas)
@@ -6649,6 +6659,45 @@ mod tests {
              always leaves None: {:?}",
             config.env
         );
+    }
+
+    /// cas-033a: a Claude worker names its own harness, so the supervisor's
+    /// inherited default worker CLI (e.g. codex) can no longer reach its
+    /// registry row; the supervisor role keeps its "my workers' CLI" value.
+    #[test]
+    fn claude_worker_tags_its_own_harness_cas_033a() {
+        let last = |config: &PtyConfig| {
+            config
+                .env
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "CAS_FACTORY_WORKER_CLI")
+                .map(|(_, v)| v.clone())
+        };
+        let worker = PtyConfig::claude(
+            "test-agent",
+            "worker",
+            PathBuf::from("/tmp"),
+            None,
+            Some("supervisor"),
+            None, // factory_worker_cli — always None on the real worker spawn path
+            Some("claude-opus-5-5"),
+            Some("high"),
+            None,
+        );
+        assert_eq!(last(&worker).as_deref(), Some("claude"), "{:?}", worker.env);
+        let supervisor = PtyConfig::claude(
+            "test-supervisor",
+            "supervisor",
+            PathBuf::from("/tmp"),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(last(&supervisor).as_deref(), Some("codex"), "{:?}", supervisor.env);
     }
 
     /// The supervisor path passes `factory_worker_cli = Some(<workers' cli>)`

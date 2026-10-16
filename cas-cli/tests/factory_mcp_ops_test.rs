@@ -2782,6 +2782,85 @@ async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
     assert_eq!(spec.config_dir.as_deref(), Some(account_dir.to_str().unwrap()));
 }
 
+/// cas-033a: register a recyclable worker with recorded recipe `metadata`.
+fn register_recyclable_worker(env: &FactoryTestEnv, name: &str, recipe: &[(&str, &str)]) {
+    let worker_path = init_sync_repo(env, name);
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    for (key, value) in recipe {
+        metadata.insert((*key).to_string(), (*value).to_string());
+    }
+    let worker_id = env.register_worker_with_metadata(name, metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some("session-recycle".to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+}
+
+/// cas-033a AC1 (GH: clever-panther-60, golden-stork-66): a Claude worker
+/// whose row recorded the supervisor's inherited `worker_cli=codex` is
+/// recycled on Claude with its own model, effort and account.
+#[tokio::test]
+async fn test_recycle_worker_relaunches_a_claude_worker_on_claude_cas_033a() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle")]);
+    let env = FactoryTestEnv::new();
+    let account_dir = env.cas_root.join("claude-account");
+    let account = account_dir.display().to_string();
+    register_recyclable_worker(
+        &env,
+        "clever-panther-60",
+        &[
+            ("worker_cli", "codex"),
+            ("worker_model", "claude-opus-5-5"),
+            ("worker_effort", "high"),
+            ("worker_account_dir", &account),
+        ],
+    );
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("clever-panther-60".to_string());
+    env.service
+        .factory_request(Parameters(req))
+        .await
+        .expect("a Claude worker is recyclable");
+    let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
+    assert_eq!(entries.len(), 1);
+    let spec = entries[0]
+        .worker_spec
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok())
+        .expect("recycle carries the recipe");
+    assert_eq!(spec.cli, SupervisorCli::Claude);
+    assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    assert_eq!(spec.config_dir.as_deref(), Some(account.as_str()));
+}
+
+/// cas-033a AC2: a recorded recipe the routing policy refuses is refused by
+/// recycle_worker itself, while the worker still runs: nothing is queued, so
+/// the daemon never stops it.
+#[tokio::test]
+async fn test_recycle_worker_refuses_an_unlaunchable_recipe_before_stopping_cas_033a() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle")]);
+    let env = FactoryTestEnv::new();
+    register_recyclable_worker(
+        &env,
+        "haiku-worker",
+        &[("worker_cli", "claude"), ("worker_model", "claude-haiku-4-5")],
+    );
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("haiku-worker".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .expect_err("an unlaunchable recipe is refused");
+    assert!(error.message.contains("Nothing was stopped or queued"), "{error:?}");
+    assert!(error.message.contains("routing policy violation"), "{error:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek").is_empty(),
+        "no lifecycle request reaches the daemon"
+    );
+}
+
 /// A worker checkout whose `factory/<worker>` branch is pushed to a bare
 /// `origin`, so the push-branch safety probe sees `unpushed_commits=0`
 /// (cas-a622).

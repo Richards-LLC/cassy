@@ -219,7 +219,12 @@ impl NeonClient for LiveNeonClient {
 #[cfg(feature = "mcp-proxy")]
 impl NeonClient for LiveNeonClient {
     fn list_organizations(&self) -> Result<Vec<NeonOrg>> {
-        let value = self.inner.call("list_organizations", None)?;
+        // Neon requires `params.arguments` to be an object even when this
+        // tool has no inputs. `None` omits the JSON-RPC field and triggers
+        // -32602 on strict MCP servers.
+        let value = self
+            .inner
+            .call("list_organizations", Some(serde_json::Map::new()))?;
         parse_list_organizations(&value)
     }
 

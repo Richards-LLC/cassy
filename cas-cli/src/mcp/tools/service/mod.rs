@@ -139,7 +139,8 @@ pub struct CasService {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     /// Keep late context available for a later response instead of dropping mail.
-    factory_context: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
+    factory_context:
+        std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Option<String>>>>>,
     message_sweep_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -1637,10 +1638,10 @@ mod external_verification;
 pub(crate) mod factory_ops;
 mod factory_remind;
 pub(crate) mod harness_observation;
+pub(crate) mod mutation_receipt;
 pub(crate) mod opencode_liveness;
 pub(crate) mod orphan_recovery;
 mod panic_catch;
-pub(crate) mod mutation_receipt;
 #[cfg(test)]
 mod panic_regression_test;
 
@@ -1905,6 +1906,192 @@ mod tests {
             "token=",
         ] {
             assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+        }
+    }
+
+    /// GH #1239: the Neon MCP contract requires `tools/call.params.arguments`
+    /// to be an object even for tools with no inputs. Exercise the real
+    /// stdio adapter and the follow-on supervisor branch provisioning path
+    /// against a fixture that returns -32602 for omitted/non-object args.
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn neon_strict_mcp_arguments_support_integrations_and_db_branch_create() {
+        use crate::cli::integrate::{
+            neon::{self, InitChoices, LiveNeonClient, RefreshOpts},
+            types::{IntegrationAction, IntegrationStatus},
+        };
+        use crate::types::Task;
+        use cmcp_core::config::{Config as ProxyConfig, ExternalToolConfig, ServerConfig};
+        use std::{collections::HashMap, sync::Arc};
+
+        if !std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            eprintln!("python3 not on PATH — skipping strict Neon MCP fixture test");
+            return;
+        }
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_SESSION_ID", "neon-fixture-supervisor");
+
+        let repo_root = env.home().join("fixture-repo");
+        let cas_root = repo_root.join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        env.set("CAS_ROOT", &cas_root);
+        std::fs::write(
+            repo_root.join("package.json"),
+            r#"{"dependencies":{"@neondatabase/serverless":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        let call_log = env.home().join("strict-neon-calls.jsonl");
+        let fixture =
+            crate::test_paths::crate_root().join("tests/fixtures/mock_mcp_neon_strict_server.py");
+        assert!(
+            fixture.is_file(),
+            "strict Neon fixture missing: {}",
+            fixture.display()
+        );
+        let server = ServerConfig::Stdio {
+            command: "python3".to_string(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            env: HashMap::from([(
+                "NEON_CALL_LOG".to_string(),
+                call_log.to_string_lossy().into_owned(),
+            )]),
+        };
+        let mut live_config = ProxyConfig::default();
+        live_config
+            .servers
+            .insert("neon".to_string(), server.clone());
+        live_config.save_to(&cas_root.join("proxy.toml")).unwrap();
+
+        // These are the production Neon actions: init must discover the org
+        // and project, refresh re-fetches project data, and verify confirms
+        // every recorded branch. The strict fixture makes any missing args
+        // object observable as MCP error -32602.
+        {
+            let client = LiveNeonClient::new();
+            let initialized = neon::init(&repo_root, &client, InitChoices::default()).unwrap();
+            assert_eq!(initialized.action, IntegrationAction::Init);
+            assert_eq!(initialized.status, IntegrationStatus::Configured);
+
+            let refreshed =
+                neon::refresh(&repo_root, &client, RefreshOpts { update_ids: true }).unwrap();
+            assert_eq!(refreshed.action, IntegrationAction::Refresh);
+            assert_eq!(refreshed.status, IntegrationStatus::Refreshed);
+
+            let verified = neon::verify(&repo_root, &client).unwrap();
+            assert_eq!(verified.action, IntegrationAction::Verify);
+            assert_eq!(verified.status, IntegrationStatus::AlreadyConfigured);
+        }
+
+        // `db_branch_create` reads the project/parent IDs that init recorded,
+        // then calls list_branches, create_branch, and get_connection_string
+        // through the real proxy path.
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        core.register_agent(
+            "neon-fixture-supervisor".to_string(),
+            "neon fixture supervisor".to_string(),
+            None,
+        )
+        .unwrap();
+        let worker_name = "neon-fixture-worker";
+        let worktree = cas_root.join("worktrees").join(worker_name);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git_init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&worktree)
+            .status()
+            .unwrap();
+        assert!(git_init.success(), "git init failed for fixture worktree");
+
+        let mut task = Task::new(
+            "cas-neon-fixture".to_string(),
+            "Neon fixture task".to_string(),
+        );
+        task.assignee = Some(worker_name.to_string());
+        core.open_task_store().unwrap().add(&task).unwrap();
+
+        let mut service_config = live_config;
+        service_config.allowlist =
+            vec![ExternalToolConfig::parse_allowlist_entry("supervisor:neon.*").unwrap()];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = Arc::new(
+            runtime
+                .block_on(cmcp_core::ProxyEngine::from_configs(
+                    service_config.servers.clone(),
+                ))
+                .unwrap(),
+        );
+        runtime.block_on(crate::mcp::server::install_proxy_policy(
+            &engine,
+            &service_config,
+        ));
+        let service = CasService::new(core, Some(engine.clone()));
+        let request: CoordinationRequest = serde_json::from_value(serde_json::json!({
+            "action": "db_branch_create",
+            "task_id": "cas-neon-fixture",
+            "target": worker_name
+        }))
+        .unwrap();
+        let created = runtime
+            .block_on(service.db_branch_create(&request))
+            .expect("db_branch_create should work after init with the strict Neon server");
+        let rendered = serde_json::to_string(&created).unwrap();
+        assert!(rendered.contains("Created Neon branch"), "{rendered}");
+        let env_file = worktree.join(crate::db_branch::ENV_FILE);
+        assert!(
+            env_file.is_file(),
+            "db_branch_create did not write the worker env file"
+        );
+        assert!(
+            std::fs::read_to_string(&env_file)
+                .unwrap()
+                .contains("CAS_DB_BRANCH_ID=br-task-fixture"),
+            "db_branch_create wrote an unexpected branch record"
+        );
+        drop(service);
+        runtime.block_on(engine.shutdown());
+        drop(engine);
+        drop(runtime);
+
+        let calls = std::fs::read_to_string(&call_log).unwrap();
+        let calls: Vec<serde_json::Value> = calls
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            calls.len() >= 8,
+            "not all Neon calls were exercised: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call["arguments"].is_object()),
+            "every Neon call must send an object: {calls:?}"
+        );
+        let org_list = calls
+            .iter()
+            .find(|call| call["tool"] == "list_organizations")
+            .expect("init should list organizations");
+        assert_eq!(org_list["arguments"], serde_json::json!({}));
+        for tool in [
+            "list_projects",
+            "describe_project",
+            "describe_branch",
+            "list_branches",
+            "create_branch",
+            "get_connection_string",
+        ] {
+            assert!(
+                calls.iter().any(|call| call["tool"] == tool),
+                "missing Neon call {tool}: {calls:?}"
+            );
         }
     }
 }

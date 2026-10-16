@@ -3275,10 +3275,14 @@ mod tests {
         );
         assert_eq!(receipt.hub.state, ObservationState::Unknown);
         assert_eq!(receipt.serve_publication.state, ObservationState::Unknown);
+        // Phase B supports Cloud presence; this local, read-only probe has no
+        // authenticated Cloud snapshot and therefore cannot know its health.
         assert_eq!(
             receipt.independent_monitoring.state,
-            ObservationState::Unsupported
+            ObservationState::Unknown
         );
+        // pin: local diagnostic receipts name why remote monitoring is unknown.
+        assert_eq!(receipt.independent_monitoring.reason, "cloud_snapshot_required");
         assert!(!home.path().join(".cas").exists());
     }
 

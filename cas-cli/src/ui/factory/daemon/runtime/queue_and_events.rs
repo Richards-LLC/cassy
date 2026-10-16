@@ -4384,8 +4384,8 @@ impl FactoryDaemon {
             let live = self.queue_jobs.poison_jobs.epoch(pane);
             self.queue_jobs.poison_jobs.pointers.insert(key, PendingPointer {
                 work: PointerWork { cas_dir: self.app.cas_dir().to_path_buf(), row,
-                    recipient: if pane == &supervisor { "supervisor".into() } else { recipient },
-                    source, primary: primary.clone(), config_dir, live },
+                    inbox_target: if pane == &supervisor { "supervisor".into() } else { recipient.clone() },
+                    recipient, source, primary: primary.clone(), config_dir, live },
                 phase: PointerPhase::Claim, retry_at: Instant::now(),
             });
         }
@@ -4536,7 +4536,7 @@ impl FactoryDaemon {
     fn decide_idle_unread_probe(&mut self, context: message_attention::AttentionInputs,
         candidates: Vec<super::delivery_probe_jobs::IdleCandidate>)
     {
-        let current: HashSet<_> = candidates.iter().map(|candidate| candidate.row.id).collect();
+        let current: std::collections::HashSet<_> = candidates.iter().map(|candidate| candidate.row.id).collect();
         self.queue_jobs.poison_jobs.idle_relayed.retain(|id| current.contains(id));
         for candidate in candidates {
             let row = &candidate.row;

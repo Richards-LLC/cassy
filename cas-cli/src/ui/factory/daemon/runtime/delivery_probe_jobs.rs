@@ -252,7 +252,7 @@ pub(crate) fn write_idle_unread(
                 "cas-913c: relayed an unread message on an idle worker to the supervisor");
             true
         }
-        Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => true
+        Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => true,
         Err(error) => {
             tracing::warn!(message_id=row.id, %error, "cas-913c: failed to relay an unread message on an idle worker");
             false

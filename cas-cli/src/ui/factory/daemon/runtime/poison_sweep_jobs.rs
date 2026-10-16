@@ -36,6 +36,7 @@ pub(crate) struct PointerWork {
     pub(crate) cas_dir: std::path::PathBuf,
     pub(crate) row: cas_store::QueuedPrompt,
     pub(crate) recipient: String,
+    pub(crate) inbox_target: String,
     pub(crate) source: String,
     pub(crate) primary: Arc<TeamsManager>,
     pub(crate) config_dir: Option<String>,
@@ -88,8 +89,8 @@ pub(crate) fn file_pointer(work: &PointerWork) -> bool {
     if !work.live.load(Ordering::Acquire) { return false; }
     let Ok(queue) = crate::store::open_prompt_queue_store(&work.cas_dir) else { return false; };
     let Ok(Some(row)) = queue.queued_prompt(work.row.id) else { return false; };
-    if !same_message(&row, &work.row) || row.acked_at.is_some() { return false; }
-    let pane = &work.recipient;
+    if !same_message(&row, &work.row) || (row.target != "all_workers" && row.acked_at.is_some()) { return false; }
+    let pane = &work.inbox_target;
     let view = work.primary.view_for_config_dir(work.config_dir.as_deref());
     let view = view.filter(|view| {
         view.provision_mirror_from(&work.primary, pane).map_err(|error| {

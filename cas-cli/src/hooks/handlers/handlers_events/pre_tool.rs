@@ -3482,6 +3482,160 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
     targets
 }
 
+/// cas-7d68: one link a shell command creates, with its operands as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellLink {
+    /// Where the link is created.
+    link: String,
+    /// What it points at (symbolic) or the file it shares (hard).
+    destination: String,
+    symbolic: bool,
+    /// `ln -r`: a symbolic destination is read relative to the cwd, not to
+    /// the link's directory.
+    destination_from_cwd: bool,
+}
+
+/// cas-7d68: every link `ln`, `link` (and `cp -s`/`cp -l`) creates in a shell
+/// command, however wrapped (see [`shell_invocations`]). A link does not
+/// exist when the hook runs, so the caller judges its destination and the
+/// writes made through it, instead of resolving the link on disk.
+fn bash_link_creations(command: &str, cwd: &Path) -> Vec<ShellLink> {
+    let mut links = Vec::new();
+    for (name, args) in shell_invocations(command) {
+        if !matches!(name.as_str(), "ln" | "link" | "cp") {
+            continue;
+        }
+        let mut symbolic = false;
+        let mut hard = name != "cp";
+        let mut relative = false;
+        let mut no_target_directory = false;
+        let mut target_directory: Option<String> = None;
+        let mut operands = Vec::new();
+        let mut index = 0;
+        let mut options_done = false;
+        while index < args.len() {
+            let arg = &args[index];
+            index += 1;
+            if options_done || arg == "-" || !arg.starts_with('-') {
+                operands.push(arg.clone());
+                continue;
+            }
+            if arg == "--" {
+                options_done = true;
+                continue;
+            }
+            if let Some(long) = arg.strip_prefix("--") {
+                let (key, value) = match long.split_once('=') {
+                    Some((key, value)) => (key, Some(value.to_string())),
+                    None => (long, None),
+                };
+                match key {
+                    "symbolic" | "symbolic-link" => symbolic = true,
+                    "link" => hard = true,
+                    "relative" => relative = true,
+                    "no-target-directory" => no_target_directory = true,
+                    "target-directory" => {
+                        target_directory = value.or_else(|| {
+                            index += 1;
+                            args.get(index - 1).cloned()
+                        });
+                    }
+                    "suffix" if value.is_none() => index += 1,
+                    _ => {}
+                }
+                continue;
+            }
+            for (position, flag) in arg.char_indices().skip(1) {
+                match flag {
+                    's' => symbolic = true,
+                    'l' if name == "cp" => hard = true,
+                    'r' if name == "ln" => relative = true,
+                    'T' => no_target_directory = true,
+                    't' | 'S' => {
+                        let attached = &arg[position + 1..];
+                        let value = if attached.is_empty() {
+                            index += 1;
+                            args.get(index - 1).cloned()
+                        } else {
+                            Some(attached.to_string())
+                        };
+                        if flag == 't' {
+                            target_directory = value;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !symbolic && !hard {
+            continue;
+        }
+        let basename = |destination: &str| {
+            Path::new(destination)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(destination)
+                .to_string()
+        };
+        let into = |directory: &str, destination: &str| {
+            Path::new(directory).join(basename(destination)).display().to_string()
+        };
+        let pairs: Vec<(String, String)> = if let Some(directory) = target_directory {
+            operands.iter().map(|destination| (into(&directory, destination), destination.clone())).collect()
+        } else if operands.len() == 1 {
+            vec![(basename(&operands[0]), operands[0].clone())]
+        } else if let Some(last) = operands.pop() {
+            if operands.len() > 1 || (!no_target_directory && cwd.join(&last).is_dir()) {
+                operands.iter().map(|destination| (into(&last, destination), destination.clone())).collect()
+            } else {
+                operands.into_iter().map(|destination| (last.clone(), destination)).collect()
+            }
+        } else {
+            Vec::new()
+        };
+        links.extend(pairs.into_iter().map(|(link, destination)| ShellLink {
+            link,
+            destination,
+            symbolic,
+            destination_from_cwd: relative || !symbolic,
+        }));
+    }
+    links
+}
+
+/// cas-7d68: `path` (absolute, not yet normalized) as the filesystem will
+/// resolve it, given the links `aliases` that the same command creates first
+/// (link path, already-resolved destination). A `..` after a symlink leaves
+/// the symlink's real destination, not its lexical parent, so an existing
+/// symlink is resolved before `..` pops it. `None` when such a symlink cannot
+/// be resolved (dangling): the write is not attributable to any root.
+fn resolve_through_links(path: &Path, aliases: &[(std::path::PathBuf, std::path::PathBuf)]) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut current = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if std::fs::symlink_metadata(&current)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    current = current.canonicalize().ok()?;
+                }
+                current.pop();
+            }
+            Component::Normal(name) => {
+                current.push(name);
+                if let Some((_, destination)) = aliases.iter().rev().find(|(link, _)| *link == current) {
+                    current = destination.clone();
+                }
+            }
+        }
+    }
+    Some(current)
+}
+
 /// cas-cf4f / cas-aa4e: a Cassy runtime file under `~/.cas` (a socket, lock
 /// or pid file, or a session record under `~/.cas/sessions`) left behind by
 /// a throwaway factory. Files only. Any agent may delete one once it is
@@ -3863,12 +4017,17 @@ fn factory_write_decision(
         } else {
             lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
         };
+        // cas-7d68: any project's policy path, judged lexically as well as
+        // at its resolved location.
+        let lexical_policy = super::write_roots::is_cas_policy_path(&path);
         let resolved = canonicalize_for_containment(&path).unwrap_or(path);
-        policy
-            .protected
-            .iter()
-            .filter_map(|dir| canonicalize_for_containment(dir))
-            .any(|dir| resolved.starts_with(&dir) || (ancestors_too && dir.starts_with(&resolved)))
+        (lexical_policy
+            || super::write_roots::is_cas_policy_path(&resolved)
+            || policy
+                .protected
+                .iter()
+                .filter_map(|dir| canonicalize_for_containment(dir))
+                .any(|dir| resolved.starts_with(&dir) || (ancestors_too && dir.starts_with(&resolved))))
             .then(|| FactoryWriteViolation {
                 evaluated_path: raw_path.to_string(),
                 resolved_path: resolved,
@@ -3877,6 +4036,95 @@ fn factory_write_decision(
     };
     let Some(tool_input) = input.tool_input.as_ref() else {
         return FactoryWriteDecision::Allowed;
+    };
+    // cas-7d68: a link the command creates does not exist when this hook
+    // runs, so resolving paths on disk would judge a write through it at the
+    // link's own location. Resolve every link the command creates to its real
+    // destination first. A link may never point at, into or above a Cassy
+    // policy path; a hard link is a write to the file it shares; the link
+    // path is itself a write; and every other path the command writes is
+    // judged where it lands through those links.
+    let cwd = std::path::PathBuf::from(&input.cwd);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let absolute = |raw: &str, base: &std::path::Path| -> Option<std::path::PathBuf> {
+        let expanded = if raw == "~" {
+            home.clone()?
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            home.as_ref()?.join(rest)
+        } else {
+            std::path::PathBuf::from(raw)
+        };
+        Some(if expanded.is_absolute() { expanded } else { base.join(expanded) })
+    };
+    let unresolved_word = |raw: &str| raw.contains('$') || raw.contains('`');
+    let link_violation = |evaluated: String, resolved: std::path::PathBuf, matched_rule: &'static str| {
+        FactoryWriteDecision::Denied(FactoryWriteViolation {
+            evaluated_path: evaluated,
+            resolved_path: resolved,
+            matched_rule,
+        })
+    };
+    let protected_dirs: Vec<std::path::PathBuf> = policy
+        .protected
+        .iter()
+        .filter_map(|dir| canonicalize_for_containment(dir))
+        .collect();
+    let mut aliases: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut link_targets: Vec<(String, Option<WriteMode>)> = Vec::new();
+    if tool == "Bash"
+        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
+    {
+        for link in bash_link_creations(command, &cwd) {
+            let evaluated = format!("{} -> {}", link.link, link.destination);
+            if unresolved_word(&link.link) || unresolved_word(&link.destination) {
+                return link_violation(evaluated, std::path::PathBuf::from(&link.link), "link with an unresolved shell variable");
+            }
+            let Some(link_path) = absolute(&link.link, &cwd).and_then(|path| resolve_through_links(&path, &aliases)) else {
+                return link_violation(evaluated, std::path::PathBuf::from(&link.link), "link through a symlink that cannot be resolved");
+            };
+            let base = if link.destination_from_cwd {
+                cwd.clone()
+            } else {
+                link_path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| cwd.clone())
+            };
+            let Some(destination) = absolute(&link.destination, &base).and_then(|path| resolve_through_links(&path, &aliases)) else {
+                return link_violation(evaluated, link_path, "link through a symlink that cannot be resolved");
+            };
+            let destination = canonicalize_for_containment(&destination).unwrap_or(destination);
+            let reaches_policy = super::write_roots::is_cas_policy_path(&destination)
+                || destination.file_name().is_some_and(|name| name == ".cas")
+                || protected_dirs
+                    .iter()
+                    .any(|dir| dir.starts_with(&destination) || destination.starts_with(dir));
+            if reaches_policy {
+                return link_violation(evaluated, destination, "link to, into or above a Cassy policy path");
+            }
+            link_targets.push((link_path.display().to_string(), None));
+            if !link.symbolic {
+                link_targets.push((destination.display().to_string(), Some(WriteMode::Edit)));
+            }
+            aliases.push((link_path, destination));
+        }
+    }
+    // The path a raw target names once the command's links exist and any
+    // existing symlink before a `..` is followed. Unchanged when neither
+    // applies; a target with a shell variable is judged as before.
+    let physical = |raw: &str| -> Result<String, FactoryWriteViolation> {
+        if unresolved_word(raw) {
+            return Ok(raw.to_string());
+        }
+        let Some(path) = absolute(raw, &cwd) else {
+            return Ok(raw.to_string());
+        };
+        match resolve_through_links(&path, &aliases) {
+            Some(resolved) if resolved == lexically_normalize_path(path.clone()) => Ok(raw.to_string()),
+            Some(resolved) => Ok(resolved.display().to_string()),
+            None => Err(FactoryWriteViolation {
+                evaluated_path: raw.to_string(),
+                resolved_path: path,
+                matched_rule: "a path through a symlink that cannot be resolved",
+            }),
+        }
     };
     let mut uses = Vec::new();
     let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
@@ -3894,6 +4142,10 @@ fn factory_write_decision(
         && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
     {
         for (raw_path, _recursive) in bash_delete_targets(command) {
+            let raw_path = match physical(&raw_path) {
+                Ok(path) => path,
+                Err(violation) => return FactoryWriteDecision::Denied(violation),
+            };
             if let Some(violation) = protected_violation(&raw_path, true) {
                 return FactoryWriteDecision::Denied(violation);
             }
@@ -3920,12 +4172,15 @@ fn factory_write_decision(
     // policy files are refused for it too. (The default contract judges only
     // `file_path`/`path`, unchanged here.)
     if tool == "NotebookEdit"
-        && let Some(violation) = tool_input
-            .get("notebook_path")
-            .and_then(|value| value.as_str())
-            .and_then(|path| protected_violation(path, false))
+        && let Some(path) = tool_input.get("notebook_path").and_then(|value| value.as_str())
     {
-        return FactoryWriteDecision::Denied(violation);
+        let path = match physical(path) {
+            Ok(path) => path,
+            Err(violation) => return FactoryWriteDecision::Denied(violation),
+        };
+        if let Some(violation) = protected_violation(&path, false) {
+            return FactoryWriteDecision::Denied(violation);
+        }
     }
     let targets: Vec<(String, Option<WriteMode>)> = match tool {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
@@ -3943,7 +4198,13 @@ fn factory_write_decision(
             // other write. Without them the default contract stays as it
             // was, except that the protected policy files are never edited
             // in place or renamed (GH #1182).
-            let mut in_place = bash_in_place_edit_targets(command);
+            let mut in_place = Vec::new();
+            for raw_path in bash_in_place_edit_targets(command) {
+                match physical(&raw_path) {
+                    Ok(path) => in_place.push(path),
+                    Err(violation) => return FactoryWriteDecision::Denied(violation),
+                }
+            }
             for raw_path in &in_place {
                 if let Some(violation) = protected_violation(raw_path, false) {
                     return FactoryWriteDecision::Denied(violation);
@@ -3971,7 +4232,16 @@ fn factory_write_decision(
         }
         _ => return FactoryWriteDecision::Allowed,
     };
+    let mut resolved_targets = Vec::with_capacity(targets.len() + link_targets.len());
     for (raw_path, mode) in targets {
+        match physical(&raw_path) {
+            Ok(path) => resolved_targets.push((path, mode)),
+            Err(violation) => return FactoryWriteDecision::Denied(violation),
+        }
+    }
+    // Link paths are already resolved; never alias a link to itself.
+    resolved_targets.extend(link_targets);
+    for (raw_path, mode) in resolved_targets {
         if let Some(violation) = protected_violation(&raw_path, false) {
             return FactoryWriteDecision::Denied(violation);
         }
@@ -4049,6 +4319,12 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
                 .into_iter()
                 .chain(bash_in_place_edit_targets(command))
                 .chain(bash_delete_targets(command).into_iter().map(|(path, _)| path))
+                // cas-7d68: `ln -sf forged.toml .cas/config.toml` replaces it.
+                .chain(
+                    bash_link_creations(command, Path::new(&input.cwd))
+                        .into_iter()
+                        .map(|link| link.link),
+                )
                 .collect()
         }
         "apply_patch" => tool_input
@@ -5552,6 +5828,17 @@ fn factory_workspace_contract_denial(
         return format!(
             "🚫 FACTORY WORKSPACE CONTRACT: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
             violation.evaluated_path, worktree.display(),
+        );
+    }
+    if violation.matched_rule.starts_with("link") || violation.matched_rule.starts_with("a path through") {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: {} (`{}` resolves to `{}`). A write is judged where it lands: a link may not point at, into or above a Cassy policy path (`.cas/config.toml`, `.cas/config.yaml`, `.cas/operator/`), a hard link is a write to the file it shares, and a write through a link the same command creates must land in your worktree, under `{}/<task-id>/`{} or in an operator write root. Use literal link operands. Assigned worktree: `{}`.",
+            violation.matched_rule,
+            violation.evaluated_path,
+            violation.resolved_path.display(),
+            artifacts,
+            scratch,
+            worktree.display(),
         );
     }
     if violation.matched_rule.starts_with("deletion") {
@@ -7178,6 +7465,116 @@ mod workspace_contract_tests {
             let config_write = tool_input("Edit", serde_json::json!({"file_path": cas_a.join("config.toml").display().to_string(), "old_string": "a", "new_string": "b"}), &home);
             let (decision, reason) = decide(&cas_a, &project_a, role, config_write);
             assert_eq!(decision, "deny", "{role}: config.toml is never writable: {reason}");
+        }
+    }
+
+    /// cas-7d68 (GH #1182 QA): a link the command itself creates does not
+    /// exist when the hook runs, so a single-command link-then-write
+    /// (`ln -s ../../.. up && echo x >> up/.cas/operator/write-policy.toml`)
+    /// used to resolve inside the worktree and pass. Through the real
+    /// PreToolUse handler, for worker and supervisor: every write is judged at
+    /// the destination the command's own links give it, a link may never
+    /// point at, into or above a Cassy policy path, a hard link is a write to
+    /// its target, and the link path itself is a write. Links and writes that
+    /// stay inside the permitted roots are unaffected.
+    #[cfg(unix)]
+    #[test]
+    fn cas_7d68_single_command_link_then_write_cannot_reach_policy_or_escape_roots() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let outside = home.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let project = home.join("projects/a");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::create_dir_all(cas_root.join("operator")).unwrap();
+        let worktree = cas_root.join("worktrees/brisk-otter-7");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-7d68");
+
+        let mut decide = |role: &str, command: &str| -> (String, String) {
+            env.set("CAS_AGENT_ROLE", role);
+            env.set("CAS_AGENT_NAME", format!("{role}-cas-7d68"));
+            let cwd = if role == "worker" {
+                env.set("CAS_CLONE_PATH", &worktree);
+                worktree.clone()
+            } else {
+                env.remove("CAS_CLONE_PATH");
+                project.clone()
+            };
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some(role.to_string()),
+                ..bash_input(command, &cwd)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        let outside_dir = outside.display().to_string();
+        // Worker cwd: <project>/.cas/worktrees/brisk-otter-7.
+        let worker_denied = [
+            "ln -s ../../.. up && echo x >> up/.cas/operator/write-policy.toml".to_string(),
+            "ln -s ../../.. up && echo x >> up/.cas/config.toml".to_string(),
+            "ln -s ../../config.toml cfg && echo x >> cfg".to_string(),
+            "ln -s ../../operator op; printf x > op/write-policy.toml".to_string(),
+            "ln -sfn ../.. c && cp /tmp/forged.toml c/config.toml".to_string(),
+            "ln -s ../../.. up && rm -rf up/.cas/operator".to_string(),
+            "ln ../../config.toml cfg".to_string(),
+            "mkdir -p d && ln -s ../../../.. d/up && echo x | tee -a d/up/.cas/operator/write-policy.toml".to_string(),
+            "sh -c 'ln -s ../../config.toml cfg && echo x >> cfg'".to_string(),
+            format!("ln -s {outside_dir} o && echo x > o/escaped.txt"),
+            format!("ln -s {outside_dir}/target.txt t && echo x > t"),
+            "ln -s \"$TARGET\" t && echo x > t".to_string(),
+        ];
+        for command in &worker_denied {
+            let (decision, reason) = decide("worker", command);
+            assert_eq!(decision, "deny", "worker must be refused `{command}`: {reason}");
+        }
+        // Supervisor cwd: the project's main checkout, which it may write.
+        let supervisor_denied = [
+            "ln -s .cas/operator op && echo x > op/write-policy.toml",
+            "ln -s .cas c && echo x >> c/config.toml",
+            "ln .cas/config.toml cfg && echo x >> cfg",
+            "ln -sf /tmp/forged.toml .cas/config.toml",
+            "ln -s ../.. up && echo x >> up/projects/a/.cas/operator/write-policy.toml",
+            "cd src && ln -s ../.cas/operator op",
+        ];
+        for command in supervisor_denied {
+            let (decision, reason) = decide("supervisor", command);
+            assert_eq!(decision, "deny", "supervisor must be refused `{command}`: {reason}");
+        }
+        // A symlink left by an earlier command: `..` after it leaves its real
+        // destination, not its lexical parent. `a/b/l -> <worktree>` makes
+        // `a/b/l/../../config.toml` the project's `.cas/config.toml`.
+        std::fs::create_dir_all(worktree.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(&worktree, worktree.join("a/b/l")).unwrap();
+        for command in [
+            "echo x >> a/b/l/../../config.toml",
+            "echo x > a/b/l/../../operator/write-policy.toml",
+            "link ../../config.toml cfg",
+        ] {
+            let (decision, reason) = decide("worker", command);
+            assert_eq!(decision, "deny", "worker must be refused `{command}`: {reason}");
+        }
+        for (role, command) in [
+            ("worker", "ln -s src s && echo x > s/new.rs"),
+            ("worker", "ln -sf ../src/lib.rs src/alias.rs"),
+            ("worker", "ln src/existing.rs src/hard.rs"),
+            ("supervisor", "ln -s src s && echo x > s/new.rs"),
+            ("supervisor", "cat .cas/config.toml"),
+            ("worker", "ln -s src/existing.rs s.rs && cat s.rs"),
+        ] {
+            std::fs::write(worktree.join("src/existing.rs"), "x").unwrap();
+            let (decision, reason) = decide(role, command);
+            assert_ne!(decision, "deny", "{role} `{command}` stays allowed: {reason}");
         }
     }
 

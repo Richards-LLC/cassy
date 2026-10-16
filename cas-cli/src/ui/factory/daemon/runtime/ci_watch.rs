@@ -291,6 +291,8 @@ pub(crate) struct DeliveryPrObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct MergeQueuePullRequest {
+    #[serde(default)]
+    pub url: Option<String>,
     pub number: u64,
     #[serde(rename = "headRefName")]
     pub head_branch: String,
@@ -348,6 +350,8 @@ pub(crate) struct SupervisorPr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MergeQueuePoll {
+    /// Reuse the bounded poll's actual PR records for read-only peer awareness.
+    pub observed_prs: Vec<crate::cloud::peers_detail::PeerPr>,
     pub queued_prs: BTreeSet<u64>,
     pub ejections: Vec<MergeQueueEjection>,
     pub auto_merge_prs: BTreeSet<u64>,
@@ -986,7 +990,7 @@ impl CiTransport for GhCiTransport {
                     "invalid GitHub repository for merge-queue watcher".to_string(),
                 )
             })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
         let response: MergeQueueGraphqlResponse = self.gh_json(&[
             "api".to_string(),
             "graphql".to_string(),
@@ -1134,6 +1138,14 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     }
 
     let mut poll = MergeQueuePoll::default();
+    poll.observed_prs = pulls.iter().map(|pr| crate::cloud::peers_detail::PeerPr {
+        url: pr.url.clone(),
+        head_sha: pr.head_sha.clone(),
+        branch: pr.head_branch.clone(),
+        number: pr.number,
+        state: "OPEN".into(),
+        in_merge_queue: pr.is_in_merge_queue,
+    }).collect();
     let tracked = deliveries
         .iter()
         .map(|delivery| (&delivery.task_id, delivery.worker.as_str(), &delivery.branch))
@@ -1485,6 +1497,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cas_cd42_reuses_actual_poll_records_without_inventing_missing_pr_urls() {
+        let mut unknown_url = pull(42, "epic/release", true, "2026-10-16T12:00:00Z");
+        unknown_url.url = None;
+        let transport = FakeTransport {
+            runs: Vec::new(), pulls: vec![unknown_url], delivery_pulls: Vec::new(),
+            job: "unused".into(), log: None, calls: Cell::new(0),
+        };
+        let poll = collect_tracked_merge_queue_ejections(
+            &transport, &[], &[], &BTreeSet::new(), &BTreeSet::new(),
+        ).unwrap();
+        assert_eq!(poll.observed_prs.len(), 1);
+        assert_eq!(poll.observed_prs[0].head_sha, "deadbeef");
+        assert!(poll.observed_prs[0].in_merge_queue);
+        assert!(poll.observed_prs[0].url.is_none());
+        assert_eq!(transport.calls.get(), 0, "inventory must not add detail lookups");
+    }
+
     /// cas-0f05: GitHub's runs for fba7a3365 (push, merge_group and
     /// scheduled), recorded 2026-10-14 and trimmed to the fields read.
     const FIXTURE_SHA: &str = "fba7a3365eb0cb6403be9d708e8f03151fc42054";
@@ -1570,6 +1600,7 @@ mod tests {
 
     fn pull(number: u64, branch: &str, queued: bool, updated_at: &str) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
+            url: Some(format!("https://github.com/acme/widgets/pull/{number}")),
             number,
             head_branch: branch.to_string(),
             head_sha: "deadbeef".to_string(),
@@ -1588,6 +1619,7 @@ mod tests {
         updated_at: &str,
     ) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
+            url: Some(format!("https://github.com/acme/widgets/pull/{number}")),
             number,
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),

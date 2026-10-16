@@ -124,6 +124,11 @@ echo 'PASS operator launch smoke: fixture'
 EOF_OPERATOR_LAUNCH
     printf 'fixture license\n' >"$repo/LICENSE"
     cp "$script_dir/release-test-env.sh" "$script_dir/release-integration-gates.py" "$repo/scripts/"
+    # Exercise the real no-build SLO row, including its checked-in SQLite session.
+    cp "$script_dir/check-communication-slos.py" "$repo/scripts/"
+    mkdir -p "$repo/scripts/fixtures/communication-slos" "$repo/crates/cas-store/src/communication_slo"
+    cp "$script_dir/fixtures/communication-slos/"*.sql "$repo/scripts/fixtures/communication-slos/"
+    cp "$script_dir/../crates/cas-store/src/communication_slo/"*.sql "$repo/crates/cas-store/src/communication_slo/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
@@ -577,7 +582,7 @@ fi
 # cas-dcb4: the gate schedules independent rows concurrently under declared
 # resources. Spans come from the fake Cargo, visual-QA and script fixtures;
 # the receipt, timing.tsv and failure reporting keep canonical row order.
-readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
+readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,communication-slos,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
 
 # span_check <log> overlap A B | disjoint A B... | max | wall
 span_check() {
@@ -829,7 +834,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
+        journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"

@@ -116,9 +116,12 @@ class FastRows(unittest.TestCase):
                        "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
-                       "check-migration-registry.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
+                       "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
+        for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
+            for source in (ROOT / source_dir).glob("*.sql"):
+                self.write(source_dir + "/" + source.name, source.read_text())
         (self.repo / "scripts/fast-rows-pre-push.sh").chmod(0o755)
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
         self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
@@ -187,7 +190,8 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 21)
+        self.assertEqual(len(proof['rows']), 22)
+        self.assertEqual(proof['rows']['communication-slos'], 'PASS')
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 
     def test_integration_no_build_names_md022_before_assembly(self):

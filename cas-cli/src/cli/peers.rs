@@ -6,7 +6,7 @@ use clap::Args;
 
 #[derive(Debug, Args)]
 pub struct PeersArgs {
-    /// Include peer task claims, live workers and branches
+    /// Include peer ownership, roots, PR observations and waiting merges
     #[arg(long)]
     pub detail: bool,
     /// Show one supervisor (name or name@machine); implies --detail

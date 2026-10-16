@@ -966,6 +966,14 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
         drop(lane);
     }
     assert!(!daemon.app.worker_names().iter().any(|name| name == "relay-worker"));
+    // The record reports on a drain; its cleanup is submitted by the next
+    // relay pass, outside the drained batch, as the loop's tick does.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon.app.crash_cleanup_pending("relay-worker") {
+        daemon.relay_correlated_worker_deaths();
+        assert!(Instant::now() < deadline, "the cleanup never applied");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     settle_relays(&mut daemon).await;
     let exit = &daemon.recent_worker_exits[0];
     assert!(!exit.recording, "recorded and cleaned");

@@ -31,6 +31,16 @@ use crate::ui::theme::ActiveTheme;
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
 const PDF_TIMEOUT: Duration = Duration::from_secs(120);
+/// Issues are closed by hand a few minutes after the release PR merges
+/// (6–7 minutes for v3.58.0 and v3.59.0). A closure up to this long after
+/// the merge belongs to the release.
+const CLOSURE_WINDOW_MINUTES: i64 = 15;
+const CLOSURE_POLL: Duration = Duration::from_secs(30);
+
+fn closure_window() -> chrono::Duration {
+    chrono::Duration::minutes(CLOSURE_WINDOW_MINUTES)
+}
+
 const THEME_ORDER: [&str; 7] = [
     "Factory",
     "Delivery",
@@ -1189,6 +1199,108 @@ fn collect_pr_issue_references(value: &Value, referenced: &mut BTreeSet<u64>) {
             referenced.extend(extract_issue_numbers(body));
         }
     }
+}
+
+/// The merged release PR for a version, and the issues it references.
+#[derive(Debug, Clone)]
+struct ReleasePr {
+    number: u64,
+    url: Option<String>,
+    created_at: Option<DateTime<Utc>>,
+    merged_at: DateTime<Utc>,
+    referenced: BTreeSet<u64>,
+}
+
+/// The span in which a closed issue belongs to this release.
+#[derive(Debug, Clone)]
+struct ClosureWindow {
+    opened: Option<DateTime<Utc>>,
+    closes: DateTime<Utc>,
+}
+
+/// One issue-state snapshot, split by what it means for this release.
+#[derive(Debug, Clone, Default)]
+struct ClosureSnapshot {
+    closed: Vec<GithubIssue>,
+    still_open: Vec<u64>,
+    closed_outside: Vec<u64>,
+    missing: Vec<u64>,
+}
+
+fn parse_utc(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+/// Pick the merged release PR whose title names this version.
+fn select_release_pr(value: &Value, version: &str) -> Option<ReleasePr> {
+    let title_pattern = Regex::new(&format!(
+        r"(?i)(^|[^0-9.])v?{}($|[^0-9])",
+        regex::escape(version)
+    ))
+    .ok()?;
+    value
+        .as_array()?
+        .iter()
+        .filter(|pr| {
+            pr.get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| {
+                    title.to_ascii_lowercase().contains("release") && title_pattern.is_match(title)
+                })
+        })
+        .filter_map(|pr| {
+            let merged_at = parse_utc(pr.get("mergedAt").and_then(Value::as_str))?;
+            let mut referenced = BTreeSet::new();
+            collect_pr_issue_references(&Value::Array(vec![pr.clone()]), &mut referenced);
+            Some(ReleasePr {
+                number: pr.get("number").and_then(Value::as_u64)?,
+                url: pr.get("url").and_then(Value::as_str).map(ToOwned::to_owned),
+                created_at: parse_utc(pr.get("createdAt").and_then(Value::as_str)),
+                merged_at,
+                referenced,
+            })
+        })
+        .min_by_key(|pr| pr.merged_at)
+}
+
+/// Split one snapshot of issue states into this release's closures.
+fn classify_closures(
+    value: &Value,
+    candidates: &BTreeSet<u64>,
+    _window: Option<&ClosureWindow>,
+    repo: &str,
+) -> ClosureSnapshot {
+    let mut snapshot = ClosureSnapshot::default();
+    for issue in parse_issues(value, candidates, repo) {
+        if issue.state.eq_ignore_ascii_case("closed") {
+            snapshot.closed.push(issue);
+        } else {
+            snapshot.still_open.push(issue.number);
+        }
+    }
+    snapshot.missing = candidates
+        .iter()
+        .filter(|number| {
+            !snapshot.closed.iter().any(|issue| issue.number == **number)
+                && !snapshot.still_open.contains(number)
+        })
+        .copied()
+        .collect();
+    snapshot
+}
+
+/// Read issue states and classify this release's closures.
+fn gather_closures(
+    mut fetch: impl FnMut() -> anyhow::Result<Value>,
+    candidates: &BTreeSet<u64>,
+    window: Option<&ClosureWindow>,
+    repo: &str,
+    _now: impl FnMut() -> DateTime<Utc>,
+    _sleep: impl FnMut(Duration),
+) -> anyhow::Result<ClosureSnapshot> {
+    Ok(classify_closures(&fetch()?, candidates, window, repo))
 }
 
 fn classify_theme(issue: &GithubIssue) -> String {
@@ -2679,6 +2791,72 @@ fn playwright_module_missing(detail: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-7860: issues are closed by hand minutes after the release PR
+    /// merges, so a report generated at merge+10s must still count the
+    /// issues that close at merge+30s, and must not recount an issue a
+    /// previous release already closed.
+    #[test]
+    fn release_closures_count_issues_closed_after_generation_starts() {
+        let prs = serde_json::json!([
+            {"number": 1226, "title": "Release v3.58.0: epic/burn-down-v43",
+             "body": "### Fixed (#1225)", "url": "https://github.com/o/r/pull/1226",
+             "createdAt": "2026-10-16T03:47:00Z", "mergedAt": "2026-10-16T05:04:14Z",
+             "closingIssuesReferences": []},
+            {"number": 1227, "title": "Release v3.59.0: epic/burn-down-v44",
+             "body": "### Added — batch QA (#1203)\n### Fixed — a (#1204)\n### Fixed — b (#1205)\n### Fixed — c (#1225 follow-up)\n### Changed — d (#1211 in part)",
+             "url": "https://github.com/o/r/pull/1227",
+             "createdAt": "2026-10-16T08:56:17Z", "mergedAt": "2026-10-16T09:29:58Z",
+             "closingIssuesReferences": []}
+        ]);
+        let pr = select_release_pr(&prs, "3.59.0").expect("release PR");
+        assert_eq!(pr.number, 1227);
+        let window = ClosureWindow {
+            opened: pr.created_at,
+            closes: pr.merged_at + closure_window(),
+        };
+        let issue = |number: u64, state: &str, closed: Option<&str>| {
+            serde_json::json!({"number": number, "title": format!("Issue {number}"),
+                "url": format!("https://github.com/o/r/issues/{number}"),
+                "state": state, "closedAt": closed, "labels": []})
+        };
+        let merged = pr.merged_at;
+        let closed_at = (merged + chrono::Duration::seconds(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let before = serde_json::json!([
+            issue(1203, "OPEN", None), issue(1204, "OPEN", None), issue(1205, "OPEN", None),
+            issue(1211, "OPEN", None), issue(1225, "CLOSED", Some("2026-10-16T05:11:00Z"))
+        ]);
+        let after = serde_json::json!([
+            issue(1203, "CLOSED", Some(&closed_at)), issue(1204, "CLOSED", Some(&closed_at)),
+            issue(1205, "CLOSED", Some(&closed_at)), issue(1211, "OPEN", None),
+            issue(1225, "CLOSED", Some("2026-10-16T05:11:00Z"))
+        ]);
+        let clock = std::cell::Cell::new(merged + chrono::Duration::seconds(10));
+        let snapshot = gather_closures(
+            || {
+                Ok(if clock.get() < merged + chrono::Duration::seconds(30) {
+                    before.clone()
+                } else {
+                    after.clone()
+                })
+            },
+            &pr.referenced,
+            Some(&window),
+            "o/r",
+            || clock.get(),
+            |pause| clock.set(clock.get() + chrono::Duration::from_std(pause).unwrap()),
+        )
+        .unwrap();
+        let closed = snapshot
+            .closed
+            .iter()
+            .map(|issue| issue.number)
+            .collect::<Vec<_>>();
+        assert_eq!(closed, vec![1203, 1204, 1205]);
+        assert_eq!(snapshot.closed_outside, vec![1225]);
+        assert_eq!(snapshot.still_open, vec![1211]);
+    }
 
     /// cas-2bef: a release over a stage budget fails the latency section,
     /// with every stage's earlier releases read from their receipts.

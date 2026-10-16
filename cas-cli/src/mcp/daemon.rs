@@ -1745,7 +1745,7 @@ impl EmbeddedDaemon {
             } => {
                 eprintln!(
                     "[Cassy] Socket: SessionStart for {} (name: {:?}, role: {:?}, pid: {})",
-                    &session_id[..8.min(session_id.len())],
+                    session_id.chars().take(8).collect::<String>(),
                     agent_name,
                     agent_role,
                     cc_pid
@@ -1763,7 +1763,7 @@ impl EmbeddedDaemon {
             DaemonEvent::SessionEnd { session_id, cc_pid } => {
                 eprintln!(
                     "[Cassy] Socket: SessionEnd for {}",
-                    &session_id[..8.min(session_id.len())]
+                    session_id.chars().take(8).collect::<String>()
                 );
                 // Remove PID → session mapping
                 if let Some(pid) = cc_pid {
@@ -1825,7 +1825,7 @@ impl EmbeddedDaemon {
                     let _ = event_store.record(&event);
                     eprintln!(
                         "[Cassy] Worker activity: {} - {}",
-                        &session_id[..8.min(session_id.len())],
+                        session_id.chars().take(8).collect::<String>(),
                         description
                     );
                 }
@@ -2011,7 +2011,7 @@ impl EmbeddedDaemon {
                 // stale, clear our local agent_id, and skip heartbeat. Next
                 // tick will no-op.
                 if let Ok(agent) = store.get(&id) {
-                    let short_id = &id[..8.min(id.len())];
+                    let short_id = id.chars().take(8).collect::<String>();
                     match evaluate_liveness(&agent, pid_alive, pid_matches_fingerprint) {
                         LivenessOutcome::NoPidRecorded => {
                             // Legacy agents (pre-cas-2749) have no pid. warn! so
@@ -2111,7 +2111,7 @@ impl EmbeddedDaemon {
                             // Agent was shut down or marked stale — stop heartbeating
                             if msg.contains("shutdown") || msg.contains("stale") {
                                 tracing::info!(
-                                    agent_id = %&id[..8.min(id.len())],
+                                    agent_id = %id.chars().take(8).collect::<String>(),
                                     "Agent is in terminal state, stopping heartbeat"
                                 );
                                 terminal = true;
@@ -2125,7 +2125,7 @@ impl EmbeddedDaemon {
                                 tokio::time::sleep(delay).await;
                             } else {
                                 tracing::warn!(
-                                    agent_id = %&id[..8.min(id.len())],
+                                    agent_id = %id.chars().take(8).collect::<String>(),
                                     error = %e,
                                     "Agent heartbeat failed after 3 attempts — \
                                      worker may be marked stale under DB contention"
@@ -2140,7 +2140,7 @@ impl EmbeddedDaemon {
                     *guard = None;
                 } else if !succeeded {
                     tracing::error!(
-                        agent_id = %&id[..8.min(id.len())],
+                        agent_id = %id.chars().take(8).collect::<String>(),
                         "All heartbeat retries exhausted"
                     );
                 }

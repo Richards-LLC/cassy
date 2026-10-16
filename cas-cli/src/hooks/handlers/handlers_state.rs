@@ -346,7 +346,7 @@ impl ExitBlockers {
                 };
                 lines.push(format!(
                     "  🤖 [{}] {}{}",
-                    &agent.id[..8.min(agent.id.len())],
+                    agent.id.chars().take(8).collect::<String>(),
                     agent.name,
                     claimed_info
                 ));

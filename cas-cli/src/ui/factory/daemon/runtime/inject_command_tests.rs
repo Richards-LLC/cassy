@@ -108,10 +108,21 @@ pub(super) fn enqueue_urgent_to(cas_dir: &std::path::Path, target: &str, text: &
 /// spec §7 `flv2_inject_is_a_command`: an urgent inject with a 1.2 s settle
 /// leaves every control pass under 100 ms, and the redirect still reaches
 /// the pane after the settle.
+///
+/// cas-a8dc: the passes run on the daemon's job lanes, as `run` drives them.
+/// Inline jobs put the queue's store I/O on the measured pass (247 blocking
+/// SQLite calls), so under a parallel `cargo test` the 100 ms bound timed
+/// disk contention rather than the settle.
 #[tokio::test]
 async fn flv2_inject_is_a_command() {
     let (_root, cas_dir) = project_with_worker();
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas_dir.clone(),
+        daemon.app.project_scope(),
+    );
+    // Opened once before the loop runs, as `run` does.
+    daemon.queue_jobs.store(&cas_dir).unwrap();
     ready_claude_worker(&mut daemon).await;
     assert_eq!(daemon.urgent_settle_duration(WORKER), Duration::from_millis(1200));
     let id = enqueue_urgent(&cas_dir, "urgent redirect C4A-MARKER");
@@ -139,6 +150,10 @@ async fn flv2_inject_is_a_command() {
     assert!(
         started.elapsed() >= Duration::from_millis(1200),
         "the payload still waits out the settle"
+    );
+    assert!(
+        daemon.queue_jobs.drain_for_shutdown(&cas_dir, Duration::from_secs(5)),
+        "every stamp landed"
     );
     // The outcome came back as an event on a later pass and was recorded as
     // before C4a: the wake fired, and the row waits for (or already has)
@@ -174,8 +189,13 @@ async fn flv2_inject_path_claims_in_two_phases_with_no_lane_violation() {
 
     let (_root, cas_dir) = project_with_worker();
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
-    daemon.queue_jobs =
-        super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
+    // cas-a8dc: a writer of its own, as a daemon process has. On the shared
+    // test-binary StoreWorker the claim queued behind other tests' writes and
+    // the payload missed the 8 s window.
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas_dir.clone(),
+        daemon.app.project_scope(),
+    );
     // Opened once before the loop becomes a lane, as `run` does.
     daemon.queue_jobs.store(&cas_dir).unwrap();
     ready_claude_worker(&mut daemon).await;

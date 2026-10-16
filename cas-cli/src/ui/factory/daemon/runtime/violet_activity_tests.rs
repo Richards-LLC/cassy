@@ -573,7 +573,7 @@ fn cas_639c_review_interrupted_quarantine_retry_does_not_remigrate_legacy() {
 fn cas_639c_review_foreign_hot_thread_cannot_evict_cold_thread_dedupe() {
     let fx = Fixture::new();
     let relay = FakeRelay::new();
-    let cold = envelope(PROJECT, "C1", "thread_reply", 1, 20, "U1");
+    let cold = envelope(PROJECT, "C1", "thread_reply", 2, 1, "U1");
     let mut owner = fx.wake("owner", t0());
     relay.publish(mention("C1", 0));
     relay.publish(cold.clone());

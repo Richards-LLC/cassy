@@ -3227,6 +3227,48 @@ fn script_write_targets_from_command(command: &str) -> Vec<String> {
     targets
 }
 
+/// cas-a673: the command position a `)` returns to. A `$(…)` substitution
+/// closes back into the position its `$` word started in: inside an argument
+/// (`echo $(cat f) touch x`) the following words are still arguments, while
+/// at command position (`$(true) touch x`, which runs `touch` when the
+/// substitution expands to nothing) they may be the command. A bare group or
+/// subshell, and an unmatched `)` such as a `case` pattern, return to command
+/// position as before.
+#[derive(Default)]
+struct ParenPositions {
+    open: Vec<bool>,
+    /// Command position in effect when the previous word token began.
+    word_entry: Option<bool>,
+}
+
+impl ParenPositions {
+    fn word(&mut self, command_position: bool) {
+        self.word_entry = Some(command_position);
+    }
+
+    fn open(&mut self, tokens: &[ShellToken], index: usize) {
+        let substitution = index
+            .checked_sub(1)
+            .and_then(|previous| tokens.get(previous))
+            .is_some_and(|token| matches!(token, ShellToken::Word(word) if word.ends_with('$')));
+        let resume = match self.word_entry {
+            Some(entry) if substitution => entry,
+            _ => true,
+        };
+        self.open.push(resume);
+        self.word_entry = None;
+    }
+
+    fn close(&mut self) -> bool {
+        self.word_entry = None;
+        self.open.pop().unwrap_or(true)
+    }
+
+    fn operator(&mut self) {
+        self.word_entry = None;
+    }
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
@@ -3261,18 +3303,29 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     // command. This is intentionally a small recognizer, not a shell parser.
     let mut index = 0;
     let mut command_position = true;
+    let mut parens = ParenPositions::default();
     while index < tokens.len() {
         match &tokens[index] {
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                parens.open(&tokens, index);
                 command_position = true;
                 index += 1;
             }
-            ShellToken::Operator(_) => index += 1,
+            ShellToken::Operator(')') => {
+                command_position = parens.close();
+                index += 1;
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                parens.operator();
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => {
+                parens.operator();
+                index += 1;
+            }
             ShellToken::Word(command) if command_position => {
+                parens.word(true);
                 // `do`/`then` introduce a new command position without an
                 // operator token. Recognising them lets the small parser see
                 // commands inside `for` loops and shell conditionals.
@@ -3331,9 +3384,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                         add_target(&operand);
                     }
                 }
+                // The operands were consumed here; a `$(` among them resumes
+                // at command position, as before (conservative).
+                parens.operator();
                 index = cursor;
             }
             ShellToken::Word(_) => {
+                parens.word(false);
                 command_position = false;
                 index += 1;
             }
@@ -3417,18 +3474,30 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
     let mut targets = Vec::new();
     let mut index = 0;
     let mut command_position = true;
+    // cas-a673: a `)` closing an argument substitution keeps argument position.
+    let mut parens = ParenPositions::default();
     while index < tokens.len() {
         match &tokens[index] {
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                parens.open(&tokens, index);
                 command_position = true;
                 index += 1;
             }
-            ShellToken::Operator(_) => index += 1,
+            ShellToken::Operator(')') => {
+                command_position = parens.close();
+                index += 1;
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                parens.operator();
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => {
+                parens.operator();
+                index += 1;
+            }
             ShellToken::Word(word) if command_position => {
+                parens.word(true);
                 if matches!(word.as_str(), "do" | "then" | "else" | "elif")
                     || word.starts_with('-')
                     || word.contains('=')
@@ -3471,9 +3540,11 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
                         targets.push((expanded, recursive));
                     }
                 }
+                parens.operator();
                 index = cursor;
             }
             ShellToken::Word(_) => {
+                parens.word(false);
                 command_position = false;
                 index += 1;
             }

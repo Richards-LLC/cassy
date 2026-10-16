@@ -31,6 +31,27 @@ with tempfile.TemporaryDirectory(prefix="violet-reference-guard-") as directory:
     assert module.violations(root, [relative], allowlist, pattern)
 print("Violet reference guard: 11 boundary cases passed")
 
+# The byte-pinned upstream contract contains a historical removal notice.
+# Review only that exact line; fixture paths and adjacent text stay governed.
+with tempfile.TemporaryDirectory(prefix="violet-vendored-contract-") as directory:
+    root = Path(directory)
+    relative = "cas-cli/tests/fixtures/coordination_contract/v1/violet/TOOL_CONTRACT.md"
+    original = (ROOT / relative).read_bytes()
+    destination = root / relative
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(original)
+    assert not module.violations(root, [relative], allowlist, pattern), "pinned upstream removal history"
+    destination.write_bytes(original + manifest["retired_server"].encode() + b"\n")
+    assert module.violations(root, [relative], allowlist, pattern), "new fixture references remain denied"
+    destination.write_bytes(b"\n" + original)
+    assert module.violations(root, [relative], allowlist, pattern), "line positions remain pinned"
+    destination.write_bytes(original.replace(b"fallback is removed", b"fallback is enabled"))
+    assert module.violations(root, [relative], allowlist, pattern), "changed semantics remain denied"
+    sibling = destination.with_name("NEW_CONTRACT.md")
+    sibling.write_bytes(original)
+    assert module.violations(root, [str(sibling.relative_to(root))], allowlist, pattern), "sibling fixtures remain governed"
+print("Violet vendored history: 5 exact-line boundary cases passed")
+
 # Execute the relocated admission step against governed Rust fixtures. The
 # queue must retain the guard self-tests, but must not repeat the content scan.
 workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())

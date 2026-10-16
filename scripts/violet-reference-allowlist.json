@@ -1,5 +1,5 @@
 {
-  "purpose": "Published release history stays unchanged. Compatibility is limited to reviewed exact lines in the shared manifest; new manifest vocabulary requires explicit allowlist review.",
+  "purpose": "Published release history stays unchanged. Compatibility is limited to reviewed exact lines in the shared manifest; new manifest vocabulary requires explicit allowlist review. The byte-pinned upstream Violet tool contract retains one exact historical removal notice (cas-c423); new or changed fixture references remain forbidden.",
   "published_history": [
     "CHANGELOG.md",
     "cas-cli/src/builtins/reference-history.json",
@@ -19,6 +19,9 @@
       "14": "351a079e192ba53d010121fdb67e407705b85dafaf3490dc00b38bb5a4fabaf6",
       "15": "292acbbfb25be6af5b938df23533b4f759ac54cb7f25febf01e23141c02f3d12",
       "16": "3de1af21055476ee4a6405a6bbdd6d047d21a31bd094bc934c5e342aee656319"
+    },
+    "cas-cli/tests/fixtures/coordination_contract/v1/violet/TOOL_CONTRACT.md": {
+      "769": "2745b0e838124c9cfe337d00770568872785c503a29e3af4becfef9c3455327a"
     }
   }
 }

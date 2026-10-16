@@ -1160,9 +1160,6 @@ fn record_terminal_spawn_state(
     });
 }
 
-/// Red-first stub (cas-d741).
-const CAS_D741_RED_STUB: bool = true;
-
 /// cas-d741: a spawn that fails in provisioning ends its request row
 /// `failed` with the reason, so worker_status names it FAILED instead of
 /// leaving it "queued — UNCONFIRMED" with the cause only in the session log.
@@ -1186,7 +1183,7 @@ pub(super) fn report_provision_failure(
         "failed",
         detail,
     );
-    if let Some(request_id) = request_id.filter(|_| !CAS_D741_RED_STUB) {
+    if let Some(request_id) = request_id {
         record_terminal_spawn_state(
             cas_dir,
             request_id,
@@ -1205,7 +1202,7 @@ pub(super) fn report_provision_failure(
         false,
         detail,
     );
-    if notified.is_err() && !CAS_D741_RED_STUB {
+    if notified.is_err() {
         let request = request_id
             .map(|id| format!("request {id}"))
             .unwrap_or_else(|| "a direct spawn".to_string());

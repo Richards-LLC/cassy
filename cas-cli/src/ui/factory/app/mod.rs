@@ -642,9 +642,6 @@ fn hardlink_seed_tree_inner(
     Ok(())
 }
 
-/// Red-first stub (cas-d741).
-const CAS_D741_RED_STUB: bool = true;
-
 /// cas-d741: a kept worktree on the worker's own task lane is reusable only
 /// when no tracked change would ride into the new session and the lane has
 /// not diverged from its pushed copy. Each refusal names the exact remedy.
@@ -766,8 +763,7 @@ impl WorkerSpawnPrep {
                     // lane, so a kept worktree is normally there. Reuse it in
                     // place, keeping the lane, unless it is dirty or diverged.
                     Ok(actual_branch)
-                        if !CAS_D741_RED_STUB
-                            && crate::factory_isolation::own_task_branch_task_id(
+                        if crate::factory_isolation::own_task_branch_task_id(
                                 &self.worker_name,
                                 &actual_branch,
                             )

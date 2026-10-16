@@ -268,6 +268,8 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     let root = crate::store::init_cas_dir(dir.path()).unwrap();
     let tasks = crate::store::open_task_store_local(&root).unwrap();
     let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
+    let mut agents = agents;
+    agents[0].team_id = None; // No team authorization signal.
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
         hidden_peers: 0,
@@ -526,6 +528,7 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
             .insert(key, value.as_str().unwrap().into());
     }
     agents[4].user_id = Some("other-user".into());
+    agents[4].team_id = None; // Personal accounts still expose no cross-account claims.
     agents[4].metadata.insert(
         work::PR_META.into(),
         published.metadata[work::PR_META].clone(),

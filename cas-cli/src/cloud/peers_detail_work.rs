@@ -268,8 +268,8 @@ impl PeerWork {
             },
             claims_status: ObservationStatus::at(
                 match visibility {
-                    ClaimsVisibility::SameAccount if !peer.live => "stale",
-                    ClaimsVisibility::SameAccount => "ready",
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if !peer.live => "stale",
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject => "ready",
                     ClaimsVisibility::DifferentAccount => "private",
                     ClaimsVisibility::Unknown => "unavailable",
                 },
@@ -310,7 +310,7 @@ pub(super) fn inventory(
 ) {
     let work = &mut detail.work;
     // Private claims never become an apparently empty task/merge inventory.
-    if detail.claims_visibility != ClaimsVisibility::SameAccount {
+    if !detail.claims_visibility.visible() {
         work.tasks_status = work.claims_status.clone();
         work.prs_status = work.claims_status.clone();
         work.splits_status = work.claims_status.clone();

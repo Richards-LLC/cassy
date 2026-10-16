@@ -122,6 +122,16 @@ pub(crate) enum RelayOutput {
     DeathSweepRead {
         folded: Vec<(i64, serde_json::Value)>,
         deaths: Vec<crate::mcp::tools::service::orphan_recovery::UnstampedWorkerDeath>,
+        /// cas-ff42 L3: rows that just aged out of the sweep.
+        given_up: Vec<super::queue_and_events::GivenUpDeath>,
+    },
+    /// cas-ff42 C6: an exited worker's stale mark and death record were
+    /// written on the store worker. `at` names its exit in the correlation
+    /// window, if it waits there.
+    WorkerDeathRecorded {
+        worker: String,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        death: Option<super::queue_and_events::DeferredWorkerDeath>,
     },
     /// cas-26c8: one swept relay was (re)injected, or found already handled.
     DeathSweepWritten,
@@ -160,12 +170,32 @@ pub(crate) struct RelayJobs {
     /// Test hook: give up in-flight reads after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
+    /// cas-ff42 L3: recorded-death rows the sweep already reported giving
+    /// up on, so each is warned about once.
+    pub(crate) death_sweep_given_up: std::collections::HashSet<i64>,
     /// Test hook (cas-26c8): relay a death group with this instead of
     /// `relay_death_group_io`, e.g. to make a group keep asking for a retry.
     #[cfg(test)]
     pub(crate) death_group_override:
-        Option<fn(&std::path::Path, &[ObservedWorkerExit], chrono::Duration) -> bool>,
+        Option<fn(&std::path::Path, &str, &[ObservedWorkerExit], chrono::Duration) -> bool>,
+    /// Test hook (cas-ff42): record a worker death with this instead of
+    /// `record_worker_death_io`, e.g. to make the record job panic.
+    #[cfg(test)]
+    pub(crate) death_record_override: Option<DeathRecordFn>,
 }
+
+/// The shape of `record_worker_death_io`, for the cas-ff42 test hook.
+#[cfg(test)]
+pub(crate) type DeathRecordFn = fn(
+    &std::path::Path,
+    &str,
+    &str,
+    Option<&str>,
+    &str,
+    Option<&crate::prompt_revalidation::WorkerExitCause>,
+    crate::mcp::tools::service::orphan_recovery::DeathRelay,
+    Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<super::queue_and_events::DeferredWorkerDeath>;
 
 impl RelayJobs {
     fn next_generation(&mut self) -> u64 {

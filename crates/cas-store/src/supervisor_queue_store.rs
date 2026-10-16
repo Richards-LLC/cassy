@@ -206,6 +206,26 @@ pub trait SupervisorQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SupervisorNotification>>;
 
+    /// cas-ff42: [`Self::list_pending_prompt_outbox`] for rows created in
+    /// `[created_after, created_before)`, so old rows a sweep has given up on
+    /// can never crowd recent ones out of the limit. The default filters the
+    /// unwindowed list.
+    fn list_pending_prompt_outbox_between(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        created_after: DateTime<Utc>,
+        created_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>> {
+        Ok(self
+            .list_pending_prompt_outbox(supervisor_id, event_type, usize::MAX)?
+            .into_iter()
+            .filter(|row| row.created_at >= created_after && row.created_at < created_before)
+            .take(limit)
+            .collect())
+    }
+
     /// Poll for pending notifications (ordered by priority, then created_at)
     /// Returns up to `limit` notifications and marks them as processed
     fn poll(&self, supervisor_id: &str, limit: usize) -> Result<Vec<SupervisorNotification>>;
@@ -423,6 +443,44 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                     prompt_delivered: prompt_delivered_at.is_some(),
                 }
             };
+            // cas-ff42 L2: every other recipient of a folded member (a live
+            // Director, say) gets its own copy of the fold, so stamping its
+            // member rows never leaves it without the group alert. The copy
+            // is unstamped and names its recipient (`fold_copy_for`), so the
+            // death sweep injects its prompt like the per-worker prompts it
+            // replaces.
+            for prefix in folded_key_prefixes {
+                let member = format!("{prefix}:");
+                let others: Vec<String> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT DISTINCT supervisor_id FROM supervisor_queue
+                          WHERE event_type = ?1
+                            AND prompt_delivered_at IS NULL
+                            AND substr(transition_key, 1, length(?2)) = ?2
+                            AND supervisor_id <> ?3",
+                    )?;
+                    stmt.query_map(params![folded_event_type, member, supervisor_id], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<std::result::Result<_, _>>()?
+                };
+                for other in others {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO supervisor_queue
+                            (supervisor_id, event_type, payload, priority, created_at,
+                             transition_key)
+                         VALUES (?1, ?2, json_set(?3, '$.fold_copy_for', ?1), ?4, ?5, ?6)",
+                        params![
+                            other,
+                            event_type,
+                            payload,
+                            i32::from(priority),
+                            now,
+                            format!("{transition_key}:{other}")
+                        ],
+                    )?;
+                }
+            }
             for prefix in folded_key_prefixes {
                 let member = format!("{prefix}:");
                 tx.execute(
@@ -526,6 +584,40 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         let rows = stmt
             .query_map(
                 params![supervisor_id, event_type, limit as i64],
+                Self::notification_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn list_pending_prompt_outbox_between(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        created_after: DateTime<Utc>,
+        created_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
+                    transition_key, prompt_delivered_at
+             FROM supervisor_queue
+             WHERE supervisor_id = ?1 AND event_type = ?2
+               AND processed_at IS NULL AND prompt_delivered_at IS NULL
+               AND julianday(created_at) >= julianday(?3)
+               AND julianday(created_at) < julianday(?4)
+             ORDER BY priority ASC, created_at ASC, id ASC LIMIT ?5",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    supervisor_id,
+                    event_type,
+                    created_after.to_rfc3339(),
+                    created_before.to_rfc3339(),
+                    limit as i64
+                ],
                 Self::notification_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1448,6 +1540,21 @@ mod tests {
         assert_eq!(store.get(a2).unwrap().unwrap().prompt_delivered_at, delivered_at);
         let untouched = store.get(lookalike).unwrap().unwrap();
         assert!(untouched.prompt_delivered_at.is_none() && untouched.processed_at.is_none());
+        // cas-ff42 L2: sup-b's member row was folded away, so sup-b holds its
+        // own copy of the fold, awaiting its prompt and naming its recipient.
+        let copy = store
+            .get_by_transition_key("fold:w1:100:sup-b")
+            .unwrap()
+            .expect("the other recipient keeps the group alert");
+        assert_eq!(copy.supervisor_id, "sup-b");
+        assert_eq!(copy.event_type, "workers_died_together");
+        assert!(copy.prompt_delivered_at.is_none() && copy.processed_at.is_none());
+        let copy_payload: serde_json::Value = serde_json::from_str(&copy.payload).unwrap();
+        assert_eq!(copy_payload["fold_copy_for"], "sup-b");
+        assert!(
+            store.get_by_transition_key("fold:w1:100:sup-a").unwrap().is_none(),
+            "the fold's own recipient gets no copy"
+        );
 
         let NotifyIdempotentResult::Created(fold_id) = folded else { unreachable!() };
         assert_eq!(
@@ -1455,6 +1562,53 @@ mod tests {
             NotifyIdempotentResult::AlreadyExists { id: fold_id, prompt_delivered: false },
             "a replay re-reads the same fold"
         );
+    }
+
+    /// cas-ff42: the windowed outbox query keeps aged-out rows from crowding
+    /// recent ones out of its limit.
+    #[test]
+    fn windowed_prompt_outbox_skips_rows_outside_the_window_cas_ff42() {
+        let (_temp, store) = create_test_store();
+        let mut ids = Vec::new();
+        for key in ["old-1", "old-2", "new-1"] {
+            let NotifyIdempotentResult::Created(id) = store
+                .notify_idempotent("sup", "worker_died", "{}", NotificationPriority::Critical, key)
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            ids.push(id);
+        }
+        let aged = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE supervisor_queue SET created_at = ?1 WHERE id IN (?2, ?3)",
+                params![aged, ids[0], ids[1]],
+            )
+            .unwrap();
+        }
+        let now = Utc::now();
+        let recent = store
+            .list_pending_prompt_outbox_between(
+                "sup",
+                "worker_died",
+                now - chrono::Duration::minutes(30),
+                now + chrono::Duration::seconds(1),
+                1,
+            )
+            .unwrap();
+        assert_eq!(recent.iter().map(|row| row.id).collect::<Vec<_>>(), [ids[2]]);
+        let aged_out = store
+            .list_pending_prompt_outbox_between(
+                "sup",
+                "worker_died",
+                now - chrono::Duration::hours(3),
+                now - chrono::Duration::minutes(30),
+                10,
+            )
+            .unwrap();
+        assert_eq!(aged_out.len(), 2);
     }
 
 }

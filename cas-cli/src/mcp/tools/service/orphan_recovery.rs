@@ -670,13 +670,18 @@ pub(crate) fn list_unstamped_worker_deaths(
     };
     let mut found = Vec::new();
     for supervisor in live_session_supervisors(agent_store, factory_session) {
-        let Ok(rows) = queue.list_pending_prompt_outbox(&supervisor, "worker_died", 20) else {
+        // cas-ff42: windowed, so rows the sweep gave up on never crowd recent
+        // ones out of the limit.
+        let Ok(rows) = queue.list_pending_prompt_outbox_between(
+            &supervisor,
+            "worker_died",
+            now - max_age,
+            now + chrono::Duration::seconds(1),
+            20,
+        ) else {
             continue;
         };
         for row in rows {
-            if now - row.created_at > max_age {
-                continue;
-            }
             let Some(incident) = row
                 .transition_key
                 .as_deref()

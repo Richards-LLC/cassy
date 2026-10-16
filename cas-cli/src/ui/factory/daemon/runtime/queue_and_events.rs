@@ -219,6 +219,56 @@ fn worker_exit_cause(
 pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(5);
 
+/// cas-26c8: how old an unstamped `worker_died` row may be and still be
+/// injected by the sweep. Older rows predate this daemon's watch and are left
+/// to `worker_status` rather than surfacing as a fresh alarm.
+pub(super) const UNSTAMPED_WORKER_DEATH_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
+
+/// cas-26c8: what to do with a death group after one folded-relay attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FoldedGroupStep {
+    /// The folded prompt is enqueued: fold the held per-worker rows away.
+    Fold,
+    /// Not enqueued yet: keep the group and try again next tick.
+    Retry,
+    /// Not enqueued after ten minutes: relay each death on its own.
+    FallBack,
+}
+
+/// cas-26c8 L2: a folded relay whose prompt is enqueued is delivered, even if
+/// stamping its durable row failed, so the per-worker fallback never adds a
+/// second report on top of it.
+pub(crate) fn folded_group_step(prompt_enqueued: bool, age: chrono::Duration) -> FoldedGroupStep {
+    if prompt_enqueued {
+        FoldedGroupStep::Fold
+    } else if age < chrono::Duration::minutes(10) {
+        FoldedGroupStep::Retry
+    } else {
+        FoldedGroupStep::FallBack
+    }
+}
+
+/// cas-26c8 L1: relay every closed death group independently. A group that
+/// `relay` keeps (returns false) stays queued without blocking the groups
+/// after it; exits whose window is still open stay too.
+pub(crate) fn drive_death_groups(
+    mut exits: Vec<ObservedWorkerExit>,
+    now: chrono::DateTime<chrono::Utc>,
+    window: std::time::Duration,
+    mut relay: impl FnMut(&[ObservedWorkerExit]) -> bool,
+) -> Vec<ObservedWorkerExit> {
+    let mut kept = Vec::new();
+    while let Some(group) = closed_death_group(&exits, now, window) {
+        let rest = exits.split_off(group.len());
+        if !relay(&group) {
+            kept.extend(group);
+        }
+        exits = rest;
+    }
+    kept.extend(exits);
+    kept
+}
+
 /// One observed harness exit, kept briefly to detect correlated deaths.
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedWorkerExit {

@@ -523,11 +523,22 @@ fn emit_worker_died_signals_with_exit(
     }
 
     // cas-b06f: a requested stop is reported once, by the shutdown receipt.
-    // cas-26c8: a deferred death is relayed once its correlation window closes.
-    if relay != DeathRelay::Alarm {
+    if relay == DeathRelay::Requested {
         return;
     }
-    relay_worker_death_payload(cas_root, agent_store, agent, summary, reason, exit, &payload);
+    // cas-26c8: a deferred death writes its durable rows now, so a daemon
+    // restart inside the correlation window cannot lose it, and holds only
+    // the prompt until the window closes.
+    relay_worker_death_payload(
+        cas_root,
+        agent_store,
+        agent,
+        summary,
+        reason,
+        exit,
+        &payload,
+        relay == DeathRelay::Deferred,
+    );
 }
 
 /// cas-26c8: the per-worker Critical `worker_died` relay for a death recorded
@@ -544,9 +555,36 @@ pub(crate) fn relay_worker_death(
         return;
     }
     let payload = worker_died_payload(agent, summary, reason, exit);
-    relay_worker_death_payload(cas_root, agent_store, agent, summary, reason, exit, &payload);
+    relay_worker_death_payload(cas_root, agent_store, agent, summary, reason, exit, &payload, false);
 }
 
+/// The supervisors (or, with none live, the parent) a worker's death
+/// notifies.
+fn death_recipients(agent_store: &dyn AgentStore, agent: &Agent) -> Vec<String> {
+    let mut recipients: Vec<String> = agent_store
+        .list(None)
+        .map(|agents| {
+            agents
+                .into_iter()
+                .filter(|a| {
+                    matches!(a.role, AgentRole::Supervisor | AgentRole::Director)
+                        && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
+                        && a.visible_to_factory_session(agent.factory_session.as_deref())
+                })
+                .map(|a| a.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    // If no live supervisor rows, still notify parent_id when set.
+    if recipients.is_empty() {
+        if let Some(parent) = agent.parent_id.clone() {
+            recipients.push(parent);
+        }
+    }
+    recipients
+}
+
+#[allow(clippy::too_many_arguments)]
 fn relay_worker_death_payload(
     cas_root: &Path,
     agent_store: &dyn AgentStore,
@@ -555,47 +593,150 @@ fn relay_worker_death_payload(
     reason: &str,
     exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
     payload: &serde_json::Value,
+    hold_prompt: bool,
 ) {
     // Supervisor queue — critical priority.
-    let supervisors = match agent_store.list(None) {
-        Ok(agents) => agents
-            .into_iter()
-            .filter(|a| {
-                matches!(a.role, AgentRole::Supervisor | AgentRole::Director)
-                    && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
-                    && a.visible_to_factory_session(agent.factory_session.as_deref())
-            })
-            .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
-    };
-
     if let Ok(queue) = open_supervisor_queue_store(cas_root) {
         let payload_str = payload.to_string();
         let prompt_queue = open_prompt_queue_store(cas_root).ok();
         let incident = death_incident_key(agent);
-
-        let mut recipients: Vec<String> = supervisors.iter().map(|s| s.id.clone()).collect();
-        // If no live supervisor rows, still notify parent_id when set.
-        if recipients.is_empty() {
-            if let Some(parent) = agent.parent_id.clone() {
-                recipients.push(parent);
+        for recipient in &death_recipients(agent_store, agent) {
+            let Some((notification_id, prompt_delivered)) =
+                record_worker_died_notice(queue.as_ref(), recipient, agent, &incident, &payload_str)
+            else {
+                continue;
+            };
+            if prompt_delivered || hold_prompt {
+                continue;
             }
-        }
-
-        for recipient in &recipients {
-            deliver_worker_died_notice(
+            inject_worker_died_prompt(
                 queue.as_ref(),
                 prompt_queue.as_deref(),
                 recipient,
+                notification_id,
                 agent,
                 summary,
                 reason,
                 &incident,
-                &payload_str,
                 exit,
             );
         }
     }
+}
+
+/// cas-26c8: a group's folded relay replaces these per-worker relays, so
+/// their durable rows are stamped and acknowledged and never injected.
+pub(crate) fn fold_held_worker_death(cas_root: &Path, agent_store: &dyn AgentStore, agent: &Agent) {
+    let Ok(queue) = open_supervisor_queue_store(cas_root) else {
+        return;
+    };
+    let incident = death_incident_key(agent);
+    for recipient in death_recipients(agent_store, agent) {
+        let Ok(Some(row)) = queue.get_by_transition_key(&format!("{incident}:{recipient}")) else {
+            continue;
+        };
+        let _ = queue.mark_prompt_delivered(row.id);
+        let _ = queue.ack(row.id);
+    }
+}
+
+/// cas-26c8: a death's durable `worker_died` row whose prompt was never
+/// injected, because the daemon that held it for the correlation window
+/// stopped or restarted, or because an injection failed. Each row recent
+/// enough to matter and not held by the live daemon (`held_incidents`, from
+/// [`death_incident_key`]) is injected now, so a death is never silent.
+pub(crate) fn sweep_unstamped_worker_deaths(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    held_incidents: &std::collections::HashSet<String>,
+    now: chrono::DateTime<chrono::Utc>,
+    max_age: chrono::Duration,
+) -> usize {
+    let (Ok(queue), Ok(prompt_queue)) =
+        (open_supervisor_queue_store(cas_root), open_prompt_queue_store(cas_root))
+    else {
+        return 0;
+    };
+    let supervisors = agent_store
+        .list(None)
+        .map(|agents| {
+            agents
+                .into_iter()
+                .filter(|a| matches!(a.role, AgentRole::Supervisor | AgentRole::Director))
+                .map(|a| a.id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut injected = 0;
+    for supervisor in supervisors {
+        let Ok(rows) = queue.list_pending_prompt_outbox(&supervisor, "worker_died", 20) else {
+            continue;
+        };
+        for row in rows {
+            if now - row.created_at > max_age {
+                continue;
+            }
+            let Some(incident) = row
+                .transition_key
+                .as_deref()
+                .and_then(|key| key.strip_suffix(&format!(":{supervisor}")))
+            else {
+                continue;
+            };
+            if held_incidents.contains(incident) {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload) else {
+                continue;
+            };
+            let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+            let list = |key: &str| {
+                payload
+                    .get(key)
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            let (Some(worker_id), Some(worker_name)) = (text("worker_id"), text("worker_name"))
+            else {
+                continue;
+            };
+            let mut agent = Agent::new(worker_id.to_string(), worker_name.to_string());
+            agent.role = AgentRole::Worker;
+            agent.factory_session = text("factory_session").map(str::to_string);
+            let summary = OrphanRecoverySummary {
+                held_task_ids: list("held_tasks"),
+                recovered_task_ids: list("recovered_tasks"),
+            };
+            let exit = crate::prompt_revalidation::WorkerExitCause {
+                exit_code: payload
+                    .get("exit_code")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|code| i32::try_from(code).ok()),
+                exit_signal: text("exit_signal").map(str::to_string),
+                output_tail: text("exit_tail").map(str::to_string),
+            };
+            let has_exit = exit != crate::prompt_revalidation::WorkerExitCause::default();
+            inject_worker_died_prompt(
+                queue.as_ref(),
+                Some(prompt_queue.as_ref()),
+                &supervisor,
+                row.id,
+                &agent,
+                &summary,
+                text("reason").unwrap_or("worker died"),
+                incident,
+                has_exit.then_some(&exit),
+            );
+            injected += 1;
+        }
+    }
+    injected
 }
 
 fn worker_died_payload(
@@ -628,7 +769,7 @@ fn worker_died_payload(
 /// heartbeat → die-again cycle moves the heartbeat and earns a second notice.
 /// This is what makes the reported 1,452-notices-for-one-agent class impossible
 /// rather than merely unlikely.
-fn death_incident_key(agent: &Agent) -> String {
+pub(crate) fn death_incident_key(agent: &Agent) -> String {
     format!(
         "worker_died:{}:{}",
         agent.id,
@@ -647,30 +788,28 @@ fn death_incident_key(agent: &Agent) -> String {
 /// Every step is replay-safe, so a crash between 2 and 3 costs at most a
 /// repeated no-op enqueue — never a second prompt row.
 #[allow(clippy::too_many_arguments)]
-fn deliver_worker_died_notice(
+/// The durable `worker_died` row for one recipient: its id and whether its
+/// prompt was already injected.
+fn record_worker_died_notice(
     queue: &dyn SupervisorQueueStore,
-    prompt_queue: Option<&dyn PromptQueueStore>,
     recipient: &str,
     agent: &Agent,
-    summary: &OrphanRecoverySummary,
-    reason: &str,
     incident: &str,
     payload_str: &str,
-    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
-) {
+) -> Option<(i64, bool)> {
     let transition_key = format!("{incident}:{recipient}");
-    let (notification_id, prompt_already_delivered) = match queue.notify_idempotent(
+    match queue.notify_idempotent(
         recipient,
         "worker_died",
         payload_str,
         NotificationPriority::Critical,
         &transition_key,
     ) {
-        Ok(NotifyIdempotentResult::Created(id)) => (id, false),
+        Ok(NotifyIdempotentResult::Created(id)) => Some((id, false)),
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered,
-        }) => (id, prompt_delivered),
+        }) => Some((id, prompt_delivered)),
         Err(error) => {
             tracing::error!(
                 target: "cas::coordination",
@@ -680,14 +819,24 @@ fn deliver_worker_died_notice(
                 %error,
                 "cas-3dcb: could not record a worker death for the supervisor"
             );
-            return;
+            None
         }
-    };
-
-    if prompt_already_delivered {
-        return;
     }
+}
 
+/// Inject the supervisor prompt for a recorded `worker_died` row and stamp it.
+#[allow(clippy::too_many_arguments)]
+fn inject_worker_died_prompt(
+    queue: &dyn SupervisorQueueStore,
+    prompt_queue: Option<&dyn PromptQueueStore>,
+    recipient: &str,
+    notification_id: i64,
+    agent: &Agent,
+    summary: &OrphanRecoverySummary,
+    reason: &str,
+    incident: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+) {
     let Some(prompt_queue) = prompt_queue else {
         tracing::error!(
             target: "cas::coordination",

@@ -952,6 +952,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
@@ -1091,6 +1092,7 @@ fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
     // deliberately do not serialize and are not runtime settings.
     let factory = FactoryConfig {
         artifacts_root: Some("/mnt/factory-artifacts".into()),
+        scratch_root: Some("/mnt/rewind/cas".into()),
         epic_base_branch: Some("main".into()),
         write_roots: vec!["/mnt/operator-approved".into()],
         ..FactoryConfig::default()
@@ -1473,4 +1475,21 @@ fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
             .project
             .is_none()
     );
+}
+
+/// cas-3f93: `factory.scratch_root` is unset by default, refuses a relative
+/// path (it would resolve against whichever cwd a spawn ran in) and clears
+/// back to unset with an empty value.
+#[test]
+fn factory_scratch_root_is_absolute_or_unset_cas_3f93() {
+    let mut config = Config::default();
+    assert_eq!(config.factory().scratch_root, None);
+    assert_eq!(config.get("factory.scratch_root").as_deref(), Some(""));
+    let error = config.set("factory.scratch_root", "rewind/cas").unwrap_err();
+    assert!(error.to_string().contains("absolute"), "{error}");
+    assert_eq!(config.factory().scratch_root, None);
+    config.set("factory.scratch_root", "/mnt/rewind/cas").unwrap();
+    assert_eq!(config.factory().scratch_root.as_deref(), Some("/mnt/rewind/cas"));
+    config.set("factory.scratch_root", "").unwrap();
+    assert_eq!(config.factory().scratch_root, None);
 }

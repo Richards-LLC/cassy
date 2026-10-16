@@ -2056,10 +2056,27 @@ fn preflight_factory_launch(
     if let Some(cas_root) = resolved_cas_root.as_deref() {
         let config = Config::load(cas_root).unwrap_or_default();
         let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
-        match crate::factory_target_cache::capacity_status(cwd, policy) {
+        // cas-3f93: worker targets on `[factory] scratch_root` fill that
+        // filesystem, so it is probed first; the checkout's own follows.
+        let scratch_probe = crate::factory_scratch::configured_scratch_root(cas_root)
+            .and_then(|root| crate::factory_scratch::existing_ancestor(&root).map(std::path::Path::to_path_buf));
+        let scratch_pressure = scratch_probe.as_deref().and_then(|root| {
+            match crate::factory_target_cache::capacity_status(root, policy) {
+                Ok(capacity) if !capacity.pressure => None,
+                result => Some((root, result)),
+            }
+        });
+        let (probed, result) = scratch_pressure
+            .unwrap_or_else(|| (cwd, crate::factory_target_cache::capacity_status(cwd, policy)));
+        let filesystem = if probed == cwd {
+            "filesystem".to_string()
+        } else {
+            format!("scratch filesystem at {}", probed.display())
+        };
+        match result {
             Ok(capacity) if capacity.pressure => {
                 let warning = format!(
-                    "Cargo target-cache disk pressure: filesystem is {}% used (factory high watermark {}%, low watermark {}%). Run coordination gc_report, review TARGET_CACHE_STATUS_JSON, then explicitly run gc_cleanup force=true dry_run=false.",
+                    "Cargo target-cache disk pressure: {filesystem} is {}% used (factory high watermark {}%, low watermark {}%). Run coordination gc_report, review TARGET_CACHE_STATUS_JSON, then explicitly run gc_cleanup force=true dry_run=false.",
                     capacity.used_percent,
                     capacity.high_watermark_percent,
                     capacity.low_watermark_percent,

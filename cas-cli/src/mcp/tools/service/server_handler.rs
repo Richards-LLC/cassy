@@ -691,6 +691,29 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 mod tests {
     use super::potentially_mutating_call;
 
+    #[test]
+    fn cas_4e19_authenticated_non_worker_verdict_skips_store_access_across_clones() {
+        use crate::mcp::server::{AgentIdentitySource, CasCore};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role("cached-supervisor".into(), "cached-supervisor".into(), cas_types::AgentRole::Supervisor);
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.bind_agent_identity(supervisor.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        let before = cas_store::wait_budget::store_access_violations();
+        {
+            let _forbid = cas_store::wait_budget::forbid_store_access();
+            for _ in 0..16 {
+                super::record_worker_mcp_activity(&core.clone(), "task", "notes");
+            }
+        }
+        assert_eq!(cas_store::wait_budget::store_access_violations(), before,
+            "a confirmed non-worker core must not read the store again");
+        assert!(crate::store::open_event_store(&root).unwrap().list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cas_6eec_mcp_burst_records_one_activity_across_service_clones() {
         use crate::mcp::server::{CasCore, AgentIdentitySource};

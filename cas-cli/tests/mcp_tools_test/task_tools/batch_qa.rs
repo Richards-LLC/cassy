@@ -94,16 +94,11 @@ async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
         "squash must break commit ancestry"
     );
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
-    let mut request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+    let request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
         "id":"cas-bq01", "commit_receipt":squash, "reason":"Reviewed squash delivery"
     }))
     .unwrap();
-    let closed = extract_text(
-        fx.core
-            .cas_task_close(Parameters(request.clone()))
-            .await
-            .unwrap(),
-    );
+    let closed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     assert_eq!(
         tasks.get("cas-bq01").unwrap().status,
         TaskStatus::Closed,
@@ -117,8 +112,11 @@ async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
             .contains("QA evidence scoped to delivery anchor")
     );
     // A real but unrelated target commit must never be mapped to the anchor.
-    request.id = "cas-bq02".into();
-    request.commit_receipt = Some(git(&fx.repo, &["rev-parse", "main^1"]));
+    let request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq02", "commit_receipt":git(&fx.repo, &["rev-parse", "main^1"]),
+        "reason":"Unrelated target receipt must stay refused"
+    }))
+    .unwrap();
     let unrelated = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
     assert_ne!(
         tasks.get("cas-bq02").unwrap().status,

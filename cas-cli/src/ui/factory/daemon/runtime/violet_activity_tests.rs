@@ -160,6 +160,7 @@ fn mention(channel: &str, secs: i64) -> serde_json::Value {
 }
 
 struct Fixture {
+    _env: crate::test_support::TestEnvGuard,
     _temp: tempfile::TempDir,
     queue: SqlitePromptQueueStore,
     watch_path: PathBuf,
@@ -167,18 +168,36 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let watch_path = WatchBook::path(temp.path());
-        Self { _temp: temp, queue, watch_path }
+        Self {
+            _env: env,
+            _temp: temp,
+            queue,
+            watch_path,
+        }
     }
 
     fn wake(&self, session: &str, now: DateTime<Utc>) -> VioletWake {
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            None,
+            None,
+        );
+        crate::ui::factory::session::SessionManager::new()
+            .save_metadata(&metadata)
+            .unwrap();
         VioletWake::new(
             PROJECT.into(),
             Vec::new(),
-            CONSUMER.into(),
+            format!("machine:{session}"),
             session.into(),
             self.watch_path.clone(),
             Vec::new(),
@@ -244,6 +263,886 @@ fn mention_is_claimed_admitted_acked_and_wakes_the_supervisor_once() {
     let report = wake.poll_once(&relay, &fx.queue, true, at(29));
     assert_eq!((report.claimed, report.wakes), (0, 0));
     assert_eq!(fx.wakes().len(), 1);
+}
+
+#[test]
+fn cas_639c_peer_start_and_interleaved_ticks_preserve_both_sessions_watches() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut first = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    assert_eq!(first.poll_once(&relay, &fx.queue, true, at(10)).wakes, 1);
+
+    let mut second = fx.wake("second", at(20));
+    relay.publish(mention("C2", 21));
+    assert_eq!(second.poll_once(&relay, &fx.queue, true, at(30)).wakes, 1);
+    first.poll_once(&relay, &fx.queue, true, at(40));
+    second.poll_once(&relay, &fx.queue, true, at(50));
+
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let owners: BTreeSet<_> = saved
+        .active()
+        .map(|w| (w.factory_session.as_str(), w.channel_id.as_str()))
+        .collect();
+    assert_eq!(owners, BTreeSet::from([("first", "C1"), ("second", "C2")]));
+    assert_eq!(
+        first
+            .due_sweeps(at(400))
+            .iter()
+            .map(|s| s.channel_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C1"]
+    );
+    assert_eq!(
+        second
+            .due_sweeps(at(400))
+            .iter()
+            .map(|s| s.channel_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C2"]
+    );
+    first.stop_idle(&fx.queue, at(3600));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert!(saved.active().any(|w| w.factory_session == "second"));
+}
+
+#[test]
+fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let original = owner.book().watches[0].clone();
+    let mut claimant = fx.wake("claimant", at(20));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
+    *relay.fail_ack.borrow_mut() = true;
+    let report = claimant.poll_once(&relay, &fx.queue, false, at(30));
+    assert_eq!((report.wakes, report.admitted), (1, 1));
+    let rows = fx.wakes();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.factory_session.as_deref() == Some("owner"))
+    );
+    assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), None);
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let mut expected = original;
+    expected.last_human_at = at(25);
+    expected.foreign_seen_keys.insert(
+        ts(0),
+        VecDeque::from([format!("slack:T0123:C1:{}", ts(25))]),
+    );
+    assert_eq!(saved.watch("C1", "owner"), Some(&expected));
+    *relay.fail_ack.borrow_mut() = false;
+    relay.set_now(at(200));
+    let replay = claimant.poll_once(&relay, &fx.queue, false, at(200));
+    assert_eq!((replay.wakes, replay.admitted), (0, 1));
+    assert_eq!(fx.wakes().len(), 2);
+    assert_eq!(
+        relay.outcome(&format!("slack:T0123:C1:{}", ts(25))),
+        Some(AckOutcome::Admitted)
+    );
+
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 90, 80, "U3"));
+    claimant.poll_once(&relay, &fx.queue, true, at(295));
+    assert_eq!(
+        fx.wakes().last().unwrap().factory_session.as_deref(),
+        Some("claimant")
+    );
+}
+
+#[test]
+fn cas_639c_wake_started_before_login_claims_after_credentials_are_saved() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_USER_CLOUD_JSON", env.home().join("cloud.json"));
+    crate::cloud::CloudConfig::default().save_user().unwrap();
+    let runtime = VioletWakeRuntime::start(&root, "login-session", "supervisor")
+        .expect("the daemon needs a runtime before login so later ticks can recover");
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let cloud = crate::cloud::CloudConfig {
+        endpoint: format!("http://{}", server.server_addr()),
+        token: Some("cas-639c-fixture-cloud-token".into()),
+        ..Default::default()
+    };
+    cloud.save_user().unwrap();
+    let response = std::thread::spawn(move || {
+        let request = server
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.url(), "/api/violet/activity/claim");
+        assert!(
+            request
+                .headers()
+                .iter()
+                .any(|header| header.field.equiv("Authorization")
+                    && header.value.as_str() == "Bearer cas-639c-fixture-cloud-token")
+        );
+        request
+            .respond(tiny_http::Response::from_string(
+                r#"{"events":[],"denied":[]}"#,
+            ))
+            .unwrap();
+    });
+    let (report, _, _) = runtime.tick_blocking();
+    response.join().unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(
+        WatchBook::read(&WatchBook::path(&root))
+            .unwrap()
+            .relay
+            .last_ok_at
+            .is_some()
+    );
+}
+
+#[test]
+fn cas_639c_concurrent_session_saves_keep_both_watch_sets() {
+    let fx = Fixture::new();
+    let first = fx.wake("first", t0());
+    let second = fx.wake("second", t0());
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = [(first, "C1"), (second, "C2")]
+        .into_iter()
+        .map(|(mut wake, channel)| {
+            let root = fx._temp.path().to_path_buf();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let queue = SqlitePromptQueueStore::open(&root).unwrap();
+                let relay = FakeRelay::new();
+                relay.publish(mention(channel, 0));
+                barrier.wait();
+                for tick in 0..4 {
+                    let report = wake.poll_once(&relay, &queue, true, at(10 + tick));
+                    assert!(report.errors.is_empty(), "{report:?}");
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let owners: BTreeSet<_> = saved
+        .active()
+        .map(|watch| watch.factory_session.as_str())
+        .collect();
+    assert_eq!(owners, BTreeSet::from(["first", "second"]));
+    assert_eq!(fx.wakes().len(), 2);
+}
+
+#[test]
+fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut first = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    first.poll_once(&relay, &fx.queue, true, at(10));
+    let mut second = fx.wake("second", at(20));
+    relay.publish(mention("C1", 21));
+    second.poll_once(&relay, &fx.queue, true, at(30));
+    let messages = [
+        (100, 0, Some("U1")),
+        (120, 21, Some("U2")),
+        (150, 150, Some("U3")),
+    ];
+    assert_eq!(
+        first.apply_sweep(&fx.queue, "C1", read(&messages), at(400)),
+        SweepOutcome::Woke { messages: 2 }
+    );
+    assert_eq!(
+        second.apply_sweep(&fx.queue, "C1", read(&messages), at(400)),
+        SweepOutcome::Woke { messages: 1 }
+    );
+    let rows = fx.wakes();
+    assert_eq!(
+        rows.len(),
+        4,
+        "each session receives its owned thread and the first wake claims the unknown root"
+    );
+    for (session, owned, foreign) in [("first", 100, 120), ("second", 120, 100)] {
+        let row = rows
+            .iter()
+            .rev()
+            .find(|row| row.factory_session.as_deref() == Some(session))
+            .unwrap();
+        assert!(row.prompt.contains(&format!("message_ts={}", ts(owned))));
+        assert!(!row.prompt.contains(&format!("message_ts={}", ts(foreign))));
+    }
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .thread_owner("C1", &ts(150)),
+        Some("first")
+    );
+}
+
+#[test]
+fn cas_639c_review_missing_metadata_prunes_old_owner_before_routing() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut old = fx.wake("old", t0());
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
+    old.poll_once(&relay, &fx.queue, true, at(10));
+    crate::ui::factory::session::SessionManager::new()
+        .remove_metadata("old")
+        .unwrap();
+    let mut next = fx.wake("next", at(20));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
+    next.poll_once(&relay, &fx.queue, true, at(30));
+    assert_eq!(
+        fx.wakes().last().unwrap().factory_session.as_deref(),
+        Some("next")
+    );
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(
+        saved.watch("C1", "old").unwrap().stop_reason.as_deref(),
+        Some("session_end")
+    );
+}
+
+#[test]
+fn cas_639c_review_logged_out_ticks_do_not_write_or_warn() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_USER_CLOUD_JSON", env.home().join("cloud.json"));
+    crate::cloud::CloudConfig::default().save_user().unwrap();
+    let runtime = VioletWakeRuntime::start(&root, "logged-out", "supervisor").unwrap();
+    for _ in 0..4 {
+        let (report, sweeps, presence) = runtime.tick_blocking();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(sweeps.is_empty());
+        assert!(presence.is_none());
+    }
+    assert!(!WatchBook::path(&root).exists());
+    assert!(watch_status(&root, t0()).is_none());
+}
+
+#[test]
+fn cas_639c_review_corrupt_book_is_quarantined_and_recovered_with_doctor_finding() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.watch_path.parent().unwrap()).unwrap();
+    let corrupt = b"{broken watch book";
+    std::fs::write(&fx.watch_path, corrupt).unwrap();
+    let relay = FakeRelay::new();
+    relay.publish(mention("C1", 0));
+    let mut wake = fx.wake(SESSION, t0());
+    assert_eq!(wake.poll_once(&relay, &fx.queue, true, at(10)).wakes, 1);
+    assert_eq!(
+        std::fs::read(fx.watch_path.with_extension("json.corrupt")).unwrap(),
+        corrupt
+    );
+    let (health, message) = watch_status(fx._temp.path(), at(10))
+        .unwrap()
+        .doctor(at(10));
+    assert_eq!(health, WatchHealth::Warning);
+    assert!(message.contains("corrupt"), "{message}");
+}
+
+#[test]
+fn cas_639c_review_interrupted_quarantine_retry_does_not_remigrate_legacy() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut old = fx.wake("old", t0());
+    relay.publish(mention("C1", 0));
+    old.poll_once(&relay, &fx.queue, true, at(10));
+    let legacy_path = fx.watch_path.with_file_name("watches.json");
+    let legacy = std::fs::read(&fx.watch_path).unwrap();
+    std::fs::write(&legacy_path, &legacy).unwrap();
+    std::fs::write(&fx.watch_path, b"{corrupt native").unwrap();
+    let blocked_tmp = fx.watch_path.with_extension("json.tmp");
+    std::fs::create_dir(&blocked_tmp).unwrap();
+    let mut next = fx.wake("next", at(20));
+    relay.publish(mention("C2", 21));
+    let failed = next.poll_once(&relay, &fx.queue, true, at(30));
+    assert!(!failed.errors.is_empty());
+    assert_eq!(failed.held, 1);
+    std::fs::remove_dir(&blocked_tmp).unwrap();
+    assert_eq!(next.poll_once(&relay, &fx.queue, true, at(40)).wakes, 1);
+    let recovered = WatchBook::read(&fx.watch_path).unwrap();
+    assert!(recovered.watch("C1", "old").is_none());
+    assert!(recovered.watch("C2", "next").unwrap().is_active());
+    assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy);
+}
+
+#[test]
+fn cas_639c_review_foreign_hot_thread_cannot_evict_cold_thread_dedupe() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let cold = envelope(PROJECT, "C1", "thread_reply", 2, 1, "U1");
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    relay.publish(cold.clone());
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut claimant = fx.wake("claimant", at(20));
+    for batch in 0..11 {
+        for item in 0..20 {
+            relay.publish(envelope(
+                PROJECT,
+                "C1",
+                "thread_reply",
+                25 + batch * 20 + item,
+                0,
+                "U2",
+            ));
+        }
+        claimant.poll_once(&relay, &fx.queue, false, at(100 + batch * 70));
+    }
+    let replay = FakeRelay::new();
+    replay.publish(cold);
+    let report = owner.poll_once(&replay, &fx.queue, true, at(1000));
+    assert_eq!((report.wakes, report.admitted), (0, 1), "{report:?}");
+}
+
+#[test]
+fn cas_639c_review_versioned_book_migrates_legacy_once_without_writing_it() {
+    let fx = Fixture::new();
+    // pin: pre-3.59 binaries write only watches.json; v2 must use another file.
+    assert!(fx.watch_path.ends_with("watches.v2.json"));
+    let relay = FakeRelay::new();
+    let mut old = fx.wake("old", t0());
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
+    old.poll_once(&relay, &fx.queue, true, at(10));
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("format_version");
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    std::fs::remove_file(&fx.watch_path).unwrap();
+    let legacy_path = fx.watch_path.with_file_name("watches.json");
+    std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+    fx.wake("next", at(20))
+        .poll_once(&relay, &fx.queue, true, at(30));
+    assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
+    assert_eq!(saved["format_version"], 2);
+    std::fs::write(&legacy_path, b"old binary overwrote its legacy file").unwrap();
+    fx.wake("next", at(40))
+        .poll_once(&relay, &fx.queue, true, at(50));
+    assert!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "old")
+            .unwrap()
+            .is_active()
+    );
+    assert_eq!(
+        std::fs::read(&legacy_path).unwrap(),
+        b"old binary overwrote its legacy file"
+    );
+}
+
+#[test]
+fn cas_639c_review_future_book_version_is_refused_without_overwrite() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.watch_path.parent().unwrap()).unwrap();
+    let future = br#"{"format_version":999,"watches":[]}"#;
+    std::fs::write(&fx.watch_path, future).unwrap();
+    let relay = FakeRelay::new();
+    relay.publish(mention("C1", 0));
+    let mut wake = fx.wake(SESSION, t0());
+    let report = wake.poll_once(&relay, &fx.queue, true, at(10));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("unsupported")),
+        "{report:?}"
+    );
+    assert_eq!(report.wakes, 0);
+    assert_eq!(std::fs::read(&fx.watch_path).unwrap(), future);
+    assert!(!fx.watch_path.with_extension("json.corrupt").exists());
+}
+
+#[test]
+fn cas_639c_review_clean_end_stops_only_own_watches_and_blocks_later_ticks() {
+    let fx = Fixture::new();
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    crate::cloud::CloudConfig {
+        endpoint: format!("http://{}", server.server_addr()),
+        token: Some("cas-639c-fixture-token".into()),
+        ..Default::default()
+    }
+    .save_user()
+    .unwrap();
+    let relay = FakeRelay::new();
+    let mut first = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    first.poll_once(&relay, &fx.queue, true, at(10));
+    let mut second = fx.wake("second", at(20));
+    relay.publish(mention("C2", 21));
+    second.poll_once(&relay, &fx.queue, true, at(30));
+    let runtime = VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap();
+    assert_eq!(runtime.stop_blocking().unwrap(), 1);
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(
+        saved.watch("C1", "first").unwrap().stop_reason.as_deref(),
+        Some("session_end")
+    );
+    assert!(saved.watch("C2", "second").unwrap().is_active());
+    let before = std::fs::read(&fx.watch_path).unwrap();
+    let requests = std::thread::spawn(move || {
+        let request = server.recv_timeout(Duration::from_millis(200)).unwrap();
+        if let Some(request) = request {
+            request
+                .respond(tiny_http::Response::from_string(
+                    r#"{"events":[],"denied":[]}"#,
+                ))
+                .unwrap();
+            true
+        } else {
+            false
+        }
+    });
+    assert!(runtime.tick_blocking().0.errors.is_empty());
+    assert!(
+        !requests.join().unwrap(),
+        "stopped runtime contacted Cloud with valid credentials"
+    );
+    assert_eq!(std::fs::read(&fx.watch_path).unwrap(), before);
+}
+
+#[test]
+fn cas_639c_round3_truncated_peer_receipt_preserves_live_watch() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut peer = fx.wake("peer", t0());
+    relay.publish(mention("C1", 0));
+    peer.poll_once(&relay, &fx.queue, true, at(10));
+    let mut actor = fx.wake("actor", at(20));
+    // save_metadata truncates before writing; this is an ambiguous live receipt.
+    std::fs::write(
+        crate::ui::factory::session::metadata_path("peer"),
+        b"{\"name\":",
+    )
+    .unwrap();
+    relay.publish(mention("C2", 21));
+    let report = actor.poll_once(&relay, &fx.queue, true, at(30));
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C2", "actor")
+            .unwrap()
+            .is_active()
+    );
+    assert!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "peer")
+            .unwrap()
+            .is_active()
+    );
+}
+
+#[test]
+fn cas_639c_round3_listing_error_preserves_peer_watch() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut peer = fx.wake("peer", t0());
+    relay.publish(mention("C1", 0));
+    peer.poll_once(&relay, &fx.queue, true, at(10));
+    let mut actor = fx.wake("actor", at(20));
+    let sessions = crate::ui::factory::session::sessions_dir();
+    std::fs::rename(&sessions, sessions.with_extension("saved")).unwrap();
+    std::fs::write(&sessions, b"not a directory").unwrap();
+    assert!(
+        crate::ui::factory::session::SessionManager::new()
+            .list_sessions_read_only()
+            .is_err()
+    );
+    relay.publish(mention("C2", 21));
+    let report = actor.poll_once(&relay, &fx.queue, true, at(30));
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C2", "actor")
+            .unwrap()
+            .is_active()
+    );
+    assert!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "peer")
+            .unwrap()
+            .is_active()
+    );
+}
+
+#[test]
+fn cas_639c_round3_shutdown_is_bounded_and_next_tick_finishes_stop() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+    let runtime = std::sync::Arc::new(
+        VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap(),
+    );
+    let guard = runtime.state.lock().unwrap();
+    let (send, recv) = std::sync::mpsc::channel();
+    let stop = runtime.clone();
+    let thread = std::thread::spawn(move || {
+        send.send(stop.stop_blocking()).unwrap();
+    });
+    let bounded = recv.recv_timeout(Duration::from_millis(500));
+    drop(guard);
+    thread.join().unwrap();
+    assert!(
+        bounded.is_ok(),
+        "shutdown waited on an in-flight tick's mutex"
+    );
+    assert!(runtime.tick_blocking().0.errors.is_empty());
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "first")
+            .unwrap()
+            .stop_reason
+            .as_deref(),
+        Some("session_end")
+    );
+}
+
+#[test]
+fn cas_639c_round3_inflight_http_tick_finishes_deferred_stop() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    crate::cloud::CloudConfig {
+        endpoint: format!("http://{}", server.server_addr()),
+        token: Some("cas-639c-fixture-token".into()),
+        ..Default::default()
+    }
+    .save_user()
+    .unwrap();
+    let runtime = std::sync::Arc::new(
+        VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap(),
+    );
+    let ticking = runtime.clone();
+    let tick = std::thread::spawn(move || ticking.tick_blocking());
+    // Keep the real HTTP claim in flight while the daemon ends its session.
+    let request = server
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .expect("authenticated claim");
+    assert_eq!(request.url(), "/api/violet/activity/claim");
+    let started = std::time::Instant::now();
+    let stopped = runtime.stop_blocking();
+    let elapsed = started.elapsed();
+    request
+        .respond(tiny_http::Response::from_string(
+            r#"{"events":[],"denied":[]}"#,
+        ))
+        .unwrap();
+    let (report, sweeps, presence) = tick.join().unwrap();
+    assert_eq!(
+        stopped.unwrap(),
+        0,
+        "the in-flight tick owns deferred retirement"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "shutdown blocked for {elapsed:?}"
+    );
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(sweeps.is_empty() && presence.is_none());
+    // No additional tick or last-handle Drop is needed to finish the stop.
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "first")
+            .unwrap()
+            .stop_reason
+            .as_deref(),
+        Some("session_end")
+    );
+}
+
+#[test]
+fn cas_639c_round3_lifecycle_scope_drop_ends_own_watches() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+    {
+        // The lifecycle owns this runtime through Arc. Dropping its last handle
+        // must end watches even on an early return before explicit shutdown.
+        let _runtime = std::sync::Arc::new(
+            VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap(),
+        );
+    }
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "first")
+            .unwrap()
+            .stop_reason
+            .as_deref(),
+        Some("session_end")
+    );
+}
+
+#[test]
+fn cas_639c_round3_busy_foreign_thread_does_not_wake_owner_twice() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut claimant = fx.wake("claimant", at(20));
+    for batch in 0..3 {
+        for item in 0..20 {
+            relay.publish(envelope(
+                PROJECT,
+                "C1",
+                "thread_reply",
+                25 + batch * 20 + item,
+                0,
+                "U2",
+            ));
+        }
+        claimant.poll_once(&relay, &fx.queue, false, at(100 + batch * 70));
+    }
+    assert_eq!(
+        owner.apply_sweep(&fx.queue, "C1", read(&[(25, 0, Some("U2"))]), at(300)),
+        SweepOutcome::Quiet
+    );
+}
+
+#[test]
+fn cas_639c_round3_thread_state_is_bounded_and_reopen_is_fresh() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    // A perpetually busy watch must still have bounded ownership state.
+    let messages: Vec<_> = (1..=250).map(|n| (n, n, Some("U2"))).collect();
+    owner.apply_sweep(&fx.queue, "C1", read(&messages), at(300));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert!(
+        saved
+            .watch("C1", "owner")
+            .unwrap()
+            .watched_thread_roots
+            .len()
+            <= 200
+    );
+    let mut claimant = fx.wake("claimant", at(310));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 350, 250, "U2"));
+    claimant.poll_once(&relay, &fx.queue, false, at(360));
+    owner.stop_idle(&fx.queue, at(4000));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let stopped = saved.watch("C1", "owner").unwrap();
+    assert!(!stopped.is_active());
+    assert!(stopped.watched_thread_roots.is_empty());
+    assert!(stopped.violet_thread_roots.is_empty());
+    assert!(stopped.foreign_seen_keys.is_empty());
+    relay.publish(mention("C1", 4100));
+    owner.poll_once(&relay, &fx.queue, true, at(4110));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let reopened = saved.watch("C1", "owner").unwrap();
+    assert_eq!(reopened.watched_thread_roots, BTreeSet::from([ts(4100)]));
+    assert!(reopened.foreign_seen_keys.is_empty());
+}
+
+fn race_wait_for(path: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !path.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for {}", path.display()));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "subprocess role; invoked only by the two-process race test"]
+fn cas_639c_review_process_race_child() {
+    let root = PathBuf::from(std::env::var_os("CAS_639C_RACE_ROOT").expect("child root"));
+    let session = std::env::var("CAS_639C_RACE_SESSION").expect("child session");
+    let home = std::env::var_os("HOME").unwrap();
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("HOME", home);
+    let metadata = crate::ui::factory::session::create_metadata(
+        &session,
+        std::process::id(),
+        "supervisor",
+        &[],
+        None,
+        None,
+        None,
+    );
+    crate::ui::factory::session::SessionManager::new()
+        .save_metadata(&metadata)
+        .unwrap();
+    let queue = SqlitePromptQueueStore::open(&root).unwrap();
+    let mut wake = VioletWake::new(
+        PROJECT.into(),
+        vec![],
+        format!("machine:{session}"),
+        session.clone(),
+        WatchBook::path(&root),
+        vec![],
+        t0(),
+    );
+    std::fs::write(root.join(format!("ready-{session}")), b"ready").unwrap();
+    race_wait_for(&root.join("start")).unwrap();
+    let relay = FakeRelay::new();
+    relay.publish(mention(if session == "first" { "C1" } else { "C2" }, 0));
+    for tick in 0..8 {
+        let report = wake.poll_once(&relay, &queue, true, at(10 + tick));
+        assert!(report.errors.is_empty(), "{report:?}");
+    }
+    std::fs::write(root.join(format!("done-{session}")), b"done").unwrap();
+    race_wait_for(&root.join("release")).unwrap();
+}
+
+#[test]
+fn cas_639c_review_two_process_race_preserves_both_live_watch_sets() {
+    let fx = Fixture::new();
+    let mut children: Vec<_> = ["first", "second"].into_iter().map(|session| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "ui::factory::daemon::runtime::violet_activity::tests::cas_639c_review_process_race_child", "--nocapture"])
+            .env("CAS_639C_RACE_ROOT", fx._temp.path())
+            .env("CAS_639C_RACE_SESSION", session)
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .spawn().unwrap()
+    }).collect();
+    let result = (|| -> Result<(), String> {
+        for session in ["first", "second"] {
+            race_wait_for(&fx._temp.path().join(format!("ready-{session}")))?;
+        }
+        std::fs::write(fx._temp.path().join("start"), b"start").map_err(|e| e.to_string())?;
+        for session in ["first", "second"] {
+            race_wait_for(&fx._temp.path().join(format!("done-{session}")))?;
+        }
+        let saved = WatchBook::read(&fx.watch_path).ok_or("missing race book")?;
+        let owners: BTreeSet<_> = saved
+            .active()
+            .map(|watch| watch.factory_session.as_str())
+            .collect();
+        if owners != BTreeSet::from(["first", "second"]) {
+            return Err(format!("lost live race owner: {owners:?}"));
+        }
+        Ok(())
+    })();
+    std::fs::write(fx._temp.path().join("release"), b"release").unwrap();
+    if result.is_err() {
+        for child in &mut children {
+            let _ = child.kill();
+        }
+    }
+    let outputs: Vec<_> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap())
+        .collect();
+    assert!(result.is_ok(), "{result:?}; children: {outputs:?}");
+    assert!(
+        outputs.iter().all(|output| output.status.success()),
+        "{outputs:?}"
+    );
+    assert_eq!(fx.wakes().len(), 2);
+}
+
+#[test]
+fn cas_639c_foreign_reply_near_idle_boundary_keeps_owners_watch_active() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut claimant = fx.wake("claimant", at(3500));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 3595, 0, "U2"));
+    claimant.poll_once(&relay, &fx.queue, false, at(3596));
+    assert!(owner.stop_idle(&fx.queue, at(3601)).is_empty());
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let watch = saved.watch("C1", "owner").unwrap();
+    assert!(watch.is_active());
+    assert_eq!(watch.last_human_at, at(3595));
+}
+
+#[test]
+fn cas_639c_foreign_admission_updates_only_known_thread_activity() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    relay.publish(mention("C2", 1));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut other = fx.wake("other", at(20));
+    relay.publish(mention("C1", 21));
+    other.poll_once(&relay, &fx.queue, true, at(30));
+    let before = WatchBook::read(&fx.watch_path).unwrap();
+    let mut claimant = fx.wake("claimant", at(3500));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 3595, 0, "U2"));
+    claimant.poll_once(&relay, &fx.queue, false, at(3596));
+    let after = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(after.watches.len(), before.watches.len());
+    for original in &before.watches {
+        let updated = after
+            .watch(&original.channel_id, &original.factory_session)
+            .unwrap();
+        if original.factory_session == "owner" && original.channel_id == "C1" {
+            assert_eq!(updated.last_human_at, at(3595));
+            assert_eq!(updated.cursor_ts, original.cursor_ts);
+            assert!(updated.has_seen(&format!("slack:T0123:C1:{}", ts(3595))));
+            assert_eq!(updated.started_at, original.started_at);
+            assert_eq!(updated.stopped_at, original.stopped_at);
+            assert_eq!(updated.stop_reason, original.stop_reason);
+            assert_eq!(updated.watched_thread_roots, original.watched_thread_roots);
+            assert_eq!(updated.violet_thread_roots, original.violet_thread_roots);
+        } else {
+            assert_eq!(updated, original);
+        }
+    }
+}
+
+#[test]
+fn cas_639c_failed_durable_enqueue_does_not_update_or_ack_owner_activity() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let original = WatchBook::read(&fx.watch_path)
+        .unwrap()
+        .watch("C1", "owner")
+        .unwrap()
+        .clone();
+    let mut claimant = fx.wake("claimant", at(20));
+    let db = rusqlite::Connection::open(fx._temp.path().join("cas.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER cas_639c_fail_enqueue BEFORE INSERT ON prompt_queue BEGIN SELECT RAISE(FAIL, 'injected enqueue failure'); END;").unwrap();
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
+    let report = claimant.poll_once(&relay, &fx.queue, false, at(30));
+    assert!(!report.errors.is_empty());
+    assert_eq!((report.wakes, report.held), (0, 1));
+    assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), None);
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "owner"),
+        Some(&original)
+    );
+    db.execute_batch("DROP TRIGGER cas_639c_fail_enqueue;")
+        .unwrap();
+    let retry = claimant.poll_once(&relay, &fx.queue, false, at(40));
+    assert_eq!((retry.wakes, retry.admitted, retry.held), (1, 1, 0));
+    assert_eq!(
+        relay.outcome(&format!("slack:T0123:C1:{}", ts(25))),
+        Some(AckOutcome::Admitted)
+    );
 }
 
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the
@@ -551,13 +1450,29 @@ fn incomplete_sweep_keeps_the_cursor() {
     assert_eq!(wake.book().watches[0].cursor_ts.as_deref(), Some(ts(0).as_str()));
 }
 
-/// A watch from an ended factory session is stopped on load.
+/// A positively dead daemon receipt ends its watches; another session alone
+/// is not evidence of death.
 #[test]
 fn watches_end_with_their_factory_session() {
     let fx = Fixture::new();
     let relay = FakeRelay::new();
     relay.publish(mention("C1", 0));
     fx.wake("old-session", t0()).poll_once(&relay, &fx.queue, true, at(10));
+    let metadata = crate::ui::factory::session::create_metadata(
+        "old-session",
+        i32::MAX as u32,
+        "supervisor",
+        &[],
+        None,
+        None,
+        None,
+    );
+    assert!(!crate::ui::factory::session::daemon_identity_is_live(
+        &metadata
+    ));
+    crate::ui::factory::session::SessionManager::new()
+        .save_metadata(&metadata)
+        .unwrap();
     let wake = fx.wake(SESSION, at(20));
     let watch = &wake.book().watches[0];
     assert_eq!(watch.stop_reason.as_deref(), Some("session_end"));
@@ -582,6 +1497,8 @@ fn sweep_learns_the_violet_bot_from_its_thread_root() {
     assert_eq!(outcome, SweepOutcome::Quiet, "root and reply are Violet's");
     assert!(wake.book().learned_bot_user_ids.contains("U0VIOLET"));
     // Configured ids work before anything is learned.
+    drop(wake);
+    drop(fx);
     let fx2 = Fixture::new();
     let mut configured = VioletWake::new(
         PROJECT.into(),

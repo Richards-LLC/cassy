@@ -84,9 +84,15 @@ def simple(source):
                 block.append(lines[i])
                 i += 1
             rows = table_rows('\n'.join(block))
-            caption = ('Issue register · ' + str(len(rows[2:])) + ' verified closures'
-                       if rows[0][0] == 'Issue' else 'Change map data · closed issues by surface')
-            result.append('<div class="table-wrap"><table><caption>' + caption + '</caption><thead><tr>')
+            if rows[0][0] == 'Issue':
+                caption = 'GitHub issues closed with this release · ' + str(len(rows[2:]))
+            elif rows[0][0] == 'Area' and rows[0][1] == 'Changes':
+                caption = ''  # the open <summary> above names this table
+            elif rows[0][0] == 'Measure':
+                caption = 'Release at a glance'
+            else:
+                caption = 'Issues closed, by area'
+            result.append('<div class="table-wrap"><table>' + ('<caption>' + caption + '</caption>' if caption else '') + '<thead><tr>')
             for k, cell in enumerate(rows[0]):
                 num = ' class="num"' if rows[1][k].endswith(':') else ''
                 result.append('<th scope="col"' + num + '>' + inline(cell) + '</th>')
@@ -201,41 +207,70 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
         raise ValueError('change map needs claim, reading guide and source after table')
     claim, guide = intro
     rows = table_rows(map_table)
-    if len(rows[0]) != 3 or len(rows) < 4 or rows[-1][0] != 'Total':
-        raise ValueError('change map needs three columns, surface rows and a Total row')
+    header = [cell.lower() for cell in rows[0]]
+    if header == ['area', 'changes', 'what changed']:
+        by_change = True
+    elif header == ['surface', 'issues closed', 'issue numbers']:
+        by_change = False  # v1 sources: one dot per closed issue
+    else:
+        raise ValueError('change map header must be Area | Changes | What changed')
+    if len(rows) < 3 or rows[-1][0] != 'Total':
+        raise ValueError('change map needs area rows and a final Total row')
     map_rows, seen = [], set()
-    for name, count, issues in rows[2:-1]:
+    for name, count, items in rows[2:-1]:
         if not re.fullmatch(r'\d+', count) or not name or name in [r[0] for r in map_rows]:
-            raise ValueError('map surface names must be unique and counts nonnegative integers')
-        ids = re.findall(r'#([0-9]+)\b', issues)
-        if len(ids) != int(count) or len(set(ids)) != len(ids) or seen.intersection(ids):
-            raise ValueError('each counted closure needs one unique issue number: ' + name)
-        seen.update(ids)
+            raise ValueError('map area names must be unique and counts nonnegative integers')
+        if by_change:
+            ids = [item.strip() for item in items.split(';') if item.strip()]
+            if int(count) == 0 or len(ids) != int(count):
+                raise ValueError('each area needs one or more changes, separated by semicolons, '
+                                 'matching its count: ' + name)
+        else:
+            ids = re.findall(r'#([0-9]+)\b', items)
+            if len(ids) != int(count) or len(set(ids)) != len(ids) or seen.intersection(ids):
+                raise ValueError('each counted closure needs one unique issue number: ' + name)
+            seen.update(ids)
         map_rows.append((name, int(count), ids))
     total = sum(row[1] for row in map_rows)
     if str(total) != rows[-1][1]:
-        raise ValueError('change map Total differs from the sum of its surfaces')
-    # The ledger and map must account for the same issue set, once each.
+        raise ValueError('change map Total differs from the sum of its areas')
     _, ledger_table, _ = split_table(sections['Fixes ledger'])
     ledger_rows = table_rows(ledger_table)[2:]
     ledger_ids = [re.findall(r'#([0-9]+)\b', row[0]) for row in ledger_rows]
-    if any(len(ids) != 1 for ids in ledger_ids) or sorted(ids[0] for ids in ledger_ids) != sorted(seen):
+    if any(len(ids) != 1 for ids in ledger_ids) or len({ids[0] for ids in ledger_ids}) != len(ledger_ids):
+        raise ValueError('fixes ledger needs one unique linked issue number per row')
+    if not by_change and sorted(ids[0] for ids in ledger_ids) != sorted(seen):
         raise ValueError('fixes ledger must contain exactly the issues counted in the map')
-    maximum = max(row[1] for row in map_rows)
+    issues_closed = len(ledger_rows)
+    # Page one never shows an empty row: areas without marks stay in the data table only.
+    shown = [row for row in map_rows if row[1] > 0]
+    maximum = max((row[1] for row in shown), default=0)
     svg, description = [], []
     y = 46
     # Wrap long stitches into equal-area rows; never shrink marks to imply impact.
-    for name, count, ids in map_rows:
-        decisive = count == maximum and count > 0
-        svg.append('<g data-surface="' + escape(name) + '" data-count="' + str(count) + '" data-issues="' + escape(json.dumps(ids)) + '" data-emphasis="' + str(decisive).lower() + '">')
+    for name, count, ids in shown:
+        decisive = count == maximum
+        if by_change:
+            svg.append('<g data-area="' + escape(name) + '" data-count="' + str(count) + '" data-changes="' + escape(json.dumps(ids)) + '" data-emphasis="' + str(decisive).lower() + '">')
+        else:
+            svg.append('<g data-surface="' + escape(name) + '" data-count="' + str(count) + '" data-issues="' + escape(json.dumps(ids)) + '" data-emphasis="' + str(decisive).lower() + '">')
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{escape(name)}</text>')
-        for j, issue in enumerate(ids):
-            svg.append(f'<circle cx="{140+(j%7)*25}" cy="{y+(j//7)*20}" r="7" class="{"decisive" if decisive else "dot"}" data-issue="{issue}"><title>Issue #{issue}</title></circle>')
-        if count == 0:
-            svg.append(f'<text x="134" y="{y+4}" class="svg-note">no listed issues</text>')
+        for j, item in enumerate(ids):
+            mark = f'data-change="{j+1}"><title>{escape(item)}</title>' if by_change else f'data-issue="{item}"><title>Issue #{item}</title>'
+            svg.append(f'<circle cx="{156+(j%7)*25}" cy="{y+(j//7)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
         svg.append(f'<text x="337" y="{y+5}" text-anchor="end" class="svg-count">{count}</text></g>')
         description.append(name + ' ' + str(count))
         y += 40 + max(0, (count-1)//7)*20
+    if not shown:
+        svg.append(f'<text x="0" y="{y+5}" class="svg-label">{"No changes listed" if by_change else "No GitHub issues closed"}</text>')
+        y += 40
+    unit = 'shipped change' if by_change else 'closed GitHub issue'
+    if by_change:
+        legend = ('One dot, one shipped change. ' +
+                  (f'{issues_closed} GitHub issue{"" if issues_closed == 1 else "s"} closed with this release, listed in the fixes ledger.'
+                   if issues_closed else 'No GitHub issues were closed with this release.'))
+    else:
+        legend = 'One dot, one closed GitHub issue.'
     leading, glance_table, method = split_table(sections['Release at a glance'])
     stats = []
     for row in table_rows(glance_table)[2:]:
@@ -252,8 +287,10 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
     values = dict(TITLE=inline(title), DATE=inline(date), VERDICT=rendered_verdict,
                   LIGHT_TOKENS=light, DARK_TOKENS=dark, PRINT_TOKENS=light, FONT_TOKENS=fonts,
                   MAP_HEIGHT=y, MAP_TOTAL=total, MAP_CLAIM=inline(claim),
-                  MAP_DESCRIPTION=escape(', '.join(description) + '. Each filled circle represents one closed issue. Total ' + str(total) + '.'),
-                  MAP_ROWS='\n'.join(svg), MAP_LEGEND='One dot, one closed issue. ' + str(sum(r[1] > 0 for r in map_rows)) + ' issue-bearing surfaces.',
+                  MAP_DESCRIPTION=escape(', '.join(description) + '. Each filled circle represents one ' + unit + '. Total ' + str(total) + '.'),
+                  MAP_ROWS='\n'.join(svg), MAP_LEGEND=escape(legend), MAP_UNIT=escape('CHANGES' if by_change else 'ISSUES CLOSED'),
+                  MAP_SUMMARY=escape('What shipped, by area' if by_change else 'Issues closed, by area'),
+                  MAP_LINK=escape('See every change' if by_change else 'Read the map data'),
                   STATS='\n'.join(stats), METHOD=simple(leading + '\n\n' + method),
                   MAP_DATA=simple(guide) + simple(map_table) + simple(after),
                   USERS=groups(sections['What you can do now']), DEV=groups(sections['Under the hood']),

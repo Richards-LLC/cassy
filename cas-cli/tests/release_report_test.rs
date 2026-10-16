@@ -179,13 +179,17 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     }
     assert!(source.starts_with("---\nversion: 3.19.0\n"));
     assert!(source.contains("## Change map\n"));
-    assert!(source.contains("| Factory | 1 | #705 |"));
-    assert!(source.contains("| Install | 1 | #746 |"));
+    assert!(source.contains("| Area | Changes | What changed |"));
+    assert!(source.contains("| Sessions | 1 | Worker report improvements |"));
+    assert!(source.contains("| Releases and CI | 1 | Simpler install |"));
+    assert!(source.contains("| GitHub issues closed | 2 |"));
+    assert!(source.contains("[#705](https://github.com/example/project/issues/705)"));
     assert!(source.contains("sha256:abc123"));
     assert!(html.contains("<html lang=\"en\">"));
     assert!(html.contains("data-change-map=\"1\""));
-    assert!(html.contains("data-issue=\"705\""));
-    assert!(html.contains("data-issue=\"746\""));
+    assert!(html.contains("data-area=\"Sessions\""));
+    assert!(html.contains("2 GitHub issues closed with this release"));
+    assert!(html.contains("https://github.com/example/project/issues/746"));
 
     let second = cas_cmd(&project)
         .env("GH_BIN", &fake_gh)
@@ -206,6 +210,98 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(second["source_written"], false);
     assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
     assert_eq!(fs::read_to_string(&html_path).unwrap(), html);
+}
+
+/// cas-7860: the release PR's issues are closed by hand minutes after it
+/// merges. A report run that starts before those closures must wait inside
+/// the counting window and count them, not print 0.
+#[cfg(unix)]
+#[test]
+fn cli_release_report_counts_issues_closed_after_the_run_starts() {
+    let project = TempDir::new().unwrap();
+    fs::write(
+        project.path().join("CHANGELOG.md"),
+        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n\
+         ### Fixed — replies thread between supervisors and workers (#801)\n\n- Detail.\n\n\
+         ### Fixed — reminders wake an idle supervisor (#802)\n\n- Detail.\n\n\
+         ### Fixed — a parked delivery merges after the worker moves on (#700 follow-up)\n\n- Detail.\n",
+    )
+    .unwrap();
+    cas_cmd(&project).args(["init", "--yes"]).assert().success();
+    cas_cmd(&project)
+        .args(["config", "set", "issues.repo", "example/project"])
+        .assert()
+        .success();
+
+    let stamp = |offset: i64| {
+        (chrono::Utc::now() + chrono::Duration::seconds(offset))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    let (created, merged, closed) = (stamp(-600), stamp(-10), stamp(20));
+    let issue = |number: u64, state: &str, closed_at: &str| {
+        format!(
+            r#"{{"number":{number},"title":"Issue {number}","url":"https://github.com/example/project/issues/{number}","state":"{state}","closedAt":{closed_at},"labels":[],"body":""}}"#
+        )
+    };
+    let open = format!(
+        "[{},{},{}]",
+        issue(801, "OPEN", "null"),
+        issue(802, "OPEN", "null"),
+        issue(700, "CLOSED", "\"2026-09-01T00:00:00Z\"")
+    );
+    let closed_now = format!(
+        "[{},{},{}]",
+        issue(801, "CLOSED", &format!("\"{closed}\"")),
+        issue(802, "CLOSED", &format!("\"{closed}\"")),
+        issue(700, "CLOSED", "\"2026-09-01T00:00:00Z\"")
+    );
+    let reads = project.path().join("issue-reads");
+    let fake_gh = project.path().join("fake-gh-late-closures");
+    cas::test_paths::warm_stub(
+        &fake_gh,
+        &format!(
+            r#"#!/bin/sh
+case "$1 $2" in
+  "release view")
+    printf '%s' '{{"name":"v3.19.0","url":"https://github.com/example/project/releases/tag/v3.19.0","body":"","publishedAt":"{merged}","isDraft":false,"assets":[]}}'
+    ;;
+  "pr list")
+    printf '%s' '[{{"number":901,"title":"Release v3.19.0","body":"Release PR","url":"https://github.com/example/project/pull/901","closingIssuesReferences":[],"createdAt":"{created}","mergedAt":"{merged}"}}]'
+    ;;
+  "issue list")
+    if [ -f '{reads}' ]; then printf '%s' '{closed_now}'; else : > '{reads}'; printf '%s' '{open}'; fi
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+            reads = reads.display()
+        ),
+    );
+
+    let output = cas_cmd(&project)
+        .env("GH_BIN", &fake_gh)
+        .env("CAS_RELEASE_REPORT_POLL_SECS", "1")
+        .args(["--json", "release", "report", "3.19.0", "--out", "docs/release-reports"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["issue_count"], 2, "{result}");
+    assert_eq!(result["change_count"], 3);
+    let source = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();
+    assert!(source.contains("| GitHub issues closed | 2 |"), "{source}");
+    assert!(source.contains("[#801](https://github.com/example/project/issues/801)"));
+    assert!(source.contains("[#802](https://github.com/example/project/issues/802)"));
+    assert!(
+        source.contains("closed outside this release's counting window, so not counted: [#700]"),
+        "{source}"
+    );
+    let page_one = &source[..source.find("## What you can do now").unwrap()];
+    for zero in ["| 0 |", "no listed issues", "issue-bearing", "verified closure"] {
+        assert!(!page_one.contains(zero), "page one shows {zero:?}:\n{page_one}");
+    }
 }
 
 #[cfg(unix)]
@@ -295,14 +391,15 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     assert_eq!(result["github_repo"], "example/project");
     assert_eq!(result["issue_count"], 1);
     assert_eq!(result["release_published_at"], "2026-09-09T16:51:40Z");
+    assert_eq!(result["change_count"], 1);
     assert_eq!(
-        result["theme_counts"]
+        result["change_areas"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|theme| theme["theme"].as_str().unwrap())
+            .map(|area| area["area"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Release", "Memory", "Verification", "Factory"]
+        vec!["Tasks and merges"]
     );
     assert!(
         !result["warnings"]
@@ -316,9 +413,9 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     let (user_section, developer_and_rest) = source.split_once("## Under the hood").unwrap();
     assert!(source.contains("Published 9 September 2026 · 16:51 UTC"));
     assert!(source.contains("The release is ready to inspect."));
-    assert!(source.contains("themes: [\"Release\", \"Memory\", \"Verification\", \"Factory\"]"));
-    assert!(source.contains("| Verification | 1 | #767 |"));
-    assert!(!source.contains("has no verified closed GitHub issues"));
+    assert!(source.contains("areas: [\"Tasks and merges\"]"));
+    assert!(source.contains("| Tasks and merges | 1 |"));
+    assert!(source.contains("[#767](https://github.com/example/project/issues/767)"));
     assert!(user_section.contains("### Release reports"));
     assert!(user_section.contains("### Already live on hosts that updated from main"));
     assert!(user_section.contains("one command builds them."));

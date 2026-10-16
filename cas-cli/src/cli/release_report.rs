@@ -37,19 +37,19 @@ const PDF_TIMEOUT: Duration = Duration::from_secs(120);
 const CLOSURE_WINDOW_MINUTES: i64 = 15;
 const CLOSURE_POLL: Duration = Duration::from_secs(30);
 
+/// The pause between issue-state reads; `CAS_RELEASE_REPORT_POLL_SECS`
+/// shortens it for fixtures.
+fn closure_poll() -> Duration {
+    std::env::var("CAS_RELEASE_REPORT_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(CLOSURE_POLL)
+}
+
 fn closure_window() -> chrono::Duration {
     chrono::Duration::minutes(CLOSURE_WINDOW_MINUTES)
 }
-
-const THEME_ORDER: [&str; 7] = [
-    "Factory",
-    "Delivery",
-    "Cloud",
-    "Diagnostics",
-    "Violet",
-    "Install",
-    "Unclassified",
-];
 
 /// Generate a release-report Markdown source and its standalone render.
 #[derive(Args, Debug, Clone)]
@@ -83,19 +83,13 @@ struct ReportResult {
     pdf_written: bool,
     issue_count: usize,
     asset_count: usize,
-    theme_counts: Vec<ThemeCount>,
+    change_count: usize,
+    change_areas: Vec<AreaCount>,
     warnings: Vec<String>,
     retrieved_at: String,
     github_repo: Option<String>,
     release_published_at: Option<String>,
     green_to_published_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ThemeCount {
-    theme: String,
-    issues: usize,
-    issue_numbers: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -489,6 +483,11 @@ fn parse_blocker_costs(costs: &str) -> Vec<(String, i64, bool)> {
 #[derive(Debug, Clone)]
 struct AcquiredSources {
     project: String,
+    changes: Vec<ShippedChange>,
+    release_pr: Option<ReleasePr>,
+    closure_window: Option<ClosureWindow>,
+    issues_still_open: Vec<u64>,
+    issues_closed_outside: Vec<u64>,
     changelog: Option<ChangelogSection>,
     changelog_path: Option<PathBuf>,
     release_notes: Option<(PathBuf, String)>,
@@ -591,7 +590,8 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         pdf_written,
         issue_count: acquired.issue_count,
         asset_count: acquired.assets.len(),
-        theme_counts: theme_counts_for_sources(&acquired),
+        change_count: acquired.changes.len(),
+        change_areas: area_counts(&acquired.changes),
         warnings: acquired.warnings.clone(),
         retrieved_at: acquired.retrieved_at.clone(),
         github_repo: acquired.github_repo.clone(),
@@ -628,9 +628,12 @@ fn render_human_output(fmt: &mut Formatter<'_>, result: &ReportResult) -> io::Re
         verdict,
         "report ready",
         &format!(
-            "{} {separator} {} issues {separator} {} warning{}",
+            "{} {separator} {} change{} {separator} {} GitHub issue{} closed {separator} {} warning{}",
             result.tag,
+            result.change_count,
+            if result.change_count == 1 { "" } else { "s" },
             result.issue_count,
+            if result.issue_count == 1 { "" } else { "s" },
             warning_count,
             if warning_count == 1 { "" } else { "s" }
         ),
@@ -768,6 +771,11 @@ impl AcquiredSources {
         let issue_count = count_issues_in_source(source);
         Self {
             project,
+            changes: Vec::new(),
+            release_pr: None,
+            closure_window: None,
+            issues_still_open: Vec::new(),
+            issues_closed_outside: Vec::new(),
             changelog: None,
             changelog_path: None,
             release_notes: None,
@@ -841,6 +849,10 @@ fn acquire_sources(
     let mut release = None;
     let mut issues = Vec::new();
     let mut assets = Vec::new();
+    let mut release_pr = None;
+    let mut counting_window = None;
+    let mut issues_still_open = Vec::new();
+    let mut issues_closed_outside = Vec::new();
 
     if let Some(repo) = &github_repo {
         match gh_json(
@@ -881,63 +893,98 @@ fn acquire_sources(
             }
         }
 
-        match gh_json(
-            project_root,
-            &[
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "merged",
-                "--search",
-                tag,
-                "--limit",
-                "30",
-                "--json",
-                "number,title,body,url,closingIssuesReferences,mergedAt",
-            ],
-        ) {
-            Ok(value) => collect_pr_issue_references(&value, &mut referenced),
-            Err(error) => warnings.push(format!(
-                "GitHub release PRs: {error}; remedy `gh pr list --repo {repo} --state merged`"
+        for search in [tag, version] {
+            match gh_json(
+                project_root,
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "merged",
+                    "--search",
+                    search,
+                    "--limit",
+                    "30",
+                    "--json",
+                    "number,title,body,url,closingIssuesReferences,createdAt,mergedAt",
+                ],
+            ) {
+                Ok(value) => {
+                    release_pr = select_release_pr(&value, version);
+                    if release_pr.is_some() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    warnings.push(format!(
+                        "GitHub release PRs: {error}; remedy `gh pr list --repo {repo} --state merged`"
+                    ));
+                    break;
+                }
+            }
+        }
+        match &release_pr {
+            Some(pr) => referenced.extend(pr.referenced.iter().copied()),
+            None => warnings.push(format!(
+                "GitHub release PR: no merged PR titled for {tag}; issue closures are counted without a time window"
             )),
         }
+        counting_window = release_pr.as_ref().map(|pr| ClosureWindow {
+            opened: pr.created_at,
+            closes: pr.merged_at + closure_window(),
+        });
 
-        match gh_json(
-            project_root,
-            &[
-                "issue",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "closed",
-                "--limit",
-                "1000",
-                "--json",
-                "number,title,url,state,closedAt,labels,body",
-            ],
-        ) {
-            Ok(value) => {
-                issues = parse_issues(&value, &referenced, repo);
+        let mut announced = false;
+        let fetch = || {
+            gh_json(
+                project_root,
+                &[
+                    "issue",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "all",
+                    "--limit",
+                    "1000",
+                    "--json",
+                    "number,title,url,state,closedAt,labels,body",
+                ],
+            )
+        };
+        let sleep = |pause: Duration| {
+            if !announced {
+                announced = true;
+                eprintln!(
+                    "release report: waiting up to {CLOSURE_WINDOW_MINUTES} minutes after the release PR merge for referenced issues to close"
+                );
+            }
+            std::thread::sleep(pause);
+        };
+        match gather_closures(fetch, &referenced, counting_window.as_ref(), repo, Utc::now, sleep) {
+            Ok(snapshot) => {
+                issues = snapshot.closed;
                 for issue in &mut issues {
-                    issue.theme = classify_theme(issue);
+                    issue.theme = classify_area(&issue.title, "");
                 }
-                let missing = referenced
-                    .iter()
-                    .filter(|number| !issues.iter().any(|issue| issue.number == **number))
-                    .map(|number| format!("#{number}"))
-                    .collect::<Vec<_>>();
-                if !missing.is_empty() {
+                issues_still_open = snapshot.still_open;
+                issues_closed_outside = snapshot.closed_outside;
+                if !snapshot.missing.is_empty() {
                     warnings.push(format!(
-                        "GitHub issues: referenced closures unavailable or not closed: {}",
-                        missing.join(", ")
+                        "GitHub issues: referenced issues not found: {}",
+                        snapshot
+                            .missing
+                            .iter()
+                            .map(|number| format!("#{number}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
             }
             Err(error) => warnings.push(format!(
-                "GitHub issues: {error}; remedy `gh issue list --repo {repo} --state closed`"
+                "GitHub issues: {error}; remedy `gh issue list --repo {repo} --state all`"
             )),
         }
     } else {
@@ -970,8 +1017,17 @@ fn acquire_sources(
     }
 
     let issue_count = issues.len();
+    let changes = changelog
+        .as_ref()
+        .map(|section| changelog_changes(&section.body))
+        .unwrap_or_default();
     Ok(AcquiredSources {
         project,
+        changes,
+        release_pr,
+        closure_window: counting_window,
+        issues_still_open,
+        issues_closed_outside,
         changelog,
         changelog_path,
         release_notes,
@@ -1067,6 +1123,193 @@ fn parse_changelog_section(content: &str, version: &str) -> Option<ChangelogSect
         body,
         entries,
     })
+}
+
+/// One shipped change from a CHANGELOG section, as page one counts it.
+#[derive(Debug, Clone, Serialize)]
+struct ShippedChange {
+    kind: String,
+    title: String,
+    area: String,
+}
+
+/// Product areas in their fixed page-one order, with the words that place a
+/// change in each. A change goes to the area with the most matching words in
+/// its title, then in its full text; ties go to the earlier area.
+const AREAS: [(&str, &[&str]); 8] = [
+    ("Commander", &["commander", "hub", "rail", "browser", "phone"]),
+    ("Sessions", &[
+        "session", "worker", "supervisor", "factory", "agent", "heartbeat", "relay",
+        "alert", "spawn", "daemon", "typing", "keystroke", "tool call", "cas serve",
+        "peer", "prompt", "nudge", "respawn", "stall",
+    ]),
+    ("Tasks and merges", &[
+        "task", "delivery", "deliveries", "merge request", "merges", "parked", "close gate",
+        "close", "qa", "verification", "epic", "review", "proof", "receipt",
+    ]),
+    ("Messages", &["message", "reminder", "inbox", "reply", "replies", "notice"]),
+    ("Releases and CI", &[
+        "release", "merge queue", "ci", "install", "update", "changelog", "publish",
+        "build", "gate", "runner", "journey",
+    ]),
+    ("Memory and search", &["memory", "recall", "search", "index", "briefing", "lesson"]),
+    ("Slack and Cloud", &["slack", "violet", "cloud", "sync", "pairing"]),
+    ("Safety", &[
+        "permission", "operator-authenticated", "operator-policy", "security", "secret",
+        "credential", "allowlist", "authenticated",
+    ]),
+];
+const OTHER_AREA: &str = "Other";
+
+fn area_score(text: &str, words: &[&str]) -> usize {
+    words
+        .iter()
+        .filter(|word| {
+            Regex::new(&format!(
+                r"(^|[^a-z0-9]){}(s|es|d|ed|ing)?([^a-z0-9]|$)",
+                regex::escape(word)
+            ))
+                .is_ok_and(|regex| regex.is_match(text))
+        })
+        .count()
+}
+
+fn classify_area(title: &str, body: &str) -> String {
+    for text in [title.to_ascii_lowercase(), format!("{title} {body}").to_ascii_lowercase()] {
+        let mut best: Option<(&str, usize)> = None;
+        for (area, words) in AREAS {
+            let score = area_score(&text, words);
+            if score > 0 && best.is_none_or(|(_, top)| score > top) {
+                best = Some((area, score));
+            }
+        }
+        if let Some((area, _)) = best {
+            return area.to_string();
+        }
+    }
+    OTHER_AREA.to_string()
+}
+
+/// CHANGELOG categories that record tests and documentation, not product
+/// changes; reports list them under the hood but do not count them.
+fn is_test_or_docs_category(category: &str) -> bool {
+    let category = category.to_ascii_lowercase();
+    category.starts_with("test") || category.starts_with("doc")
+}
+
+/// Strip trailing reference lists such as `(#1203, cas-d697)` from a title.
+fn plain_change_title(title: &str) -> String {
+    let references = Regex::new(r"\s*\([^()]*(#\d+|cas-[0-9a-f]+)[^()]*\)\s*$")
+        .expect("reference suffix regex");
+    let mut title = clean_markdown_text(title).replace("&#124;", "/");
+    while let Some(found) = references.find(&title) {
+        title.truncate(found.start());
+    }
+    let title = title
+        .trim()
+        .trim_matches('*')
+        .trim()
+        .replace(';', ",");
+    let mut chars = title.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => "Release change".to_string(),
+    }
+}
+
+/// The shipped changes in one CHANGELOG section. A titled heading
+/// (`### Fixed — what changed (refs)`) is one change; under an untitled
+/// heading each bullet is one change, titled by its bold lead-in.
+fn changelog_changes(body: &str) -> Vec<ShippedChange> {
+    let mut changes = Vec::new();
+    let mut kind = "Changes".to_string();
+    let mut titled: Option<(String, String)> = None;
+    let mut bullet: Option<String> = None;
+    let flush_bullet = |bullet: &mut Option<String>, kind: &str, changes: &mut Vec<ShippedChange>| {
+        if let Some(text) = bullet.take() {
+            let title = Regex::new(r"^\*\*([^*]+)\*\*")
+                .ok()
+                .and_then(|regex| regex.captures(&text))
+                .and_then(|capture| capture.get(1))
+                .map(|lead| lead.as_str().to_string())
+                .unwrap_or_else(|| heading_from_entry(&clean_markdown_text(&text)));
+            changes.push(ShippedChange {
+                kind: kind.to_string(),
+                area: classify_area(&title, &text),
+                title: plain_change_title(&title),
+            });
+        }
+    };
+    let flush_titled = |titled: &mut Option<(String, String)>, kind: &str, changes: &mut Vec<ShippedChange>| {
+        if let Some((title, text)) = titled.take() {
+            changes.push(ShippedChange {
+                kind: kind.to_string(),
+                area: classify_area(&plain_change_title(&title), &text),
+                title: plain_change_title(&title),
+            });
+        }
+    };
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("### ") {
+            flush_bullet(&mut bullet, &kind, &mut changes);
+            flush_titled(&mut titled, &kind, &mut changes);
+            let (category, title) = heading
+                .split_once(" — ")
+                .map(|(category, title)| (category.trim(), Some(title.trim())))
+                .unwrap_or((heading.trim(), None));
+            kind = category.to_string();
+            if is_test_or_docs_category(&kind) {
+                continue;
+            }
+            titled = title.map(|title| (title.to_string(), String::new()));
+        } else if is_test_or_docs_category(&kind) {
+            continue;
+        } else if let Some((_, text)) = titled.as_mut() {
+            text.push(' ');
+            text.push_str(trimmed);
+        } else if let Some(value) = line.trim_start().strip_prefix("- ") {
+            flush_bullet(&mut bullet, &kind, &mut changes);
+            bullet = Some(value.trim().to_string());
+        } else if let Some(text) = bullet.as_mut() {
+            if !trimmed.is_empty() {
+                text.push(' ');
+                text.push_str(trimmed);
+            }
+        }
+    }
+    flush_bullet(&mut bullet, &kind, &mut changes);
+    flush_titled(&mut titled, &kind, &mut changes);
+    changes
+}
+
+/// Changes per area, in the fixed area order; areas without a change are
+/// left out so page one never shows a zero row.
+#[derive(Debug, Clone, Serialize)]
+struct AreaCount {
+    area: String,
+    changes: usize,
+    titles: Vec<String>,
+}
+
+fn area_counts(changes: &[ShippedChange]) -> Vec<AreaCount> {
+    AREAS
+        .iter()
+        .map(|(area, _)| *area)
+        .chain([OTHER_AREA])
+        .filter_map(|area| {
+            let titles = changes
+                .iter()
+                .filter(|change| change.area == area)
+                .map(|change| change.title.clone())
+                .collect::<Vec<_>>();
+            (!titles.is_empty()).then(|| AreaCount {
+                area: area.to_string(),
+                changes: titles.len(),
+                titles,
+            })
+        })
+        .collect()
 }
 
 fn parse_issues(value: &Value, referenced: &BTreeSet<u64>, repo: &str) -> Vec<GithubIssue> {
@@ -1269,22 +1512,37 @@ fn select_release_pr(value: &Value, version: &str) -> Option<ReleasePr> {
 fn classify_closures(
     value: &Value,
     candidates: &BTreeSet<u64>,
-    _window: Option<&ClosureWindow>,
+    window: Option<&ClosureWindow>,
     repo: &str,
 ) -> ClosureSnapshot {
     let mut snapshot = ClosureSnapshot::default();
     for issue in parse_issues(value, candidates, repo) {
-        if issue.state.eq_ignore_ascii_case("closed") {
+        if !issue.state.eq_ignore_ascii_case("closed") {
+            snapshot.still_open.push(issue.number);
+            continue;
+        }
+        // Without a release PR there is no window; keep the referenced
+        // closure and let Evidence and scope say so.
+        let inside = window.is_none_or(|window| {
+            parse_utc(issue.closed_at.as_deref()).is_some_and(|closed| {
+                closed <= window.closes && window.opened.is_none_or(|opened| closed >= opened)
+            })
+        });
+        if inside {
             snapshot.closed.push(issue);
         } else {
-            snapshot.still_open.push(issue.number);
+            snapshot.closed_outside.push(issue.number);
         }
     }
+    snapshot.closed.sort_by_key(|issue| issue.number);
+    snapshot.still_open.sort_unstable();
+    snapshot.closed_outside.sort_unstable();
     snapshot.missing = candidates
         .iter()
         .filter(|number| {
             !snapshot.closed.iter().any(|issue| issue.number == **number)
                 && !snapshot.still_open.contains(number)
+                && !snapshot.closed_outside.contains(number)
         })
         .copied()
         .collect();
@@ -1292,221 +1550,29 @@ fn classify_closures(
 }
 
 /// Read issue states and classify this release's closures.
+///
+/// Referenced issues are closed by hand a few minutes after the release PR
+/// merges, usually after a report run has started. While the closure window
+/// is still open and a referenced issue is still open, re-read the states
+/// until it closes or the window ends, so the count needs no hand correction.
 fn gather_closures(
     mut fetch: impl FnMut() -> anyhow::Result<Value>,
     candidates: &BTreeSet<u64>,
     window: Option<&ClosureWindow>,
     repo: &str,
-    _now: impl FnMut() -> DateTime<Utc>,
-    _sleep: impl FnMut(Duration),
+    mut now: impl FnMut() -> DateTime<Utc>,
+    mut sleep: impl FnMut(Duration),
 ) -> anyhow::Result<ClosureSnapshot> {
-    Ok(classify_closures(&fetch()?, candidates, window, repo))
-}
-
-fn classify_theme(issue: &GithubIssue) -> String {
-    let labels = issue
-        .labels
-        .iter()
-        .map(|label| label.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    for (theme, keys) in [
-        ("Factory", &["factory", "worker", "spawn", "supervisor"][..]),
-        ("Delivery", &["delivery", "task", "queue", "message"][..]),
-        ("Cloud", &["cloud", "sync", "pairing"][..]),
-        (
-            "Diagnostics",
-            &["diagnostic", "doctor", "config", "history"][..],
-        ),
-        (
-            "Violet",
-            &["violet", "violet_ps", "slack", "hub"][..],
-        ),
-        ("Install", &["install", "release", "asset", "update"][..]),
-    ] {
-        if labels
-            .iter()
-            .any(|label| keys.iter().any(|key| label.contains(key)))
-        {
-            return theme.to_string();
-        }
-    }
-
-    let text = format!(
-        "{} {}",
-        issue.title.to_ascii_lowercase(),
-        issue
-            .body
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-    );
-    for (theme, keys) in [
-        (
-            "Factory",
-            &["factory", "worker", "spawn", "supervisor", "watcher"][..],
-        ),
-        (
-            "Delivery",
-            &["delivery", "task", "queue", "message", "proposal"][..],
-        ),
-        (
-            "Cloud",
-            &["cloud", "sync", "pairing", "project registration"][..],
-        ),
-        (
-            "Diagnostics",
-            &[
-                "diagnostic",
-                "doctor",
-                "config",
-                "history",
-                "recall",
-                "index",
-            ][..],
-        ),
-        (
-            "Violet",
-            &["violet", "violet_ps", "slack", "hub", "upload"][..],
-        ),
-        ("Install", &["install", "release", "asset", "update"][..]),
-    ] {
-        if keys.iter().any(|key| text.contains(key)) {
-            return theme.to_string();
-        }
-    }
-    "Unclassified".to_string()
-}
-
-fn theme_counts(issues: &[GithubIssue]) -> Vec<ThemeCount> {
-    theme_counts_with_context(issues, None, &[])
-}
-
-fn theme_counts_for_sources(sources: &AcquiredSources) -> Vec<ThemeCount> {
-    theme_counts_with_context(
-        &sources.issues,
-        sources.changelog.as_ref(),
-        &sources.release_note_articles,
-    )
-}
-
-fn theme_counts_with_context(
-    issues: &[GithubIssue],
-    changelog: Option<&ChangelogSection>,
-    articles: &[ReleaseNoteArticle],
-) -> Vec<ThemeCount> {
-    let mut theme_order = draft_theme_order(articles);
-    if theme_order.is_empty() {
-        theme_order = THEME_ORDER
-            .iter()
-            .map(|theme| (*theme).to_string())
-            .collect();
-    }
-
-    let mut assignments = HashMap::new();
-    for article in articles {
-        let theme = draft_theme_label(article);
-        if !theme_order.iter().any(|known| known == &theme) {
-            theme_order.push(theme.clone());
-        }
-        let text = format!("{} {} {}", article.title, article.was, article.now);
-        for number in extract_issue_numbers(&text) {
-            if issues.iter().any(|issue| issue.number == number) {
-                assignments.entry(number).or_insert_with(|| theme.clone());
-            }
-        }
-    }
-
-    for issue in issues {
-        if assignments.contains_key(&issue.number) {
-            continue;
-        }
-        let fallback = if articles.is_empty() {
-            issue.theme.clone()
-        } else {
-            changelog
-                .and_then(|section| {
-                    section
-                        .entries
-                        .iter()
-                        .find(|entry| extract_issue_numbers(&entry.text).contains(&issue.number))
-                })
-                .map(|entry| entry.category.clone())
-                .unwrap_or_else(|| issue.theme.clone())
+    loop {
+        let snapshot = classify_closures(&fetch()?, candidates, window, repo);
+        let Some(window) = window else {
+            return Ok(snapshot);
         };
-        if !theme_order.iter().any(|known| known == &fallback) {
-            theme_order.push(fallback.clone());
+        let remaining = window.closes - now();
+        if snapshot.still_open.is_empty() || remaining <= chrono::Duration::zero() {
+            return Ok(snapshot);
         }
-        assignments.insert(issue.number, fallback);
-    }
-
-    theme_order
-        .into_iter()
-        .map(|theme| {
-            let mut issue_numbers = issues
-                .iter()
-                .filter(|issue| assignments.get(&issue.number) == Some(&theme))
-                .map(|issue| issue.number)
-                .collect::<Vec<_>>();
-            issue_numbers.sort_unstable();
-            ThemeCount {
-                theme,
-                issues: issue_numbers.len(),
-                issue_numbers,
-            }
-        })
-        .collect()
-}
-
-fn draft_theme_order(articles: &[ReleaseNoteArticle]) -> Vec<String> {
-    let mut order = Vec::new();
-    for article in articles {
-        let theme = draft_theme_label(article);
-        if !order.iter().any(|known| known == &theme) {
-            order.push(theme);
-        }
-    }
-    order
-}
-
-fn draft_theme_label(article: &ReleaseNoteArticle) -> String {
-    let text = format!(
-        "{} {} {} {}",
-        article.title,
-        article.group.as_deref().unwrap_or_default(),
-        article.was,
-        article.now
-    )
-    .to_ascii_lowercase();
-    if text.contains("release") || text.contains("report") || text.contains("train") {
-        "Release".to_string()
-    } else if text.contains("recall")
-        || text.contains("briefing")
-        || text.contains("memory")
-        || text.contains("budget")
-        || text.contains("headroom")
-    {
-        "Memory".to_string()
-    } else if text.contains("verification")
-        || text.contains("close-gate")
-        || text.contains("close gate")
-        || text.contains("fair task")
-        || text.contains("posture")
-        || text.contains("epoch")
-    {
-        "Verification".to_string()
-    } else if text.contains("factory")
-        || text.contains("worker")
-        || text.contains("spawn")
-        || text.contains("start-up")
-        || text.contains("startup")
-        || text.contains("provider")
-    {
-        "Factory".to_string()
-    } else {
-        article
-            .group
-            .clone()
-            .unwrap_or_else(|| "Release".to_string())
+        sleep(remaining.to_std().unwrap_or_default().min(closure_poll()));
     }
 }
 
@@ -1530,34 +1596,31 @@ fn assemble_markdown(
         })
         .unwrap_or_else(|| Utc::now().date_naive().to_string());
     let issue_count = sources.issues.len();
-    let themes_for_report = theme_counts_for_sources(sources);
-    let themes = themes_for_report
-        .iter()
-        .map(|theme| theme.theme.clone())
-        .collect::<Vec<_>>();
-    let theme_frontmatter = if themes.is_empty() {
-        "[]".to_string()
-    } else {
-        format!(
-            "[{}]",
-            themes
-                .iter()
-                .map(|theme| format!("\"{}\"", theme))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+    let areas = area_counts(&sources.changes);
+    let change_count = sources.changes.len();
+    let plural = |count: usize, one: &str, many: &str| {
+        format!("{count} {}", if count == 1 { one } else { many })
     };
+    let area_frontmatter = format!(
+        "[{}]",
+        areas
+            .iter()
+            .map(|area| format!("\"{}\"", area.area))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let verdict = sources
         .release_note_user_punch
         .as_deref()
         .map(format_verdict)
         .unwrap_or_else(|| {
-            if issue_count == 0 {
-                format!("{tag} has no verified closed GitHub issues in the available release sources.")
+            if change_count == 0 {
+                format!("{tag} has no listed changes in the available release sources.")
             } else {
                 format!(
-                    "{tag} closes {issue_count} verified GitHub issue{} across the sourced release surfaces.",
-                    if issue_count == 1 { "" } else { "s" }
+                    "{tag} ships {} across {}.",
+                    plural(change_count, "change", "changes"),
+                    plural(areas.len(), "area", "areas")
                 )
             }
         });
@@ -1569,172 +1632,273 @@ fn assemble_markdown(
         .map(format_publication_line)
         .unwrap_or_else(|| format!("Draft assembled {date} · publication evidence unavailable"));
 
-    let map_rows = themes_for_report
-        .into_iter()
-        .map(|theme| {
-            let ids = if theme.issue_numbers.is_empty() {
-                "No listed issues".to_string()
-            } else {
-                theme
-                    .issue_numbers
-                    .iter()
-                    .map(|number| format!("#{number}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            format!("| {} | {} | {} |", theme.theme, theme.issues, ids)
+    let claim = match areas.as_slice() {
+        [] => "No changes are listed for this release yet.".to_string(),
+        [only] => format!(
+            "{} shipped, all in {}.",
+            plural(change_count, "change", "changes"),
+            only.area
+        ),
+        _ if areas.len() <= 3 => {
+            let parts = areas
+                .iter()
+                .map(|area| format!("{} in {}", area.changes, area.area))
+                .collect::<Vec<_>>();
+            let (last, rest) = parts.split_last().expect("at least two areas");
+            format!(
+                "{} shipped: {} and {last}.",
+                plural(change_count, "change", "changes"),
+                rest.join(", ")
+            )
+        }
+        _ => {
+            let top = areas
+                .iter()
+                .fold(&areas[0], |top, area| if area.changes > top.changes { area } else { top });
+            format!(
+                "{} shipped across {} areas; {} has the most, {}.",
+                plural(change_count, "change", "changes"),
+                areas.len(),
+                top.area,
+                top.changes
+            )
+        }
+    };
+    let guide = format!(
+        "One dot is one change listed in the {tag} CHANGELOG. Dots count changes, not their size or importance."
+    );
+    let map_rows = areas
+        .iter()
+        .map(|area| {
+            format!(
+                "| {} | {} | {} |",
+                area.area,
+                area.changes,
+                escape_table(&area.titles.join("; "))
+            )
         })
         .collect::<Vec<_>>();
     let source_refs = source_reference_line(sources, tag);
-    let theme_counts = theme_counts_for_sources(sources);
-    let claim = if let Some(largest) = theme_counts
-        .iter()
-        .max_by_key(|theme| theme.issues)
-        .filter(|theme| theme.issues > 0)
-    {
-        format!(
-            "{} leads the closure map with {} issue{}.",
-            largest.theme,
-            largest.issues,
-            if largest.issues == 1 { "" } else { "s" }
-        )
+    let release_pr_label = sources
+        .release_pr
+        .as_ref()
+        .map(|pr| format!("PR #{}", pr.number));
+
+    // Page one shows measured, nonzero values only; zeros and missing
+    // measurements are named in the counting note instead.
+    let mut glance = Vec::<(String, String, String)>::new();
+    let mut zero_notes = Vec::<String>::new();
+    let mut unavailable = Vec::<&str>::new();
+    if change_count > 0 {
+        let mut kinds = Vec::<(String, usize)>::new();
+        for change in &sources.changes {
+            let kind = change.kind.to_ascii_lowercase();
+            match kinds.iter_mut().find(|(known, _)| *known == kind) {
+                Some((_, count)) => *count += 1,
+                None => kinds.push((kind, 1)),
+            }
+        }
+        glance.push((
+            "Changes shipped".to_string(),
+            change_count.to_string(),
+            format!(
+                "{}; tests and docs not counted",
+                kinds
+                    .iter()
+                    .map(|(kind, count)| format!("{count} {kind}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     } else {
-        "The closure map is empty until release evidence names verified issues.".to_string()
-    };
-    let guide = "One filled dot represents one closed issue. Dots have equal weight: this is a count of closures, not a measured impact score.";
-    let glance_entries = sources
-        .changelog
-        .as_ref()
-        .map(|section| {
-            section
-                .entries
-                .iter()
-                .filter(|entry| entry.category.eq_ignore_ascii_case("Added"))
-                .count()
-        })
-        .unwrap_or(0);
-    let fix_entries = sources
-        .changelog
-        .as_ref()
-        .map(|section| {
-            section
-                .entries
-                .iter()
-                .filter(|entry| entry.category.eq_ignore_ascii_case("Fixed"))
-                .count()
-        })
-        .unwrap_or(0);
-    let changed_entries = sources
-        .changelog
-        .as_ref()
-        .map(|section| {
-            section
-                .entries
-                .iter()
-                .filter(|entry| entry.category.eq_ignore_ascii_case("Changed"))
-                .count()
-        })
-        .unwrap_or(0);
-    let latency = sources
-        .release_evidence
-        .green_to_published_seconds
-        .map(format_duration)
-        .unwrap_or_else(|| "unavailable".to_string());
+        zero_notes.push("No changes are listed in the CHANGELOG section.".to_string());
+    }
+    if issue_count > 0 {
+        glance.push((
+            "GitHub issues closed".to_string(),
+            issue_count.to_string(),
+            match &release_pr_label {
+                Some(pr) => format!("Closed from {pr} opening to {CLOSURE_WINDOW_MINUTES} min after merge"),
+                None => "Referenced issues that are closed; no release PR found".to_string(),
+            },
+        ));
+    } else {
+        zero_notes.push("No GitHub issues were closed with this release.".to_string());
+    }
+    let green_timing =
+        if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
+            Some(sources.release_evidence.publication_timing())
+        } else {
+            sources
+                .release_evidence
+                .green_to_published_seconds
+                .map(format_duration)
+        };
+    match green_timing.filter(|value| value != "unavailable") {
+        Some(value) => glance.push((
+            "Green to published".to_string(),
+            value,
+            "Merge-queue CI completion to publication".to_string(),
+        )),
+        None => unavailable.push("green to published"),
+    }
+    match sources.release_evidence.request_timing() {
+        value if value == "unavailable" => unavailable.push("request to published"),
+        value => glance.push((
+            "Request to published".to_string(),
+            value,
+            "The release request, or first cut, to publication".to_string(),
+        )),
+    }
+    match sources.release_evidence.cut_to_published_seconds {
+        Some(seconds) => glance.push((
+            "Cut to published".to_string(),
+            format_duration(seconds),
+            "The first release-train cut to publication".to_string(),
+        )),
+        None => unavailable.push("cut to published"),
+    }
+    if let Some((publication_endpoint, publication_description)) =
+        sources.release_evidence.publication_endpoint()
+    {
+        let timing = sources.release_evidence.publication_timing();
+        if timing != "unavailable" {
+            glance.push((
+                publication_endpoint.to_string(),
+                timing,
+                publication_description.to_string(),
+            ));
+        }
+    }
+    match sources.release_evidence.blocker_summary() {
+        value if value == "unavailable" => unavailable.push("blockers"),
+        value if value == "0" => zero_notes.push("No release stage was blocked.".to_string()),
+        value => glance.push((
+            "Blockers".to_string(),
+            value,
+            "Each blocked stage, from the block to its next completion".to_string(),
+        )),
+    }
+    match sources.release_evidence.lesson_recurrence.as_deref() {
+        None => unavailable.push("lesson recurrence"),
+        Some(value) if value.trim() == "0" || value.trim().starts_with("0 ") => {
+            zero_notes.push("No rescue repeated a lesson already learned.".to_string())
+        }
+        Some(value) => glance.push((
+            "Lesson recurrence".to_string(),
+            value.to_string(),
+            "Rescues whose lesson was already in the failure log".to_string(),
+        )),
+    }
+    match sources.release_evidence.interventions {
+        None => unavailable.push("manual interventions"),
+        Some(0) => zero_notes.push("No manual interventions.".to_string()),
+        Some(count) => glance.push((
+            "Manual interventions".to_string(),
+            count.to_string(),
+            "Rescued stages plus recorded hand fixes".to_string(),
+        )),
+    }
+    let mut method = vec![format!(
+        "Changes and GitHub issues are counted separately. A change is one titled entry in the {tag} CHANGELOG section; tests and documentation entries are listed under the hood but not counted."
+    )];
+    match (&sources.release_pr, &sources.closure_window) {
+        (Some(pr), Some(window)) => method.push(format!(
+            "A GitHub issue counts when release PR #{} or the CHANGELOG section references it and it closed between the PR opening{} and {CLOSURE_WINDOW_MINUTES} minutes after its merge ({}). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open.",
+            pr.number,
+            window
+                .opened
+                .map(|opened| format!(" ({})", opened.format("%H:%M:%SZ")))
+                .unwrap_or_default(),
+            window.closes.format("%H:%M:%SZ")
+        )),
+        _ => method.push(
+            "No merged release PR was found, so every referenced closed issue counts.".to_string(),
+        ),
+    }
+    method.extend(zero_notes);
+    if !unavailable.is_empty() {
+        method.push(format!(
+            "Not measured for this release: {}.",
+            unavailable.join(", ")
+        ));
+    }
 
     let mut output = String::new();
     output.push_str("---\n");
     output.push_str(&format!("version: {version}\n"));
     output.push_str(&format!("date: {date}\n"));
-    output.push_str(&format!("themes: {theme_frontmatter}\n"));
+    output.push_str(&format!("areas: {area_frontmatter}\n"));
     output.push_str("---\n\n");
     output.push_str(&format!(
         "# {project} {tag}\n\n{publication_line}\n\n{verdict}\n\n"
     ));
     output.push_str("## Change map\n\n");
     output.push_str(&format!("{claim}\n\n{guide}\n\n"));
-    output.push_str("| Surface | Issues closed | Issue numbers |\n| --- | ---: | --- |\n");
-    output.push_str(&map_rows.join("\n"));
+    output.push_str("| Area | Changes | What changed |\n| --- | ---: | --- |\n");
+    for row in &map_rows {
+        output.push_str(row);
+        output.push('\n');
+    }
     output.push_str(&format!(
-        "\n| Total | {issue_count} | {} issue-bearing themes |\n\n{}\n\n",
-        theme_counts.iter().filter(|theme| theme.issues > 0).count(),
-        source_refs
+        "| Total | {change_count} | {} |\n\n{source_refs}\n\n",
+        plural(areas.len(), "area", "areas")
     ));
     output.push_str("## Release at a glance\n\n");
     output.push_str("| Measure | Value | Definition |\n| --- | ---: | --- |\n");
-    output.push_str(&format!(
-        "| Issues closed | {issue_count} | Named, verified closed issues in this report |\n"
-    ));
-    output.push_str(&format!(
-        "| Features added | {glance_entries} | Top-level Added entries in the CHANGELOG section |\n"
-    ));
-    output.push_str(&format!(
-        "| Changed entries | {changed_entries} | Top-level Changed entries in the CHANGELOG section |\n"
-    ));
-    output.push_str(&format!(
-        "| Fix entries | {fix_entries} | Top-level Fixed entries in the CHANGELOG section |\n"
-    ));
-    let green_timing =
-        if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
-            sources.release_evidence.publication_timing()
-        } else {
-            latency
-        };
-    output.push_str(&format!(
-        "| Green to published | {green_timing} | merge-queue CI completion to publication, when available |\n"
-    ));
-    output.push_str(&format!(
-        "| Request to published | {} | The release request (or first cut) to publication; receipt REQUEST_TO_PUBLISHED_SECS |\n",
-        sources.release_evidence.request_timing()
-    ));
-    output.push_str(&format!(
-        "| Cut to published | {} | The first release-train cut to publication; receipt CUT_TO_PUBLISHED_SECS |\n",
-        sources
-            .release_evidence
-            .cut_to_published_seconds
-            .map(format_duration)
-            .unwrap_or_else(|| "unavailable".to_string())
-    ));
-    if let Some((publication_endpoint, publication_description)) =
-        sources.release_evidence.publication_endpoint()
-    {
+    for (measure, value, definition) in &glance {
         output.push_str(&format!(
-            "| {publication_endpoint} | {} | {publication_description} |\n",
-            sources.release_evidence.publication_timing()
+            "| {measure} | {} | {} |\n",
+            escape_table(value),
+            escape_table(definition)
         ));
     }
-    output.push_str(&format!(
-        "| Blockers | {} | Each blocked stage, from the block to its next completion; receipt BLOCKER_COSTS |\n",
-        sources.release_evidence.blocker_summary()
-    ));
-    output.push_str(&format!(
-        "| Lesson recurrence | {} | Rescues whose learn= lesson was already in the failure log; lesson-recurrence.json |\n",
-        sources.release_evidence.lesson_recurrence.as_deref().map_or("unavailable".to_string(), escape_table)
-    ));
-    output.push_str(&format!(
-        "| Manual interventions | {} | Distinct rescued stages plus recorded hand fixes; receipt INTERVENTIONS |\n\n",
-        sources
-            .release_evidence
-            .interventions
-            .map(|count| count.to_string())
-            .unwrap_or_else(|| "unavailable".to_string())
-    ));
+    output.push('\n');
+    output.push_str(&method.join(" "));
+    output.push_str("\n\n");
     output.push_str("## What you can do now\n\n");
     output.push_str(&was_now_sections(sources, true));
     output.push_str("\n## Under the hood\n\n");
     output.push_str(&was_now_sections(sources, false));
     output.push_str("\n## Fixes ledger\n\n");
-    output.push_str("| Issue | State | Closed | Theme |\n| --- | --- | --- | --- |\n");
+    output.push_str("| Issue | Title | Closed | Area |\n| --- | --- | --- | --- |\n");
     for issue in &sources.issues {
         output.push_str(&format!(
             "| [#{}]({}) | {} | {} | {} |\n",
             issue.number,
             issue.url,
-            issue.state,
+            escape_table(&issue.title),
             issue.closed_at.as_deref().unwrap_or("unavailable"),
             issue.theme
         ));
     }
-    output.push_str("\n## Install\n\n");
+    let issue_list = |numbers: &[u64]| {
+        numbers
+            .iter()
+            .map(|number| match &sources.github_repo {
+                Some(repo) => format!("[#{number}](https://github.com/{repo}/issues/{number})"),
+                None => format!("#{number}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    output.push('\n');
+    if sources.issues.is_empty() {
+        output.push_str("No GitHub issues were closed with this release.\n\n");
+    }
+    if !sources.issues_still_open.is_empty() {
+        output.push_str(&format!(
+            "Referenced and still open at retrieval, so not counted: {}.\n\n",
+            issue_list(&sources.issues_still_open)
+        ));
+    }
+    if !sources.issues_closed_outside.is_empty() {
+        output.push_str(&format!(
+            "Referenced but closed outside this release's counting window, so not counted: {}.\n\n",
+            issue_list(&sources.issues_closed_outside)
+        ));
+    }
+    output.push_str("## Install\n\n");
     output.push_str("```bash\n");
     output.push_str(&format!(
         "cas update  # install {tag} through the project's normal release channel\n"
@@ -1758,9 +1922,19 @@ fn assemble_markdown(
     output.push_str("\n## Evidence and scope\n\n");
     output.push_str(&format!("Retrieved: {}.\n\n", sources.retrieved_at));
     output.push_str(&format!("{}\n\n", source_refs));
-    output.push_str(&format!(
-        "GitHub issue theme assignment uses labels first, then the keyword table in the CLI. Any issue classified as `Unclassified` is shown in the map so a human can correct the Markdown before rendering.\n\n"
-    ));
+    output.push_str(
+        "Each change is placed in a product area by the words in its title, then its text; a change that matches no area is listed under Other. Correct an area in the Change map table before rendering.\n\n",
+    );
+    if let Some(pr) = &sources.release_pr {
+        output.push_str(&format!(
+            "Release PR: {} (merged {}).\n\n",
+            pr.url
+                .as_deref()
+                .map(|url| format!("<{url}>"))
+                .unwrap_or_else(|| format!("#{}", pr.number)),
+            pr.merged_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ));
+    }
     if let Some((path, _)) = &sources.release_notes {
         output.push_str(&format!(
             "Release-notes draft: `{}`.\n\n",
@@ -2323,7 +2497,7 @@ impl RendererAssets {
         ];
         if let Some(script) = candidates
             .into_iter()
-            .find(|path| path.is_file() && renderer_supports_frontmatter(path))
+            .find(|path| path.is_file() && renderer_supports_source(path))
         {
             return Ok(Self {
                 script,
@@ -2370,9 +2544,14 @@ impl RendererAssets {
     }
 }
 
-fn renderer_supports_frontmatter(path: &Path) -> bool {
+/// An installed renderer is used only when it reads the front matter and the
+/// v2 change map this assembler writes; older copies fall back to the builtin.
+fn renderer_supports_source(path: &Path) -> bool {
     fs::read_to_string(path)
-        .map(|content| content.contains("front matter needs a closing"))
+        .map(|content| {
+            content.contains("front matter needs a closing")
+                && content.contains("['area', 'changes', 'what changed']")
+        })
         .unwrap_or(false)
 }
 
@@ -3259,7 +3438,7 @@ Dev reply
     }
 
     #[test]
-    fn release_note_groups_drive_verdict_themes_and_issue_assignment() {
+    fn release_note_groups_drive_verdict_and_titles() {
         let draft = r#"User top-level
 
 ```text
@@ -3303,30 +3482,6 @@ Dev reply
         );
         assert_eq!(parsed.articles[2].title, "Fair task closes");
 
-        let changelog = parse_changelog_section(
-            "# Changelog\n\n## [2.4.0] - 2026-09-01\n\n### Changed\n- Close gate repair (#767)\n",
-            "2.4.0",
-        )
-        .expect("section");
-        let issue = GithubIssue {
-            number: 767,
-            title: "Close gate repair".to_string(),
-            url: "https://example.test/issues/767".to_string(),
-            state: "CLOSED".to_string(),
-            closed_at: Some("2026-09-09T14:47:28Z".to_string()),
-            labels: Vec::new(),
-            body: None,
-            theme: "Unclassified".to_string(),
-        };
-        let counts = theme_counts_with_context(&[issue], Some(&changelog), &parsed.articles);
-        assert_eq!(
-            counts
-                .iter()
-                .map(|theme| theme.theme.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Release", "Memory", "Verification", "Factory"]
-        );
-        assert_eq!(counts[2].issue_numbers, vec![767]);
         assert_eq!(
             format_publication_line("2026-09-09T16:51:40Z"),
             "Published 9 September 2026 · 16:51 UTC"
@@ -3334,7 +3489,7 @@ Dev reply
     }
 
     #[test]
-    fn reply_was_now_headings_do_not_become_release_groups_or_themes() {
+    fn reply_was_now_headings_do_not_become_release_groups() {
         let draft = r#"## User thread
 
 **Top-level:**
@@ -3376,6 +3531,11 @@ Was: reports lacked evidence. Now: reports include verification evidence.
 
         let sources = AcquiredSources {
             project: "fixture".to_string(),
+            changes: Vec::new(),
+            release_pr: None,
+            closure_window: None,
+            issues_still_open: Vec::new(),
+            issues_closed_outside: Vec::new(),
             changelog: None,
             changelog_path: None,
             release_notes: Some((PathBuf::from("release-notes.md"), draft.to_string())),
@@ -3445,11 +3605,9 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             {"number": 13, "title": "Mysterious change", "url": "https://github.com/o/r/issues/13", "state": "CLOSED", "closedAt": null, "labels": []}
         ]);
         let references = [12_u64, 13].into_iter().collect();
-        let mut parsed = parse_issues(&issues, &references, "o/r");
-        parsed[0].theme = classify_theme(&parsed[0]);
-        parsed[1].theme = classify_theme(&parsed[1]);
-        assert_eq!(parsed[0].theme, "Factory");
-        assert_eq!(parsed[1].theme, "Unclassified");
+        let parsed = parse_issues(&issues, &references, "o/r");
+        assert_eq!(classify_area(&parsed[0].title, ""), "Sessions");
+        assert_eq!(classify_area(&parsed[1].title, ""), OTHER_AREA);
 
         let release = parse_release_metadata(
             &serde_json::json!({
@@ -3469,23 +3627,60 @@ Was: reports lacked evidence. Now: reports include verification evidence.
         assert!(normalize_version("v").is_err());
     }
 
+    /// cas-7860: page one counts shipped changes by area, in plain titles,
+    /// and never lists an area without a change.
     #[test]
-    fn map_counts_keep_zero_install_and_unclassified_rows() {
-        let issue = GithubIssue {
-            number: 1,
-            title: "unknown".to_string(),
-            url: "https://example/1".to_string(),
-            state: "CLOSED".to_string(),
-            closed_at: None,
-            labels: Vec::new(),
-            body: None,
-            theme: "Unclassified".to_string(),
-        };
-        let counts = theme_counts(&[issue]);
-        assert_eq!(counts.len(), THEME_ORDER.len());
-        assert_eq!(counts[5].theme, "Install");
-        assert_eq!(counts[5].issues, 0);
-        assert_eq!(counts[6].issue_numbers, vec![1]);
+    fn changelog_changes_group_by_area_without_zero_rows() {
+        let section = parse_changelog_section(
+            "## [3.59.0] - 2026-10-16\n\n\
+             ### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697)\n\n\
+             - With `qa.mode = \"batch\"`, one walk covers the batch.\n\n\
+             ### Fixed — Commander renders its designed type on every machine (cas-4427)\n\n\
+             - Commander bundles its fonts.\n\n\
+             ### Fixed — after /clear the heartbeat stays with the new session (cas-9735)\n\n\
+             - The new session keeps it.\n\n\
+             ### Fixed — `cas serve` starts while another agent is creating a task (cas-30e3)\n\n\
+             - Boot skips a retired intent.\n\n\
+             ### Tests and docs\n\n\
+             - Flaky daemon tests are deterministic (cas-a8dc).\n",
+            "3.59.0",
+        )
+        .expect("section");
+        let changes = changelog_changes(&section.body);
+        assert_eq!(changes.len(), 4, "tests and docs are not counted: {changes:?}");
+        assert_eq!(
+            changes[0].title,
+            "A batch QA mode: one staging walk covers every task in a batch"
+        );
+        assert!(changes.iter().all(|change| !change.title.contains("cas-")));
+        let areas = area_counts(&changes);
+        assert_eq!(
+            areas
+                .iter()
+                .map(|area| (area.area.as_str(), area.changes))
+                .collect::<Vec<_>>(),
+            vec![("Commander", 1), ("Sessions", 2), ("Tasks and merges", 1)]
+        );
+        assert!(areas.iter().all(|area| area.changes > 0));
+
+        // Untitled headings: each bullet is a change, titled by its bold lead-in.
+        let section = parse_changelog_section(
+            "## [3.60.0] - 2026-10-16\n\n### Fixed\n\n\
+             - **Typing during cleanup** — Was: slow. → Now: off the input loop.\n\
+             - **Loaded-proof receipts** — Was: a number could be borrowed. → Now: fields own them.\n\n\
+             ### Added\n\n- **Peer ownership board** — Was: little context. → Now: owners are shown.\n\n\
+             ### Documentation\n\n- **3.59.0 release report** — committed.\n",
+            "3.60.0",
+        )
+        .expect("section");
+        let titles = changelog_changes(&section.body)
+            .into_iter()
+            .map(|change| change.title)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec!["Typing during cleanup", "Loaded-proof receipts", "Peer ownership board"]
+        );
     }
 
     #[test]
@@ -3504,7 +3699,8 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             pdf_written: true,
             issue_count: 2,
             asset_count: 1,
-            theme_counts: Vec::new(),
+            change_count: 0,
+            change_areas: Vec::new(),
             warnings: vec![
                 "source preserved: /home/pippenz/.cas/artifacts/cas-7dfa/reports/v3.19.0.md is authoritative for v3.19.0".to_string(),
             ],
@@ -3556,7 +3752,8 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             pdf_written: false,
             issue_count: 0,
             asset_count: 0,
-            theme_counts: Vec::new(),
+            change_count: 0,
+            change_areas: Vec::new(),
             warnings: vec!["source preserved: docs/release-reports/v3.19.0.md".to_string()],
             retrieved_at: "2026-09-09T15:00:00Z".to_string(),
             github_repo: None,

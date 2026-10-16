@@ -10,27 +10,34 @@ metadata:
 1. Confirm the published version, commit and release assets. An unpublished
    version remains a draft.
 2. From the project root run `cas release report <version> --pdf`. It gathers the
-   CHANGELOG section, release-notes draft, closed issues and publication receipts;
+   CHANGELOG section, release-notes draft and publication receipts, and counts
+   the GitHub issues closed with the release (see exemplar.md); it waits up to
+   15 minutes after the release PR merges for referenced issues still open. It
    writes `docs/release-reports/v<version>.md`; renders `.html` through this
    skill's [scripts/render.py](scripts/render.py) and
    [references/template.html](references/template.html); and prints the A4
    `v<version>.pdf`. Read its warnings: missing evidence is named as unavailable.
 3. Edit the Markdown against the source contract in
-   [references/exemplar.md](references/exemplar.md): every user and developer
-   change as Was → Now, verified closures counted separately from changelog
-   entries, the counting window and latency endpoints defined, exact source URLs,
-   retrieval times and full asset digests kept. Rerun step 2 to re-render; an
-   existing Markdown source is kept unless you pass `--refresh-sources`.
+   [references/exemplar.md](references/exemplar.md): page one leads with what
+   shipped, one dot per CHANGELOG change grouped by product area, with plain
+   titles. GitHub issues closed is a secondary figure counted by the generator;
+   do not hand-correct it. Every user and developer change stays Was → Now; keep
+   the exact source URLs, retrieval times and full asset digests. Rerun step 2 to
+   re-render; an existing Markdown source is kept unless you pass
+   `--refresh-sources`.
 4. Fill `v<version>.brief.md` from
    [references/brief-template.md](references/brief-template.md). The renderer takes
    project tokens from `design-tokens.json` or `docs/design/design-tokens.json`
    (roles named as in the project's `DESIGN.md`), else the bundled Petrastella
    defaults. Record which in the brief.
-5. Preserve the identity: a sandstone/serif verdict, closure stitches made of
-   equal-area issue dots, a quiet numbered folio and one decorative stitch at
-   install. Project tokens may adapt the palette and fonts; retain the motif,
-   hierarchy and section order. Keep established product-surface order across
-   releases. Dots count closures, never impact or severity.
+5. Preserve the identity: a sandstone/serif verdict, a change map of equal-area
+   dots (one per shipped change) in named product areas, a quiet numbered folio
+   and one decorative row of dots at install. Project tokens may adapt the palette
+   and fonts; retain the motif, hierarchy and section order. Keep the generator's
+   area order across releases. Dots count changes, never impact or severity.
+   Page one never shows a zero row or an unmeasured value: omit them, and name
+   them in the counting note. Write in plain words; avoid internal terms such as
+   "surface", "closure" or "verified".
 6. Keep the fixed skeleton: verdict + change map; Release at a glance; What you
    can do now; Under the hood; Fixes ledger; Install; Evidence and scope. Preserve
    the template's `data-section` markers and documented map attributes. Keep the

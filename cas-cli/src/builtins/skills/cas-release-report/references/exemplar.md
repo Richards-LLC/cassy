@@ -9,32 +9,47 @@ The approved starting point is Cassy v3.19.0 in the Cassy source repository:
 
 In a Cassy checkout these files live under `docs/release-reports/`. The exemplar's
 `render-v3.19.0.py` is historical; use this skill's generic `scripts/render.py`.
-Keep the approved section order and closure-stitch identity. Its original PDF
-forced fresh pages per section; this template deliberately uses continuous flow.
+Keep the approved section order and dot-map identity. v3.19.0 is a v1 source
+(one dot per closed issue); new reports use the v2 change map below. Its original
+PDF forced fresh pages per section; this template deliberately uses continuous
+flow.
 
-## Markdown input v1
+## Markdown input v2
 
 Begin with three blank-line-separated blocks: `# <product> <version>`, a
 publication date/time line, and a verdict paragraph. Then provide these exact
 `##` headings once each, in this order:
 
 1. `Change map`: claim paragraph, reading-guide paragraph, a three-column table
-   (`Surface | Issues closed | Issue numbers`), then source paragraph(s).
-   Use a nonnegative integer count per surface, `#123` identifiers once each,
-   and a final `Total` row. Include a zero row for an improvement without an
-   issue; its third cell explains that distinction.
+   (`Area | Changes | What changed`), then source paragraph(s). Each area row has
+   a positive integer count and that many plain change titles separated by `; `;
+   end with a `Total` row. Omit areas without changes: page one never shows a
+   zero row. A v1 table (`Surface | Issues closed | Issue numbers`) still renders
+   for older sources; its zero rows are not drawn.
 2. `Release at a glance`: a three-column table (`Measure | Value | Definition`),
-   followed by counting methodology. Missing measurements say unavailable.
+   followed by the counting note. Lead with `Changes shipped` and then
+   `GitHub issues closed`. List only measured, nonzero values, with short
+   definitions; name zero and unmeasured values in the counting note instead.
 3. `What you can do now`: `###` themes and `####` change titles; each change has
    `Was: ...`, a blank line, `Now: ...`, and optional `Source: ...` paragraphs.
 4. `Under the hood`: the same grouped Was/Now structure for developers.
-5. `Fixes ledger`: a Markdown table whose first column contains one linked issue
-   number per row. Its issues must match the map exactly, without duplicates.
-   A zero-issue release uses a header/separator-only ledger and zero map rows.
+5. `Fixes ledger`: a Markdown table (`Issue | Title | Closed | Area`) whose first
+   column holds one linked issue number per row, without duplicates. These are
+   the GitHub issues closed with the release; a release without any keeps a
+   header-only table and says so in a sentence.
 6. `Install`: commands in fenced code, archive URLs and complete digests.
 7. `Evidence and scope`: source URLs, query/window, retrieval timestamps and
    limitations. State latency endpoints; never substitute tag latency for
    green-to-published time.
+
+GitHub issues closed: the generator counts the issues that the merged release PR
+(its title names the version) or the CHANGELOG section references and that closed
+between the PR opening and 15 minutes after its merge. Issues are closed by hand
+a few minutes after the merge, so a run that starts inside that window re-reads
+issue states until the referenced issues close or the window ends. Issues still
+open, or closed outside the window, are listed under the ledger and not counted.
+Do not correct the count by hand; rerun with `--refresh-sources` if a source
+was wrong.
 
 Supported Markdown: paragraphs, inline code, links, emphasis, strong text,
 unnested `- ` lists, fenced code, tables and the headings above. Raw HTML is
@@ -64,20 +79,24 @@ overrides inherit missing defaults. Precedence: explicit `--tokens`, root
 agent reads DESIGN.md and resolves any other token path or maps another schema;
 the renderer does not infer visual design rules from prose. No network font loads.
 
-## Template and change-map data contract v1
+## Template and change-map data contract v2
 
 `template.html` owns CSS and fixed section markup; `{{NAME}}` slots are filled
 once with escaped content or renderer-owned HTML. Stable `data-section` values:
 `hero`, `glance`, `users`, `dev`, `ledger`, `install`, `provenance`.
 
 The inline `svg[data-change-map="1"]` carries `data-total`. Each directly labelled
-`g[data-surface]` carries the surface name, integer `data-count`, JSON string array
-`data-issues` (digits without `#`) and Boolean-string `data-emphasis`. Every circle
-has `data-issue`. Largest positive groups get equal emphasis, including ties.
-Each dot means one closure; zero rows have a label and no mark. Stitches wrap at
-seven dots while preserving equal area. The SVG description and open `#map-data`
-table repeat all data. Long labels or large maps still need the brief's first-screen
-QA; regroup with an explicit editorial rationale if they cannot fit legibly.
+`g[data-area]` carries the area name, integer `data-count` (at least 1), JSON
+string array `data-changes` (the plain titles) and Boolean-string
+`data-emphasis`. Every circle has `data-change` and a `<title>` naming the change.
+Largest groups get equal emphasis, including ties. Each dot means one change;
+areas without changes are not drawn. v1 sources draw `g[data-surface]` with
+`data-issues` and `data-issue` circles instead. Rows wrap at seven dots while
+preserving equal area. The SVG description and the open `#map-data` table, which
+opens Release at a glance ahead of the stats, repeat all data. The hero note
+states the GitHub issues closed as a secondary figure. Long labels or large maps
+still need the brief's first-screen QA; regroup with an explicit editorial
+rationale if they cannot fit legibly.
 
 ## Exemplar dry run
 
@@ -89,6 +108,6 @@ python3 <skill-dir>/scripts/render.py docs/release-reports/2026-09-08-v3.19.0.md
   --emphasis 'clearer states' --footer 'Clearer states. Safer next steps.'
 ```
 
-Expect the same source content, 21 dots across six surfaces, 36 Was/Now articles,
-21 ledger rows, full hashes and all source links. The legend and metadata are
+Expect the same source content, 21 dots across six surfaces (a v1 source), 36
+Was/Now articles, 21 ledger rows, full hashes and all source links. The legend and metadata are
 now input-derived; print pagination intentionally differs from the historical PDF.

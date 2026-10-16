@@ -24,10 +24,9 @@ class LaneBaseTests(unittest.TestCase):
         for name in ('classify-ci-diff.sh', 'classify-fast-admission.sh', 'classify-web-inputs.py',
                      'resolve-ci-base.sh'):
             source = ROOT / 'scripts' / name
-            if source.exists():
-                destination = self.repo / 'scripts' / name
-                destination.parent.mkdir(exist_ok=True)
-                shutil.copy2(source, destination)
+            destination = self.repo / 'scripts' / name
+            destination.parent.mkdir(exist_ok=True)
+            shutil.copy2(source, destination)
         self.write('Cargo.lock', 'base\n')
         self.commit('main')
         self.main = self.git('rev-parse', 'HEAD')

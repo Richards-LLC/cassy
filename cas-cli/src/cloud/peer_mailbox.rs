@@ -39,6 +39,11 @@ pub const MAILBOX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 pub const CLAIM_MAX: u32 = 50;
 /// Lease on a claimed message before the cloud redelivers it.
 pub const LEASE_SECS: u32 = 120;
+/// Cloud messages expire after seven days; older retirement identities cannot
+/// recover a message sent during that restart window.
+const RETIREMENT_LOOKBACK_DAYS: i64 = 7;
+/// Keep current recipients independent of bounded historical recovery work.
+const RETIRED_RECIPIENT_MAX: usize = 100;
 
 /// One outbound peer message (`POST /api/peer-messages`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +151,7 @@ pub trait PeerMailbox: Send + Sync {
             .map(|messages| PeerClaim {
                 messages,
                 denied: Vec::new(),
+                errors: Vec::new(),
             })
     }
     fn ack(&self, consumer_id: &str, acks: &[(String, PeerAckOutcome)]) -> Result<(), String>;
@@ -405,7 +411,12 @@ pub fn resolve_peer_target<'a>(
             .as_deref()
             .and_then(crate::cloud::normalize_project_canonical_id);
         addresses
-            .entry((peer.name.to_ascii_lowercase(), machine, project))
+            .entry((
+                peer.name.to_ascii_lowercase(),
+                machine,
+                project,
+                peer.session.as_deref(),
+            ))
             .or_default()
             .push(peer);
     }
@@ -458,12 +469,15 @@ struct RetiredRecipient {
     machine_id: Option<String>,
     factory_session: Option<String>,
     registered_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip, default = "chrono::Utc::now")]
+    retired_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone)]
 struct UnverifiedRetirement {
     id: String,
     name: String,
+    retired_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Default)]
@@ -473,16 +487,19 @@ struct RecipientHistory {
     warning: Option<String>,
 }
 
-fn retired_recipients(cas_root: &Path) -> Result<RecipientHistory, String> {
-    const HISTORY_LIMIT: usize = 10_000;
-    let events = crate::store::open_event_store(cas_root)
+fn retired_recipients(cas_root: &Path, session: &str) -> Result<RecipientHistory, String> {
+    let events = cas_store::SqliteEventStore::open(cas_root)
         .map_err(|e| e.to_string())?
-        .list_by_type(crate::types::EventType::AgentShutdown, HISTORY_LIMIT)
+        .list_retired_supervisors_since(
+            chrono::Utc::now() - chrono::Duration::days(RETIREMENT_LOOKBACK_DAYS),
+            session,
+            RETIRED_RECIPIENT_MAX + 1,
+        )
         .map_err(|e| e.to_string())?;
     let mut history = RecipientHistory::default();
-    if events.len() == HISTORY_LIMIT {
+    if events.len() > RETIRED_RECIPIENT_MAX {
         history.warning = Some(
-            "retired peer identity history reached its limit; older addresses were not checked"
+            "recent retired peer identity history is capped; older addresses were not checked"
                 .into(),
         );
     }
@@ -497,6 +514,7 @@ fn retired_recipients(cas_root: &Path) -> Result<RecipientHistory, String> {
             .and_then(|v| serde_json::from_value::<RetiredRecipient>(v.clone()).ok());
         if let Some(mut identity) = identity {
             identity.id = event.entity_id;
+            identity.retired_at = event.created_at;
             history.verified.push(identity);
         } else if let Some(name) = event
             .summary
@@ -509,6 +527,7 @@ fn retired_recipients(cas_root: &Path) -> Result<RecipientHistory, String> {
             history.unverified.push(UnverifiedRetirement {
                 id: event.entity_id,
                 name: name.into(),
+                retired_at: event.created_at,
             });
         }
     }
@@ -528,7 +547,7 @@ fn send_unverified_address_notice(
     );
     let dedupe_key = format!(
         "{:x}",
-        Sha256::digest(format!("unverified-recipient:{}:{}", message.id, author.id))
+        Sha256::digest(format!("unverified-recipient:{}", message.id))
     );
     mailbox
         .send(&PeerSend {
@@ -562,40 +581,60 @@ fn live_supervisor(agent: &crate::types::Agent) -> bool {
 
 fn recipient_routes<'a>(
     all: &'a [crate::types::Agent],
+    live: &[&'a crate::types::Agent],
     retired: &[RetiredRecipient],
     session: &str,
-) -> (BTreeMap<String, &'a crate::types::Agent>, Vec<String>) {
-    let live: Vec<_> = all.iter().filter(|agent| live_supervisor(agent)).collect();
+) -> (
+    BTreeMap<String, &'a crate::types::Agent>,
+    Vec<String>,
+    Vec<String>,
+) {
+    let live_ids: BTreeSet<_> = live.iter().map(|a| a.id.as_str()).collect();
     let mut routes: BTreeMap<_, _> = live
         .iter()
         .copied()
-        .filter(|agent| agent.factory_session.as_deref() == Some(session))
-        .map(|agent| (agent.id.clone(), agent))
+        .filter(|a| a.factory_session.as_deref() == Some(session))
+        .map(|a| (a.id.clone(), a))
         .collect();
     let mut errors = BTreeSet::new();
+    let mut warnings = Vec::new();
     let rows = all
         .iter()
-        .filter(|agent| !live_supervisor(agent))
-        .map(|agent| RetiredRecipient {
-            id: agent.id.clone(),
-            name: agent.name.clone(),
-            role: agent.role,
-            machine_id: agent.machine_id.clone(),
-            factory_session: agent.factory_session.clone(),
-            registered_at: agent.registered_at,
+        .filter(|a| !live_ids.contains(a.id.as_str()))
+        .map(|a| RetiredRecipient {
+            id: a.id.clone(),
+            name: a.name.clone(),
+            role: a.role,
+            machine_id: a.machine_id.clone(),
+            factory_session: a.factory_session.clone(),
+            registered_at: a.registered_at,
+            retired_at: a.last_heartbeat,
         });
-    for old in rows.chain(
-        retired
-            .iter()
-            .filter(|old| !all.iter().any(|a| a.id == old.id))
-            .cloned(),
-    ) {
-        if old.role != AgentRole::Supervisor
+    let mut old_rows: Vec<_> = rows
+        .chain(
+            retired
+                .iter()
+                .filter(|old| !all.iter().any(|a| a.id == old.id))
+                .cloned(),
+        )
+        .collect();
+    old_rows.sort_by(|a, b| {
+        b.retired_at
+            .cmp(&a.retired_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let now = chrono::Utc::now();
+    let since = now - chrono::Duration::days(RETIREMENT_LOOKBACK_DAYS);
+    let mut retired_count = 0;
+    let mut seen = BTreeSet::new();
+    for old in old_rows {
+        if !seen.insert(old.id.clone())
+            || old.role != AgentRole::Supervisor
             || old.name.trim().is_empty()
-            || old
-                .factory_session
-                .as_deref()
-                .is_none_or(|s| s.trim().is_empty())
+            || session.trim().is_empty()
+            || old.factory_session.as_deref() != Some(session)
+            || old.retired_at < since
+            || old.retired_at > now
         {
             continue;
         }
@@ -605,25 +644,31 @@ fn recipient_routes<'a>(
         let successors: Vec<_> = live
             .iter()
             .copied()
-            .filter(|agent| {
-                agent.name.eq_ignore_ascii_case(&old.name)
-                    && agent.machine_id.as_deref() == Some(machine)
-                    && agent.registered_at >= old.registered_at
+            .filter(|a| {
+                a.name.eq_ignore_ascii_case(&old.name)
+                    && a.machine_id.as_deref() == Some(machine)
+                    && a.factory_session.as_deref() == old.factory_session.as_deref()
+                    && a.registered_at >= old.registered_at
             })
             .collect();
         match successors.as_slice() {
-            [successor] if successor.factory_session.as_deref() == Some(session) => {
-                routes.insert(old.id, *successor);
+            [successor] => {
+                if retired_count < RETIRED_RECIPIENT_MAX {
+                    routes.insert(old.id, *successor);
+                    retired_count += 1;
+                } else if warnings.is_empty() {
+                    warnings.push(
+                        "retired peer recipients capped at 100; older addresses were not checked"
+                            .into(),
+                    );
+                }
             }
-            many if many.len() > 1
-                && many
-                    .iter()
-                    .any(|a| a.factory_session.as_deref() == Some(session)) =>
-            {
+            many if many.len() > 1 => {
                 errors.insert(format!(
-                    "ambiguous live successors for {}@{}: {}",
+                    "ambiguous live successors for {}@{} in factory {}: {}",
                     old.name,
                     machine,
+                    session,
                     many.iter()
                         .map(|a| a.id.as_str())
                         .collect::<Vec<_>>()
@@ -633,7 +678,7 @@ fn recipient_routes<'a>(
             _ => {}
         }
     }
-    (routes, errors.into_iter().collect())
+    (routes, errors.into_iter().collect(), warnings)
 }
 
 /// What one delivery tick did.
@@ -646,6 +691,8 @@ pub struct DeliveryReport {
     /// Local prompt ids of newly admitted rows, in delivery order.
     pub admitted: Vec<i64>,
     pub errors: Vec<String>,
+    /// Bounded historical recovery can warn without disabling current mail.
+    pub warnings: Vec<String>,
 }
 
 /// Claim this session's peer messages and admit each once.
@@ -727,25 +774,65 @@ fn deliver_claimed_with_history(
             return report;
         }
     };
-    let (routes, errors) = recipient_routes(&all, &history.verified, factory_session);
+    // Evaluate process/heartbeat liveness once per registry row, never per
+    // historical ID. Both verified routing and legacy feedback reuse this set.
+    let live: Vec<_> = all.iter().filter(|a| live_supervisor(a)).collect();
+    if !live
+        .iter()
+        .any(|a| a.factory_session.as_deref() == Some(factory_session))
+    {
+        report
+            .errors
+            .push("no live supervisor in this factory session".into());
+        return report;
+    }
+    let (routes, errors, warnings) =
+        recipient_routes(&all, &live, &history.verified, factory_session);
     report.errors.extend(errors);
-    let inspections: BTreeMap<_, _> = history
+    report.warnings.extend(warnings);
+    if let Some(warning) = &history.warning {
+        report.warnings.push(warning.clone());
+    }
+    let current_count = live
+        .iter()
+        .filter(|a| a.factory_session.as_deref() == Some(factory_session))
+        .count();
+    let retired_count = routes.len().saturating_sub(current_count);
+    let mut candidates: Vec<_> = history
         .unverified
         .iter()
         .filter(|old| !all.iter().any(|a| a.id == old.id) && !routes.contains_key(&old.id))
         .filter_map(|old| {
-            all.iter()
+            live.iter()
+                .copied()
                 .filter(|a| {
-                    live_supervisor(a)
-                        && a.factory_session.as_deref() == Some(factory_session)
+                    a.factory_session.as_deref() == Some(factory_session)
                         && a.name.eq_ignore_ascii_case(&old.name)
                 })
                 .max_by_key(|a| (a.registered_at, &a.id))
-                .map(|author| (old.id.clone(), author))
+                .map(|author| (old, author))
         })
         .collect();
-    if routes.is_empty() && inspections.is_empty() {
-        return report;
+    let now = chrono::Utc::now();
+    let since = now - chrono::Duration::days(RETIREMENT_LOOKBACK_DAYS);
+    candidates.retain(|(old, _)| old.retired_at >= since && old.retired_at <= now);
+    candidates.sort_by(|(a, _), (b, _)| {
+        b.retired_at
+            .cmp(&a.retired_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut inspections = BTreeMap::new();
+    for (old, author) in candidates {
+        if inspections.contains_key(&old.id) {
+            continue;
+        }
+        if retired_count + inspections.len() >= RETIRED_RECIPIENT_MAX {
+            report.warnings.push(
+                "retired peer recipients capped at 100; older addresses were not checked".into(),
+            );
+            break;
+        }
+        inspections.insert(old.id.clone(), author);
     }
     let recipient_ids: Vec<_> = routes.keys().chain(inspections.keys()).cloned().collect();
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
@@ -759,6 +846,7 @@ fn deliver_claimed_with_history(
                     batch.denied.join(", ")
                 ));
             }
+            report.errors.extend(batch.errors);
             batch.messages
         }
         Err(error) => {
@@ -1048,6 +1136,10 @@ pub struct PeerClaim {
     pub messages: Vec<ClaimedPeerMessage>,
     #[serde(default)]
     pub denied: Vec<String>,
+    /// Local transport failures from individual claim batches. Successful
+    /// batches remain available for admission and ACK even when another fails.
+    #[serde(skip)]
+    pub errors: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1105,6 +1197,9 @@ impl PeerMailbox for HttpPeerMailbox {
         consumer_id: &str,
     ) -> Result<Vec<ClaimedPeerMessage>, String> {
         let batch = self.claim_report(project_ids, recipient_agent_ids, consumer_id)?;
+        if !batch.errors.is_empty() {
+            return Err(batch.errors.join("; "));
+        }
         if batch.denied.is_empty() {
             Ok(batch.messages)
         } else {
@@ -1124,15 +1219,21 @@ impl PeerMailbox for HttpPeerMailbox {
         let mut combined = PeerClaim {
             messages: Vec::new(),
             denied: Vec::new(),
+            errors: Vec::new(),
         };
         for projects in project_ids.chunks(50) {
             for recipients in recipient_agent_ids.chunks(50) {
-                let batch:PeerClaim=Self::read("peer message claim",self.post("/claim",serde_json::json!({
+                let batch = Self::read::<PeerClaim>("peer message claim", self.post("/claim", serde_json::json!({
                     "project_ids":projects,"recipient_agent_ids":recipients,"consumer_id":consumer_id,
                     "max":CLAIM_MAX,"lease_secs":LEASE_SECS,
-                })))?;
-                combined.messages.extend(batch.messages);
-                combined.denied.extend(batch.denied);
+                })));
+                match batch {
+                    Ok(batch) => {
+                        combined.messages.extend(batch.messages);
+                        combined.denied.extend(batch.denied);
+                    }
+                    Err(error) => combined.errors.push(error),
+                }
             }
         }
         combined.denied.sort();

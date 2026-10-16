@@ -371,7 +371,11 @@ fn delivery_does_not_claim_without_a_live_local_supervisor() {
     );
     let mailbox = FakeMailbox::default();
     let report = machine.deliver(&mailbox);
-    assert_eq!(report, DeliveryReport::default());
+    assert_eq!(report.claimed, 0);
+    assert!(
+        !report.errors.is_empty(),
+        "missing recipient must be an observable retry state"
+    );
     assert!(
         mailbox.claims.lock().unwrap().is_empty(),
         "messages wait in the cloud until a supervisor of this session is live"
@@ -466,7 +470,7 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         "machine",
         "worker",
         "nonfactory",
-        "future",
+        "earlier-successor",
         "live",
         "unknown-machine",
         "stale-current",
@@ -478,13 +482,15 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         old.role = AgentRole::Supervisor;
         old.status = AgentStatus::Shutdown;
         old.machine_id = Some("box".into());
-        old.factory_session = Some("previous".into());
+        old.factory_session = Some("factory-a".into());
         match case {
             "name" => old.name = "other".into(),
             "machine" => old.machine_id = Some("other-box".into()),
             "worker" => old.role = AgentRole::Worker,
             "nonfactory" => old.factory_session = None,
-            "future" => old.registered_at = chrono::Utc::now() + chrono::Duration::days(1),
+            "earlier-successor" => {
+                old.registered_at = chrono::Utc::now() + chrono::Duration::days(1)
+            }
             "live" => old.status = AgentStatus::Active,
             "unknown-machine" => old.machine_id = None,
             _ => {}
@@ -504,7 +510,7 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         if case == "ambiguous" {
             let mut other = current.clone();
             other.id = "other-current".into();
-            other.factory_session = Some("other-session".into());
+            other.factory_session = Some("factory-a".into());
             agents.register(&other).unwrap();
             agents.update(&current).unwrap();
         }
@@ -564,9 +570,18 @@ fn cas_8063_repair_retirement_claims_are_recent_and_bounded() {
     current.factory_session = Some("factory-a".into());
     agents.register(&current).unwrap();
     let mailbox = FakeMailbox::default();
-    machine.deliver(&mailbox);
+    let report = machine.deliver(&mailbox);
+    assert!(
+        report.errors.is_empty(),
+        "cap is not a transport failure: {report:?}"
+    );
+    assert!(!report.warnings.is_empty());
     let claims = mailbox.claims.lock().unwrap();
-    assert!(claims[0].len() <= 101, "bounded retired IDs plus current: {}", claims[0].len());
+    assert!(
+        claims[0].len() <= 101,
+        "bounded retired IDs plus current: {}",
+        claims[0].len()
+    );
     assert!(claims[0].iter().any(|id| id == "current"));
     assert!(!claims[0].iter().any(|id| id == "old-000"), "expired retirement must not be claimed");
 }
@@ -587,7 +602,48 @@ fn cas_8063_repair_history_excludes_workers_and_expired_supervisors() {
         event.created_at -= chrono::Duration::days(days);
         events.record(&event).unwrap();
     }
-    let history = retired_recipients(&machine.cas).unwrap();
+    let history = retired_recipients(&machine.cas, "factory-a").unwrap();
     let ids: Vec<_> = history.verified.iter().map(|old| old.id.as_str()).collect();
     assert_eq!(ids, ["recent"]);
+}
+
+#[test]
+fn cas_8063_repair_same_name_factories_cannot_swap_mail() {
+    let machine = Machine::new();
+    let agents = open_agent_store(&machine.cas).unwrap();
+    let mut current = Vec::new();
+    for session in ["factory-a", "factory-b"] {
+        let mut old = Agent::new(format!("old-{session}"), "same".into());
+        old.role = AgentRole::Supervisor;
+        old.status = AgentStatus::Shutdown;
+        old.machine_id = Some("box".into());
+        old.factory_session = Some(session.into());
+        agents.register(&old).unwrap();
+        let mut next = old.clone();
+        next.id = format!("current-{session}");
+        next.status = AgentStatus::Active;
+        next.registered_at = chrono::Utc::now();
+        current.push(next);
+    }
+    for agent in &current {
+        agents.register(agent).unwrap();
+    }
+    // Registration's separate restart reconciliation must not hide the
+    // simultaneous-factory competitor from this routing regression.
+    for agent in &current {
+        agents.update(agent).unwrap();
+    }
+    let mailbox = FakeMailbox::default();
+    mailbox.inbox.lock().unwrap().extend([
+        message("own-mail", "old-factory-a", REPO, "for a"),
+        message("other-mail", "old-factory-b", REPO, "for b"),
+    ]);
+    let report = machine.deliver(&mailbox);
+    assert_eq!((report.delivered, report.rejected), (1, 1), "{report:?}");
+    let rows = machine.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(parse_envelope(&rows[0].prompt).unwrap().id, "own-mail");
+    let claims = mailbox.claims.lock().unwrap();
+    assert!(claims[0].iter().any(|id| id == "old-factory-a"));
+    assert!(!claims[0].iter().any(|id| id == "old-factory-b"));
 }

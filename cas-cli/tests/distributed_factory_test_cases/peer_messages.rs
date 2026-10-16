@@ -1431,7 +1431,9 @@ async fn restart_peer_mail(unregister: bool, legacy: bool, fail_notice: bool) {
             let mut agent = Agent::new(id.into(), "peer-beta".into());
             agent.role = AgentRole::Supervisor;
             agent.machine_id = Some("machine-beta".into());
-            agent.factory_session = Some(format!("factory-{id}"));
+            // The named factory survives a full daemon restart; only its
+            // supervisor agent ID/process lifetime changes.
+            agent.factory_session = Some("factory-b-new".into());
             let config = cas::cloud::CloudConfig::load_from_cas_dir(&beta.cas_dir).unwrap();
             cas::cloud::CloudCoordinator::new(config)
                 .unwrap()
@@ -1509,8 +1511,11 @@ async fn restart_peer_mail(unregister: bool, legacy: bool, fail_notice: bool) {
             assert!(notices[0].prompt.to_ascii_lowercase().contains("resend"));
             // pin: a routing failure notice must not forward the unverified original body.
             assert!(!notices[0].prompt.contains("mail while down"));
+            // A second successor must reuse the original message's feedback
+            // key rather than manufacture another notice under its new ID.
+            register("b-next");
             mailbox.lock().unwrap()[0]["status"] = json!("queued");
-            let replay = tick(&beta.cas_dir, "b-new");
+            let replay = tick(&beta.cas_dir, "b-next");
             assert_eq!(replay.rejected, 1);
             assert_eq!(
                 mailbox.lock().unwrap().len(),
@@ -1605,5 +1610,62 @@ async fn cas_8063_repair_claim_batch_failure_preserves_other_batches() {
             .expect("one failed claim must not discard successful batches");
         let ids: Vec<_> = report.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["r000", "r100"]);
-    }).await.unwrap();
+        assert_eq!(report.errors.len(), 1, "partial failure remains visible");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cas_8063_repair_history_warning_keeps_mailbox_receiving() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let machine = TestMachine::new("machine-beta");
+        seed_project(&machine, &endpoint, "github.com/acme/widgets");
+        supervisor(&machine, "b");
+        let events = cas::store::open_event_store(&machine.cas_dir).unwrap();
+        for i in 0..125 {
+            let event = cas::types::Event::new(
+                cas::types::EventType::AgentShutdown,
+                cas::types::EventEntityType::Agent,
+                format!("retired-{i}"),
+                "Agent unregistered: sup-b",
+            )
+            .with_metadata(json!({"retired_agent": {
+                "name":"sup-b", "role":"supervisor", "machine_id":"machine-beta",
+                "factory_session":"factory-b",
+                "registered_at":(chrono::Utc::now()-chrono::Duration::days(1)).to_rfc3339()
+            }}));
+            events.record(&event).unwrap();
+        }
+        let report = tick(&machine.cas_dir, "b");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            !report.warnings.is_empty(),
+            "truncation must remain visible"
+        );
+        let text =
+            cas::cloud::peer_mailbox::mailbox_status_section(&machine.cas_dir, Some("factory-b"));
+        assert!(text.contains("Peer mailbox: receiving."), "{text}");
+        assert!(text.contains("Warning:"), "{text}");
+    })
+    .await
+    .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let recipient_count: usize = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/claim"))
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["recipient_agent_ids"]
+                .as_array()
+                .unwrap()
+                .len()
+        })
+        .sum();
+    assert!(
+        recipient_count <= 101,
+        "bounded retirement claims plus current: {recipient_count}"
+    );
 }

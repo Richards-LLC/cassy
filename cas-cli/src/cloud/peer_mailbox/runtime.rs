@@ -8,6 +8,8 @@ struct MailboxHealth {
     written_at: chrono::DateTime<chrono::Utc>,
     receiving: bool,
     cause: String,
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 fn health_path(root: &Path, session: &str) -> PathBuf {
@@ -34,7 +36,11 @@ pub fn mailbox_status_section(root: &Path, session: Option<&str>) -> String {
                 <= 90 =>
         {
             if health.receiving {
-                "Peer mailbox: receiving.\n".into()
+                let mut text = "Peer mailbox: receiving.\n".to_string();
+                for warning in health.warnings {
+                    text.push_str(&format!("Warning: {warning}\n"));
+                }
+                text
             } else {
                 format!(
                     "Peer mailbox: not receiving: {}\nRetry: automatic with backoff, at most 30s.\n",
@@ -69,16 +75,17 @@ impl PeerMailboxRuntime {
             .take(200)
             .collect(),
         };
-        runtime.record_health(false, "waiting for first mailbox poll");
+        runtime.record_health(false, "waiting for first mailbox poll", &[]);
         Some(runtime)
     }
 
-    fn record_health(&self, receiving: bool, cause: &str) {
+    fn record_health(&self, receiving: bool, cause: &str, warnings: &[String]) {
         let path = health_path(&self.cas_dir, &self.factory_session);
         let health = MailboxHealth {
             written_at: chrono::Utc::now(),
             receiving,
             cause: cause.into(),
+            warnings: warnings.to_vec(),
         };
         let result = (|| -> anyhow::Result<()> {
             std::fs::create_dir_all(path.parent().expect("health path has parent"))?;
@@ -94,7 +101,11 @@ impl PeerMailboxRuntime {
 
     pub fn tick_blocking(&self) -> DeliveryReport {
         let report = self.tick_inner();
-        self.record_health(report.errors.is_empty(), &report.errors.join("; "));
+        self.record_health(
+            report.errors.is_empty(),
+            &report.errors.join("; "),
+            &report.warnings,
+        );
         report
     }
 
@@ -118,24 +129,16 @@ impl PeerMailboxRuntime {
                 .map_err(|e| format!("could not open prompt queue: {e}"))?;
             let agents = crate::store::open_agent_store(&self.cas_dir)
                 .map_err(|e| format!("could not open agent store: {e}"))?;
-            let has_recipient = agents
-                .list(None)
-                .map_err(|e| e.to_string())?
-                .iter()
-                .any(|agent| {
-                    live_supervisor(agent)
-                        && agent.factory_session.as_deref() == Some(&self.factory_session)
-                });
-            if !has_recipient {
-                return Err("no live supervisor in this factory session".into());
-            }
             // cas-4736: record epic split proposals and answers before ack.
             let cas_dir = self.cas_dir.clone();
-            let history = match retired_recipients(&self.cas_dir) {
+            let history = match retired_recipients(&self.cas_dir, &self.factory_session) {
                 Ok(history) => history,
-                Err(error) => RecipientHistory { warning: Some(format!("retired peer identity lookup failed: {error}")), ..Default::default() },
+                Err(error) => RecipientHistory {
+                    warning: Some(format!("retired peer identity lookup failed: {error}")),
+                    ..Default::default()
+                },
             };
-            let mut report = deliver_claimed_with_history(
+            let report = deliver_claimed_with_history(
                 &mailbox,
                 queue.as_ref(),
                 agents.as_ref(),
@@ -157,7 +160,6 @@ impl PeerMailboxRuntime {
                     Ok(())
                 },
             );
-            if let Some(error) = history.warning { report.errors.push(error); }
             Ok(report)
         };
         let mut report = run().unwrap_or_else(|error| DeliveryReport {
@@ -180,6 +182,7 @@ pub struct PeerMailboxPoller {
     task: Option<tokio::task::JoinHandle<DeliveryReport>>,
     failures: u32,
     last_error: String,
+    last_warning: String,
 }
 
 impl PeerMailboxPoller {
@@ -192,6 +195,7 @@ impl PeerMailboxPoller {
             task: None,
             failures: 0,
             last_error: String::new(),
+            last_warning: String::new(),
         }
     }
     pub async fn poll(&mut self, now: Instant) -> Option<DeliveryReport> {
@@ -225,8 +229,18 @@ impl PeerMailboxPoller {
                 }
                 self.last_error = error;
             }
-            self.runtime
-                .record_health(report.errors.is_empty(), &report.errors.join("; "));
+            let warning = report.warnings.join("; ");
+            if warning != self.last_warning {
+                if !warning.is_empty() {
+                    tracing::warn!(cause=%warning, "peer mailbox receiving with recovery warning");
+                }
+                self.last_warning = warning;
+            }
+            self.runtime.record_health(
+                report.errors.is_empty(),
+                &report.errors.join("; "),
+                &report.warnings,
+            );
             self.next_poll = now + delay;
             return Some(report);
         }

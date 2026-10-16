@@ -196,6 +196,50 @@ impl SqliteEventStore {
         Ok(store)
     }
 
+    /// Recent retirement evidence for one named factory. Typed worker rows and
+    /// other factories cannot consume the caller's bounded history window.
+    /// Legacy rows match a current supervisor name only for resend feedback;
+    /// that match does not establish their former role or machine.
+    pub fn list_retired_supervisors_since(
+        &self,
+        since: DateTime<Utc>,
+        factory_session: &str,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "WITH recent AS (
+                SELECT *, CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END AS identity_json
+                FROM events
+                WHERE event_type = 'agent_shutdown' AND entity_type = 'agent'
+                  AND created_at >= substr(?1, 1, 10)
+                  AND julianday(created_at) >= julianday(?1)
+            )
+            SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
+            FROM recent e
+            WHERE EXISTS (
+                SELECT 1 FROM agents a
+                WHERE a.role = 'supervisor' AND a.factory_session = ?2
+                  AND a.status IN ('active', 'idle')
+                  AND (
+                    (json_extract(e.identity_json, '$.retired_agent.role') = 'supervisor'
+                     AND json_extract(e.identity_json, '$.retired_agent.factory_session') = ?2
+                     AND json_extract(e.identity_json, '$.retired_agent.name') = a.name COLLATE NOCASE)
+                    OR
+                    (json_extract(e.identity_json, '$.retired_agent.role') IS NULL
+                     AND e.summary = 'Agent unregistered: ' || a.name COLLATE NOCASE)
+                  )
+            )
+            ORDER BY created_at DESC, id DESC LIMIT ?3",
+        )?;
+        stmt.query_map(
+            params![since.to_rfc3339(), factory_session, limit as i64],
+            Self::row_to_event,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
+
     /// Parse a row into an Event
     fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         let event_type_str: String = row.get("event_type")?;

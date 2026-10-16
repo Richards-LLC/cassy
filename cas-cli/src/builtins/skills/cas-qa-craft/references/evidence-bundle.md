@@ -7,7 +7,6 @@ keep rendered components out of these globs. Follow [Fewest tests](../../cas-tdd
 one transcript per changed status/error code, including refusal cases. The only
 required artifacts are `LEDGER.md` (the transcript itself) and `contracts.diff`
 (captured comparison against vendored contract fixtures, empty when they agree).
-Use the task artifact directory, or the independent round's ledger directory.
 Record `head_sha: <delivered SHA>` and `origin: <HTTP origin>` in the transcript,
 a PASS/real-build ledger row for approval, then `request: <METHOD> <absolute URL>`,
 `status: <numeric code>` and `body: <captured response>` for each cell.
@@ -50,13 +49,12 @@ layout, colour, typography, imagery or motion. For `visual_change: false`, omit
 trace, assertions, ARIA, cell captures, polish and affected journey receipts/logs.
 A recording listed voluntarily still needs to be valid and fresh.
 
-Polish evidence is required for every web bundle, not only for visual changes.
-An unpolished delivery is a defect, the same as a bug. The one exception is a
-`journey` bundle ([journeys.md](journeys.md)). It may set
+Every web bundle needs polish evidence. A
+`journey` bundle ([journeys.md](journeys.md)) may set
 `visual_qa_status: "unavailable"` and omit the polish keys, because the release
 journey evaluation scores polish for it.
 
-`bundle.json` is the manifest. It records:
+`bundle.json` records:
 
 - `schema: 1`, `task_id`, and `producer` (`cas-qa-craft`, `independent-qa`, or `journey`)
 - `head_sha`: the full SHA of the build under test
@@ -125,8 +123,7 @@ while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
 affected, four workers) or `--affected <base>`. Close and QA do not require a
 journey receipt.
 
-The merge queue owns full-suite proof; without one, CI or supervisor assembly
-proves the exact default-branch tip. Workers run targeted tests. Reuse receipts.
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
 Workers produce affected-journey evidence; independent QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
 The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing

@@ -16,12 +16,12 @@ use assert_cmd::Command;
 use std::path::Path;
 use tempfile::TempDir;
 
-#[path = "support/worker_sync_isolation.rs"]
-mod worker_sync_isolation;
+#[path = "support/mod.rs"]
+mod support;
 
 #[test]
 fn cas_76e4_cli_cases_leave_the_worker_worktree_untouched() {
-    worker_sync_isolation::assert_worker_cases_are_hermetic(&[
+    support::CasSandbox::new().assert_child_tests_leave_worktree_untouched(&[
         "update_sync_report_attribution_test::sync_attributes_every_claimed_write_to_the_directory_it_landed_in",
         "update_sync_report_attribution_test::codex_sync_reports_its_own_result_and_is_idempotent",
         "update_sync_report_attribution_test::unwritable_codex_destination_fails_loudly_instead_of_claiming_success",

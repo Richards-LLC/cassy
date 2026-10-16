@@ -47,6 +47,8 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible({ timeout: 15_000 });
       expect(cloud.presence.get(soundwave.id)?.monitoring).toBe("disabled");
       const settings = row.locator("summary");
+      await expect(settings).toHaveText("Monitoring settings");
+      await expect(settings).toHaveAccessibleName("Monitoring settings for soundwave");
       const chevron = settings.locator(".machine-presence-chevron");
       await expect(chevron).toBeVisible();
       const closedMarker = await chevron.evaluate((node) => getComputedStyle(node).transform);
@@ -56,9 +58,10 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
       await expect(row.getByText(/Enable alerts, then run cas hub restart on soundwave/)).toBeVisible();
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
+      await expect(enable).toHaveText("Enable alerts");
       await page.emulateMedia({ forcedColors: "active" });
       expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
-      for (const button of [enable, inbox.getByRole("button", { name: "Refresh machine status" }), inbox.getByRole("button", { name: "Sign out", exact: true })]) {
+      for (const button of [enable, inbox.getByRole("button", { name: "Refresh machine status" }), inbox.getByRole("button", { name: "Sign out of the inbox", exact: true })]) {
         const edges = await button.evaluate((node) => {
           const style = getComputedStyle(node);
           return ["Top", "Right", "Bottom", "Left"].map((side) => ({
@@ -189,6 +192,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
         await settings.press("Enter");
       }
       const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
+      await expect(disable).toHaveText("Disable alerts");
       await disable.focus();
       await disable.press("Enter");
       await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible();

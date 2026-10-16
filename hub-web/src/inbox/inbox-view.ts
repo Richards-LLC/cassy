@@ -367,8 +367,8 @@ export class InboxView {
         if (machine.monitoring !== "not_capable") {
           if (this.controller.canManageMonitoring()) {
             const consent = el("details", { id: `presence-consent-${machine.machineId}` });
-            const summary = el("summary", { id: `presence-details-${machine.machineId}` });
-            summary.append(el("span", { class: "machine-presence-chevron", "aria-hidden": "true" }), document.createTextNode(`Monitoring settings for ${label}`));
+            const summary = el("summary", { id: `presence-details-${machine.machineId}`, "aria-label": `Monitoring settings for ${label}` });
+            summary.append(el("span", { class: "machine-presence-chevron", "aria-hidden": "true" }), document.createTextNode("Monitoring settings"));
             consent.append(summary);
             consent.append(el("p", {}, "Cassy Cloud receives a report about this machine's Hub, Serve and Factory about once a minute. If reports stop, an alert appears in this inbox within about five minutes while Cassy Cloud's alert check is working. It keeps only the latest status and keeps notices for 90 days; Cassy Cloud can read them. No email or phone push is sent."));
             if (machine.monitoring === "disabled") {
@@ -377,7 +377,8 @@ export class InboxView {
               consent.append(setup);
             }
             const enabled = machine.monitoring !== "enabled";
-            const toggle = el("button", { type: "button", id: `presence-toggle-${machine.machineId}` }, `${enabled ? "Enable" : "Disable"} alerts for ${label}`);
+            const action = `${enabled ? "Enable" : "Disable"} alerts`;
+            const toggle = el("button", { type: "button", id: `presence-toggle-${machine.machineId}`, "aria-label": `${action} for ${label}` }, action);
             toggle.disabled = this.busy;
             toggle.onclick = () => void this.act(() => this.controller.setMonitoring(machine.machineId, enabled), `Could not ${enabled ? "enable" : "disable"} alerts. Review the current setting and try again.`);
             consent.append(toggle);

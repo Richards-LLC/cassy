@@ -325,7 +325,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeInViewport();
   });
 
-  await journey.stage("A pairing without factory:manage sees Stop disabled and where to add it", async () => {
+  await journey.stage("A pairing without factory:manage", async () => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click();
     await expect(row("swift-lark-3")).toBeVisible();
     // cas-d043 G13: the merge was asked on cas-src; the same task id here is another task.
@@ -344,21 +344,38 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
     await expect(row("swift-lark-3").locator(".fleet-ops-reason").first()).toContainText("Allow managing workers in Paired machines.");
-    // cas-a217: the header names the permission each control needs; Write
-    // access needs factory:manage, not the factory:operate the others need.
+    // cas-ba64: one lead, a short permission line per group, and one remedy
+    // sentence that names the grant and re-pair actions in Paired machines.
     const header = page.locator("#status-view .fleet-ops-header");
     await expect(header.locator(":scope > .fleet-ops-reason")).toHaveText([
-      "Add worker and Focus epic: Not allowed on this pairing. Needs the Manage workers and tasks permission. Allow managing workers in Paired machines.",
-      "Write access: Not allowed on this pairing. Needs the Stop and restart workers and sessions permission. Add it in Paired machines.",
+      "Not allowed on this pairing.",
+      "Add worker, Focus epic: needs Manage workers and tasks.",
+      "Write access: needs Stop and restart workers and sessions.",
     ]);
+    await expect(header.locator(":scope > .fleet-ops-instruction")).toHaveText("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
     for (const name of ["Add worker…", "Focus epic…", "Write access…"]) {
       const control = header.getByRole("button", { name });
-      await expect(header.locator(`#${await control.getAttribute("aria-describedby")}`), name).toBeVisible();
+      const descriptions = (await control.getAttribute("aria-describedby"))?.split(" ") ?? [];
+      expect(descriptions).toHaveLength(3);
+      for (const id of descriptions) await expect(header.locator(`#${id}`), name).toBeVisible();
     }
     const before = hub.operations.length;
     await stop.click({ force: true });
     expect(hub.operations.length, "a disabled item sends nothing").toBe(before);
     await page.keyboard.press("Escape");
+    await page.locator("#paired-machines-toggle").click();
+    const paired = page.locator("#paired-machines-dialog");
+    const manage = paired.locator('[data-machine-id="studio"] [data-permission="manage"]');
+    await expect(paired).toBeVisible();
+    await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
+    await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");
+    expect(await manage.evaluate((node) => {
+      const reason = node.querySelector(".fleet-permission-reason")!;
+      const also = node.querySelector(".fleet-permission-also")!;
+      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
+    await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
   });
 });
 

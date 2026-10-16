@@ -81,6 +81,7 @@ STEP_ORDER = [
     "claim_refused",
     "spawn_refused",
     "message_reply_status",
+    "overcap_message_reply_status",
     "unknown_name",
     "no_route_to_peer_worker",
     "epic_split",
@@ -571,6 +572,52 @@ class Run:
             return "delivered" in status.get("text", "").lower(), status
 
         self.wait_for(f"{peer_message} delivered", delivered, 60)
+
+    def step_overcap_message_reply_status(self, evidence, notes):
+        """cas-5c2c: retain exact bytes on both machines, including a reply.
+
+        Run with --cloud-url and --steps
+        peers_discovery,message_reply_status,overcap_message_reply_status.
+        A stand-in run is diagnostic only, never the live AC4 receipt.
+        """
+        import hashlib
+        a, b = self.names["a"], self.names["b"]
+        evidence["receipt_scope"] = "live-cloud" if self.args.cloud_url else "stand-in-only"
+        evidence["started_at"] = utc()
+        for sender, receiver, source, target, label in [
+            (self.a, self.b, a, b, "send"),
+            (self.b, self.a, b, a, "reply"),
+        ]:
+            token = f"live-overcap-{label}-{self.rid}-{secrets.token_hex(3)}"
+            body = token + "\n" + ("peer body stays readable π\n" * 1200) + token
+            extra = {} if label == "send" else {"in_reply_to": notification}
+            sent = self.message(sender, source, target, f"over-cap {label} {token}", body, **extra)
+            cloud_id = peer_message_id(sent.get("text", ""))
+            evidence[label] = {"sent_at": utc(), "result": sent, "cloud_id": cloud_id,
+                               "body_bytes": len(body.encode()),
+                               "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
+            if sent.get("is_error") or not cloud_id or "Cassy Cloud" not in sent.get("text", ""):
+                raise StepFailed(f"over-cap {label} did not enter the Cloud mailbox")
+            notification = self.delivered_locally(receiver, target, source, token,
+                                                   f"{label}_delivery", evidence)
+            rows = self.queued_rows(receiver, token)
+            matching = [row for row in rows if row.get("id") == notification]
+            # The receiver computes the digest after removing CAS's envelope
+            # and routing preamble; it never exports the body into the receipt.
+            expected = evidence[label]
+            if not matching or (matching[0].get("peer_body_sha256") != expected["body_sha256"]
+                                or matching[0].get("peer_body_bytes") != expected["body_bytes"]):
+                raise StepFailed(f"over-cap {label} body changed at the destination")
+            evidence[label]["notification_id"] = notification
+            evidence[label]["received_at"] = utc()
+            def delivered_status():
+                status = sender.tool(source, "coordination", action="message_status", id=cloud_id)
+                evidence[label]["status"] = status
+                return "delivered" in status.get("text", "").lower(), status
+            self.wait_for(f"{cloud_id} delivered", delivered_status, 60)
+        evidence["completed_at"] = utc()
+        if not self.args.cloud_url:
+            notes.append("Not an AC4 live receipt: rerun this step with --cloud-url on two machines.")
 
     def step_unknown_name(self, evidence, notes):
         target = f"nobody-{self.rid}"

@@ -107,7 +107,58 @@ enum ReusedFactoryBranchStart {
     /// is kept as local branch `parked/<task>` (a convenience; the parked
     /// task's recorded anchor SHA is its delivery, cas-ba4a) and the worker
     /// branch was reset onto the new target.
-    MovedFromParked { task_id: String, tip: String },
+    ///
+    /// cas-7ce6: `delivery_branch` is `<worker branch>-<task>` at the parked
+    /// tip, so the reviewed SHA keeps a branch (and lane CI) of its own that
+    /// the next task's pushes to the worker branch cannot cancel or move.
+    /// `None` when a different per-task branch already exists there.
+    MovedFromParked {
+        task_id: String,
+        tip: String,
+        delivery_branch: Option<String>,
+    },
+}
+
+/// cas-7ce6: keep a parked tip on its own per-task delivery branch, unless a
+/// branch of that name already points somewhere else.
+fn keep_parked_delivery_branch(
+    worktree_path: &std::path::Path,
+    worker_branch: &str,
+    task_id: &str,
+    tip: &str,
+) -> Option<String> {
+    let branch = format!("{worker_branch}-{task_id}");
+    let git = GitOperations::new(worktree_path.to_path_buf());
+    match git.resolve_commit(&format!("refs/heads/{branch}")) {
+        Some(existing) => (existing == tip).then_some(branch),
+        None => git.create_branch_from(&branch, tip).ok().map(|_| branch),
+    }
+}
+
+/// cas-7ce6: publish the parked task's own delivery branch so its lane CI
+/// runs on a ref the next task never pushes to, and say how to merge it.
+/// Best effort: a repository with no origin keeps the local branch.
+fn publish_parked_delivery_branch(
+    repo_root: &std::path::Path,
+    task_id: &str,
+    delivery_branch: Option<&str>,
+) -> String {
+    let Some(branch) = delivery_branch else {
+        return String::new();
+    };
+    let git = GitOperations::new(repo_root.to_path_buf());
+    let pushed = if !git.has_origin_remote() {
+        "kept locally (no origin)".to_string()
+    } else {
+        match git.push_branch(branch) {
+            Ok(()) => "pushed to origin, so its lane CI runs there".to_string(),
+            Err(error) => format!("pushing it to origin failed: {error}"),
+        }
+    };
+    format!(
+        " Its delivery stays on {branch} ({pushed}); merge it with \
+         `factory action=worktree_merge id={branch} task_id={task_id}`."
+    )
 }
 
 /// Keep a reused worker branch from silently carrying a prior task into a new
@@ -192,9 +243,12 @@ fn reconcile_reused_factory_branch(
                     "Cannot move parked factory branch {expected_branch} to `{target_branch}`: {error}"
                 )
             })?;
+        let delivery_branch =
+            keep_parked_delivery_branch(worktree_path, expected_branch, &task_id, &factory_tip);
         return Ok(ReusedFactoryBranchStart::MovedFromParked {
             task_id,
             tip: factory_tip,
+            delivery_branch,
         });
     }
 
@@ -333,10 +387,42 @@ mod reused_factory_branch_tests {
             ReusedFactoryBranchStart::MovedFromParked {
                 task_id: "cas-park".to_string(),
                 tip: parked_tip.clone(),
+                delivery_branch: Some("factory/test-worker-cas-park".to_string()),
             }
         );
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), git(repo.path(), &["rev-parse", "main"]));
         assert_eq!(git(repo.path(), &["rev-parse", "parked/cas-park"]), parked_tip);
+        // cas-7ce6: the parked SHA keeps a delivery branch of its own.
+        assert_eq!(git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]), parked_tip);
+    }
+
+    /// cas-7ce6: a per-task branch of that name that already points elsewhere
+    /// is never moved; the parked SHA stays recorded as the anchor.
+    #[test]
+    fn existing_foreign_delivery_branch_is_left_alone() {
+        let repo = repo();
+        git(repo.path(), &["branch", "factory/test-worker-cas-park", "main"]);
+        let foreign = git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]);
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("parked"), "parked\n").expect("parked file");
+        git(repo.path(), &["add", "parked"]);
+        git(repo.path(), &["commit", "-m", "parked delivery"]);
+        let parked_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("target"), "target\n").expect("target file");
+        git(repo.path(), &["add", "target"]);
+        git(repo.path(), &["commit", "-m", "target work"]);
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+            (tip == parked_tip).then(|| "cas-park".to_string())
+        })
+        .expect("a parked tip moves instead of refusing");
+        let ReusedFactoryBranchStart::MovedFromParked { delivery_branch, .. } = result else {
+            panic!("moved from parked: {result:?}");
+        };
+        assert_eq!(delivery_branch, None);
+        assert_eq!(git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]), foreign);
     }
 }
 
@@ -1802,10 +1888,19 @@ impl CasCore {
                         Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
                             "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
                         )),
-                        Ok(ReusedFactoryBranchStart::MovedFromParked { task_id, tip }) => Some(format!(
+                        Ok(ReusedFactoryBranchStart::MovedFromParked {
+                            task_id,
+                            tip,
+                            delivery_branch,
+                        }) => Some(format!(
                             "\n\n🔀 PARKED BRANCH MOVED: {task_id} is parked for merge at anchor {tip}; that SHA is its delivery. \
                              {worker_branch} was reset to `{target_branch}` for this task. \
-                             Don't force-push {worker_branch} while a PR is open on it.",
+                             Don't force-push {worker_branch} while a PR is open on it.{}",
+                            publish_parked_delivery_branch(
+                                target_repo_root,
+                                &task_id,
+                                delivery_branch.as_deref(),
+                            ),
                         )),
                         Ok(ReusedFactoryBranchStart::Unchanged) => None,
                         Err(message) => {
@@ -2073,6 +2168,7 @@ impl CasCore {
         // cas-0078: every cloud round trip below runs off the async runtime,
         // all of them within one bounded budget.
         let peer_budget = crate::cloud::peer_claims::PeerBudget::default();
+        let peer_claims = peer_claims.map(|claims| claims.with_budget(peer_budget));
         let local_agents = std::sync::Arc::new(crate::cloud::peer_claims::local_agent_ids(
             agent_store.as_ref(),
         ));
@@ -2134,7 +2230,7 @@ impl CasCore {
                 }
                 Acquire::StalePeer(hold) => {
                     peer_notes.push_str(&format!(
-                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} {} (their machine stopped renewing it). Started here on the local lease. Cassy Cloud still lists them as the holder until it expires the claim (petra-stella-cloud#150).",
+                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} {}; Cloud recovery was not confirmed. Started here on the local lease.",
                         hold.describe(),
                         req.id,
                         hold.stale_reason(chrono::Utc::now()),

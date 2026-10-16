@@ -721,6 +721,8 @@ impl RepeatedWarningCollector {
             if normalized.contains("Cassy-managed builtin path(s) are already tracked") {
                 builtin_warning = true;
                 self.record_builtin_paths(project, std::iter::empty::<String>());
+            } else if let Some(warning) = normalized.strip_prefix("warning: Violet ") {
+                self.record(&format!("Violet {warning}"), project);
             } else if normalized.starts_with("Push incomplete") {
                 self.record("Push incomplete; queued rows remain", project);
             } else if let Some(error) = normalized.strip_prefix("remaining error: ") {
@@ -917,6 +919,7 @@ fn strip_repeated_warning_lines(
         if normalized.contains("Cassy-managed builtin path(s) are already tracked")
             || normalized.starts_with("Push incomplete")
             || normalized.starts_with("remaining error: ")
+            || normalized.starts_with("warning: Violet ")
         {
             builtin_warning = normalized.contains("Cassy-managed builtin");
             if preserve_phase_summaries
@@ -1127,9 +1130,33 @@ fn refresh_all_projects(
     hub_restart: Option<&super::hub::HubRestartOutcome>,
     first_launch_ms: Option<u64>,
 ) -> anyhow::Result<RefreshReport> {
+    refresh_all_projects_with_user_refresh(
+        args,
+        cli,
+        current_cas_root,
+        hub_transport_error,
+        hub_restart,
+        first_launch_ms,
+        || refresh_user_level_store(args, cli),
+    )
+}
+
+fn refresh_all_projects_with_user_refresh(
+    args: &UpdateArgs,
+    cli: &Cli,
+    current_cas_root: Option<&Path>,
+    hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
+    first_launch_ms: Option<u64>,
+    user_refresh: impl FnOnce() -> ProjectPhase,
+) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
     let discovery = discover_local_projects(current_cas_root);
     let mut receipts = Vec::with_capacity(discovery.projects.len());
+
+    // Account registrations must converge before project proxies choose their
+    // bearer. Keep this phase advisory and run it once for the whole update.
+    let (user_level, user_details) = capture_phase(!cli.json, user_refresh);
 
     for project in &discovery.projects {
         let project = project.clone();
@@ -1211,8 +1238,6 @@ fn refresh_all_projects(
         });
     }
 
-    let (user_level, user_details) =
-        capture_phase(!cli.json, || refresh_user_level_store(args, cli));
     print_project_refresh_summary(
         &receipts,
         &user_level,
@@ -1260,6 +1285,14 @@ fn refresh_all_projects(
 /// deliberately not a project: it is never counted in the project totals and
 /// never appears in the project table.
 fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
+    refresh_user_level_store_with_builtins(args, cli, || sync_user_builtins(cli))
+}
+
+fn refresh_user_level_store_with_builtins(
+    args: &UpdateArgs,
+    cli: &Cli,
+    builtins: impl FnOnce() -> anyhow::Result<()>,
+) -> ProjectPhase {
     let Some(cas_root) = user_level_store_root() else {
         return ProjectPhase::Skipped("no home directory".to_string());
     };
@@ -1268,7 +1301,7 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
     }
 
     if !cas_root.join("cas.db").is_file() {
-        return match sync_user_builtins(cli) {
+        return match builtins() {
             Ok(()) => ProjectPhase::Ok(format!(
                 "builtins only — no store at {}",
                 cas_root.display()
@@ -1282,7 +1315,7 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
     if migration.failed() {
         return migration;
     }
-    match sync_user_builtins(cli) {
+    match builtins() {
         Ok(()) => ProjectPhase::Ok(format!(
             "migrated {} and synced builtins",
             cas_root.display()
@@ -2096,6 +2129,9 @@ fn sync_claude_files_into(
         crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
             &cas_root.join("proxy.toml"),
         ))?;
+        crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
+            &cas_root.join("proxy.toml"),
+        ));
     }
     let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");

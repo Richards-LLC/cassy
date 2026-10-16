@@ -981,6 +981,8 @@ fn ct2_p1_one_body_per_message_teams() {
     let id = store.enqueue_with_session("supervisor", WORKER, busy, SESSION).unwrap();
     claim_for_claude_teams(&store, &mut worker, id, busy);
     store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
+    // The daemon stamps the held Teams copy after the write (cas-a1ed).
+    store.record_deferred_inbox(id, 0).unwrap();
     let mid_turn = worker.tool_call();
     assert_eq!(mid_turn.matches(busy).count(), 1, "{mid_turn}");
     context.push_str(&mid_turn);
@@ -1363,6 +1365,7 @@ fn a_never_silent_worker_sees_a_claimed_message_at_its_next_tool_boundary_cas_b5
     store
         .record_wake_gate_decline(id, "pane has not been silent long enough")
         .unwrap();
+    store.record_deferred_inbox(id, 0).unwrap();
 
     let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
     let Some(HookSpecificOutput::PostToolUse {
@@ -1397,6 +1400,7 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         .enqueue_with_session("supervisor", WORKER, "Take (B), but keep the flag operator-only.", SESSION)
         .unwrap();
     assert!(store.claim_recipient_transport(shown, WORKER).unwrap());
+    store.record_deferred_inbox(shown, 0).unwrap();
     // The tool boundary surfaced it mid-turn (cas-b5ad).
     let surfaced = store
         .surface_unseen_for_recipient_delivered_after(
@@ -1407,11 +1411,6 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
         )
         .unwrap();
     assert_eq!(surfaced.len(), 1);
-    // Claimed for the teams transport and never surfaced by a hook.
-    let unseen = store
-        .enqueue_with_session("supervisor", WORKER, "Also rebase onto the new tip.", SESSION)
-        .unwrap();
-    assert!(store.claim_recipient_transport(unseen, WORKER).unwrap());
 
     worker.teams_inbox.push_back(format!(
         "[cas #{shown} supervisor-authored 40s first]\n\nTake (B), but keep the flag operator-only."
@@ -1421,9 +1420,389 @@ fn a_teams_copy_of_a_message_already_surfaced_mid_turn_is_marked_as_already_show
     assert!(repeat.contains("already shown"), "{repeat}");
     assert_eq!(repeat.matches("Take (B), but keep the flag operator-only.").count(), 1, "{repeat}");
 
+    // Claimed for the teams transport and never surfaced by a hook. It is
+    // claimed after the last tool call: since cas-a1ed a tool call would
+    // surface a held claim, and its copy would then rightly read as shown.
+    let unseen = store
+        .enqueue_with_session("supervisor", WORKER, "Also rebase onto the new tip.", SESSION)
+        .unwrap();
+    assert!(store.claim_recipient_transport(unseen, WORKER).unwrap());
+    store.record_deferred_inbox(unseen, 0).unwrap();
+
     worker.teams_inbox.push_back(format!(
         "[cas #{unseen} supervisor-authored 5s first]\n\nAlso rebase onto the new tip."
     ));
     let fresh = worker.next_teammate_turn().unwrap();
     assert!(!fresh.contains("already shown"), "{fresh}");
+}
+
+/// cas-a1ed: one Claude transcript line that starts a turn.
+fn transcript_turn(session: &str, prompt_id: &str, at: chrono::DateTime<chrono::Utc>, prompt: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "sessionId": session,
+            "promptId": prompt_id,
+            "uuid": format!("uuid-{prompt_id}"),
+            "timestamp": at.to_rfc3339(),
+            "message": {"content": prompt},
+        })
+    )
+}
+
+/// cas-a1ed: `bytes` of tool results, the bulk of a long working turn.
+fn transcript_tool_results(session: &str, bytes: usize) -> String {
+    let line = format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "sessionId": session,
+            "uuid": "tool",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "x".repeat(8 * 1024)}]},
+        })
+    );
+    line.repeat(bytes.div_ceil(line.len()))
+}
+
+fn append(path: &std::path::Path, text: &str) {
+    use std::io::Write;
+    std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(text.as_bytes()).unwrap();
+}
+
+fn post_tool_context(hook: &HookInput, cas_root: &std::path::Path) -> Option<String> {
+    match crate::hooks::handle_post_tool_use(hook, Some(cas_root)).unwrap().hook_specific_output {
+        Some(HookSpecificOutput::PostToolUse { additional_context }) => additional_context,
+        _ => None,
+    }
+}
+
+/// A busy Claude worker, in its real store and transcript layout.
+struct BusyClaudeWorker {
+    _project: TempDir,
+    cas_root: std::path::PathBuf,
+    transcript: std::path::PathBuf,
+    hook: HookInput,
+    store: SqlitePromptQueueStore,
+}
+
+impl BusyClaudeWorker {
+    fn new() -> Self {
+        let project = TempDir::new().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let store = store_at_root(&cas_root);
+        let transcript = project.path().join("session.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let mut hook = input("worker");
+        hook.cwd = project.path().to_string_lossy().into_owned();
+        hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        Self { _project: project, cas_root, transcript, hook, store }
+    }
+
+    /// A turn starts, served by UserPromptSubmit.
+    fn start_turn(&mut self, prompt_id: &str, at: chrono::DateTime<chrono::Utc>, prompt: &str) {
+        append(&self.transcript, &transcript_turn(&self.hook.session_id, prompt_id, at, prompt));
+        self.hook.prompt_id = Some(prompt_id.to_string());
+        self.hook.hook_event_name = "UserPromptSubmit".into();
+        crate::hooks::turn_context::record_prompt_hook(&self.cas_root, &self.hook);
+        self.hook.hook_event_name = "PostToolUse".into();
+        self.hook.tool_name = Some("Bash".into());
+    }
+
+    /// The worker keeps working: `bytes` more tool output, then a tool boundary.
+    fn call_tool(&self, bytes: usize) -> Option<String> {
+        append(&self.transcript, &transcript_tool_results(&self.hook.session_id, bytes));
+        post_tool_context(&self.hook, &self.cas_root)
+    }
+
+    /// The daemon's busy-recipient pass: claim the row for the Teams
+    /// transport, write the copy, and decline the wake on pane silence.
+    fn supervisor_decides(&self, body: &str) -> i64 {
+        let id = self.store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+        assert!(self.store.claim_recipient_transport(id, WORKER).unwrap());
+        self.store.record_wake_gate_decline(id, "pane has not been silent long enough").unwrap();
+        self.store.record_deferred_inbox(id, 0).unwrap();
+        id
+    }
+
+    fn receipt(&self, id: i64) -> Option<cas_store::SurfacingSource> {
+        self.store.message_delivery_report(id).unwrap().unwrap().recipient_receipt
+    }
+}
+
+/// cas-a1ed reproduction of message 4189912 (2026-10-15 22:08:30Z): the
+/// worker's turn began long before the decision, and by then more than 256 KiB
+/// of tool output followed the turn's first line. The tool-boundary check read
+/// only the transcript's last 256 KiB, found no turn, and fell back to a query
+/// that hides a row the daemon claimed. 23 of the worker's next 35 tool calls
+/// saw no turn; the decision surfaced at none of them, and the worker built
+/// the rejected design. The next tool boundary must show it, once.
+#[test]
+fn a_decision_to_a_worker_deep_in_a_long_turn_surfaces_at_its_next_tool_call_cas_a1ed() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let mut worker = BusyClaudeWorker::new();
+    worker.start_turn(
+        "turn-1",
+        chrono::Utc::now() - chrono::Duration::minutes(25),
+        "<teammate-message teammate_id=\"supervisor\">\nStart cas-223f.\n</teammate-message>",
+    );
+    assert!(worker.call_tool(512 * 1024).is_none());
+
+    let decision = "Decision: ONE daemon JobRuntime. Don't add FactoryJobs as a second runtime.";
+    let id = worker.supervisor_decides(decision);
+    let context = worker
+        .call_tool(16 * 1024)
+        .expect("the decision must surface at the busy worker's next tool call");
+    assert!(context.contains(decision), "{context}");
+    assert_eq!(worker.receipt(id), Some(cas_store::SurfacingSource::HookSurfaced));
+    assert!(worker.call_tool(16 * 1024).is_none(), "a surfaced message is shown once");
+}
+
+/// cas-a1ed reproduction of messages 4189870 and 4189924 (2026-10-15
+/// 22:00:45Z and 22:09:15Z): both were claimed mid-turn and their wakes
+/// declined. A background-command notification then started the worker's
+/// next turn without the Teams copies, and the tool-boundary query took only
+/// claims made after that turn began, so neither message ever surfaced.
+#[test]
+fn a_decision_claimed_before_the_current_turn_began_still_surfaces_cas_a1ed() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let mut worker = BusyClaudeWorker::new();
+    worker.start_turn("turn-1", chrono::Utc::now() - chrono::Duration::minutes(20), "resume cas-d757");
+    let review = worker.supervisor_decides("Round 3: one High. Do this BEFORE continuing cas-d757.");
+    let ci = worker.supervisor_decides("CI failed on one test; fold the fix into round 4.");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    worker.start_turn(
+        "turn-2",
+        chrono::Utc::now(),
+        "<task-notification>\n<task-id>becrd735o</task-id>\n<status>completed</status>\n</task-notification>",
+    );
+
+    let context = worker
+        .call_tool(1024)
+        .expect("held decisions must surface in the worker's next turn");
+    assert!(context.contains("Round 3: one High."), "{context}");
+    assert!(context.contains("CI failed on one test"), "{context}");
+    assert_eq!(worker.receipt(review), Some(cas_store::SurfacingSource::HookSurfaced));
+    assert_eq!(worker.receipt(ci), Some(cas_store::SurfacingSource::HookSurfaced));
+    assert!(worker.call_tool(1024).is_none(), "each message is shown once");
+}
+
+/// cas-a1ed: a held Teams copy that Claude Code did render as a turn (message
+/// 4189912 at 22:16:37Z, a UserPromptSubmit-served teammate turn) is recorded
+/// as surfaced by that turn. It stays out of later turns' tool boundaries, and
+/// the row stops looking undelivered.
+#[test]
+fn a_teams_copy_rendered_as_a_turn_is_recorded_and_not_shown_again_cas_a1ed() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let mut worker = BusyClaudeWorker::new();
+    worker.start_turn("turn-1", chrono::Utc::now() - chrono::Duration::minutes(10), "resume cas-223f");
+    let body = "Decision: drop FactoryJobs and use submit_external.";
+    let id = worker.supervisor_decides(body);
+
+    let teammate_turn = format!(
+        "<teammate-message teammate_id=\"supervisor\" summary=\"Decision\">\n[cas #{id} supervisor-authored 0s first]\n\n{body}\n</teammate-message>"
+    );
+    let mut turn = worker.hook.clone();
+    turn.hook_event_name = "UserPromptSubmit".into();
+    turn.user_prompt = Some(teammate_turn.clone());
+    let output = handle_user_prompt_submit(&turn, Some(&worker.cas_root)).unwrap();
+    let rendered = output.user_prompt_context().unwrap_or_default();
+    assert!(!rendered.contains(body), "the turn already carries the body: {rendered}");
+    assert_eq!(
+        worker.receipt(id),
+        Some(cas_store::SurfacingSource::HookSurfaced),
+        "a body rendered into a turn is surfaced, not merely claimed"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    worker.start_turn("turn-3", chrono::Utc::now(), "continue");
+    let later = worker.call_tool(1024).unwrap_or_default();
+    assert!(!later.contains(body), "a rendered copy is not shown a second time: {later}");
+}
+
+/// cas-a1ed review H1: a row whose body the daemon is typing into the pane
+/// (claimed, not yet stamped Delivered) is not a held Teams copy. A tool call
+/// deep in a long turn, where the hook cannot place the turn, must not show it
+/// a second time.
+#[test]
+fn a_tool_call_does_not_replay_a_body_being_typed_into_the_pane_cas_a1ed() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let mut worker = BusyClaudeWorker::new();
+    worker.start_turn("turn-1", chrono::Utc::now() - chrono::Duration::minutes(25), "resume cas-d757");
+    assert!(worker.call_tool(512 * 1024).is_none());
+
+    let body = "Urgent: stop and rebase now.";
+    let id = worker
+        .store
+        .enqueue_urgent("supervisor", WORKER, body, Some(SESSION), None, None, true)
+        .unwrap();
+    assert!(worker.store.claim_recipient_transport(id, WORKER).unwrap());
+    let plain = worker.store.enqueue_with_session("supervisor", WORKER, "typed via PTY", SESSION).unwrap();
+    assert!(worker.store.claim_recipient_transport(plain, WORKER).unwrap());
+
+    let shown = worker.call_tool(16 * 1024).unwrap_or_default();
+    assert!(!shown.contains(body) && !shown.contains("typed via PTY"), "{shown}");
+    assert_eq!(worker.receipt(id), Some(cas_store::SurfacingSource::TransportClaimed));
+    assert_eq!(worker.receipt(plain), Some(cas_store::SurfacingSource::TransportClaimed));
+}
+
+/// cas-6ccb (GH #1215 §3.4): `inbox_poll` marks rows seen before its response
+/// is read, so a row polled mid-turn and not acted on was lost. A polled row
+/// the agent never acknowledged is shown once more at its next turn, labelled
+/// as such; a row it acknowledged with message_ack is not, and nothing is
+/// repeated inside the polling turn or after the one repeat.
+#[test]
+fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    let first_turn = worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Rebase onto v43, then re-run the named tests.";
+    let acked = "FYI: lane CI is green.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    let acked_id = store.enqueue_with_session("supervisor", WORKER, acked, SESSION).unwrap();
+    // Mid-turn, the agent polls both (what `inbox_poll` runs) and acks one.
+    let polled = store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap();
+    assert_eq!(polled.len(), 2);
+    store.ack(acked_id).unwrap();
+    let same_turn = worker.tool_call();
+    assert!(!same_turn.contains(kept) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next_turn = worker.take_turn("continuing my work");
+    assert_eq!(next_turn.matches(kept).count(), 1, "{next_turn}");
+    assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
+    assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
+    assert_eq!(
+        store.recipient_receipt(kept_id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+    assert_eq!(
+        store.recipient_receipt(acked_id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::InboxPoll)
+    );
+
+    let after = worker.take_turn("still working");
+    assert!(!after.contains(kept) && !after.contains("[not acknowledged]"), "once: {after}");
+}
+
+/// cas-6ccb: a Claude Teams member's next turn may be a teammate-message
+/// turn, which fires no UserPromptSubmit; its tool boundary shows the
+/// polled-but-unacked row once instead.
+#[test]
+fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Hold the merge until the QA pass lands.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    assert!(!worker.tool_call().contains(kept));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next = "Also: rebase first.";
+    let next_id = store.enqueue_with_session("supervisor", WORKER, next, SESSION).unwrap();
+    deliver_to_claude_worker(&store, &mut worker, next_id, next);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert_eq!(teammate_turn.matches(kept).count(), 1, "{teammate_turn}");
+    assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(next).count(), 1, "{teammate_turn}");
+    assert!(!worker.take_turn("continuing my work").contains(kept));
+}
+
+/// cas-6ccb review: the repeat does not wait for new mail. A turn no prompt
+/// hook served (a teammate-message turn) shows the polled-but-unacked row at
+/// its first tool call even when nothing new was enqueued; the next tool call
+/// and the next turn do not repeat it.
+#[test]
+fn cas_6ccb_the_repeat_runs_once_per_turn_without_new_mail() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Keep the flag operator-only.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    // Every later tool call in the polling turn runs the mail check.
+    assert!(!worker.tool_call().contains(kept));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let turn = worker.take_turn_without_prompt_hook("<teammate-message teammate_id=\"peer\">\nping\n</teammate-message>");
+    assert_eq!(turn.matches(kept).count(), 1, "{turn}");
+    assert!(turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{turn}");
+    assert!(turn.contains("one-time repeat"), "{turn}");
+    assert!(!worker.tool_call().contains(kept));
+    assert!(!worker.take_turn("continuing my work").contains(kept));
+}
+
+/// cas-6ccb review: an acknowledgement in any form ends the repeat:
+/// message_ack, a reply with in_reply_to (which acks the row), or a later
+/// message to the sender that implies a reply (`assumed_seen`).
+#[test]
+fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let answered = "Which epic should this target?";
+    store.enqueue_with_session("supervisor", WORKER, answered, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    // The worker answers the supervisor (reply inference, cas-dcf2).
+    let reply_at = chrono::Utc::now();
+    store
+        .ack_delivered_for_recipient(&[WORKER], &["supervisor"], Some(SESSION), reply_at)
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next_turn = worker.take_turn("continuing my work");
+    assert!(!next_turn.contains(answered), "{next_turn}");
+}
+
+/// cas-6ccb review: a polled row that this turn's pointer also names gets one
+/// note. Shown in full as the repeat, it is not also "[already shown]".
+#[test]
+fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let body = "Ship the dedupe, then close the issue.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+    assert!(store.claim_recipient_transport(id, WORKER).unwrap());
+    let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload("supervisor", Some(id));
+    // The agent polls the row by the id its pointer named.
+    assert_eq!(store.poll_named_for_recipient(WORKER, Some(SESSION), &[id]).unwrap().len(), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let woken = worker.take_turn(&wake);
+    assert_eq!(woken.matches(body).count(), 1, "{woken}");
+    assert!(woken.contains(&format!("[not acknowledged] Message #{id}")), "{woken}");
+    assert!(!woken.contains(&format!("[already shown] Message #{id}")), "{woken}");
 }

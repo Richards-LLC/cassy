@@ -70,6 +70,32 @@ Never set `status=closed` or invent a verification record to bypass close.
   and hit counts for conclusions based on searches.
 - Epic: every child's delivered work must reach the parent before epic close.
 
+### Loaded proof for non-Rust targets
+
+When the close gate requires a `loaded_proof` for `risk=concurrency`, add one
+`task action=notes note_type=loaded_proof` body with all four fields on one line:
+
+```text
+LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS
+```
+
+Replace the example target with the complete target actually exercised. Use
+`target=whole`, `target=entire` or `target=full` for a complete Rust target (an
+optional `target` word may follow). Use `target=explicit non-Rust (...)` for
+other ecosystems. Direct `target=vitest`, `target=jest`, `target=pytest` and
+`target=go test` runner forms also work. A Rust module/test-filter `target=`
+value does not establish whole-target scope. Legacy `non-Rust target: ...`
+and `whole/entire/full target` prose still works.
+Record 16 actual concurrent processes/workers with `parallelism=16` or
+`concurrency=16`. `-j16` and `--jobs 16` also work when they describe the runner
+or harness used; the receipt does not require Cargo flags on a non-Rust runner.
+Record at least three loops/runs and `result=PASS` (or SUCCESS, exit 0, status 0).
+SHA and log fields are optional; include logs and passed/failed counts for review.
+Read the refusal's per-note `parsed=[...]` and `missing=[...]` lists and repair
+that note; fields split across notes do not combine into a valid receipt.
+Factory Rust checks still defer loaded execution to supervisor assembly under
+[discipline.md](discipline.md); this grammar adds no worker check obligation.
+
 ## cas-src surface checklist
 
 Record applicable evidence and the reason for each inapplicable surface:

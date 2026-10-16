@@ -210,6 +210,96 @@ pub(crate) fn target_is_reserved_source(target: &str) -> bool {
         .any(|prefix| target.starts_with(prefix))
 }
 
+
+/// cas-009c: how a row named by `in_reply_to` relates to this send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyReference {
+    /// The counterparty's row to this sender: the reply answers it, and
+    /// acknowledges it.
+    DirectReply,
+    /// A row in the same conversation that this reply cites without
+    /// answering: the sender's own earlier row to the counterparty or to
+    /// all workers, the counterparty's broadcast, or a row CAS itself wrote
+    /// to the sender (lifecycle, verification dispatch, director, delivery
+    /// watchdog).
+    Thread,
+}
+
+/// Classify a prior row against the two parties' names. `counterparty` and
+/// `me` list every name each side's rows may carry; empty entries are
+/// ignored. `None` means the row belongs to someone else's conversation.
+fn classify_reply_reference(
+    prior_source: &str,
+    prior_target: &str,
+    counterparty: &[&str],
+    me: &[&str],
+) -> Option<ReplyReference> {
+    let is = |name: &str, names: &[&str]| {
+        names
+            .iter()
+            .any(|candidate| !candidate.is_empty() && candidate.eq_ignore_ascii_case(name))
+    };
+    let broadcast = prior_target.eq_ignore_ascii_case("all_workers");
+    let cas_generated = target_is_reserved_source(prior_source)
+        || ["director", "delivery-watchdog"]
+            .iter()
+            .any(|source| prior_source.eq_ignore_ascii_case(source));
+    if is(prior_source, counterparty) && is(prior_target, me) {
+        Some(ReplyReference::DirectReply)
+    } else if (is(prior_source, me) && (is(prior_target, counterparty) || broadcast))
+        || (is(prior_source, counterparty) && broadcast)
+        || (cas_generated && (is(prior_target, me) || broadcast))
+    {
+        Some(ReplyReference::Thread)
+    } else {
+        None
+    }
+}
+
+/// GH #1196: why an operator turn cannot be delivered right now, or `None`
+/// when it can or the state is unknown. Delivery needs a Commander client
+/// connected to the session's daemon or an enrolled cloud operator feed.
+///
+/// The daemon records its client count in `loop.json` at the end of each loop
+/// pass. The watchdog rewrites the file every 5 s even while the loop is
+/// wedged, so the count is current only when the file is fresh
+/// ([`STATUS_STALE_SECS`](crate::factory_daemon_health::STATUS_STALE_SECS))
+/// and the last pass is recent
+/// ([`LOOP_WEDGED_SECS`](crate::factory_daemon_health::LOOP_WEDGED_SECS)).
+/// Anything else is unknown, and the turn queues so the daemon can deliver it
+/// once it is back. An unreadable cloud binding is unknown too.
+///
+/// Known limits: a device that attached within the last loop pass (about
+/// 5 s) can still be refused; retrying reaches it. A refused send records
+/// nothing, so an `in_reply_to` it carried stays unacknowledged.
+pub(crate) fn operator_turn_undeliverable(
+    cas_root: &std::path::Path,
+    factory_session: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    use crate::factory_daemon_health::{LOOP_WEDGED_SECS, STATUS_STALE_SECS};
+    let status = crate::factory_daemon_health::read_status(cas_root, factory_session)?;
+    let fresh = now.signed_duration_since(status.written_at).num_seconds() <= STATUS_STALE_SECS
+        && now.signed_duration_since(status.last_pass_at).num_seconds() <= LOOP_WEDGED_SECS;
+    if !fresh || status.commander_clients != Some(0) {
+        return None;
+    }
+    let cloud_feed = cas_store::SqlitePromptQueueStore::open(cas_root)
+        .and_then(|store| store.operator_feed_binding())
+        .map(|binding| binding.is_some())
+        // An unreadable binding is unknown, not absent.
+        .unwrap_or(true);
+    if cloud_feed {
+        return None;
+    }
+    Some(format!(
+        "No Commander device is attached to factory session {factory_session}, and this \
+         project has no cloud operator feed, so nothing can deliver this turn. Nothing was \
+         queued. Reach the operator in the terminal or another channel; once a Commander \
+         device connects, operator sends are delivered normally."
+    ))
+}
+
 #[cfg(test)]
 mod viktor_provenance_tests {
     use super::queued_message_provenance_at;
@@ -515,8 +605,19 @@ pub(crate) fn wake_attempt_narrative(
 /// claimed by the daemon's transport. A Claude teams handoff is claimed when
 /// the inbox file is written, but Claude Code renders it only at a turn
 /// boundary, so "claimed" is not "rendered".
-pub(crate) fn recipient_receipt_narrative(receipt: Option<cas_store::SurfacingSource>) -> String {
+pub(crate) fn recipient_receipt_narrative(
+    receipt: Option<cas_store::SurfacingSource>,
+    poll_settled: Option<&str>,
+) -> String {
     use cas_store::SurfacingSource;
+    // cas-6ccb: an inbox_poll that withheld the row, did not replay it, or
+    // showed it as a redelivery settled it; the recipient confirmed nothing.
+    if let (Some(SurfacingSource::InboxPoll), Some(reason)) = (receipt, poll_settled) {
+        return format!(
+            "recipient_receipt: {reason} (poll_settled; not an acknowledgement, and not repeated \
+             at the next turn).\n"
+        );
+    }
     let line = match receipt {
         None => return String::new(),
         Some(SurfacingSource::HookSurfaced) => {
@@ -814,6 +915,29 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        // Resolve cross-machine peers before applying the local inbox cap.
+        // Their Cloud body must be readable on the receiving machine: spilling
+        // first sent a path on the sender's disk instead of the full text
+        // (communication contract P3.6, cas-5c2c). Local messages retain their
+        // existing cap/spill policy; peer urgency and identity checks still run.
+        if role == "supervisor"
+            && let Some(sender) = agent_from_store.as_ref()
+            && let Some(sent) = self
+                .peer_message_send(
+                    sender,
+                    &target,
+                    &summary,
+                    &message,
+                    req.in_reply_to,
+                    req.urgent.unwrap_or(false),
+                    req.kind.as_deref(),
+                    req.blocker.unwrap_or(false),
+                )
+                .await?
+        {
+            return Ok(sent);
+        }
+
         if let Some(refusal) = over_cap_refusal {
             let to_operator = target.eq_ignore_ascii_case("operator") || commander_target;
             if role != "supervisor" || to_operator {
@@ -891,27 +1015,6 @@ impl CasService {
                     .map(|a| a.name)
             })
         };
-
-        // cas-f9c7: a supervisor addressing a peer supervisor of this repo on
-        // another machine (or replying to one) goes through the cloud peer
-        // mailbox; everything else stays on the local queue below.
-        if role == "supervisor"
-            && let Some(sender) = agent_from_store.as_ref()
-            && let Some(sent) = self
-                .peer_message_send(
-                    sender,
-                    &target,
-                    &summary,
-                    &message,
-                    req.in_reply_to,
-                    req.urgent.unwrap_or(false),
-                    req.kind.as_deref(),
-                    req.blocker.unwrap_or(false),
-                )
-                .await?
-        {
-            return Ok(sent);
-        }
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let addressed_operator = target.eq_ignore_ascii_case("operator") || commander_target;
@@ -1511,6 +1614,14 @@ impl CasService {
                     format!("Failed to encode Commander reply: {error}"),
                 )
             })?;
+            // GH #1196: with no Commander client connected to this session's
+            // daemon and no enrolled cloud feed, nothing can deliver this
+            // turn. Say so now instead of queuing it to expire in 15 min.
+            if let Some(reason) =
+                operator_turn_undeliverable(&self.inner.cas_root, factory_session, chrono::Utc::now())
+            {
+                return Err(Self::error(ErrorCode::INVALID_REQUEST, reason));
+            }
             let reply = queue
                 .record_operator_turn(&cas_store::OperatorTurn {
                     source: "supervisor",
@@ -1617,6 +1728,8 @@ impl CasService {
         // This is strong evidence for exactly one row; the conservative
         // generic reply-inference rule below remains unchanged.
         let explicit_reply_to = req.in_reply_to;
+        // Only a direct reply acknowledges the row it names (cas-009c).
+        let mut explicit_reply_acks = false;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
                 .message_delivery_report(notification_id)
@@ -1632,39 +1745,46 @@ impl CasService {
                         format!("in_reply_to notification {notification_id} does not exist"),
                     )
                 })?;
-            let expected_prior_sources = [
+            // cas-009c: both parties under every name a row may carry. A
+            // supervisor's rows are stored as the logical `supervisor`
+            // (display_name above), whatever name the other side typed.
+            let counterparty_is_supervisor = addressed_logical_supervisor
+                || resolved_target_agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.role == cas_types::AgentRole::Supervisor);
+            let counterparty = [
                 resolved_target.as_str(),
-                if addressed_logical_supervisor {
-                    "supervisor"
-                } else {
-                    ""
-                },
+                if counterparty_is_supervisor { "supervisor" } else { "" },
             ];
-            let expected_prior_targets = [
+            let me = [
                 display_name.as_str(),
                 env_agent_name.as_deref().unwrap_or_default(),
                 if role == "supervisor" { "supervisor" } else { "" },
             ];
-            let source_matches = expected_prior_sources
-                .iter()
-                .filter(|name| !name.is_empty())
-                .any(|name| prior.source.eq_ignore_ascii_case(name));
-            let target_matches = expected_prior_targets
-                .iter()
-                .filter(|name| !name.is_empty())
-                .any(|name| prior.target.eq_ignore_ascii_case(name));
-            if !source_matches || !target_matches {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "in_reply_to notification {notification_id} is {} -> {}, not a direct message from {resolved_target} to this sender",
-                        prior.source, prior.target
-                    ),
-                ));
+            let reference =
+                classify_reply_reference(&prior.source, &prior.target, &counterparty, &me);
+            explicit_reply_acks = reference == Some(ReplyReference::DirectReply);
+            match reference {
+                Some(ReplyReference::DirectReply) => {
+                    message = format!(
+                        "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
+                    );
+                }
+                Some(ReplyReference::Thread) => {
+                    message = format!(
+                        "[CAS reply: in thread with notification_id={notification_id}]\n{message}"
+                    );
+                }
+                None => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "in_reply_to notification {notification_id} is {} -> {}, which is not in a thread between {resolved_target} and this sender",
+                            prior.source, prior.target
+                        ),
+                    ));
+                }
             }
-            message = format!(
-                "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
-            );
         }
 
         // P3.8: a worker may explicitly type a status/ready message to its
@@ -2088,35 +2208,17 @@ impl CasService {
                             ) {
                                 message = format!("{hold}\n\n{message}");
                             }
-                            let review = crate::review_body::delivery_body(
+                            // cas-8b0e: the in-band review shows the worker's
+                            // proof:/ci: lines and renders unsupplied fields
+                            // neutrally; a missing merge base keeps the task
+                            // metadata with the comparison error.
+                            let review = crate::review_body::merge_request_review(
                                 &repo.repo_root,
-                                Some(&task),
+                                &task,
                                 &target_tip,
                                 &branch_tip,
-                                None,
-                                None,
-                                None,
-                            )
-                            .unwrap_or_else(|error| {
-                                // A missing merge base does not disable the existing
-                                // typed request: still show authoritative task metadata.
-                                crate::review_body::ReviewBody {
-                                    summary: &format!(
-                                        "```text\n{} -> {}\n```",
-                                        target_tip, branch_tip
-                                    ),
-                                    before: "Baseline behavior run not supplied.",
-                                    after: "Changed behavior run not supplied.",
-                                    evidence: &crate::review_body::task_evidence(&task),
-                                    details: &format!("\nGit comparison unavailable: {error}\n"),
-                                    risk: &crate::review_body::task_risk(&task),
-                                    door: &task
-                                        .door
-                                        .map(|door| door.to_string())
-                                        .unwrap_or_else(|| "not declared".into()),
-                                }
-                                .render()
-                            });
+                                &message,
+                            );
                             message = attach_merge_request_envelope(
                                 &format!("{message}\n\n{review}"),
                                 &MergeRequestEnvelope {
@@ -2561,7 +2663,7 @@ impl CasService {
                     )
                 })?;
         }
-        if let Some(notification_id) = explicit_reply_to {
+        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_acks) {
             queue.ack(notification_id).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
@@ -2759,7 +2861,25 @@ impl CasService {
         // P1.6: the send result is a compact current-stage receipt. The
         // detailed delivery report stays available through message_status;
         // only actionable exceptions expand the send result.
-        let send_report = queue.message_delivery_report(message_id).ok().flatten();
+        // cas-d5ab: with a daemon listening, give it its first pass so a busy
+        // recipient's deferral is named at send time, not 50 ms later. A
+        // native-extension recipient's row is never decided by the daemon,
+        // so it is not waited on. A backlog is not a reason to skip: the wait
+        // is bounded and says "no decision yet" when it runs out (review N1:
+        // a project-wide pending count skipped every real send).
+        let native_recipient = resolved_target_agent.as_ref().is_some_and(|agent| {
+            agent.metadata.get("native_extension").is_some_and(|value| value == "true")
+        });
+        let awaits_decision = target_is_registered
+            && !urgent
+            && !duplicate_suppressed
+            && !native_recipient
+            && daemon_accepts_notify(&self.inner.cas_root);
+        let (send_report, no_decision_yet) = if awaits_decision {
+            wait_for_send_outcome(&*queue, message_id).await
+        } else {
+            (queue.message_delivery_report(message_id).ok().flatten(), false)
+        };
         let delivery_stage = send_report
             .as_ref()
             .map(|report| report.stage)
@@ -2795,11 +2915,19 @@ impl CasService {
             )
         } else {
             match delivery_stage {
+                // cas-d5ab (P1.6): name the deferral and where it surfaces.
                 cas_store::DeliveryStage::Gated => format!(
-                    "queued #{message_id} → {resolved_target} (gated)\n\
-                     Delivery is gated: {report_detail}. Check message_status\
-                     notification_id={message_id} for changes.\
-                     {supervisor_copy_suffix}"
+                    "deferred #{message_id} → {resolved_target}: {}{supervisor_copy_suffix}",
+                    deferral_reason(
+                        send_report.as_ref().and_then(|report| report.wake_attempt_detail.as_deref()),
+                        send_report.as_ref().and_then(|report| report.pending_detail.as_deref()),
+                        resolved_target_cli == Some(cas_mux::SupervisorCli::Claude),
+                    )
+                ),
+                cas_store::DeliveryStage::Delivered
+                | cas_store::DeliveryStage::AssumedSeen
+                | cas_store::DeliveryStage::Confirmed => format!(
+                    "delivered #{message_id} → {resolved_target} ({stage_text}){supervisor_copy_suffix}"
                 ),
                 cas_store::DeliveryStage::Dropped | cas_store::DeliveryStage::Abandoned => {
                     format!(
@@ -2816,6 +2944,11 @@ impl CasService {
                 cas_store::DeliveryStage::PartiallyDelivered => format!(
                     "partial #{message_id} → {resolved_target} ({report_detail}).\
                      Check message_status notification_id={message_id} for details.\
+                     {supervisor_copy_suffix}"
+                ),
+                // Review L6: the settle window ended before the daemon decided.
+                _ if no_decision_yet => format!(
+                    "queued #{message_id} → {resolved_target} (no decision yet)\
                      {supervisor_copy_suffix}"
                 ),
                 _ => format!(
@@ -2917,11 +3050,14 @@ impl CasService {
             }
         }
 
-        // This is an at-most-once claim for the polling API: the store records
-        // recipient-seen state in the same transaction that selects the rows,
-        // before this MCP response is handed back. That prevents concurrent
-        // duplicate delivery, but a response lost after this point is not
-        // replayed by a later poll. Daemon transport state remains independent.
+        // The store records recipient-seen state in the same transaction that
+        // selects the rows, before this MCP response is handed back. That
+        // prevents concurrent duplicate delivery; a later poll does not replay
+        // a row. cas-6ccb (GH #1215): a row polled but never acknowledged with
+        // message_ack is shown once more by the next turn's hook (the
+        // `inbox_poll` receipt, older than that turn, with no ack), so a row
+        // polled mid-turn and not acted on is not lost. Daemon transport state
+        // remains independent.
         // cas-3bf1 (GH #176): poll every alias this agent answers to, not just
         // its registered pane name. A supervisor answers to two, and rows
         // addressed to the logical `supervisor` alias were previously
@@ -3004,6 +3140,7 @@ impl CasService {
         // operator-readable reason; no suppression may disappear silently.
         let mut withheld: Vec<(i64, String)> = Vec::new();
         let mut redelivered = 0usize;
+        let mut shown_redeliveries: Vec<i64> = Vec::new();
         // cas-098d (GH #904): older transport deliveries are claimed and named,
         // not replayed.
         let mut replays: Vec<(i64, String)> = Vec::new();
@@ -3197,6 +3334,8 @@ impl CasService {
                 }
                 InboxRedelivery::MarkRedelivery => {
                     redelivered += 1;
+                    // cas-6ccb: shown again in full here; no third showing.
+                    shown_redeliveries.push(message.id);
                     body.push_str(&format!(
                         "**[{}] From: {} — {INBOX_REDELIVERY_MARKER} (already delivered {})**\n\
                         Summary: {}\n{}\n{}Message: {}\n\n",
@@ -3225,6 +3364,28 @@ impl CasService {
                 }
             }
             rendered += 1;
+        }
+        // cas-6ccb (GH #1215): a row this poll withheld as already done, or
+        // named without replaying it, is settled now, so the next turn's
+        // repeat of unacknowledged polled rows never brings back its body.
+        // No ack and no stage change: the recipient confirmed none of these.
+        let settled: Vec<(i64, String)> = withheld
+            .iter()
+            .map(|(id, reason)| (*id, format!("withheld by inbox_poll: {reason}")))
+            .chain(replays.iter().map(|(id, what)| {
+                (*id, format!("not replayed by inbox_poll: {what}"))
+            }))
+            .chain(shown_redeliveries.iter().map(|id| {
+                (*id, "shown again by inbox_poll as an earlier delivery".to_string())
+            }))
+            .collect();
+        if let Err(error) = queue.settle_polled_rows(&aliases, &settled) {
+            tracing::warn!(
+                target: "cas::coordination",
+                recipient = %recipient,
+                %error,
+                "cas-6ccb: could not settle withheld inbox rows; they may be repeated once"
+            );
         }
 
         let replay_note = (!replays.is_empty()).then(|| {
@@ -3266,9 +3427,10 @@ impl CasService {
         }
 
         let mut output = format!(
-            "Pulled {rendered} unread message(s) for {recipient} (at-most-once inbox claim: \
-             marked seen before this response is delivered; daemon transport delivery is \
-             unchanged)"
+            "Pulled {rendered} unread message(s) for {recipient} (inbox claim: marked seen \
+             now; a direct message you neither message_ack nor answer is shown once more at \
+             your next turn, except broadcasts and rows withheld or marked already delivered \
+             here; daemon transport delivery is unchanged)"
         );
         if redelivered > 0 {
             output.push_str(&format!(
@@ -3528,18 +3690,36 @@ impl CasService {
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
-                let receipt_line = recipient_receipt_narrative(r.recipient_receipt);
+                let receipt_line = recipient_receipt_narrative(
+                    r.recipient_receipt,
+                    r.recipient_poll_settled.as_deref(),
+                );
                 // cas-15f2: a row that no daemon can select used to read
                 // "awaiting_delivery" for a full 15 minutes and then flip to
                 // abandoned, so the operator watching it had no way to tell
                 // "in flight" from "already doomed" — two supervisors waited on
                 // exactly this. State the deadline while it is still pending,
                 // and say the reason out loud once it is terminal.
+                let handoff = if r.stage == cas_store::DeliveryStage::Gated
+                    && r.pending_reason == Some(cas_store::PendingReason::GatedNotReady)
+                {
+                    queue
+                        .inbox_handoff_state(notification_id)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("Failed to query deferred inbox status: {error}"),
+                            )
+                        })?
+                } else {
+                    cas_store::InboxHandoffState::NotHeld
+                };
                 let pending_deadline_line = pending_deadline_narrative(
                     r.stage,
                     r.pending_reason,
                     r.pending_detail.as_deref(),
                     undelivered_after_secs,
+                    handoff,
                 );
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
@@ -3686,6 +3866,7 @@ fn pending_deadline_narrative(
     pending_reason: Option<cas_store::PendingReason>,
     pending_detail: Option<&str>,
     undelivered_after_secs: Option<i64>,
+    handoff: cas_store::InboxHandoffState,
 ) -> String {
     use cas_store::DeliveryStage;
     // cas-d1659: a row parked for a busy recipient is neither doomed nor on
@@ -3698,6 +3879,25 @@ fn pending_deadline_narrative(
              the message surfaces at its next turn start or tool call — {}\n",
             pending_detail.unwrap_or("no detail was recorded")
         );
+    }
+    // GatedNotReady also covers composer retries. Only the durable Teams
+    // handoff marker promises tool-boundary surfacing without a retry deadline.
+    if stage == DeliveryStage::Gated
+        && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
+    {
+        let detail = pending_detail.unwrap_or("no detail was recorded");
+        return if handoff == cas_store::InboxHandoffState::HeldTeamsInbox {
+            format!(
+                "held inbox: still pending — surfaces at its next tool call or turn start; \
+                 does not expire while the recipient stays in the session — {detail}\n"
+            )
+        } else {
+            format!(
+                "delivery retry: still pending — no held inbox handoff is recorded; \
+                 transport retries (for example behind an operator draft) are abandoned \
+                 once the {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {detail}\n"
+            )
+        };
     }
     match stage {
         DeliveryStage::Abandoned => format!(
@@ -3723,6 +3923,106 @@ fn pending_deadline_narrative(
             }
         }
         _ => String::new(),
+    }
+}
+
+/// cas-d5ab (P1.6): the one-line reason a gated send names.
+///
+/// The wake decision's own detail is read first: the daemon's generic hold
+/// stamp ("wake deferred — pane busy, tool call in flight, operator
+/// composing, or wake slot taken") lists every reason and names none (review
+/// H2). A Claude recipient sees a held message at its next tool call or turn
+/// start (cas-a1ed); a PTY recipient gets it typed when its pane is free.
+fn deferral_reason(wake_detail: Option<&str>, pending_detail: Option<&str>, claude_recipient: bool) -> String {
+    fn named(detail: &str) -> Option<&'static str> {
+        if detail.starts_with("wake deferred") {
+            return Some("recipient busy");
+        }
+        if detail.contains("tool call in flight") {
+            Some("recipient mid tool call")
+        } else if detail.contains("not been silent long enough") {
+            Some("recipient busy")
+        } else if detail.contains("unsubmitted draft") {
+            Some("operator is typing in the recipient's pane")
+        } else if detail.contains("not ready for injection") {
+            Some("recipient pane not ready yet")
+        } else if detail.contains("wake slot") {
+            Some("another wake went first this pass")
+        } else {
+            None
+        }
+    }
+    let why = wake_detail
+        .and_then(named)
+        .or_else(|| pending_detail.and_then(named))
+        .map(str::to_string)
+        .or_else(|| {
+            wake_detail
+                .or(pending_detail)
+                .map(|detail| detail.trim_start_matches("wake_declined_by_policy: ").to_string())
+        })
+        .unwrap_or_else(|| "held by the wake gate".to_string());
+    let surfaces = if claude_recipient {
+        "surfaces at its next tool call or turn start"
+    } else {
+        "delivered when its pane is free"
+    };
+    format!("{why}; {surfaces}")
+}
+
+/// cas-d5ab (P1.6): how long a send waits for the daemon's first decision on
+/// its row. The daemon decides within tens of milliseconds of the notify;
+/// tests give a loaded machine more room.
+#[cfg(not(test))]
+const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_millis(1000);
+#[cfg(test)]
+const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+const SEND_OUTCOME_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Whether the daemon has made its first decision on a fresh row: handed it
+/// over, held it, or stated why it waits (review M4). A row nobody has looked
+/// at reports `awaiting_delivery`; native-extension recipients, whose rows
+/// keep that reason, are not waited on at all. The wake attempt is stamped
+/// before the hold, so it is not the signal.
+fn send_outcome_settled(report: &cas_store::MessageDeliveryReport) -> bool {
+    !matches!(
+        report.stage,
+        cas_store::DeliveryStage::Enqueued | cas_store::DeliveryStage::Selected
+    ) || report
+        .pending_reason
+        .is_some_and(|reason| reason != cas_store::PendingReason::AwaitingDelivery)
+}
+
+/// Whether a daemon is listening on the notify socket. A stale socket left by
+/// a killed daemon refuses the datagram, and `notify_daemon` treats that as
+/// success (review M3).
+fn daemon_accepts_notify(cas_root: &std::path::Path) -> bool {
+    let Ok(socket) = std::os::unix::net::UnixDatagram::unbound() else {
+        return false;
+    };
+    let _ = socket.set_nonblocking(true);
+    match socket.send_to(&[1u8], cas_factory::notify_socket_path(cas_root)) {
+        Ok(_) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::WouldBlock,
+    }
+}
+
+/// The row's report once the daemon has decided it, and whether the settle
+/// window ended first.
+async fn wait_for_send_outcome(
+    queue: &dyn cas_store::PromptQueueStore,
+    message_id: i64,
+) -> (Option<cas_store::MessageDeliveryReport>, bool) {
+    let deadline = tokio::time::Instant::now() + SEND_OUTCOME_SETTLE;
+    loop {
+        let report = queue.message_delivery_report(message_id).ok().flatten();
+        if report.as_ref().is_none_or(send_outcome_settled) {
+            return (report, false);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return (report, true);
+        }
+        tokio::time::sleep(SEND_OUTCOME_POLL).await;
     }
 }
 
@@ -3798,13 +4098,19 @@ fn row_factory_session(
 #[cfg(test)]
 mod pending_deadline_tests {
     use super::pending_deadline_narrative;
-    use cas_store::DeliveryStage;
+    use cas_store::{DeliveryStage, InboxHandoffState};
 
     /// The 15 minutes two supervisors spent watching "awaiting_delivery" must
     /// now say how much of the budget is left.
     #[test]
     fn a_pending_row_states_how_long_before_it_is_abandoned() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60));
+        let line = pending_deadline_narrative(
+            DeliveryStage::Enqueued,
+            None,
+            None,
+            Some(60),
+            InboxHandoffState::NotHeld,
+        );
         assert!(
             line.contains("abandoned as undeliverable in 840s"),
             "{line}"
@@ -3814,9 +4120,39 @@ mod pending_deadline_tests {
 
     /// Past the deadline the row is doomed, not in flight. Saying "still
     /// pending" there is the claimed-green shape this task exists to remove.
+    /// cas-a1ed: messages 4189870, 4189912 and 4189924 were held because
+    /// their busy recipients' panes were never silent. Status said "PAST — the
+    /// sweep will mark this undeliverable" although no sweep abandons a row
+    /// held for a live recipient, so a supervisor read a delivery as lost.
+    #[test]
+    fn a_row_held_for_a_busy_recipient_is_not_on_the_abandonment_deadline_cas_a1ed() {
+        for waited in [60, 1200] {
+            let line = pending_deadline_narrative(
+                DeliveryStage::Gated,
+                Some(cas_store::PendingReason::GatedNotReady),
+                Some(
+                    "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken",
+                ),
+                Some(waited),
+                InboxHandoffState::HeldTeamsInbox,
+            );
+            assert!(line.contains("still pending"), "{line}");
+            assert!(line.contains("next tool"), "{line}");
+            assert!(!line.contains("abandoned as undeliverable"), "{line}");
+            assert!(!line.contains("PAST"), "{line}");
+            assert!(!line.contains("retry budget"), "{line}");
+        }
+    }
+
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200));
+        let line = pending_deadline_narrative(
+            DeliveryStage::Enqueued,
+            None,
+            None,
+            Some(1200),
+            InboxHandoffState::NotHeld,
+        );
         assert!(line.contains("PAST"), "{line}");
         assert!(line.contains("not still in flight"), "{line}");
     }
@@ -3828,6 +4164,7 @@ mod pending_deadline_tests {
             None,
             Some("target no longer belongs to factory session"),
             Some(1800),
+            InboxHandoffState::NotHeld,
         );
         assert!(line.contains("undeliverable"), "{line}");
         assert!(
@@ -3839,7 +4176,13 @@ mod pending_deadline_tests {
 
     #[test]
     fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None);
+        let line = pending_deadline_narrative(
+            DeliveryStage::Abandoned,
+            None,
+            None,
+            None,
+            InboxHandoffState::NotHeld,
+        );
         assert!(line.contains("no reason was recorded"), "{line}");
     }
 
@@ -3852,6 +4195,7 @@ mod pending_deadline_tests {
             Some(cas_store::PendingReason::AwaitingBusyRecipient),
             Some("recipient busy: wake budget spent after 3 attempts"),
             Some(1200),
+            InboxHandoffState::NotHeld,
         );
         assert!(line.contains("busy recipient: still pending"), "{line}");
         assert!(line.contains("next turn start or tool call"), "{line}");
@@ -3862,10 +4206,18 @@ mod pending_deadline_tests {
     #[test]
     fn a_delivered_row_adds_no_deadline_noise() {
         assert!(
-            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30)).is_empty()
+            pending_deadline_narrative(
+                DeliveryStage::Delivered,
+                None,
+                None,
+                Some(30),
+                InboxHandoffState::NotHeld
+            )
+            .is_empty()
         );
     }
 }
+
 
 #[cfg(test)]
 mod cross_session_routing_tests {
@@ -4027,11 +4379,18 @@ mod inbox_poll_identity_tests {
     #[test]
     fn recipient_receipt_separates_rendered_from_claimed() {
         use cas_store::SurfacingSource;
-        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced));
-        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed));
+        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced), None);
+        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed), None);
         assert!(rendered.contains("rendered —"), "{rendered}");
         assert!(claimed.contains("claimed, not rendered"), "{claimed}");
-        assert!(super::recipient_receipt_narrative(None).is_empty());
+        assert!(super::recipient_receipt_narrative(None, None).is_empty());
+        // cas-6ccb: a settled poll receipt says why, and that it is no ack.
+        let settled = super::recipient_receipt_narrative(
+            Some(SurfacingSource::InboxPoll),
+            Some("withheld by inbox_poll: merge request for cas-1, already done"),
+        );
+        assert!(settled.starts_with("recipient_receipt: withheld by inbox_poll:"), "{settled}");
+        assert!(settled.contains("not an acknowledgement"), "{settled}");
     }
 
     /// The three wake-attempt states must read differently. If two of them
@@ -6070,6 +6429,172 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
+    /// GH #1196: with the session's daemon reporting no Commander client and
+    /// no cloud operator feed, an operator send fails at once and queues
+    /// nothing; with a client connected, or no daemon status at all
+    /// (unknown), it queues as before.
+    #[tokio::test(flavor = "current_thread")]
+    async fn gh_1196_operator_send_with_no_commander_attached_fails_at_once() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-no-commander".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = || -> AgentRequest {
+            serde_json::from_value(serde_json::json!({
+                "action": "message",
+                "target": "operator",
+                "kind": "status",
+                "summary": "build status",
+                "message": "The build is green.",
+            }))
+            .expect("operator request")
+        };
+        let write_clients = |clients: Option<u64>| {
+            let now = chrono::Utc::now();
+            crate::factory_daemon_health::write_status(
+                &cas_root,
+                &crate::factory_daemon_health::DaemonLoopStatus {
+                    pid: 1,
+                    session: "factory-no-commander".into(),
+                    written_at: now,
+                    last_pass_at: now,
+                    phase: "idle".into(),
+                    passes: 1,
+                    pending_spawns: 0,
+                    in_flight_spawn: None,
+                    in_flight_started_at: None,
+                    loop_thread_wait: None,
+                    helpers_killed: Vec::new(),
+                    last_reset: None,
+                    max_pass_ms: None,
+                    p99_pass_ms: None,
+                    window_passes: 0,
+                    passes_over_100ms: 0,
+                    phase_latency: Default::default(),
+                    slow_steps: Vec::new(),
+                    wedge: None,
+                    job_lanes: Default::default(),
+                    lane_violations: 0,
+                    lane_violation_sites: Vec::new(),
+                    frames: Default::default(),
+                    frames_coalesced: 0,
+                    frame_bytes_p50: None,
+                    frame_window_ms: 0,
+                    frames_per_s: None,
+                    commander_clients: clients,
+                },
+            )
+            .expect("write loop.json");
+        };
+        let queued = || {
+            crate::store::open_prompt_queue_store(&cas_root)
+                .expect("prompt queue")
+                .peek_operator_replies("factory-no-commander", 10)
+                .expect("read operator replies")
+                .len()
+        };
+
+        write_clients(Some(0));
+        let error = service
+            .message_send(request())
+            .await
+            .expect_err("no Commander attached: refused at send time");
+        assert!(
+            error.message.contains("No Commander device is attached to factory session factory-no-commander"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("Nothing was queued"), "{error:?}");
+        assert_eq!(queued(), 0, "nothing is queued to expire");
+
+        write_clients(Some(1));
+        let response = response_text(service.message_send(request()).await.expect("queued"));
+        assert!(response.contains("Commander status queued"), "{response}");
+        assert_eq!(queued(), 1);
+
+        std::fs::remove_file(crate::factory_daemon_health::status_path(
+            &cas_root,
+            "factory-no-commander",
+        ))
+        .expect("remove loop.json");
+        let response = response_text(service.message_send(request()).await.expect("queued"));
+        assert!(response.contains("Commander status queued"), "unknown state still queues: {response}");
+    }
+
+    /// GH #1196 review M4/L8: each branch where the Commander state is not
+    /// known to be "no device" lets the turn queue.
+    #[test]
+    fn gh_1196_operator_refusal_needs_a_known_live_state() {
+        use crate::factory_daemon_health::{LOOP_WEDGED_SECS, STATUS_STALE_SECS};
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let store = cas_store::SqlitePromptQueueStore::open(&cas_root).expect("prompt queue");
+        cas_store::PromptQueueStore::init(&store).expect("init prompt queue");
+        let session = "factory-refusal";
+        let written = chrono::Utc::now();
+        let write = |cas_root: &std::path::Path, last_pass_at: chrono::DateTime<chrono::Utc>| {
+            let mut status: crate::factory_daemon_health::DaemonLoopStatus =
+                serde_json::from_value(serde_json::json!({
+                    "pid": 1,
+                    "session": session,
+                    "written_at": written,
+                    "last_pass_at": last_pass_at,
+                    "phase": "idle",
+                    "passes": 1,
+                    "pending_spawns": 0,
+                }))
+                .expect("loop status");
+            status.commander_clients = Some(0);
+            crate::factory_daemon_health::write_status(cas_root, &status).expect("write loop.json");
+        };
+        let check = |now| operator_turn_undeliverable(&cas_root, session, now);
+
+        write(&cas_root, written);
+        assert!(check(written).is_some(), "fresh, live, no device, no feed: refused");
+        let stale = written + chrono::Duration::seconds(STATUS_STALE_SECS + 1);
+        assert!(check(stale).is_none(), "stale loop.json is unknown");
+
+        write(&cas_root, written - chrono::Duration::seconds(LOOP_WEDGED_SECS + 1));
+        assert!(check(written).is_none(), "a wedged loop's client count is unknown");
+
+        write(&cas_root, written);
+        store
+            .bind_operator_feed(&cas_store::OperatorFeedBinding {
+                account_id: "acct-1".into(),
+                machine_id: "mch-1".into(),
+                hub_id: "hub-1".into(),
+                project_id: "proj-1".into(),
+                bound_at: "2026-10-15T19:00:00Z".into(),
+            })
+            .expect("bind feed");
+        assert!(check(written).is_none(), "a cloud-bound project always queues");
+
+        let bad_root = temp.path().join("unreadable").join(".cas");
+        std::fs::create_dir_all(&bad_root).expect("second Cassy root");
+        std::fs::write(bad_root.join("cas.db"), b"not a sqlite database").expect("corrupt db");
+        write(&bad_root, written);
+        assert!(
+            operator_turn_undeliverable(&bad_root, session, written).is_none(),
+            "an unreadable binding is unknown, not absent"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn supervisor_can_send_unprompted_status_to_all_leased_devices() {
         let _env = TestEnvGuard::with_optional_vars(&[
@@ -6326,5 +6851,83 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect_err("worker operator turn must be rejected");
         assert!(error.message.contains("Only a registered supervisor"), "{error:?}");
+    }
+}
+
+/// cas-d5ab (communication contract v2, P1.6): how a send names the row's
+/// current outcome. The end-to-end `ct2_p1_send_returns_named_outcome` drives
+/// the real daemon (`ui::factory::daemon::runtime::busy_claude_delivery_tests`);
+/// these pin the wording against the daemon's production stamp text.
+#[cfg(test)]
+mod cas_d5ab_send_outcome_tests {
+    use super::*;
+    use cas_store::PromptQueueStore as _;
+
+    /// The daemon's generic hold stamp (queue_and_events.rs, `wake_deferred`).
+    const GENERIC_HOLD: &str =
+        "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken";
+
+    #[test]
+    fn a_deferral_names_the_wake_decision_not_the_generic_hold() {
+        let cases = [
+            ("wake_declined_by_policy: recipient has a tool call in flight", true, "recipient mid tool call; surfaces at its next tool call or turn start"),
+            ("wake_declined_by_policy: pane has not been silent long enough", true, "recipient busy; surfaces at its next tool call or turn start"),
+            ("wake_declined_by_policy: no transcript evidence and the pane has not been silent long enough", true, "recipient busy; surfaces at its next tool call or turn start"),
+            ("wake_declined_by_policy: operator has an unsubmitted draft in the composer", false, "operator is typing in the recipient's pane; delivered when its pane is free"),
+            ("wake_declined_by_policy: no wake slot left this pass (a supervisor wake already fired)", true, "another wake went first this pass; surfaces at its next tool call or turn start"),
+        ];
+        for (wake_detail, claude, expected) in cases {
+            assert_eq!(deferral_reason(Some(wake_detail), Some(GENERIC_HOLD), claude), expected, "{wake_detail}");
+        }
+        assert_eq!(
+            deferral_reason(None, Some(GENERIC_HOLD), true),
+            "recipient busy; surfaces at its next tool call or turn start",
+            "the generic hold alone names no single cause"
+        );
+        assert_eq!(
+            deferral_reason(None, Some("pane not ready for injection"), false),
+            "recipient pane not ready yet; delivered when its pane is free"
+        );
+    }
+
+    #[test]
+    fn a_stale_notify_socket_is_not_a_listening_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!daemon_accepts_notify(root.path()), "no socket");
+        let path = cas_factory::notify_socket_path(root.path());
+        drop(std::os::unix::net::UnixDatagram::bind(&path).unwrap());
+        assert!(path.exists());
+        assert!(!daemon_accepts_notify(root.path()), "a killed daemon's socket refuses");
+        let _listening = std::os::unix::net::UnixDatagram::bind({
+            std::fs::remove_file(&path).unwrap();
+            &path
+        })
+        .unwrap();
+        assert!(daemon_accepts_notify(root.path()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_row_the_daemon_set_aside_ends_the_wait_but_a_fresh_one_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.init().unwrap();
+        let waiting = queue.enqueue_with_session("supervisor", "worker", "ping", "s").unwrap();
+        queue
+            .record_pending_reason(
+                waiting,
+                cas_store::PendingReason::AdapterRetryable,
+                Some("transport busy; retrying"),
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let (report, timed_out) = wait_for_send_outcome(&queue, waiting).await;
+        assert!(!timed_out && report.is_some());
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "a stated wait settles at once");
+        assert!(!send_outcome_settled(
+            &queue
+                .message_delivery_report(queue.enqueue_with_session("supervisor", "w", "fresh", "s").unwrap())
+                .unwrap()
+                .unwrap()
+        ));
     }
 }

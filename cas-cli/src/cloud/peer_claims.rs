@@ -21,7 +21,7 @@
 //! ([`PeerClaims::take_from_local`]). Every network call made for an async
 //! MCP handler runs off the runtime under one [`PeerBudget`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -37,7 +37,9 @@ use crate::types::{ClaimResult, TaskLease};
 enum Listed {
     /// Listed, with a heartbeat inside the live window.
     Live(ClaimHolder),
-    /// Listed, but stale, shut down or silent past the live window.
+    /// Explicitly shut down. Unlike late presence, this overrides renewal.
+    Shutdown(ClaimHolder),
+    /// Listed, but stale or silent past the live window.
     Stale(ClaimHolder),
     /// The list was read and the holder is not in it.
     Missing,
@@ -78,6 +80,11 @@ impl PeerBudget {
         Self { deadline: Instant::now() + total }
     }
 
+    /// Time left for another Cloud call; zero forbids starting it.
+    pub fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
     /// Run `work` off the async runtime within what is left of the budget.
     /// `Err` says why it gave no answer (the budget ran out, or it panicked).
     pub async fn run<T, F>(&self, work: F) -> Result<T, String>
@@ -85,7 +92,7 @@ impl PeerBudget {
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
-        let left = self.deadline.saturating_duration_since(Instant::now());
+        let left = self.remaining();
         if left.is_zero() {
             return Err(format!("no answer within {}s", PEER_BUDGET.as_secs()));
         }
@@ -171,10 +178,9 @@ pub struct PeerHold {
     pub agent_id: String,
     pub holder: Option<ClaimHolder>,
     pub expires_at: Option<DateTime<Utc>>,
-    /// Whether Cassy Cloud lists the holder as a live agent: `Some(false)`
-    /// when it is missing from the user's agents or its last heartbeat is
-    /// older than [`crate::cloud::peers::PEER_LIVE_SECS`]; `None` when the
-    /// agent list could not be read.
+    /// Explicit shutdown is dead. Otherwise either a recent heartbeat or a
+    /// recent renewal keeps a holder live; late presence alone cannot authorize
+    /// taking a claim. `None` means no conclusive signal was available.
     pub live: Option<bool>,
 }
 
@@ -206,8 +212,8 @@ impl PeerHold {
     }
 
     /// A claim nobody is keeping: it ran out, or its holder is not a live
-    /// agent. Until petra-stella-cloud#150 lands the cloud still reports it
-    /// held, so the client treats it as stale (a warning, never a refusal).
+    /// agent. Acquisition rechecks and recovers it with an owner-scoped release;
+    /// a stale observation alone never means a live competing worker.
     pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
         self.is_expired(now) || self.live == Some(false)
     }
@@ -248,12 +254,36 @@ pub enum Acquire {
     LocalHolder(String),
     /// A live peer on another machine holds it.
     PeerHolds(PeerHold),
-    /// A peer's claim ran out without being released (its holder stopped
-    /// renewing). The cloud still reports it held (petra-stella-cloud#150),
-    /// so this agent proceeds on its local lease only.
+    /// A stale holder observed during recovery (for example another stale
+    /// owner won a race). Retry recovery later; never emit a live-conflict alarm.
     StalePeer(PeerHold),
     /// The cloud could not be asked; only the local lease applies.
     Unavailable(String),
+}
+
+/// Durable local SessionEnd evidence survives deletion of the registry row.
+#[derive(Clone)]
+pub(crate) struct RetiredLocalAgent {
+    pub name: String,
+    pub ended_at: DateTime<Utc>,
+}
+
+pub(crate) fn retired_local_agents(cas_root: &Path) -> HashMap<String, RetiredLocalAgent> {
+    let events = crate::store::open_event_store(cas_root).ok()
+        .and_then(|store| store.list_by_type(crate::types::EventType::AgentShutdown, 2000).ok())
+        .unwrap_or_default();
+    let mut retired = HashMap::new();
+    for event in events {
+        if event.entity_type == crate::types::EventEntityType::Agent
+            && let Some(name) = event.summary.strip_prefix("Agent unregistered: ")
+        {
+            // Events are newest first. Never replace the latest exit by an old one.
+            retired.entry(event.entity_id).or_insert_with(|| RetiredLocalAgent {
+                name: name.to_string(), ended_at: event.created_at,
+            });
+        }
+    }
+    retired
 }
 
 /// Cloud claims for one repository.
@@ -263,6 +293,8 @@ pub struct PeerClaims {
     project: String,
     /// This machine's label, recorded on every claim it makes (cas-c7c7).
     label: String,
+    retired_local: HashMap<String, RetiredLocalAgent>,
+    budget: Option<PeerBudget>,
 }
 
 /// `<task id>~<first 8 hex of sha256(canonical id)>`.
@@ -286,7 +318,14 @@ impl PeerClaims {
         }
         let project = crate::cloud::resolve_canonical_id(cas_root)?;
         let label = crate::cloud::peers::machine_label_for(cas_root);
-        Some(Self { config, project, label })
+        let mut retired_local = retired_local_agents(cas_root);
+        match crate::store::open_agent_store(cas_root).and_then(|store|
+            store.list(None).map_err(crate::error::CasError::from))
+        {
+            Ok(agents) => retired_local.retain(|id, _| !agents.iter().any(|agent| &agent.id == id)),
+            Err(_) => retired_local.clear(), // Unreadable registry cannot authorize a handoff.
+        }
+        Some(Self { config, project, label, retired_local, budget: None })
     }
 
     pub fn project(&self) -> &str {
@@ -297,9 +336,32 @@ impl PeerClaims {
         claim_key(&self.project, task_id)
     }
 
+    /// Keep blocking Cloud calls within the caller's async request deadline.
+    pub fn with_budget(mut self, budget: PeerBudget) -> Self {
+        self.budget = Some(match self.budget {
+            Some(existing) if existing.deadline < budget.deadline => existing,
+            _ => budget,
+        });
+        self
+    }
+
+    fn remaining(&self) -> Result<Duration, CasError> {
+        let left = self
+            .budget
+            .map(|budget| budget.remaining())
+            .unwrap_or(CLAIM_TIMEOUT)
+            .min(CLAIM_TIMEOUT);
+        if left.is_zero() {
+            Err(CasError::Other("peer check budget exhausted".into()))
+        } else {
+            Ok(left)
+        }
+    }
+
     fn coordinator(&self, agent_id: &str) -> Result<CloudCoordinator, CasError> {
+        let left = self.remaining()?;
         Ok(CloudCoordinator::new(self.config.clone())?
-            .with_timeout(CLAIM_TIMEOUT)
+            .with_timeout(left)
             .with_agent_id(agent_id)
             // cas-f707: claims carry the project scope (petra-stella-cloud#151).
             .with_canonical_id(Some(self.project.clone())))
@@ -318,6 +380,15 @@ impl PeerClaims {
         duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
     ) -> Acquire {
+        let claims = self.clone().with_budget(PeerBudget::default());
+        claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
+    }
+
+    fn acquire_bounded(
+        &self, task_id: &str, kind: ClaimKind, agent_id: &str, agent_name: &str,
+        duration_secs: u32, is_local: &dyn Fn(&str) -> bool,
+    ) -> Acquire {
+        let deadline = self.budget.expect("acquire has a budget").deadline;
         let key = self.key(task_id);
         let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
         let coordinator = match self.coordinator(agent_id) {
@@ -334,7 +405,7 @@ impl PeerClaims {
         // not parse) is resolved from the lock, so a local holder is never
         // mistaken for a peer.
         let (held_by, expires_at) = if held_by.is_empty() {
-            match coordinator.get_lock(&key) {
+            match self.coordinator(agent_id).and_then(|c| c.get_lock(&key)) {
                 Ok(Some(lock)) => (lock.agent_id, lock.expires_at),
                 Ok(None) => return Acquire::Unavailable("the claim was refused without a holder".into()),
                 Err(error) => return Acquire::Unavailable(error.to_string()),
@@ -348,14 +419,68 @@ impl PeerClaims {
         if is_local(&held_by) {
             return Acquire::LocalHolder(held_by);
         }
-        self.conflict_answer(&key, &held_by, expires_at)
+        if self.retired_local.contains_key(&held_by)
+            && let Ok(Some(lock)) = self.coordinator(agent_id).and_then(|c| c.get_lock(&key))
+            && lock.agent_id == held_by
+            && self.retired_local.get(&held_by).is_some_and(|ended| lock.renewed_at <= ended.ended_at)
+        {
+            // Still arbitrate locally before moving this pre-exit claim.
+            return Acquire::LocalHolder(held_by);
+        }
+        let answer = self.conflict_answer(&key, &held_by, expires_at);
+        match answer {
+            Acquire::StalePeer(hold) => self.take_stale_peer(
+                task_id, kind, &hold, agent_id, agent_name, duration_secs, deadline,
+            ),
+            answer => answer,
+        }
+    }
+
+    /// A stale observation is not permission to release a later owner's claim.
+    /// Re-read ownership and liveness, then use the wire protocol's owner-scoped
+    /// release. A raced live holder is reported rather than overwritten.
+    fn take_stale_peer(
+        &self,
+        task_id: &str,
+        kind: ClaimKind,
+        observed: &PeerHold,
+        agent_id: &str,
+        agent_name: &str,
+        duration_secs: u32,
+        deadline: Instant,
+    ) -> Acquire {
+        let claims = self.clone().with_budget(PeerBudget { deadline });
+        let key = claims.key(task_id);
+        let lock = match claims.coordinator(agent_id).and_then(|c| c.get_lock(&key)) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return Acquire::Unavailable("the stale claim disappeared; retry claiming".into());
+            }
+            Err(error) => return Acquire::Unavailable(error.to_string()),
+        };
+        let listed = claims.listed_holder(&lock.agent_id);
+        let current = Self::assemble(lock.agent_id.clone(), Some(&lock), None, listed);
+        if current.agent_id != observed.agent_id || !current.is_stale(Utc::now()) {
+            return Self::answer(current);
+        }
+        // The release validates this exact snapshot again, including same-ID
+        // renewal/reacquisition, after the final presence observation.
+        claims.move_claim(
+            task_id,
+            kind,
+            &current.agent_id,
+            agent_id,
+            agent_name,
+            duration_secs,
+            deadline,
+            Some(&lock),
+        )
     }
 
     /// A peer's hold from a refused claim. The 409 names the holder and when
     /// its lock runs out, and the agent list names its machine and says
-    /// whether it is live, so the lock is read only when the list does not
-    /// know the holder (only the lock's reason can then name it) or the 409
-    /// lacked a usable expiry.
+    /// whether it is live. Late or missing presence also reads the lock: a
+    /// recent renewal protects the holder even when presence has backed off.
     fn conflict_answer(&self, key: &str, held_by: &str, expires_at: DateTime<Utc>) -> Acquire {
         let now = Utc::now();
         if held_by.is_empty() || expires_at <= now {
@@ -363,8 +488,8 @@ impl PeerClaims {
         }
         let listed = self.listed_holder(held_by);
         let lock = match &listed {
-            Listed::Live(..) | Listed::Stale(..) => None,
-            Listed::Missing | Listed::Unknown => self
+            Listed::Live(..) | Listed::Shutdown(..) => None,
+            Listed::Stale(..) | Listed::Missing | Listed::Unknown => self
                 .coordinator(held_by)
                 .and_then(|coordinator| coordinator.get_lock(key))
                 .ok()
@@ -384,28 +509,91 @@ impl PeerClaims {
         agent_name: &str,
         duration_secs: u32,
     ) -> Acquire {
+        self.move_claim(task_id, kind, from, agent_id, agent_name, duration_secs,
+            Instant::now() + CLAIM_TIMEOUT, None)
+    }
+
+    fn move_claim(
+        &self,
+        task_id: &str,
+        kind: ClaimKind,
+        from: &str,
+        agent_id: &str,
+        agent_name: &str,
+        duration_secs: u32,
+        deadline: Instant,
+        expected: Option<&TaskLease>,
+    ) -> Acquire {
+        let claims = self.clone().with_budget(PeerBudget { deadline });
         let key = self.key(task_id);
-        let reason = ClaimHolder::new(kind, agent_name, &self.project).on(&self.label).reason();
-        let moved = self
-            .coordinator(from)
-            .and_then(|holder| holder.release(&key))
-            .and_then(|()| self.coordinator(agent_id))
+        let reason = ClaimHolder::new(kind, agent_name, &self.project)
+            .on(&self.label)
+            .reason();
+        if let Some(expected) = expected {
+            match claims.release_if_unchanged(&key, expected) {
+                Ok(true) => {}
+                Ok(false) => {
+                    // The old snapshot no longer identifies a competitor.
+                    // A fresh read may find a new holder, a stale holder, or no lock.
+                    return claims.peer_answer(&key, &expected.agent_id);
+                }
+                Err(error) => return Acquire::Unavailable(error.to_string()),
+            }
+        } else if let Err(error) = claims.release_with_reserve(&key, from) {
+            return Acquire::Unavailable(error.to_string());
+        }
+        let moved = claims
+            .coordinator(agent_id)
             .and_then(|coordinator| coordinator.claim(&key, duration_secs, Some(&reason)));
         match moved {
             Ok(ClaimResult::Success(_)) => Acquire::Claimed,
-            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if held_by == agent_id => Acquire::Claimed,
+            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if held_by == agent_id => {
+                Acquire::Claimed
+            }
             // Someone else claimed it between the release and the claim.
             Ok(ClaimResult::AlreadyClaimed { held_by, .. }) if !held_by.is_empty() => {
-                self.peer_answer(&key, &held_by)
+                claims.peer_answer(&key, &held_by)
             }
             Ok(other) => Acquire::Unavailable(format!("could not move the claim: {other:?}")),
             Err(error) => Acquire::Unavailable(error.to_string()),
         }
     }
 
+    /// Spend at most half the remaining allowance releasing, leaving time to
+    /// claim. A blocking continuation cannot start a call after the deadline.
+    fn release_with_reserve(&self, key: &str, agent_id: &str) -> Result<(), CasError> {
+        let left = self.remaining()? / 2;
+        if left.is_zero() {
+            return Err(CasError::Other("peer check budget exhausted".into()));
+        }
+        self.coordinator(agent_id)?.with_timeout(left).release(key)
+    }
+
+    /// Client guard only: Cloud's release POST sends agent_id, not an expected
+    /// epoch. A renewal in the round trip after this final read can still be
+    /// lost until Cloud supports release conditional on epoch (accepted M2).
+    fn release_if_unchanged(&self, key: &str, expected: &TaskLease) -> Result<bool, CasError> {
+        let current = self.coordinator(&expected.agent_id)?.get_lock(key)?;
+        let unchanged = current.is_some_and(|current| {
+            current.agent_id == expected.agent_id
+                && current.epoch == expected.epoch
+                && current.renewed_at == expected.renewed_at
+                && current.status == expected.status
+        });
+        if !unchanged {
+            return Ok(false);
+        }
+        self.release_with_reserve(key, &expected.agent_id)?;
+        Ok(true)
+    }
+
     /// A peer's hold on `key`, live or stale, read from the lock.
     fn peer_answer(&self, key: &str, held_by: &str) -> Acquire {
-        Self::answer(self.hold(key, held_by))
+        match self.hold(key, held_by) {
+            Ok(Some(hold)) => Self::answer(hold),
+            Ok(None) => Acquire::Unavailable("the claim is no longer held; retry claiming".into()),
+            Err(error) => Acquire::Unavailable(error.to_string()),
+        }
     }
 
     fn answer(hold: PeerHold) -> Acquire {
@@ -465,31 +653,36 @@ impl PeerClaims {
                 .cloned()
                 .unwrap_or_default(),
         };
-        if live { Listed::Live(holder) } else { Listed::Stale(holder) }
+        if agent.status == "shutdown" { Listed::Shutdown(holder) }
+        else if live { Listed::Live(holder) } else { Listed::Stale(holder) }
     }
 
-    /// Who holds `key`, read from the lock itself.
-    fn hold(&self, key: &str, held_by: &str) -> PeerHold {
-        let lock = self
-            .coordinator(held_by)
-            .and_then(|coordinator| coordinator.get_lock(key))
-            .ok()
-            .flatten();
-        let agent_id = lock
-            .as_ref()
-            .map(|lock| lock.agent_id.clone())
-            .unwrap_or_else(|| held_by.to_string());
-        let listed = self.listed_holder(&agent_id);
-        Self::assemble(agent_id, lock.as_ref(), None, listed)
+    /// Who holds `key` now. A disappeared or released lock cannot be filled
+    /// in from a formerly observed holder; read failures remain unavailable.
+    fn hold(&self, key: &str, reader: &str) -> Result<Option<PeerHold>, CasError> {
+        let claims = self.clone().with_budget(PeerBudget::default());
+        let Some(lock) = claims
+            .coordinator(reader)?
+            .get_lock(key)?
+            .filter(|lock| lock.status == crate::types::LeaseStatus::Active)
+        else {
+            return Ok(None);
+        };
+        let listed = claims.listed_holder(&lock.agent_id);
+        Ok(Some(Self::assemble(
+            lock.agent_id.clone(),
+            Some(&lock),
+            None,
+            listed,
+        )))
     }
 
     /// One hold from whatever was learned: the lock (reason, expiry, last
     /// renewal), the 409's expiry, and the agent list.
     ///
-    /// cas-0078: only a running holder renews its claim, so a renewal within
-    /// the live window is a liveness signal of its own. A holder missing from
-    /// the agent list (its registration failed) is live while it renews and
-    /// stale once it stopped; without a lock to read, its liveness is unknown.
+    /// Only explicit shutdown overrides renewal. Presence can lag independently
+    /// of renewals; either fresh signal protects the claim. Missing evidence
+    /// cannot authorize recovery.
     fn assemble(
         agent_id: String,
         lock: Option<&TaskLease>,
@@ -499,15 +692,11 @@ impl PeerClaims {
         let renewed_recently = lock.map(|lock| {
             (Utc::now() - lock.renewed_at).num_seconds() <= crate::cloud::peers::PEER_LIVE_SECS
         });
-        let (listed_live, listed_holder) = match listed {
+        let (live, listed_holder) = match listed {
+            Listed::Shutdown(holder) => (Some(false), Some(holder)),
             Listed::Live(holder) => (Some(true), Some(holder)),
-            Listed::Stale(holder) => (Some(false), Some(holder)),
-            Listed::Missing | Listed::Unknown => (None, None),
-        };
-        let live = match (listed_live, renewed_recently) {
-            (Some(true), _) | (_, Some(true)) => Some(true),
-            (Some(false), _) | (None, Some(false)) => Some(false),
-            (None, None) => None,
+            Listed::Stale(holder) => (renewed_recently, Some(holder)),
+            Listed::Missing | Listed::Unknown => (renewed_recently, None),
         };
         PeerHold {
             holder: lock
@@ -526,12 +715,22 @@ impl PeerClaims {
         task_id: &str,
         is_local: &dyn Fn(&str) -> bool,
     ) -> Result<Option<PeerHold>, CasError> {
-        let key = self.key(task_id);
-        let lock = self.coordinator("peer-claims-reader")?.get_lock(&key)?;
-        Ok(lock
-            .filter(|lock| !is_local(&lock.agent_id))
-            .map(|lock| self.hold(&key, &lock.agent_id))
-            .filter(|hold| !hold.is_stale(Utc::now())))
+        let claims = self.clone().with_budget(PeerBudget::default());
+        let key = claims.key(task_id);
+        let Some(lock) = claims.coordinator("peer-claims-reader")?.get_lock(&key)? else {
+            return Ok(None);
+        };
+        if is_local(&lock.agent_id)
+            || self
+                .retired_local
+                .get(&lock.agent_id)
+                .is_some_and(|ended| lock.renewed_at <= ended.ended_at)
+        {
+            return Ok(None);
+        }
+        Ok(claims
+            .hold(&key, &lock.agent_id)?
+            .filter(|hold| !is_local(&hold.agent_id) && !hold.is_stale(Utc::now())))
     }
 
     /// Release the cloud claim on `task_id` when an agent of this database
@@ -550,6 +749,20 @@ impl PeerClaims {
         }
         self.coordinator(&lock.agent_id)?.release(&key)?;
         Ok(true)
+    }
+
+    pub(crate) fn release_reset_holder(
+        &self, task_id: &str, name: &str, registered_ids: &HashSet<String>,
+    ) -> Result<bool, CasError> {
+        let claims = self.clone().with_budget(PeerBudget::default());
+        let key = claims.key(task_id);
+        let Some(lock) = claims.coordinator("peer-claims-reader")?.get_lock(&key)? else {
+            return Ok(false);
+        };
+        let ended = self.retired_local.get(&lock.agent_id).is_some_and(|ended|
+            ended.name == name && lock.renewed_at <= ended.ended_at);
+        if !registered_ids.contains(&lock.agent_id) && !ended { return Ok(false); }
+        claims.release_if_unchanged(&key, &lock)
     }
 
     /// The agent holding the active claim on `task_id`, if any.
@@ -646,7 +859,11 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
             // A focus another agent of this database also claims: the epic is
             // still claimed for this repository, and nothing is lost.
             Acquire::LocalHolder(_) => {}
-            Acquire::PeerHolds(hold) | Acquire::StalePeer(hold) => {
+            Acquire::StalePeer(_) => {
+                // Staleness is not a competing worker. Retry recovery next beat.
+                report.failed += 1;
+            }
+            Acquire::PeerHolds(hold) => {
                 notify_claim_lost(cas_root, agents.as_ref(), me.as_ref(), agent_id, &task_id, &hold);
                 report.conflicts.push((task_id, hold));
             }
@@ -843,14 +1060,21 @@ pub fn claim_epic_focus(cas_root: &Path, epic_id: &str, agent_id: &str) -> Optio
         .map(|agent| agent.name)
         .unwrap_or_else(|_| agent_id.to_string());
     let is_local = |id: &str| agents.get(id).is_ok();
-    Some(claims.acquire(
-        epic_id,
-        ClaimKind::Epic,
-        agent_id,
-        &name,
-        lease_duration_secs(cas_root),
-        &is_local,
-    ))
+    let duration = lease_duration_secs(cas_root);
+    let answer = claims.acquire(epic_id, ClaimKind::Epic, agent_id, &name, duration, &is_local);
+    let answer = match answer {
+        Acquire::LocalHolder(ref from) if match agents.get(from) {
+            Ok(holder) => !crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+                &holder,
+                crate::mcp::tools::service::agent_liveness::agent_process_is_alive(&holder),
+                crate::cloud::peers::PEER_LIVE_SECS,
+            ).is_live(),
+            Err(cas_store::StoreError::NotFound(_)) => claims.retired_local.contains_key(from),
+            Err(_) => false,
+        } => claims.take_from_local(epic_id, ClaimKind::Epic, from, agent_id, &name, duration),
+        answer => answer,
+    };
+    Some(answer)
 }
 
 /// Forget `agent_id`'s focus claim and release it in the cloud. Returns the
@@ -937,6 +1161,88 @@ mod tests {
         let spent = Instant::now();
         assert!(budget.run(|| 1).await.is_err(), "a spent budget answers at once");
         assert!(spent.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn cas_50713_stale_recovery_bounds_reads_by_remaining_budget() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for slow_pages in [false, true] {
+            let server = MockServer::start().await;
+            let key = claim_key("repo", "cas-slow");
+            let mut lock = TaskLease::new(key.clone(), "old".into(), 600);
+            lock.renewed_at = Utc::now() - chrono::Duration::seconds(301);
+            let mut wire_lock = serde_json::to_value(&lock).unwrap();
+            wire_lock["id"] = serde_json::json!("fixture-lock");
+            Mock::given(method("GET"))
+                .and(path(format!("/api/agents/tasks/{key}/lock")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"lock": wire_lock}))
+                        .set_delay(if slow_pages {
+                            Duration::ZERO
+                        } else {
+                            Duration::from_millis(400)
+                        }),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+            .and(path("/api/agents"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(if slow_pages {
+                    serde_json::json!({"agents": [], "next_cursor": "2026-10-15T00:00:00Z", "next_cursor_id": "more"})
+                } else { serde_json::json!({"agents": []}) })
+                    .set_delay(if slow_pages { Duration::from_millis(40) } else { Duration::ZERO }),
+            )
+            .mount(&server)
+            .await;
+            let claims = PeerClaims {
+                config: CloudConfig {
+                    endpoint: server.uri(),
+                    token: Some("test-token".into()),
+                    ..Default::default()
+                },
+                project: "repo".into(),
+                label: "here".into(),
+                retired_local: HashMap::new(),
+                budget: None,
+            };
+            let started = Instant::now();
+            let answer = tokio::task::spawn_blocking(move || {
+                let observed = PeerHold {
+                    agent_id: "old".into(),
+                    holder: None,
+                    expires_at: None,
+                    live: Some(false),
+                };
+                claims.take_stale_peer(
+                    "cas-slow",
+                    ClaimKind::Task,
+                    &observed,
+                    "new",
+                    "new",
+                    600,
+                    Instant::now() + Duration::from_millis(80),
+                )
+            })
+            .await
+            .unwrap();
+            assert!(matches!(answer, Acquire::Unavailable(_)), "{answer:?}");
+            assert!(
+                started.elapsed() < Duration::from_millis(300),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| !request.url.path().ends_with("/release"))
+            );
+        }
     }
 
     #[test]

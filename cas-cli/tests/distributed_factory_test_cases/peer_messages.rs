@@ -1373,3 +1373,374 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
     // pin: the future-session notice must identify its own durable outbox receipt.
     assert!(future[0].prompt.contains("peer-outbox:43"));
 }
+
+#[tokio::test]
+async fn ct2_p3_overcap_peer_body_readable() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _registry, mailbox) = fake_cloud_with_mailbox().await;
+    let alpha = TestMachine::new("machine-alpha");
+    let beta = TestMachine::new("machine-beta");
+    seed_project(&alpha, &server.uri(), "github.com/acme/widgets");
+    seed_project(&beta, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    let (aa, bb) = (a.clone(), b.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&aa, "machine-alpha", "a");
+        supervisor_at(&bb, "machine-beta", "b");
+    }).await.unwrap();
+    let (sender, receiver) = (service_for(&a, "a"), service_for(&b, "b"));
+    let body = format!("contract-v2 over-cap body\n{}\nend-of-body", "readable 体\n".repeat(400));
+    assert!(body.chars().count() > cas::config::Config::default().factory().message_max_chars);
+    coordinate(&sender, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"long peer body", "message":body})).await.unwrap();
+    assert_eq!(mailbox.lock().unwrap()[0]["body"].as_str(), Some(body.as_str()));
+    let rows = tokio::task::spawn_blocking(move || { tick(&b, "b"); inbox(&b) }).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].prompt.ends_with(&body));
+    let reply = format!("reply\n{body}");
+    coordinate(&receiver, json!({"action":"message", "target":"sup-a@machine-alpha", "summary":"long peer reply", "message":reply, "in_reply_to":rows[0].id})).await.unwrap();
+    assert_eq!(mailbox.lock().unwrap()[1]["body"].as_str(), Some(reply.as_str()));
+    let rows = tokio::task::spawn_blocking(move || { tick(&a, "a"); inbox(&a) }).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].prompt.ends_with(&reply));
+}
+
+
+async fn restart_peer_mail(unregister: bool, legacy: bool, fail_notice: bool) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    if fail_notice {
+        Mock::given(method("POST"))
+            .and(path("/api/peer-messages"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"sender_agent_id":"b-new"}),
+            ))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    let endpoint = server.uri();
+    let alpha = TestMachine::new("machine-alpha");
+    let beta = TestMachine::new("machine-beta");
+    tokio::task::spawn_blocking(move || {
+        seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+        seed_project(&beta, &endpoint, "github.com/acme/widgets");
+        supervisor(&alpha, "a");
+        let register = |id: &str| {
+            let mut agent = Agent::new(id.into(), "peer-beta".into());
+            agent.role = AgentRole::Supervisor;
+            agent.machine_id = Some("machine-beta".into());
+            // The named factory survives a full daemon restart; only its
+            // supervisor agent ID/process lifetime changes.
+            agent.factory_session = Some("factory-b-new".into());
+            let config = cas::cloud::CloudConfig::load_from_cas_dir(&beta.cas_dir).unwrap();
+            cas::cloud::CloudCoordinator::new(config)
+                .unwrap()
+                .with_canonical_id(Some("github.com/acme/widgets".into()))
+                .register_with_focus(&agent, Some("cas-571d"))
+                .unwrap();
+            open_agent_store(&beta.cas_dir)
+                .unwrap()
+                .register(&agent)
+                .unwrap();
+        };
+        register("b-old");
+        let agents = open_agent_store(&beta.cas_dir).unwrap();
+        if unregister {
+            agents.unregister("b-old").unwrap();
+            if legacy {
+                // A pre-upgrade SessionEnd row had no typed retirement metadata.
+                rusqlite::Connection::open(beta.cas_dir.join("cas.db"))
+                    .unwrap()
+                    .execute(
+                        "UPDATE events SET metadata = NULL WHERE entity_id = 'b-old'",
+                        [],
+                    )
+                    .unwrap();
+            }
+        } else {
+            let mut old = agents.get("b-old").unwrap();
+            old.status = cas::types::AgentStatus::Shutdown;
+            agents.update(&old).unwrap();
+        }
+        // Cloud presence can lag a locally ended session (including a
+        // missed shutdown). The stale address is still a valid mailbox.
+        registry.lock().unwrap().get_mut("b-old").unwrap()["status"] = json!("stale");
+        let peers = peers_of(&alpha.cas_dir, "a");
+        let old_peer = resolve_peer_target(&peers, "peer-beta@machine-beta")
+            .unwrap()
+            .unwrap();
+        let receipt =
+            send_to_peer(&alpha.cas_dir, "a", old_peer, "mail while down", None, None).unwrap();
+        assert_eq!(mailbox.lock().unwrap()[0]["recipient_agent_id"], "b-old");
+        assert!(inbox(&beta.cas_dir).is_empty());
+        register("b-new");
+        let mut report = tick(&beta.cas_dir, "b-new");
+        if fail_notice {
+            assert_eq!((report.delivered, report.rejected), (0, 0), "{report:?}");
+            assert!(!report.errors.is_empty());
+            assert_eq!(
+                mailbox.lock().unwrap()[0]["status"],
+                "leased",
+                "failed feedback must not terminally ACK original"
+            );
+            assert!(inbox(&beta.cas_dir).is_empty());
+            // Simulate the claim lease expiring; the body remains in Cloud.
+            mailbox.lock().unwrap()[0]["status"] = json!("queued");
+            report = tick(&beta.cas_dir, "b-new");
+        }
+        if legacy {
+            assert_eq!((report.delivered, report.rejected), (0, 1), "{report:?}");
+            assert!(
+                inbox(&beta.cas_dir).is_empty(),
+                "unverified body is never admitted"
+            );
+            assert_eq!(mailbox.lock().unwrap()[0]["status"], "rejected");
+            assert_eq!(tick(&alpha.cas_dir, "a").delivered, 1);
+            let notices = inbox(&alpha.cas_dir);
+            assert_eq!(notices.len(), 1);
+            assert_eq!(
+                parse_envelope(&notices[0].prompt)
+                    .unwrap()
+                    .in_reply_to
+                    .as_deref(),
+                Some(receipt.id.as_str())
+            );
+            assert!(notices[0].prompt.contains("b-new"));
+            assert!(notices[0].prompt.to_ascii_lowercase().contains("resend"));
+            // pin: a routing failure notice must not forward the unverified original body.
+            assert!(!notices[0].prompt.contains("mail while down"));
+            // A second successor must reuse the original message's feedback
+            // key rather than manufacture another notice under its new ID.
+            register("b-next");
+            mailbox.lock().unwrap()[0]["status"] = json!("queued");
+            let replay = cas::cloud::peer_mailbox::PeerMailboxRuntime::start(
+                &beta.cas_dir,
+                "factory-b-new",
+            )
+            .unwrap()
+            .tick_blocking();
+            assert_eq!(replay.rejected, 1);
+            assert_eq!(
+                mailbox.lock().unwrap().len(),
+                2,
+                "notice send is idempotent on redelivery"
+            );
+            assert_eq!(tick(&alpha.cas_dir, "a").claimed, 0);
+            assert_eq!(inbox(&alpha.cas_dir).len(), 1);
+            return;
+        }
+        assert_eq!(
+            (report.claimed, report.delivered, report.rejected),
+            (1, 1, 0),
+            "unregister={unregister}: {report:?}"
+        );
+        let rows = inbox(&beta.cas_dir);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "peer-beta");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("factory-b-new"));
+        assert_eq!(parse_envelope(&rows[0].prompt).unwrap().id, receipt.id);
+        // pin: restart recovery must preserve the original cross-machine body.
+        assert!(rows[0].prompt.ends_with("mail while down"));
+        assert_eq!(tick(&beta.cas_dir, "b-new").claimed, 0);
+        assert_eq!(
+            http_mailbox(&alpha.cas_dir)
+                .unwrap()
+                .status(&receipt.id)
+                .unwrap()
+                .status,
+            "delivered"
+        );
+        // Model redelivery after an uncertain ACK. The durable Cloud ID
+        // remains the queue idempotency key, including across restarts.
+        mailbox.lock().unwrap()[0]["status"] = json!("queued");
+        let replay = tick(&beta.cas_dir, "b-new");
+        assert_eq!((replay.delivered, replay.duplicates), (0, 1), "{replay:?}");
+        assert_eq!(inbox(&beta.cas_dir).len(), 1);
+        let peers = peers_of(&alpha.cas_dir, "a");
+        assert_eq!(
+            resolve_peer_target(&peers, "peer-beta@machine-beta")
+                .unwrap()
+                .unwrap()
+                .agent_id,
+            "b-new"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ct2_p3_peer_mail_survives_restart() {
+    restart_peer_mail(false, false, false).await;
+}
+
+#[tokio::test]
+async fn cas_8063_peer_mail_survives_unregister_restart() {
+    restart_peer_mail(true, false, false).await;
+}
+
+#[tokio::test]
+async fn cas_8063_legacy_deleted_address_notifies_sender_to_resend_without_forwarding_body() {
+    restart_peer_mail(true, true, false).await;
+}
+
+#[tokio::test]
+async fn cas_8063_failed_legacy_feedback_keeps_original_retryable() {
+    restart_peer_mail(true, true, true).await;
+}
+
+#[tokio::test]
+async fn cas_8063_repair_claim_batch_failure_preserves_other_batches() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(|request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let first = body["recipient_agent_ids"][0].as_str().unwrap();
+            if first == "r050" { return ResponseTemplate::new(503); }
+            ResponseTemplate::new(200).set_body_json(json!({"messages":[{
+                "id":first, "project_id":"github.com/acme/widgets", "recipient_agent_id":first,
+                "sender_agent_id":"sender", "sender_name":"sender", "body":"body",
+                "created_at":chrono::Utc::now().to_rfc3339()
+            }],"denied":[]}))
+        })
+        .mount(&server).await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let mailbox = cas::cloud::peer_mailbox::HttpPeerMailbox::new(&endpoint, "test-token");
+        let recipients: Vec<_> = (0..101).map(|i| format!("r{i:03}")).collect();
+        let report = mailbox.claim_report(&["github.com/acme/widgets".into()], &recipients, "consumer")
+            .expect("one failed claim must not discard successful batches");
+        let ids: Vec<_> = report.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["r000", "r100"]);
+        assert_eq!(report.errors.len(), 1, "partial failure remains visible");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cas_8063_repair_history_warning_keeps_mailbox_receiving() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, _) = fake_cloud_with_mailbox().await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let machine = TestMachine::new("machine-beta");
+        seed_project(&machine, &endpoint, "github.com/acme/widgets");
+        supervisor(&machine, "b");
+        let events = cas::store::open_event_store(&machine.cas_dir).unwrap();
+        // Mix typed and pre-metadata retirements: both must share the same
+        // budget, including the legacy-name backlog seen in the incident.
+        for i in 0..338 {
+            let mut event = cas::types::Event::new(
+                cas::types::EventType::AgentShutdown,
+                cas::types::EventEntityType::Agent,
+                format!("retired-{i}"),
+                "Agent unregistered: sup-b",
+            )
+            .with_metadata(json!({"retired_agent": {
+                "name":"sup-b", "role":"supervisor", "machine_id":"machine-beta",
+                "factory_session":"factory-b",
+                "registered_at":(chrono::Utc::now()-chrono::Duration::days(1)).to_rfc3339()
+            }}));
+            if i % 2 == 1 { event.metadata = None; }
+            events.record(&event).unwrap();
+        }
+        let report = tick(&machine.cas_dir, "b");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            !report.warnings.is_empty(),
+            "truncation must remain visible"
+        );
+        let text =
+            cas::cloud::peer_mailbox::mailbox_status_section(&machine.cas_dir, Some("factory-b"));
+        assert!(text.contains("Peer mailbox: receiving."), "{text}");
+        assert!(text.contains("Warning:"), "{text}");
+    })
+    .await
+    .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let recipients: Vec<String> = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/claim"))
+        .flat_map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["recipient_agent_ids"]
+                .as_array()
+                .unwrap()
+                .iter().map(|id| id.as_str().unwrap().to_string()).collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(recipients.len(), 101, "100 retired recipients plus current");
+    assert!(recipients.iter().any(|id| id == "b"));
+    assert!(recipients.iter().any(|id| id == "retired-337"), "newest retiree is included");
+    assert!(!recipients.iter().any(|id| id == "retired-218"), "120th newest retiree is excluded");
+}
+
+#[tokio::test]
+async fn cas_4fe2_partial_claim_survivors_are_admitted_and_acked_once() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, cloud_mail) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+        .and(wiremock::matchers::body_partial_json(json!({"recipient_agent_ids": (50..100).map(|i| format!("r{i:03}")).collect::<Vec<_>>()})))
+        .respond_with(ResponseTemplate::new(503)).with_priority(1).mount(&server).await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let machine = TestMachine::new("machine-beta");
+        seed_project(&machine, &endpoint, "github.com/acme/widgets");
+        let agents = open_agent_store(&machine.cas_dir).unwrap();
+        // Two current IDs plus99 retirements keeps this independent of the
+        // cap-size negative control while still crossing three HTTP chunks.
+        for i in 2..=100 {
+            let mut old = Agent::new(format!("r{i:03}"), "sup-b".into());
+            old.role = AgentRole::Supervisor;
+            old.status = cas::types::AgentStatus::Shutdown;
+            old.factory_session = Some("factory-b".into());
+            old.machine_id = Some("machine-beta".into());
+            agents.register(&old).unwrap();
+        }
+        let mut current = Agent::new("r000".into(), "sup-b".into());
+        current.role = AgentRole::Supervisor;
+        current.factory_session = Some("factory-b".into());
+        current.machine_id = Some("machine-beta".into());
+        agents.register(&current).unwrap();
+        let mut direct = current.clone();
+        direct.id = "r001".into();
+        direct.name = "direct-first".into();
+        agents.register(&direct).unwrap();
+        for id in ["r001", "r050", "r100"] {
+            cloud_mail.lock().unwrap().push(json!({
+                "id":format!("mail-{id}"), "project_id":"github.com/acme/widgets",
+                "recipient_agent_id":id, "sender_agent_id":"remote", "sender_name":"remote",
+                "body":format!("body-{id}"), "created_at":chrono::Utc::now().to_rfc3339(),
+                "status":"queued", "attempts":0
+            }));
+        }
+        let runtime = cas::cloud::peer_mailbox::PeerMailboxRuntime::start(&machine.cas_dir, "factory-b").unwrap();
+        let report = runtime.tick_blocking();
+        assert_eq!((report.claimed, report.delivered), (2, 2), "{report:?}");
+        assert!(!report.errors.is_empty(), "failed middle batch stays visible");
+        let rows = inbox(&machine.cas_dir);
+        let ids: Vec<_> = rows.iter().map(|r| parse_envelope(&r.prompt).unwrap().id).collect();
+        assert_eq!(ids, ["mail-r001", "mail-r100"]);
+        assert_eq!(rows.iter().map(|row| row.target.as_str()).collect::<Vec<_>>(), ["direct-first", "sup-b"]);
+        for row in &rows {
+            assert_eq!(row.factory_session.as_deref(), Some("factory-b"));
+        }
+        let mut mail = cloud_mail.lock().unwrap();
+        assert_eq!(mail[0]["status"], "delivered");
+        assert_eq!(mail[1]["status"], "queued", "failed chunk is neither claimed nor ACKed");
+        assert_eq!(mail[2]["status"], "delivered");
+        mail[0]["status"] = json!("queued");
+        mail[2]["status"] = json!("queued");
+        drop(mail);
+        let replay = runtime.tick_blocking();
+        assert_eq!((replay.delivered, replay.duplicates), (0, 2), "{replay:?}");
+        assert_eq!(inbox(&machine.cas_dir).len(), 2);
+        let mail = cloud_mail.lock().unwrap();
+        assert_eq!(mail[0]["status"], "delivered");
+        assert_eq!(mail[1]["status"], "queued");
+        assert_eq!(mail[2]["status"], "delivered");
+    }).await.unwrap();
+}

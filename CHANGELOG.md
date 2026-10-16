@@ -7,6 +7,191 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.58.0] - 2026-10-16
+
+### Fixed — busy Claude workers see supervisor messages at their next tool call (#1223, cas-a1ed, cas-1ba0)
+
+- The silence gate now holds only the terminal nudge. A held copy surfaces at
+  the worker's next tool call instead of waiting 15 minutes and being dropped.
+- A new terminal or urgent inject clears the held stamp, `message_status`
+  says whether a message is held for the inbox or waiting on a composer retry,
+  and a held stamp that runs out of retries raises a visible warning.
+
+### Fixed — polled messages that were never handled come back once (#1215 e, cas-6ccb)
+
+- A row returned by `inbox_poll` but never acknowledged resurfaces once at the
+  next turn's first tool call; `message_ack` or an `in_reply_to` reply ends
+  it, and broadcasts do not repeat. Migration m273 records poll-settled rows,
+  and `inbox_poll notification_id=<id>` re-reads one.
+
+### Fixed — sending to a busy worker says when the message will arrive (cas-d5ab)
+
+- A non-urgent send waits up to one second for the first delivery decision and
+  reports it in one line, for example "deferred … surfaces at its next tool
+  call or turn start". A send declined because a tool call is in flight counts
+  as worker activity.
+
+### Fixed — replies thread between supervisors and workers (cas-009c)
+
+- `in_reply_to` matches by party in either direction, treating `supervisor`
+  and the supervisor's name as the same party. The sender's own earlier row,
+  broadcasts and lifecycle rows are accepted as references without
+  acknowledging them.
+
+### Fixed — reminders wake an idle supervisor (cas-835e)
+
+- Fired reminders are stamped by the daemon with the owner's name and wake an
+  idle supervisor pane through a reminder wake class that no other sender can
+  use.
+
+### Fixed — peer messages sent during a supervisor restart are delivered (cas-8063, cas-4fe2)
+
+- A relaunched supervisor also claims mail addressed to its earlier ids from the
+  same factory, so a message sent while it was down arrives exactly once.
+- Legacy name-only claims check the factory lineage, a lasting same-factory
+  ambiguity is a warning rather than a broken mailbox, and migration m275 adds
+  an `(event_type, created_at)` index for the retired-supervisor lookup.
+
+### Fixed — abandoned-message notices fold into one, and operator sends fail fast (#1196, cas-1be0)
+
+- Abandonment notices fold into one hourly episode per recipient, and
+  Commander mirror abandonments raise none.
+- With no Commander attached and no cloud operator feed, a send to `operator`
+  fails at once instead of queueing for 15 minutes.
+
+### Added — supervisors hand off epics and hear about conflicts (#1186, cas-5c2c)
+
+- When a supervisor session ends, the epics it owns are marked orphaned and a
+  durable notice goes to a live peer or the operator. Integration notices go
+  only to live owners, and a conflict notifies both owners.
+
+### Fixed — dead workers' cloud claims no longer block their replacement (cas-50713)
+
+- A stale-assignee reset and recovery settle the dead holder's Cassy Cloud
+  claim, and holders whose session ended are no longer reported as live peers.
+
+### Fixed — quiet-worker alerts skip busy workers (cas-9bf6, cas-6eec)
+
+- A cold transcript alone no longer confirms a stall: the check also reads
+  turn evidence, a busy process and the age of the worker's last commit, and Codex
+  custom tool calls count as in flight.
+- Every authenticated MCP call and scoped edit from a worker counts as
+  activity, recorded at most once per worker every 30 seconds. A truly quiet
+  worker is still flagged.
+
+### Fixed — supervisor stall nudges stay quiet when nothing is stalled (#1225, cas-f439, cas-03ff)
+
+- A delivery already contained in its epic gets one rate-limited "awaiting
+  worker close" notice instead of repeated merge-now wakes.
+- A pending `ci_completed` or `branch_contained_in` reminder for the parked
+  tip holds the stall alarm, and the merge nudge no longer tells supervisors
+  to defer user chat.
+
+### Fixed — merge requests show the worker's proof (cas-8b0e)
+
+- The merge-request review block takes its evidence from the worker's `proof:`
+  and `ci:` lines and any QA bundle, and shows "—" for a missing risk or door
+  instead of "Evidence not supplied".
+
+### Fixed — a parked task merges at its reviewed commit after the next task starts (cas-7ce6)
+
+- Starting the next task keeps and pushes the parked tip on
+  `factory/<worker>-<task>`, and `worktree_merge` merges that anchor rather
+  than the worker's moving branch.
+
+### Fixed — respawning a worker by name reuses its kept worktree (cas-d741)
+
+- A clean, non-diverged kept worktree on the worker's own task lane is reused.
+  Dirty or diverged lanes are refused with the remedy, and a provisioning
+  failure shows as FAILED with its reason in `worker_status`.
+
+### Fixed — recycled Claude workers come back on Claude (cas-033a)
+
+- Claude workers record `CAS_FACTORY_WORKER_CLI=claude`, recycle repairs rows
+  whose model contradicts the recorded CLI, and the replacement recipe is
+  validated before the worker is stopped. A refused recipe leaves it running.
+
+### Fixed — epic close ignores reused lanes' commits for other tasks (cas-dbbf)
+
+- The stranded-branch gate counts a reused `factory/<assignee>` lane as zero
+  for a child when every extra commit belongs to another task.
+
+### Fixed — the loaded-proof close gate accepts non-Rust receipts and explains refusals (#1222, cas-a576)
+
+- The structured `target=` field accepts whole/entire/full, explicit non-Rust,
+  or exact vitest, jest, pytest or go test runs; a Rust module filter is still
+  refused. Each refusal lists the fields it parsed and the ones missing, with
+  an accepted example.
+
+### Fixed — the coordination tool states its message limits and reminder rules (cas-3349)
+
+- The coordination schema documents the body caps, the refusal of over-cap
+  operator and Commander messages, external-reminder filters, `cross_session`
+  and the 7-day external TTL default. The filter validator and parser now pick
+  aliases the same way.
+
+### Changed — factory loop I/O moves off the TUI thread (#1211, cas-d2a2, cas-4272, cas-223f, cas-3b16, cas-786a6)
+
+- Prompt-queue selection, per-row stamps and settles run as background jobs;
+  failed stamps are deferred rather than dropped and a message is injected
+  once.
+- Director snapshots, worker health probes, reminder scans and stall-check
+  file reads run off the loop, and `RevalidateFresh` always reads fresh.
+- Input routing and injects no longer block typing: terminal writes are
+  buffered and non-blocking, and urgent injects use a per-pane state machine
+  with a two-phase claim.
+
+### Fixed — `cas violet` uses the saved Violet credentials (cas-0a4c, cas-8235)
+
+- `cas violet` resolves credentials through the shared resolver, falling back
+  to the private credentials file, and a missing credential names the paths it
+  tried.
+- `cas update` rewrites a stale project or user proxy `auth` reference to the
+  registered account credential, leaves custom references alone and never
+  writes secrets; doctor reports stale defaults.
+
+### Fixed — CLI error lines and `cas config list` are readable on light themes (cas-d0b1, cas-828c)
+
+- Error lines colour only the mark, honour `NO_COLOR` and print `[ERROR]` under
+  a plain `C` locale.
+- `cas config list` headings and changed values use text-palette colours that
+  reach 4.5:1 contrast on light and Solarized themes.
+
+### Fixed — terminal QA runs through a symlinked skills folder (cas-bbefd)
+
+- `terminal-qa.mjs` compares the real paths in its entry guard, so a symlinked
+  launch runs and writes a receipt; an unavailable runner exits 2 and removes
+  stale PASS files.
+
+### Fixed — Commander permission notes give one instruction that works (cas-ba64)
+
+- Tasks & progress shows one lead line and one instruction to pair again,
+  Paired machines lists what is needed first, and the disabled "Stop and
+  restart" button no longer looks like a fleet action.
+
+### Fixed — the Cassy Cloud apps menu closes after Explorer opens (cas-2a26)
+
+- Following Explorer by click, tap or Enter closes the switcher in Commander's
+  tab and returns focus to the apps button.
+
+### Fixed — release latency receipts work with main-push publication (cas-fab8)
+
+- `scripts/release-latency-receipt.sh` finds the main-push `release.yml` run
+  and reports the gate-green or main-landed start; `cas release report` adds
+  a "Main to published" figure.
+
+### Fixed — worker test proofs run without the host's installed tools (cas-a9fc, cas-5a88)
+
+- Named-test proofs run with `PATH` limited to the build toolchain and
+  `/usr/bin:/bin`, so an installed `cas` cannot hide a failure.
+- Two tests that read the host's process tree now use injected probes.
+
+### Added — multi-supervisor coordination design spec (#1215, cas-a613)
+
+- `docs/specs/2026-10-16-multi-supervisor-coordination.md` proposes explicit
+  claims on outside work, one wake per claimed Slack thread, a staging merge
+  lock and an ownership view. Documentation only; not yet implemented.
+
 ## [3.57.0] - 2026-10-15
 
 ### Fixed — upgrades keep Violet working across Claude profiles (cas-678d)

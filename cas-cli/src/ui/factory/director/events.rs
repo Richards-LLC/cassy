@@ -66,7 +66,7 @@ impl SupervisorActionableState {
                 )
             }
             Self::MergeCloseBlocked { tasks } => format!(
-                "Drive to the exit: delivery is already merged, but close is blocked; do not merge the factory branch again:\n{}",
+                "Drive to the exit: delivery is already merged; awaiting worker close. Do not merge the factory branch again:\n{}",
                 render_merged_close_blocked(tasks, tool_prefix)
             ),
             Self::MergeQueue {
@@ -78,7 +78,7 @@ impl SupervisorActionableState {
                 }
                 .next_step_text_for(tool_prefix);
                 let merged = format!(
-                    "Delivery already merged but close is blocked; do not merge those factory branches again:\n{}",
+                    "Delivery already merged; awaiting worker close. Do not merge those factory branches again:\n{}",
                     render_merged_close_blocked(merged_close_blocked, tool_prefix)
                 );
                 format!("{unmerged}\n{merged}")
@@ -115,7 +115,7 @@ fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask], tool_prefix: &s
         .iter()
         .map(|task| {
             format!(
-                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified\"`).",
+                "- {}: {} delivery {} is already contained in {} (local/origin; sampled tip {}). Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified\"`).",
                 task.task_id,
                 task.factory_branch,
                 task.anchor,
@@ -135,8 +135,8 @@ fn merged_close_blocked_key(tasks: &[MergedCloseBlockedTask]) -> String {
         .iter()
         .map(|task| {
             format!(
-                "{}:{}:{}:{}",
-                task.task_id, task.anchor, task.target_branch, task.target_tip
+                "{}:{}:{}",
+                task.task_id, task.anchor, task.target_branch
             )
         })
         .collect::<Vec<_>>()
@@ -145,8 +145,8 @@ fn merged_close_blocked_key(tasks: &[MergedCloseBlockedTask]) -> String {
 
 impl SupervisorActionableState {
     /// Stable dedupe key for merged-but-close-blocked relay rows. The key
-    /// intentionally changes only when the task identity/anchor, target ref,
-    /// or target tip changes; a repeated supervisor-stall sample must not
+    /// intentionally changes only when the task identity/anchor or target ref
+    /// changes; unrelated target commits must not
     /// manufacture another close demand for the same merged delivery.
     pub(crate) fn merged_close_blocked_relay_key(&self) -> Option<String> {
         let tasks = match self {
@@ -203,7 +203,7 @@ pub struct SupervisorStallTracker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_supervisor_activity_at: Option<DateTime<Utc>>,
     /// Stable merged-delivery state most recently delivered. A changed anchor
-    /// or target tip must wake immediately, while an unchanged merged
+    /// may wake after the rate limit, while an unchanged merged
     /// delivery must not refire the same close demand every ten minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
@@ -232,7 +232,6 @@ impl SupervisorStallTracker {
             self.actionable_idle_secs = 0;
             self.actionable_idle_started_at = None;
             self.last_wake_at = None;
-            self.last_merged_close_blocked_key = None;
             self.last_supervisor_activity_at = last_supervisor_mcp_call_at;
         }
 
@@ -266,18 +265,12 @@ impl SupervisorStallTracker {
         let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
             self.last_merged_close_blocked_key.as_ref() == Some(key)
         });
-        let wake = if condition_true
-            && if merged_key.is_some() {
-                !merged_state_repeated
-            } else {
-                refire_due
-            }
-        {
+        let wake = if condition_true && refire_due && !merged_state_repeated {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
             actionable
         } else {
-            if !condition_true || merged_key.is_none() {
+            if merged_key.is_none() {
                 self.last_merged_close_blocked_key = None;
             }
             None
@@ -321,6 +314,60 @@ pub enum DeliveryHold {
     /// cas-207e: the delivery's lane CI is still running. A code merge on
     /// pending CI is refused (cas-6c13), so it is not a ready merge yet.
     LaneCiPending,
+    /// Factory loop v2 (cas-223f): the delivery's git, CI and task-store
+    /// evidence is computed off the loop in the `DirectorSnapshot` job and has
+    /// not arrived for this task yet. Unknown is never "merge now"; the next
+    /// snapshot carries the evidence.
+    EvidencePending,
+}
+
+/// cas-03ff: whether the supervisor has a pending external reminder waiting
+/// on this delivery: `ci_completed` for its tip, or `branch_contained_in`
+/// for its tip or branch. Waiting on CI or on a merge to land is not a stall.
+/// A reminder for some other delivery leaves this one's merge alarm alone.
+pub(crate) fn supervisor_reminder_watches_delivery(
+    data: &DirectorData,
+    supervisor_name: &str,
+    branch: &str,
+    tip: Option<&str>,
+) -> bool {
+    let supervisor_ids: HashSet<&str> = data
+        .agents
+        .iter()
+        .filter(|agent| agent.name == supervisor_name)
+        .map(|agent| agent.id.as_str())
+        .collect();
+    let names_delivery = |value: &str| {
+        let value = value.trim().trim_start_matches("origin/");
+        if value == branch.trim_start_matches("origin/") {
+            return true;
+        }
+        let Some(tip) = tip else {
+            return false;
+        };
+        let (value, tip) = (value.to_ascii_lowercase(), tip.to_ascii_lowercase());
+        let hex = |text: &str| text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit());
+        hex(&value) && hex(&tip) && (tip.starts_with(&value) || value.starts_with(&tip))
+    };
+    data.reminders.iter().any(|reminder| {
+        reminder.status == cas_store::ReminderStatus::Pending
+            && (supervisor_ids.contains(reminder.target_id.as_str())
+                || reminder.target_id == supervisor_name)
+            && matches!(
+                reminder.trigger_event.as_deref(),
+                Some("ci_completed" | "branch_contained_in")
+            )
+            && reminder
+                .trigger_filter
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|filter| {
+                    ["sha", "commit", "branch_tip", "branch"]
+                        .iter()
+                        .filter_map(|key| filter.get(*key).and_then(serde_json::Value::as_str))
+                        .any(names_delivery)
+                })
+    })
 }
 
 /// Marker the close gate writes each time a delivery parks for merge.
@@ -587,6 +634,11 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
             continue;
         }
         let (branch, tip) = resolve_delivery(task, worker);
+        // cas-03ff: the supervisor is waiting on this delivery's CI or on it
+        // landing, so it is not a stalled merge.
+        if supervisor_reminder_watches_delivery(data, supervisor_name, &branch, tip.as_deref()) {
+            continue;
+        }
         if let Some(target) = merge_target_for_task(data, task)
             && let Some(merged) = classify_merged_close_blocked(
                 task,
@@ -1173,7 +1225,176 @@ struct StallProbeCache {
     next_probe_at: DateTime<chrono::Utc>,
     delay_secs: i64,
     path: Option<std::path::PathBuf>,
-    fingerprint: Option<(std::time::SystemTime, u64)>,
+    fingerprint: TranscriptFingerprint,
+}
+
+/// A transcript's modification time and length; `None` when it could not be
+/// read. A changed fingerprint means the worker wrote to its transcript.
+pub(crate) type TranscriptFingerprint = Option<(std::time::SystemTime, u64)>;
+
+/// Factory loop v2 (cas-223f, spec §4.3): one `WorkerHealthProbe` job, the
+/// IO half of stall confirmation (`resolve_worker`, the `/proc` scan and the
+/// transcript reads). The detector asks for it, and the daemon runs it on the
+/// jobs runtime's blocking lane, single-flight per worker and task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerHealthRequest {
+    pub(crate) worker: String,
+    pub(crate) task: String,
+    pub(crate) threshold_secs: u64,
+    /// How long the verdict is cached once it lands (cas-7156: 5 s, doubling
+    /// to 60 s while the transcript is unchanged).
+    pub(crate) delay_secs: i64,
+    /// The detector tick that asked; the cached verdict is due again at
+    /// `requested_at + delay_secs`.
+    pub(crate) requested_at: DateTime<Utc>,
+}
+
+/// The finished probe, applied with
+/// [`DirectorEventDetector::apply_worker_health_report`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerHealthReport {
+    pub(crate) worker: String,
+    pub(crate) task: String,
+    /// Whether the checkpoint-age stall candidate is confirmed.
+    pub(crate) confirmed: bool,
+    pub(crate) transcript_path: Option<std::path::PathBuf>,
+    /// Transcript mtime and length when probed, so a later write invalidates
+    /// the cached verdict (with deferred probes, once the next snapshot job
+    /// reads the new fingerprint; cas-3b16).
+    pub(crate) fingerprint: Option<(std::time::SystemTime, u64)>,
+    /// Latest activity the probe saw (open tool call, background process or
+    /// a fresh transcript write).
+    pub(crate) activity: Option<DateTime<Utc>>,
+    pub(crate) delay_secs: i64,
+    pub(crate) requested_at: DateTime<Utc>,
+}
+
+impl WorkerHealthReport {
+    /// A report that carries a verdict but no transcript evidence.
+    pub(crate) fn verdict(request: &WorkerHealthRequest, confirmed: bool) -> Self {
+        Self {
+            worker: request.worker.clone(),
+            task: request.task.clone(),
+            confirmed,
+            transcript_path: None,
+            fingerprint: None,
+            activity: None,
+            delay_secs: request.delay_secs,
+            requested_at: request.requested_at,
+        }
+    }
+}
+
+/// Run one worker health probe: resolve the worker, read its transcript age
+/// and open tool calls, and scan `/proc` for its background processes. Blocks
+/// on the filesystem and `/proc`, so the daemon runs it as a job, never on the
+/// loop. `cas_root = None` keeps the checkpoint-only fallback (confirmed).
+pub(crate) fn run_worker_health_probe(
+    cas_root: Option<&std::path::Path>,
+    request: &WorkerHealthRequest,
+) -> WorkerHealthReport {
+    use crate::cli::factory::wedged;
+    let Some(cas_root) = cas_root else {
+        return WorkerHealthReport::verdict(request, true);
+    };
+    let Ok(resolved) = wedged::resolve_worker(cas_root, &request.worker) else {
+        return WorkerHealthReport::verdict(request, true);
+    };
+    let Some(path) = resolved.transcript_path.as_deref() else {
+        return WorkerHealthReport::verdict(request, false);
+    };
+    let background_active = wedged::find_worker_pid(&wedged::RealProcessTable, &resolved.name)
+        .or(resolved.pid)
+        .map(wedged::background_processes_for)
+        .is_some_and(|state| state.is_active());
+    let age = wedged::transcript_mtime_age(path);
+    let window = wedged::activity_fresh_window(resolved.cli)
+        .max(Duration::from_secs(request.threshold_secs));
+    let in_flight = wedged::transcript_has_in_flight_tool_call(path, resolved.cli);
+    let transcript_confirms =
+        transcript_confirms_stall_for_age_with_background(age, window, in_flight, background_active);
+    let now = request.requested_at;
+    // cas-9bf6: a cold transcript is not proof of a stall on its own; the
+    // execution evidence `worker_status` reports and the clone's HEAD commit
+    // age are consulted first (on this job's thread, never the loop).
+    let evidence = if transcript_confirms {
+        crate::mcp::tools::service::factory_ops::worker_stall_evidence(
+            cas_root,
+            &request.worker,
+            now,
+            request.threshold_secs as i64,
+        )
+        .map(|evidence| (evidence.executing, evidence.worktree_activity_age))
+        .unwrap_or((false, None))
+    } else {
+        (false, None)
+    };
+    let (confirmed, activity) = stall_verdict(
+        transcript_confirms,
+        age,
+        window,
+        in_flight,
+        background_active,
+        evidence,
+        now,
+    );
+    WorkerHealthReport {
+        worker: request.worker.clone(),
+        task: request.task.clone(),
+        confirmed,
+        transcript_path: Some(path.to_path_buf()),
+        fingerprint: stall_transcript_fingerprint(path),
+        activity,
+        delay_secs: request.delay_secs,
+        requested_at: request.requested_at,
+    }
+}
+
+/// cas-9bf6: the stall verdict and the activity it saw, from the transcript
+/// signals plus `worker_status` execution evidence `(executing, scoped edit/commit
+/// age)`. A worker executing, editing or committing inside the window is active,
+/// not stalled.
+fn stall_verdict(
+    transcript_confirms: bool,
+    age: Option<Duration>,
+    window: Duration,
+    in_flight: bool,
+    background_active: bool,
+    (executing, commit_age): (bool, Option<Duration>),
+    now: DateTime<Utc>,
+) -> (bool, Option<DateTime<Utc>>) {
+    let commit_fresh = commit_age.filter(|age| *age < window);
+    let confirmed = transcript_confirms && !executing && commit_fresh.is_none();
+    let activity = if in_flight || background_active || executing {
+        Some(now)
+    } else {
+        age.filter(|age| *age < window)
+            .into_iter()
+            .chain(commit_fresh)
+            .min()
+            .and_then(|age| chrono::Duration::from_std(age).ok())
+            .map(|age| now - age)
+    };
+    (confirmed, activity)
+}
+
+/// Whether `observed` shows a transcript write after the probe that read
+/// `probed`. A snapshot can read the fingerprint before a probe that applies
+/// after it, so an observation older than the probe's (an earlier
+/// modification time) is not a write.
+fn transcript_written_since(probed: TranscriptFingerprint, observed: TranscriptFingerprint) -> bool {
+    match (probed, observed) {
+        (Some((probed_at, probed_len)), Some((observed_at, observed_len))) => {
+            observed_at > probed_at || (observed_at == probed_at && observed_len != probed_len)
+        }
+        (probed, observed) => probed != observed,
+    }
+}
+
+/// Read a transcript's [`TranscriptFingerprint`]. Blocks on the filesystem,
+/// so the daemon calls it from its snapshot job, never on the loop (cas-3b16).
+pub(crate) fn transcript_fingerprint(path: &std::path::Path) -> TranscriptFingerprint {
+    stall_transcript_fingerprint(path)
 }
 
 fn stall_transcript_fingerprint(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
@@ -1244,6 +1465,18 @@ pub struct DirectorEventDetector {
     /// Alarm cooldown survives streak resets; keyed by kind and worker/task.
     stall_alarm_at: HashMap<(String, String, bool), DateTime<chrono::Utc>>,
     stall_probe_cache: HashMap<(String, String), StallProbeCache>,
+    /// Factory loop v2 (cas-223f): when set, stall confirmation never probes
+    /// inline. It queues a [`WorkerHealthRequest`] for the daemon to run as a
+    /// job and decides from the cached verdict meanwhile.
+    deferred_health_probes: bool,
+    /// Probes asked for and not yet applied, one per (worker, task).
+    health_probes_in_flight: HashSet<(String, String)>,
+    /// cas-3b16: with deferred probes, the cached transcripts' fingerprints
+    /// as the latest snapshot job read them. A cached verdict is invalidated
+    /// by a change seen here, never by a `stat` on the loop.
+    observed_transcript_fingerprints: HashMap<std::path::PathBuf, TranscriptFingerprint>,
+    /// Requests the daemon has not collected yet.
+    health_probe_requests: Vec<WorkerHealthRequest>,
     #[cfg(test)]
     pub(super) stall_probe_count: usize,
     /// Transcript/tool evidence remains activity after a call closes.
@@ -1309,6 +1542,12 @@ pub struct DirectorEventDetector {
     /// map) means "no in-flight call" — production resolves this via
     /// `wedged::transcript_has_in_flight_tool_call`.
     transcript_in_flight_override: Option<HashMap<String, bool>>,
+    /// (cas-9bf6) Test-only override for the `worker_status` execution
+    /// evidence the stall probe consults after the transcript: per worker,
+    /// whether worker_status reports `executing` (turn evidence or a
+    /// CPU-busy harness) and the age of the clone's HEAD commit. Missing
+    /// workers read as not executing with no commit.
+    worker_evidence_override: Option<HashMap<String, (bool, Option<Duration>)>>,
     /// (cas-09d0) Workers explicitly put on hold by the supervisor — a
     /// first-class primitive for "deliberately paused, not idle-needing-work"
     /// that doesn't require a task-status transition (unlike `AwaitingMerge`,
@@ -1360,6 +1599,10 @@ impl DirectorEventDetector {
             stall_escalated: HashSet::new(),
             stall_alarm_at: HashMap::new(),
             stall_probe_cache: HashMap::new(),
+            deferred_health_probes: false,
+            health_probes_in_flight: HashSet::new(),
+            observed_transcript_fingerprints: HashMap::new(),
+            health_probe_requests: Vec::new(),
             #[cfg(test)]
             stall_probe_count: 0,
             observed_worker_activity: HashMap::new(),
@@ -1369,6 +1612,7 @@ impl DirectorEventDetector {
             transcript_age_override: None,
             transcript_window_override: None,
             transcript_in_flight_override: None,
+            worker_evidence_override: None,
             held_workers: HashSet::new(),
             merge_alert_last_evidence: HashMap::new(),
         }
@@ -1445,6 +1689,16 @@ impl DirectorEventDetector {
         self.transcript_in_flight_override = Some(in_flight);
     }
 
+    /// (cas-9bf6) Test-only seam: inject the `worker_status` execution
+    /// evidence (executing, HEAD commit age) the stall probe consults.
+    #[cfg(test)]
+    pub(crate) fn set_worker_evidence_override(
+        &mut self,
+        evidence: HashMap<String, (bool, Option<Duration>)>,
+    ) {
+        self.worker_evidence_override = Some(evidence);
+    }
+
     /// Initialize with current state (call after first data load)
     pub fn initialize(&mut self, data: &DirectorData) {
         self.last_state = DirectorState::from_data(data);
@@ -1485,28 +1739,124 @@ impl DirectorEventDetector {
     /// worker without transcript telemetry does not confirm a stall.
     fn transcript_confirms_stall(
         &mut self, worker: &str, task: &str, now: DateTime<chrono::Utc>, threshold: u64,
-    ) -> bool {
+    ) -> Option<bool> {
         // Overrides are deterministic test signals. Production invalidates a
         // cached verdict on transcript writes, so a new open call cannot inherit
         // the previous cold verdict. Unchanged cold workers back off to 60s.
         if self.transcript_age_override.is_some() {
-            return self.probe_worker_stall(worker, now, threshold).0;
+            return Some(self.probe_worker_stall(worker, now, threshold).0);
         }
         let key = (worker.to_string(), task.to_string());
         let mut delay = 5;
+        let mut cached_verdict = None;
         if let Some(cached) = self.stall_probe_cache.get(&key) {
-            let unchanged = cached.path.as_deref().map(stall_transcript_fingerprint)
-                .unwrap_or(None) == cached.fingerprint;
-            if now < cached.next_probe_at && unchanged { return cached.confirmed; }
-            if unchanged { delay = (cached.delay_secs * 2).min(60); }
+            let unchanged = match cached.path.as_deref() {
+                None => cached.fingerprint.is_none(),
+                // cas-3b16: no IO on the loop. The snapshot job read the
+                // fingerprint; one it has not read yet counts as unchanged
+                // until the next snapshot.
+                Some(path) if self.deferred_health_probes => self
+                    .observed_transcript_fingerprints
+                    .get(path)
+                    .is_none_or(|observed| !transcript_written_since(cached.fingerprint, *observed)),
+                Some(path) => stall_transcript_fingerprint(path) == cached.fingerprint,
+            };
+            if now < cached.next_probe_at && unchanged { return Some(cached.confirmed); }
+            if unchanged {
+                delay = (cached.delay_secs * 2).min(60);
+                cached_verdict = Some(cached.confirmed);
+            }
         }
-        let (confirmed, path) = self.probe_worker_stall(worker, now, threshold);
-        let fingerprint = path.as_deref().and_then(stall_transcript_fingerprint);
-        self.stall_probe_cache.insert(key, StallProbeCache { confirmed,
-            next_probe_at: now + chrono::Duration::seconds(delay), delay_secs: delay, path, fingerprint });
-        confirmed
+        let request = WorkerHealthRequest {
+            worker: worker.to_string(),
+            task: task.to_string(),
+            threshold_secs: threshold,
+            delay_secs: delay,
+            requested_at: now,
+        };
+        if self.deferred_health_probes {
+            // cas-223f: the probe runs as a job. Until it lands, an unchanged
+            // transcript keeps its last verdict; a missing or invalidated one
+            // is undecided, so the candidate neither fires nor resets.
+            if self.health_probes_in_flight.insert(key) {
+                self.health_probe_requests.push(request);
+            }
+            return cached_verdict;
+        }
+        #[cfg(test)]
+        { self.stall_probe_count += 1; }
+        let report = run_worker_health_probe(self.cas_root.as_deref(), &request);
+        Some(self.apply_worker_health_report(report))
     }
 
+    /// Factory loop v2 (cas-223f): probe worker health off the loop. Stall
+    /// confirmation then queues [`WorkerHealthRequest`]s (collect them with
+    /// [`Self::take_worker_health_requests`]) instead of scanning `/proc` and
+    /// reading transcripts on the caller's thread.
+    pub(crate) fn set_deferred_health_probes(&mut self, deferred: bool) {
+        self.deferred_health_probes = deferred;
+    }
+
+    /// The transcripts whose cached stall verdict a write would invalidate,
+    /// for the next snapshot job to fingerprint (cas-3b16). Empty unless
+    /// probes are deferred.
+    pub(crate) fn stall_transcript_paths(&self) -> Vec<std::path::PathBuf> {
+        if !self.deferred_health_probes {
+            return Vec::new();
+        }
+        let mut paths: Vec<std::path::PathBuf> = self
+            .stall_probe_cache
+            .values()
+            .filter_map(|cached| cached.path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// The fingerprints a snapshot job read for [`Self::stall_transcript_paths`].
+    pub(crate) fn observe_transcript_fingerprints(
+        &mut self,
+        fingerprints: HashMap<std::path::PathBuf, TranscriptFingerprint>,
+    ) {
+        self.observed_transcript_fingerprints = fingerprints;
+    }
+
+    /// Probes asked for since the last call, at most one per (worker, task)
+    /// until its report is applied or cleared.
+    pub(crate) fn take_worker_health_requests(&mut self) -> Vec<WorkerHealthRequest> {
+        std::mem::take(&mut self.health_probe_requests)
+    }
+
+    /// Apply a finished probe: cache its verdict for its backoff step and
+    /// record the activity it saw. Returns the verdict.
+    pub(crate) fn apply_worker_health_report(&mut self, report: WorkerHealthReport) -> bool {
+        let key = (report.worker.clone(), report.task.clone());
+        self.health_probes_in_flight.remove(&key);
+        if let Some(activity) = report.activity {
+            self.observed_worker_activity
+                .entry(report.worker.clone())
+                .and_modify(|previous| *previous = (*previous).max(activity))
+                .or_insert(activity);
+        }
+        self.stall_probe_cache.insert(key, StallProbeCache {
+            confirmed: report.confirmed,
+            next_probe_at: report.requested_at + chrono::Duration::seconds(report.delay_secs),
+            delay_secs: report.delay_secs,
+            path: report.transcript_path,
+            fingerprint: report.fingerprint,
+        });
+        report.confirmed
+    }
+
+    /// A probe that will not report (refused, dropped or panicked): ask again
+    /// on the next tick.
+    pub(crate) fn clear_worker_health_probe(&mut self, worker: &str, task: &str) {
+        self.health_probes_in_flight
+            .remove(&(worker.to_string(), task.to_string()));
+    }
+
+    /// Test-override probe: deterministic transcript signals, no IO.
     fn probe_worker_stall(
         &mut self,
         worker_name: &str,
@@ -1515,69 +1865,57 @@ impl DirectorEventDetector {
     ) -> (bool, Option<std::path::PathBuf>) {
         #[cfg(test)]
         { self.stall_probe_count += 1; }
-        let mut transcript_path = None;
-        let (age, window, in_flight, background_active) = if let Some(overrides) =
-            &self.transcript_age_override
-        {
-            (
-                overrides.get(worker_name).copied().flatten(),
-                self.transcript_window_override
-                    .as_ref()
-                    .and_then(|m| m.get(worker_name).copied())
-                    .unwrap_or(crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW),
-                self.transcript_in_flight_override
-                    .as_ref()
-                    .and_then(|m| m.get(worker_name).copied())
-                    .unwrap_or(false),
-                false,
-            )
-        } else {
-            let Some(cas_root) = &self.cas_root else {
-                return (true, None);
-            };
-            let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, worker_name)
-            else {
-                return (true, None);
-            };
-            let Some(path) = resolved.transcript_path.as_deref() else {
-                return (false, None);
-            };
-            transcript_path = Some(path.to_path_buf());
-            let background = crate::cli::factory::wedged::find_worker_pid(
-                &crate::cli::factory::wedged::RealProcessTable,
-                &resolved.name,
-            )
-            .or(resolved.pid)
-            .map(crate::cli::factory::wedged::background_processes_for)
-            .is_some_and(|state| state.is_active());
-            (
-                crate::cli::factory::wedged::transcript_mtime_age(path),
-                crate::cli::factory::wedged::activity_fresh_window(resolved.cli),
-                crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli),
-                background,
-            )
+        let Some(overrides) = &self.transcript_age_override else {
+            let report = run_worker_health_probe(
+                self.cas_root.as_deref(),
+                &WorkerHealthRequest {
+                    worker: worker_name.to_string(),
+                    task: String::new(),
+                    threshold_secs,
+                    delay_secs: 0,
+                    requested_at: now,
+                },
+            );
+            let path = report.transcript_path.clone();
+            if let Some(activity) = report.activity {
+                self.observed_worker_activity
+                    .entry(worker_name.to_string())
+                    .and_modify(|previous| *previous = (*previous).max(activity))
+                    .or_insert(activity);
+            }
+            return (report.confirmed, path);
         };
+        let age = overrides.get(worker_name).copied().flatten();
+        let window = self
+            .transcript_window_override
+            .as_ref()
+            .and_then(|m| m.get(worker_name).copied())
+            .unwrap_or(crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW);
+        let in_flight = self
+            .transcript_in_flight_override
+            .as_ref()
+            .and_then(|m| m.get(worker_name).copied())
+            .unwrap_or(false);
         let window = window.max(Duration::from_secs(threshold_secs));
-        let confirmed = transcript_confirms_stall_for_age_with_background(
-            age,
-            window,
-            in_flight,
-            background_active,
-        );
-        let activity = if in_flight || background_active {
-            Some(now)
+        let transcript_confirms =
+            transcript_confirms_stall_for_age_with_background(age, window, in_flight, false);
+        let evidence = if transcript_confirms {
+            self.worker_evidence_override
+                .as_ref()
+                .and_then(|overrides| overrides.get(worker_name).copied())
+                .unwrap_or((false, None))
         } else {
-            age.filter(|age| *age < window)
-                .and_then(|age| chrono::Duration::from_std(age).ok())
-                .map(|age| now - age)
+            (false, None)
         };
+        let (confirmed, activity) =
+            stall_verdict(transcript_confirms, age, window, in_flight, false, evidence, now);
         if let Some(activity) = activity {
             self.observed_worker_activity
                 .entry(worker_name.to_string())
                 .and_modify(|previous| *previous = (*previous).max(activity))
                 .or_insert(activity);
         }
-        (confirmed, transcript_path)
+        (confirmed, None)
     }
 
     fn admit_stall_alarm(
@@ -1926,7 +2264,7 @@ impl DirectorEventDetector {
                 );
 
                 if has_fresh_heartbeat && elapsed.is_some()
-                    && self.transcript_confirms_stall(&resolved_name, &task.id, now_utc, effective_threshold) {
+                    && self.transcript_confirms_stall(&resolved_name, &task.id, now_utc, effective_threshold) == Some(true) {
                     if !self.stall_escalated.contains(&agent.id)
                         && self.admit_stall_alarm(
                             &resolved_name,
@@ -2060,9 +2398,13 @@ impl DirectorEventDetector {
                         // alerts for a worker that's confirmed alive —
                         // it never re-enters the `stalled_elapsed_secs`
                         // branch while its transcript stays fresh.
-                        if !self.transcript_confirms_stall(&resolved_name, task_id, now_utc, effective_threshold) {
+                        // cas-223f: `None` is a probe still running off the
+                        // loop; leave the streak as it is until it lands.
+                        let confirmed = self.transcript_confirms_stall(&resolved_name, task_id, now_utc, effective_threshold);
+                        if confirmed == Some(false) {
                             self.stall_nudged.remove(&agent.id);
                             self.stall_escalated.remove(&agent.id);
+                        } else if confirmed.is_none() {
                         } else if !self.stall_nudged.contains(&agent.id)
                             && self.admit_stall_alarm(
                                 &resolved_name,
@@ -2248,6 +2590,8 @@ impl DirectorEventDetector {
             .retain(|name| seen_factory_agent_names.contains(name));
         self.stall_probe_cache
             .retain(|(name, _), _| seen_factory_agent_names.contains(name));
+        self.health_probes_in_flight
+            .retain(|(name, _)| seen_factory_agent_names.contains(name));
         self.stall_alarm_at
             .retain(|(name, _, _), _| seen_factory_agent_names.contains(name));
         self.observed_worker_activity

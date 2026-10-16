@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
@@ -56,6 +56,8 @@ pub struct CasCore {
     pub(crate) agent_id: OnceLock<Option<String>>,
     /// Server-side provenance for `agent_id`; absent is always non-authoritative.
     pub(crate) agent_identity_source: OnceLock<AgentIdentitySource>,
+    /// One immutable caller per core; clones share its activity rate limit.
+    pub(crate) worker_mcp_activity: Arc<Mutex<WorkerMcpActivityState>>,
     /// Peer reference for sending MCP notifications (Claude Code 2.1.0+)
     /// Captured on first request, used to notify client of resource changes
     pub(crate) peer: Arc<RwLock<Option<Peer<RoleServer>>>>,
@@ -76,6 +78,12 @@ pub struct CasCore {
     pub(crate) cached_search_index: OnceLock<SearchIndex>,
     /// Cached config (lazily initialized, loaded once per server lifetime)
     pub(crate) cached_config: OnceLock<Config>,
+}
+
+#[derive(Default)]
+pub(crate) struct WorkerMcpActivityState {
+    pub(crate) last_recorded_at: Option<std::time::Instant>,
+    pub(crate) recording: bool,
 }
 
 impl CasCore {

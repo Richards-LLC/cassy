@@ -267,7 +267,7 @@ impl<'w> Formatter<'w> {
 
     /// Write text with the accent color.
     pub fn write_accent(&mut self, text: &str) -> io::Result<()> {
-        let color = self.theme.palette.accent;
+        let color = self.theme.palette.text_accent;
         self.write_colored(text, color)
     }
 
@@ -302,7 +302,7 @@ impl<'w> Formatter<'w> {
     pub fn heading(&mut self, text: &str) -> io::Result<()> {
         if self.mode == OutputMode::Styled {
             let bar = Icons::SEPARATOR_DOUBLE;
-            let color = self.theme.palette.accent;
+            let color = self.theme.palette.text_accent;
             self.write_bold_colored(&format!("{bar}{bar}{bar} {text} {bar}{bar}{bar}"), color)?;
         } else {
             write!(self.writer, "--- {text} ---")?;
@@ -329,7 +329,7 @@ impl<'w> Formatter<'w> {
 
     /// Print a success status: `✓ message`
     pub fn success(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_success;
+        let color = self.theme.palette.text_success;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::CHECK), color)?;
         } else {
@@ -340,7 +340,7 @@ impl<'w> Formatter<'w> {
 
     /// Print a warning: `⚠ message`
     pub fn warning(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_warning;
+        let color = self.theme.palette.text_warning;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::WARNING), color)?;
         } else {
@@ -349,20 +349,22 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print an error: `✗ message`
+    /// Print an error: `✗ message` on a styled UTF-8 terminal, `[ERROR] message` otherwise.
     pub fn error(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_error;
+        let label = Verdict::Error.label(self.glyphs());
         if self.mode == OutputMode::Styled {
-            self.write_colored(&format!("{} {message}", Icons::CROSS), color)?;
+            self.write_colored(label, self.theme.palette.text_error)?;
         } else {
-            write!(self.writer, "[ERROR] {message}")?;
+            self.write_raw(label)?;
         }
+        self.write_raw(" ")?;
+        self.write_text(message)?;
         self.newline()
     }
 
     /// Print an info message: `ℹ message`
     pub fn info(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.status_info;
+        let color = self.theme.palette.text_info;
         if self.mode == OutputMode::Styled {
             self.write_colored(&format!("{} {message}", Icons::INFO), color)?;
         } else {
@@ -684,6 +686,27 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("\x1b["));
         assert!(output.contains("styled"));
+    }
+
+    #[test]
+    fn test_error_renderer_uses_text_error_mark_and_ascii_fallback_under_c_locale() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        env.remove("NO_COLOR");
+        let theme = ActiveTheme::default_light();
+        let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
+            panic!("text_error must use a concrete theme color");
+        };
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut buf, theme);
+            fmt.error("configuration failed").unwrap();
+        }
+
+        let output = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            output,
+            format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+        );
     }
 
     #[test]

@@ -175,6 +175,14 @@ pub trait SupervisorQueueStore: Send + Sync {
     /// `drain_lifecycle_outbox` after process restart.
     fn list_pending_lifecycle_outbox(&self, limit: usize) -> Result<Vec<SupervisorNotification>>;
 
+    /// Bounded, event-filtered prompts awaiting adoption by a delivery daemon.
+    fn list_pending_prompt_outbox(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>>;
+
     /// Poll for pending notifications (ordered by priority, then created_at)
     /// Returns up to `limit` notifications and marks them as processed
     fn poll(&self, supervisor_id: &str, limit: usize) -> Result<Vec<SupervisorNotification>>;
@@ -418,6 +426,30 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         Ok(rows)
     }
 
+    fn list_pending_prompt_outbox(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
+                    transition_key, prompt_delivered_at
+             FROM supervisor_queue
+             WHERE supervisor_id = ?1 AND event_type = ?2
+               AND processed_at IS NULL AND prompt_delivered_at IS NULL
+             ORDER BY priority ASC, created_at ASC, id ASC LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![supervisor_id, event_type, limit as i64],
+                Self::notification_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn poll(&self, supervisor_id: &str, limit: usize) -> Result<Vec<SupervisorNotification>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -626,6 +658,88 @@ mod tests {
         let store = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn cas_5c2c_round2_pending_prompt_query_filters_before_limit() {
+        let (_temp, store) = create_test_store();
+        for _ in 0..40 {
+            store
+                .notify("operator", "unrelated", "{}", NotificationPriority::High)
+                .unwrap();
+        }
+        let done = store
+            .notify(
+                "operator",
+                "supervisor_notice",
+                "{}",
+                NotificationPriority::High,
+            )
+            .unwrap();
+        store.ack(done).unwrap();
+        let delivered = store
+            .notify(
+                "operator",
+                "supervisor_notice",
+                "{}",
+                NotificationPriority::High,
+            )
+            .unwrap();
+        store.mark_prompt_delivered(delivered).unwrap();
+        store
+            .notify(
+                "another-owner",
+                "supervisor_notice",
+                "{}",
+                NotificationPriority::High,
+            )
+            .unwrap();
+        let first = store
+            .notify(
+                "operator",
+                "supervisor_notice",
+                "{}",
+                NotificationPriority::High,
+            )
+            .unwrap();
+        let second = store
+            .notify(
+                "operator",
+                "supervisor_notice",
+                "{}",
+                NotificationPriority::High,
+            )
+            .unwrap();
+        let rows = store
+            .list_pending_prompt_outbox("operator", "supervisor_notice", 1)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert!(
+            store
+                .list_pending_prompt_outbox("operator", "supervisor_notice", 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_pending_prompt_outbox("operator", "supervisor_notice", 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        store.ack(first).unwrap();
+        assert_eq!(
+            store
+                .list_pending_prompt_outbox("operator", "supervisor_notice", 1)
+                .unwrap()[0]
+                .id,
+            second
+        );
     }
 
     #[test]

@@ -79,49 +79,33 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// tools. Each names only what the parameter does for coordination's own
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
-    ("id", "Agent id (heartbeat, unregister, session_end; default: caller). message_status: a peer message id."),
-    (
-        "target",
-        "message/interrupt recipient: agent name, 'supervisor', 'all_workers' or \
-         'commander:<label>'; remind: who receives it (default self).",
-    ),
-    ("message", "message: the full message body."),
-    ("urgent", "message: interrupt the recipient's turn and inject this next. Discards its in-flight work."),
-    ("blocker", "message: a blocker escalation; wakes an idle supervisor."),
-    ("merge_request", "message: a merge request for the parked task named by task_id."),
-    ("in_reply_to", "message: notification_id of the direct message this answers."),
-    (
-        "kind",
-        "answer|status|receipt|ask|blocker; worker status/ready wakes supervisor.",
-    ),
-    ("attachment", "Published artifact id to attach to a Commander turn."),
-    // cas-6853: kept terse; the coordination schema has a 3,600 B budget.
+    ("id", "Agent id (default caller); message_status: peer message id."),
+    ("target", "Recipient: agent, supervisor, all_workers, operator or commander:<label>; remind default self."),
+    ("message", "Body chars (configurable defaults): 1200; blocker/merge 2500; task notes 1500. Over-cap operator/Commander refused; supervisor to agent spills to artifact."),
+    ("urgent", "Interrupt recipient and inject next; discards in-flight work."),
+    ("blocker", "Blocker escalation; wakes idle supervisor."),
+    ("merge_request", "Merge request for parked task_id."),
+    ("in_reply_to", "notification_id of direct message answered."),
+    ("kind", "answer|status|receipt|ask|blocker; worker status/ready wakes supervisor."),
+    ("attachment", "Published artifact id for a Commander turn."),
+    // Keep explicit caller contracts within the 3,600 B coordination budget.
     ("supersede_key", "Broadcast: newest per key wins."),
     ("sticky", "Broadcast: late joiners get it."),
-    (
-        "task_id",
-        "message with merge_request=true: the parked task; remind: bind the reminder to this task.",
-    ),
-    ("notification_id", "message_ack / message_status: the notification id. inbox_poll: read it even while its transport holds it."),
-    ("limit", "inbox_poll: maximum rows to return."),
-    ("name", "register / session_start: agent name."),
-    ("agent_type", "register / session_start: primary, sub_agent, worker or ci."),
-    ("parent_id", "register / session_start: parent agent id for a sub-agent."),
-    ("session_id", "register / session_start / session_end: harness session id."),
-    ("remind_message", "remind: the text delivered when it fires (required). message kind=ask: the default taken at the deadline."),
-    ("remind_delay_secs", "remind: fire after this many seconds. message kind=ask: the deadline."),
-    // cas-b58a: the coordination schema has a 3,600 B cap. Filter keys are
-    // taught by the remind refusal (GH #1207), which names every missing or
-    // unknown key with a working example, not by this text.
-    (
-        "remind_event",
-        "remind: fire on task_completed, task_blocked, worker_idle, epic_completed; with \
-         cross_session=true, on branch_contained_in, tag_exists or ci_completed.",
-    ),
-    ("remind_filter", "remind: JSON filter for the event; a refusal names missing keys."),
-    ("remind_id", "remind_cancel: the reminder id."),
-    ("remind_ttl_secs", "remind: TTL seconds (default 3600; external events 7 days; 0 = never)."),
-    ("cross_session", "remind: keep the reminder across session end and task close."),
+    ("task_id", "Parked task for merge_request; remind: bind to task."),
+    // cas-6ccb: polled rows can resurface once until acknowledged.
+    ("notification_id", "message_ack/message_status: the notification id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
+    ("limit", "inbox_poll: max rows."),
+    ("name", "register/session_start: agent name."),
+    ("agent_type", "register/session_start: primary, sub_agent, worker or ci."),
+    ("parent_id", "register/session_start: parent agent id."),
+    ("session_id", "register/session_start/session_end: harness session id."),
+    ("remind_message", "Required reminder text; message kind=ask: default taken at deadline."),
+    ("remind_delay_secs", "Delay seconds; message kind=ask: deadline."),
+    ("remind_event", "task_completed, task_blocked, worker_idle, epic_completed; branch_contained_in, tag_exists, ci_completed require cross_session=true."),
+    ("remind_filter", "JSON: branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); local events e.g. {\"task_id\":\"cas-1234\"}."),
+    ("remind_id", "remind_cancel: reminder id."),
+    ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
+    ("cross_session", "remind: survive session end and task close."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not
@@ -245,6 +229,31 @@ fn compact_value(value: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cas_3349_served_coordination_explains_limits_and_filters() {
+        let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
+        let schema = &tools.iter().find(|tool| tool.name == "coordination").unwrap().input_schema;
+        let description = |field: &str| schema["properties"][field]["description"].as_str().unwrap();
+        // pin: callers discover request limits and examples through the served MCP schema.
+        let message = description("message");
+        let config = crate::config::FactoryConfig::default();
+        for limit in [config.message_max_chars, config.message_max_chars_escalation, config.note_max_chars] {
+            assert!(message.contains(&limit.to_string()), "missing cap {limit}: {message}");
+        }
+        assert!(message.contains("operator") && message.contains("refused"), "{message}");
+        assert!(description("remind_event").contains("cross_session=true"));
+        let filters = description("remind_filter");
+        for example in [r#"{"commit":"<ref>","target_branch":"main"}"#,
+            r#"{"tag":"v1.0.0"}"#, r#"{"sha":"<40-hex>","workflow":"CI"}"#,
+            r#"{"task_id":"cas-1234"}"#]
+        {
+            assert!(filters.contains(example), "missing {example}: {filters}");
+        }
+        assert!(filters.contains("workflow optional"), "{filters}");
+        let ttl = description("remind_ttl_secs");
+        assert!(ttl.contains("default 3600") && ttl.contains("external default 604800") && ttl.contains("0=never"), "{ttl}");
+    }
 
     fn tool_with(schema: Value) -> Tool {
         let Value::Object(schema) = schema else {

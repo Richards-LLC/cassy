@@ -153,11 +153,18 @@ test("HUB-J2 pair a link that grants factory:manage, and see a pairing without i
     const studio = machines.locator('[data-machine-id="studio"] .paired-machine-fleet');
     await expect(atlas.locator('[data-permission="manage"] .fleet-permission-state')).toHaveText("Allowed");
     await expect(atlas.locator('[data-permission="manage"] .fleet-permission-name')).toHaveText("Stop and restart workers and sessions");
-    // Studio was paired for control only: Stop and restart reads unavailable,
-    // in words, with the command that adds it to that pairing.
+    // Studio was paired for control only: explain the missing permission
+    // before its re-pair command, without a disabled fleet-action lookalike.
     const manage = studio.locator('[data-permission="manage"]');
     await expect(manage.locator(".fleet-permission-state")).toHaveText("Not allowed on this pairing");
-    await expect(manage.getByRole("button", { name: "Stop and restart" })).toHaveAttribute("aria-disabled", "true");
+    await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
+    await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");
+    expect(await manage.evaluate((node) => {
+      const reason = node.querySelector(".fleet-permission-reason")!;
+      const also = node.querySelector(".fleet-permission-also")!;
+      return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
     await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
     // The command is reachable by keyboard and copies exactly.
     const copy = manage.getByRole("button", { name: "Copy command" });

@@ -766,11 +766,14 @@ fn codex_has_pending_tool_call(lines: &[String]) -> bool {
         let Some(call_id) = payload.get("call_id").and_then(|v| v.as_str()) else {
             continue;
         };
+        // cas-9bf6: code-mode calls (`functions.exec` running orchestrated
+        // exec_command calls) are `custom_tool_call` records; a long one is
+        // as in-flight as a plain function call.
         match payload_type {
-            Some("function_call" | "local_shell_call") => {
+            Some("function_call" | "local_shell_call" | "custom_tool_call") => {
                 pending.insert(call_id.to_string());
             }
-            Some("function_call_output" | "local_shell_call_output") => {
+            Some("function_call_output" | "local_shell_call_output" | "custom_tool_call_output") => {
                 pending.remove(call_id);
             }
             _ => {}
@@ -873,6 +876,7 @@ fn effective_crash_signature(path: &Path, cli: cas_mux::SupervisorCli) -> bool {
 /// activity signal). `cli` (cas-058f) selects the harness-appropriate
 /// freshness/crash-signature logic — see [`effective_transcript_age`] /
 /// [`effective_crash_signature`] / [`activity_fresh_window`].
+#[cfg(test)]
 pub(crate) fn classify_worker<F, G, H>(
     pid: Option<u32>,
     transcript_path: Option<&Path>,
@@ -888,7 +892,9 @@ where
     G: FnOnce(&Path) -> Option<Duration>,
     H: FnOnce(u32) -> bool,
 {
-    classify_worker_with_pending(
+    // cas-5a88: no host process-tree read. A fixed test pid can exist on the
+    // CI host with live children, which flipped this classifier's verdict.
+    classify_worker_with_probes(
         pid,
         transcript_path,
         clone_path,
@@ -897,6 +903,7 @@ where
         pid_alive_probe,
         worktree_age_probe,
         process_busy_probe,
+        |_: u32| BackgroundProcessState::Unavailable,
         None,
     )
 }
@@ -920,6 +927,42 @@ where
     G: FnOnce(&Path) -> Option<Duration>,
     H: FnOnce(u32) -> bool,
 {
+    classify_worker_with_probes(
+        pid,
+        transcript_path,
+        clone_path,
+        session_id,
+        cli,
+        pid_alive_probe,
+        worktree_age_probe,
+        process_busy_probe,
+        background_processes_for,
+        pending_permission,
+    )
+}
+
+/// The classifier with every host observation injected, including the
+/// worker's background process tree (cas-5a88). Production passes
+/// [`background_processes_for`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_worker_with_probes<F, G, H, B>(
+    pid: Option<u32>,
+    transcript_path: Option<&Path>,
+    clone_path: Option<&Path>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+    pid_alive_probe: F,
+    worktree_age_probe: G,
+    process_busy_probe: H,
+    background_probe: B,
+    pending_permission: Option<PendingPermission>,
+) -> (WorkerLivenessState, WorkerEvidence)
+where
+    F: FnOnce(u32) -> bool,
+    G: FnOnce(&Path) -> Option<Duration>,
+    H: FnOnce(u32) -> bool,
+    B: FnOnce(u32) -> BackgroundProcessState,
+{
     let pid_alive = pid.map(pid_alive_probe).unwrap_or(false);
     let process_busy = pid
         .filter(|_| pid_alive)
@@ -936,7 +979,7 @@ where
     let worktree_age = clone_path.and_then(worktree_age_probe);
     let background_processes = pid
         .filter(|_| pid_alive)
-        .map(background_processes_for)
+        .map(background_probe)
         .unwrap_or(BackgroundProcessState::Unavailable);
     // cas-4143: Claude writes the `tool_use` to the transcript before it
     // parks the call for leader approval, so a pending approval normally
@@ -3175,6 +3218,87 @@ mod tests {
         assert_eq!(ev.session_id, "ses");
     }
 
+    /// cas-5a88: a real process at `pid` with a live child, the host state
+    /// that broke `classify_worker_orchestrator_threads_probe_fn` on CI when
+    /// pid 1234 happened to exist there with a descendant.
+    #[cfg(target_os = "linux")]
+    struct HostTreeAtPid(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl HostTreeAtPid {
+        fn spawn() -> Self {
+            let parent = std::process::Command::new("sh")
+                .args(["-c", "sleep 30 & wait"])
+                .spawn()
+                .expect("spawn sh");
+            let pid = parent.id();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !background_processes_for(pid).is_active() && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Self(parent)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for HostTreeAtPid {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("pkill")
+                .args(["-P", &self.0.id().to_string()])
+                .status();
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// cas-5a88: the classifier's verdict for a pid comes from its injected
+    /// probes, never from whatever process tree the host has at that pid.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn classify_worker_ignores_the_host_process_tree_at_its_pid_cas_5a88() {
+        let host = HostTreeAtPid::spawn();
+        let pid = host.0.id();
+        assert!(
+            background_processes_for(pid).is_active(),
+            "fixture: the host has a live child at pid {pid}"
+        );
+        let (state, ev) = classify_worker(
+            Some(pid),
+            None,
+            None,
+            "ses",
+            cas_mux::SupervisorCli::Claude,
+            |_: u32| true,
+            |_: &Path| None::<Duration>,
+            |_: u32| false,
+        );
+        drop(host);
+        assert_eq!(state, WorkerLivenessState::Unverified, "{ev:?}");
+        assert_eq!(ev.background_processes, BackgroundProcessState::Unavailable);
+
+        // The same evidence, injected, still drives the verdict.
+        let (injected, ev) = classify_worker_with_probes(
+            Some(1234),
+            None,
+            None,
+            "ses",
+            cas_mux::SupervisorCli::Claude,
+            |_: u32| true,
+            |_: &Path| None::<Duration>,
+            |_: u32| false,
+            |_: u32| {
+                BackgroundProcessState::Available(vec![BackgroundProcess {
+                    command: "sleep".into(),
+                    age_secs: 0,
+                }])
+            },
+            None,
+        );
+        assert_ne!(injected, WorkerLivenessState::Unverified, "{ev:?}");
+        assert!(ev.background_processes.is_active());
+    }
+
     #[test]
     fn classify_worker_no_pid_short_circuits_to_dead() {
         let probe = |_: u32| panic!("probe must not be called when pid is None");
@@ -3461,6 +3585,33 @@ mod tests {
         ));
     }
 
+    /// cas-9bf6: a code-mode `functions.exec` call is a `custom_tool_call`
+    /// record (the shape of the Codex workers' rollouts on 2026-10-15). An
+    /// unresolved one is in flight; its `custom_tool_call_output` resolves it.
+    #[test]
+    fn codex_custom_tool_call_in_flight_until_its_output_cas_9bf6() {
+        let open = concat!(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_x9","name":"exec","input":"..."}}"#,
+            "\n",
+        );
+        assert!(has_in_flight_tool_call(
+            Cursor::new(open),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+        let resolved = concat!(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_x9","name":"exec","input":"..."}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_x9","output":"ok"}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(resolved),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
     /// Codex: the matching `function_call_output` resolves the call.
     #[test]
     fn codex_no_in_flight_call_when_output_present() {
@@ -3626,6 +3777,27 @@ mod tests {
         ));
         assert!(is_known_sidecar_commandline("cas", b"cas\0serve\0"));
         assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
+        for (command, raw) in [
+            ("cargo", b"cargo\0test\0".as_slice()),
+            ("cargo-nextest", b"cargo-nextest\0nextest\0run\0".as_slice()),
+            ("node", b"node\0node_modules/playwright/cli.js\0test\0".as_slice()),
+            ("node", b"node\0node_modules/vite/bin/vite.js\0".as_slice()),
+        ] {
+            assert!(!is_known_sidecar_commandline(command, raw), "owned build/browser job must count: {command}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cas_6eec_background_activity_excludes_another_process_tree() {
+        let mut idle_pane = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut unrelated_job = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let observed = background_processes_for(idle_pane.id());
+        unrelated_job.kill().unwrap();
+        unrelated_job.wait().unwrap();
+        idle_pane.kill().unwrap();
+        idle_pane.wait().unwrap();
+        assert_eq!(observed, BackgroundProcessState::Available(vec![]), "a live sibling job must not suppress this worker's quiet warning");
     }
 
     #[test]

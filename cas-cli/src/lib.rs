@@ -53,6 +53,7 @@ pub mod factory_preflight;
 pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
+pub(crate) mod supervisor_notices;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;
@@ -111,6 +112,8 @@ pub(crate) mod test_child;
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) use crate::test_env_guard::TestEnvGuard;
+    #[cfg(unix)]
+    pub(crate) use crate::test_env_guard::fake_cas_on_path;
     pub(crate) use crate::test_paths::private_hub_tempdir;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};

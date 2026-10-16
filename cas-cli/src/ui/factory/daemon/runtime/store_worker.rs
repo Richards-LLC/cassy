@@ -232,6 +232,16 @@ pub(crate) fn persist_or_defer_on<E: std::fmt::Display>(
     }
 }
 
+/// Run a store write on the store worker from the start, never on the
+/// caller's thread (factory loop v2 C4a): for writes the loop must not make.
+/// Retried there like a deferred write; see [`persist_or_defer`].
+pub(crate) fn submit_write<E: std::fmt::Display>(
+    label: &'static str,
+    write: impl Fn() -> Result<(), E> + Send + 'static,
+) -> Persisted {
+    defer_on(global(), label, "queued off the daemon loop", write)
+}
+
 /// Queue a write that already failed on the caller's thread, so the store
 /// worker retries it without a budget. See [`persist_or_defer`].
 pub(crate) fn defer<E: std::fmt::Display>(
@@ -271,18 +281,6 @@ fn defer_on<E: std::fmt::Display>(
         tracing::error!(label, error = %first_error, "store write failed and could not be deferred");
         Persisted::Dropped
     }
-}
-
-/// Stamp transport delivery for a row the daemon already handed to its
-/// recipient. Deferred, never dropped, when the store is busy (GH #1165).
-pub(crate) fn mark_transport_delivered(cas_dir: &std::path::Path, prompt_id: i64) -> Persisted {
-    let cas_dir = cas_dir.to_path_buf();
-    persist_or_defer("mark transport delivered", move || {
-        crate::store::open_prompt_queue_store(&cas_dir)
-            .map_err(|error| error.to_string())?
-            .mark_transport_delivered(prompt_id)
-            .map_err(|error| error.to_string())
-    })
 }
 
 /// Run the pending task-sync repair every [`TASK_SYNC_RECONCILE_INTERVAL`]

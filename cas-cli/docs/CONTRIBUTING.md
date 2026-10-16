@@ -12,6 +12,55 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+## Coordination messages and reminders
+
+Message bodies default to 1,200 characters, or 2,500 for blocker and merge
+requests; task note bodies default to 1,500. These limits are configurable via
+`factory.message_max_chars`, `factory.message_max_chars_escalation` and
+`factory.note_max_chars`. An over-limit supervisor message to an agent spills
+to an artifact. Messages to `operator` or `commander:<label>` are refused when
+over the limit; publish the longer content as an artifact and send its reference.
+
+External event reminders require `cross_session=true` and a JSON `remind_filter`:
+
+| Event | Filter example |
+| --- | --- |
+| `branch_contained_in` | `{"commit":"<sha-or-ref>","target_branch":"main"}` |
+| `tag_exists` | `{"tag":"v1.0.0"}` |
+| `ci_completed` | `{"sha":"<full-40-character-sha>","workflow":"CI"}` |
+
+For branch containment, `branch_tip`, `branch` and `sha` are aliases of `commit`;
+`target` is an alias of `target_branch`. Creation and execution both select the
+first nonempty string without internal whitespace, in that order. A malformed
+preferred field does not hide a usable alias. Remote target spellings such as
+`origin/main` normalize to `main`. For CI reminders, `workflow` is optional;
+omit it to wait for all runs for that full SHA. Local events such as
+`task_completed` accept subset filters, for example `{"task_id":"cas-1234"}`.
+
+`remind_ttl_secs` defaults to 3,600 seconds for time and local-event reminders,
+and 604,800 seconds (7 days) for external events. Explicit `0` means no expiry.
+
+Supervisor stall notices use the full `epic_status` delivery containment
+computation. A parked delivery already contained in its target, including a
+rewritten or intentionally evolved delivery, gets an "awaiting worker close"
+notice instead of another merge demand. That notice is deduplicated per delivery
+and target across later epic commits and supervisor turns. Genuinely unmerged
+deliveries retain the merge reminder. Containment proofs run off the daemon
+loop and are cached by delivery metadata and local/origin tips; unknown proofs
+are retried rather than cached as merged.
+
+Worker quiet detection also counts authenticated MCP calls when they enter the
+server, and scoped dirty-file edits or commits in the registered worker checkout.
+MCP activity emits at most one event per server-bound worker every 30 seconds,
+with the throttle checked in memory before store access. This interval is much
+shorter than the default 300-second quiet threshold; concurrent calls share the
+same reservation and failed writes can retry.
+Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
+hide a quiet worker. Call activity uses the server's immutable registered actor;
+request fields naming another worker do not credit that worker. Open harness
+tool calls and live worker-owned child processes continue to count as activity;
+unrelated process trees and persistent MCP sidecars do not.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
@@ -145,6 +194,27 @@ within five minutes and must match both the peer's factory session and machine.
 A missing branch is shown as unknown. Worker details are read-only: these rows
 do not register remote workers locally or make them message or spawn targets.
 Cloud failures are reported as unavailable, never as an empty claim list.
+Peer mail follows a supervisor's name, stable machine identity and named
+factory session across a restart. Different factories remain distinct even
+when their supervisors have the same name on the same machine. A live
+successor claims verified retired addresses from this project's
+registry and unregister history; Cloud message IDs still deduplicate local
+admission. A reused live identity, worker, different machine or ambiguous
+successor is not a retired address. When multiple live peers share a displayed
+address, message-target ambiguity lists distinct agent IDs that can be used as
+explicit targets. Legacy deleted rows without retirement identity cannot be
+safely recovered from a name alone. Their bodies are not admitted; the daemon
+sends an idempotent reply asking the sender to resend to the current supervisor
+ID, then rejects the original. This feedback-only fallback requires exactly
+one live named factory with that supervisor name in the project. Competing
+same-name factories leave legacy addresses unclaimed and warn instead.
+If feedback fails, the original remains unacked
+for retry. Retirement recovery uses a seven-day window and at most 100 retired
+recipients per tick, separately from current recipients. History lookup failure
+or truncation is a mailbox warning; current verified addresses keep receiving.
+Failed claim batches remain visible while successful batches are admitted and
+acknowledged.
+
 Cloud locks are private to one user account: a team peer on another account shows
 `Claims not visible (different account)` and worker tasks as `not visible`.
 If the caller's account identity is unknown, the report says so. JSON includes
@@ -502,6 +572,24 @@ Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;
 use `coordination action=message_status` to inspect handoff and recipient evidence.
 
+For a gated message, status distinguishes a **held inbox** (a successful Teams
+write; surfaces at the next tool call or turn start without expiring while the
+recipient remains in the session) from a **delivery retry** (no held handoff
+recorded; transport retry budget still applies, including operator drafts).
+A fresh transport reservation clears any older inbox deferral before injecting,
+so a worker that changes harness cannot have its PTY delivery replayed by a hook.
+The actual primary channel decides whether a handoff can be held: a missing
+Teams folder falls back to PTY and never receives a new inbox deferral stamp.
+Status checks the deferral, current transport claim and absence of completed
+transport in one database snapshot; a stale marker alone cannot imply a hold.
+If the deferral stamp cannot be saved, the Teams copy remains available at the
+turn boundary and Cassy queues one supervisor warning per affected message.
+
+Abandonment digests keep the first batch within the hook's message budget by
+showing whole IDs plus an omitted-ID count. The episode's `+N more` trailer
+counts abandoned messages, including every message in a later folded batch.
+Full delivery state remains on each original message for `message_status`.
+
 Integration tests are in `cas-cli/tests/`. Key test files:
 
 - `cli_test.rs` — CLI command integration tests
@@ -620,6 +708,29 @@ environment prefixes, compound commands, repeated packages and broader flags.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+On Unix, named tests and their guard processes run with private links to resolved
+Rust tools first on PATH. Rustup proxies are resolved to concrete toolchain
+executables, and the selected Cargo invocation uses that private link; this
+prevents rustup from restoring `$CARGO_HOME/bin` when it dispatches. Only PATH
+directories containing `cas`, `codex` or `claude` files are removed. Other entries,
+including local build-tool and Homebrew directories, retain their order so tools
+such as mold, node, protoc and newer Bash remain available. Compile-only checks
+retain their ordinary PATH. The runner prints the PATH setup cost for measurement.
+
+Harness fixtures must supply their own fake executables. The shared
+`test_env_guard::fake_cas_on_path()` returns a private no-op Cassy
+stand-in and a PATH value; pass `fixture.path()` through `Command.env` and retain
+the fixture until all children exit. For a PTY fixture, re-execute the selected
+test in that private child before calling `Pty::spawn`: its preflight reads
+ambient PATH, so `PtyConfig.env` alone is insufficient. The helper does not
+mutate process-global PATH. This is for the PTY preflight and harmless hook calls;
+tests of Cassy behavior must use the built binary. The same guard source is
+compiled by cas, cas-pty and cas-mux. To deliberately test an installed host
+harness, set `CAS_WORKER_TEST_ALLOW_HOST_PATH` to a nonempty, single-line reason
+for that invocation. The runner prints the reason and stores it in the test
+receipt (`host_path_opt_out`); an empty reason refuses instead of silently
+relaxing the rule. Do not use this opt-out to repair an incomplete fixture.
+
 In the Cassy source repository, every named run first executes the fixed cheap
 guards: `test_support::lib_test_process_env_mutation_is_isolated`,
 `config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9`,

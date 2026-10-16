@@ -359,13 +359,13 @@ fn supervisor_tool_activity_resets_actionable_idle_clock() {
 #[test]
 fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_state() {
     let start = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
-    let merged = |target_tip: &str| SupervisorActionableState::MergeCloseBlocked {
+    let merged = |anchor: &str| SupervisorActionableState::MergeCloseBlocked {
         tasks: vec![MergedCloseBlockedTask {
             task_id: "cas-merged".into(),
             factory_branch: "factory/gold-fox".into(),
-            anchor: "anchor-sha".into(),
+            anchor: anchor.into(),
             target_branch: "epic/cas-epic".into(),
-            target_tip: target_tip.into(),
+            target_tip: "target-tip".into(),
             close_rejection: "already merged".into(),
         }],
     };
@@ -979,4 +979,146 @@ fn lane_ci_pending_delivery_is_not_a_ready_merge_cas_207e() {
     );
     assert_eq!(only_pending, None);
     assert!(!wake_for(only_pending, now), "pending CI alone is no nudge");
+}
+
+/// cas-03ff: a pending `ci_completed` or `branch_contained_in` reminder the
+/// supervisor set for this delivery.
+fn delivery_reminder(event: &str, filter: serde_json::Value) -> cas_store::Reminder {
+    serde_json::from_value(serde_json::json!({
+        "id": 1,
+        "owner_id": "id-supervisor",
+        "target_id": "id-supervisor",
+        "message": "merge when CI is green",
+        "trigger_type": "event",
+        "trigger_at": null,
+        "trigger_event": event,
+        "trigger_filter": filter,
+        "status": "pending",
+        "ttl_secs": 0,
+        "created_at": "2026-10-16T00:00:00Z",
+        "fired_at": null,
+        "cancelled_at": null,
+        "fired_event": null,
+        "cross_session": true,
+    }))
+    .expect("reminder")
+}
+
+/// cas-03ff: deliveries with full-SHA tips, as production resolves them.
+fn sha_tip(task: &TaskSummary, worker: &str) -> (String, Option<String>) {
+    let tip = if task.id == "cas-waiting" {
+        "0b04a99e8b56f99da4c0d0dd954599a1f11568f4"
+    } else {
+        "a4ac1d3b22a1da2b169da4268afc56691d2fb7ae"
+    };
+    (format!("factory/{worker}"), Some(tip.to_string()))
+}
+
+/// cas-03ff AC3: while the supervisor has a pending `ci_completed` or
+/// `branch_contained_in` reminder for a parked delivery, that delivery is
+/// waiting, not stalled. A reminder for one delivery leaves a sibling's
+/// merge alarm alone, and a reminder that names neither the tip nor the
+/// branch holds nothing.
+#[test]
+fn pending_ci_or_merge_reminder_quiets_the_stall_for_its_delivery_cas_03ff() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 16, 0, 40, 0).unwrap();
+    let mut snapshot = data();
+    snapshot.agents.push(AgentSummary {
+        id: "id-supervisor".into(),
+        ..worker("supervisor", now)
+    });
+    snapshot.in_progress_tasks.push(task(
+        "cas-waiting",
+        TaskStatus::AwaitingMerge,
+        Some("gold-fox"),
+        Some("cas-epic"),
+    ));
+    let state = |snapshot: &DirectorData| {
+        supervisor_actionable_state_with_classifiers(
+            snapshot,
+            Some("cas-epic"),
+            "supervisor",
+            &HashSet::new(),
+            now,
+            600,
+            sha_tip,
+            |_, _, _, _| None,
+            |_, _| None,
+        )
+    };
+    assert!(state(&snapshot).is_some(), "no reminder: the parked delivery is a ready merge");
+
+    for reminder in [
+        delivery_reminder(
+            "ci_completed",
+            serde_json::json!({"sha": "0b04a99e8b56f99da4c0d0dd954599a1f11568f4"}),
+        ),
+        delivery_reminder(
+            "branch_contained_in",
+            serde_json::json!({"commit": "0b04a99e8", "target_branch": "epic/cas-epic"}),
+        ),
+        delivery_reminder(
+            "branch_contained_in",
+            serde_json::json!({"branch": "origin/factory/gold-fox", "target": "epic/cas-epic"}),
+        ),
+    ] {
+        let mut waiting = snapshot.clone();
+        waiting.reminders.push(reminder.clone());
+        let held = state(&waiting);
+        assert_eq!(held, None, "{:?}", reminder.trigger_filter);
+        assert!(!wake_for(held, now), "waiting on CI or a merge is not stalled");
+
+        let mut sibling = waiting.clone();
+        sibling.in_progress_tasks.push(task(
+            "cas-ready",
+            TaskStatus::AwaitingMerge,
+            Some("red-kite"),
+            Some("cas-epic"),
+        ));
+        assert_eq!(
+            state(&sibling),
+            Some(SupervisorActionableState::MergeBranches {
+                branches: vec![(
+                    "cas-ready".into(),
+                    "factory/red-kite".into(),
+                    "a4ac1d3b22a1da2b169da4268afc56691d2fb7ae".into(),
+                )],
+            }),
+            "only the watched delivery is held"
+        );
+    }
+
+    for (label, reminder) in [
+        (
+            "another commit",
+            delivery_reminder(
+                "ci_completed",
+                serde_json::json!({"sha": "1111111111111111111111111111111111111111"}),
+            ),
+        ),
+        (
+            "not an external wait",
+            delivery_reminder("task_completed", serde_json::json!({"task_id": "cas-waiting"})),
+        ),
+        ("fired", {
+            let mut fired = delivery_reminder(
+                "ci_completed",
+                serde_json::json!({"sha": "0b04a99e8b56f99da4c0d0dd954599a1f11568f4"}),
+            );
+            fired.status = cas_store::ReminderStatus::Fired;
+            fired
+        }),
+        ("someone else's", {
+            let mut other = delivery_reminder(
+                "ci_completed",
+                serde_json::json!({"sha": "0b04a99e8b56f99da4c0d0dd954599a1f11568f4"}),
+            );
+            other.target_id = "id-red-kite".into();
+            other
+        }),
+    ] {
+        let mut unrelated = snapshot.clone();
+        unrelated.reminders.push(reminder);
+        assert!(state(&unrelated).is_some(), "{label} reminder holds nothing");
+    }
 }

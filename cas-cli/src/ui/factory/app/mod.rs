@@ -9,17 +9,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use cas_mux::{Mux, PaneKind};
-use cas_store::TaskStore;
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 
 use super::director::{
-    DeliveryHold, DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
-    MergeAlertFreshness, MergedCloseBlockedTask, PanelAreas, Prompt, SidecarFocus, ViewMode,
-    blocker_note_after_park, check_merge_alert_freshness, generate_prompt_at,
-    hold_decision_after_park, prompt_is_still_deliverable,
-    revalidate_event_for_delivery_with_context, revalidate_event_for_delivery_with_focus,
-    supervisor_actionable_state_with_classifiers, task_delivery_ref,
+    DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
+    MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
+    generate_prompt_at, revalidate_event_for_delivery_with_context,
+    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -34,6 +31,7 @@ use crate::ui::widgets::TreeItemType;
 use crate::worktree::WorktreeManager;
 
 mod branch_visibility;
+pub(crate) mod delivery_evidence;
 mod director_refresh;
 mod imports;
 mod init;
@@ -43,7 +41,9 @@ mod sidecar_and_selection;
 pub(crate) mod task_dialog_load;
 
 pub(crate) use director_refresh::{
-    timed as timed_refresh_step, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad, DirectorRefreshRequest,
+    timed as timed_refresh_step, DeliverabilityRequest, DeliveryInputs, DeliveryRequest,
+    DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap, IdleLivenessRequest,
+    prompt_needs_fresh_recheck,
 };
 
 pub(crate) use branch_visibility::BranchAheadBehind;
@@ -642,6 +642,69 @@ fn hardlink_seed_tree_inner(
     Ok(())
 }
 
+/// cas-d741: a kept worktree on the worker's own task lane is reusable only
+/// when no tracked change would ride into the new session and the lane has
+/// not diverged from its pushed copy. Each refusal names the exact remedy.
+fn ensure_task_lane_reusable(
+    worker_name: &str,
+    worktree_path: &std::path::Path,
+    lane: &str,
+) -> anyhow::Result<()> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree_path)
+            .output()
+    };
+    let status = git(&["status", "--porcelain", "--untracked-files=no"])?;
+    if !status.status.success() {
+        anyhow::bail!(
+            "Worker '{worker_name}': cannot inspect its kept worktree {} on '{lane}': {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+    }
+    if !status.stdout.is_empty() {
+        anyhow::bail!(
+            "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}' with \
+             uncommitted tracked changes, so a new session cannot take it over. Commit them on \
+             '{lane}' and push, or discard them with `git -C {} checkout -- .`, then retry the \
+             spawn.",
+            worktree_path.display(),
+            worktree_path.display(),
+        );
+    }
+    let resolve = |reference: &str| {
+        git(&["rev-parse", "--verify", "--quiet", reference])
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let remote = format!("refs/remotes/origin/{lane}");
+    if let (Some(local), Some(pushed)) = (resolve("HEAD"), resolve(&remote)) {
+        let ancestor = |a: &str, b: &str| {
+            git(&["merge-base", "--is-ancestor", a, b])
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        };
+        if !ancestor(&local, &pushed) && !ancestor(&pushed, &local) {
+            anyhow::bail!(
+                "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}', \
+                 which has diverged from origin/{lane} (local {}, origin {}). Reconcile it \
+                 first: rebase onto the pushed lane with `git -C {} pull --rebase origin {lane}`, \
+                 or keep the pushed lane with `git -C {} reset --hard origin/{lane}`. Then retry \
+                 the spawn.",
+                worktree_path.display(),
+                &local[..local.len().min(12)],
+                &pushed[..pushed.len().min(12)],
+                worktree_path.display(),
+                worktree_path.display(),
+            );
+        }
+    }
+    Ok(())
+}
+
 impl WorkerSpawnPrep {
     /// Phase 2: Run the slow git operations (designed for spawn_blocking).
     pub fn run(self) -> anyhow::Result<WorkerSpawnResult> {
@@ -684,6 +747,7 @@ impl WorkerSpawnPrep {
                     Some(&wt.branch_name),
                 )?;
                 let wt_git = GitOperations::new(wt.worktree_path.clone());
+                let mut reused_branch = wt.branch_name.clone();
                 match wt_git.current_branch() {
                     Ok(ref actual_branch) if actual_branch == &wt.branch_name => {
                         // Valid — correct branch confirmed.
@@ -694,6 +758,30 @@ impl WorkerSpawnPrep {
                             reused = true,
                             "spawn prep: worktree validated on correct branch (reuse path)"
                         );
+                    }
+                    // cas-d741: `task start` moves a worker onto its own task
+                    // lane, so a kept worktree is normally there. Reuse it in
+                    // place, keeping the lane, unless it is dirty or diverged.
+                    Ok(actual_branch)
+                        if crate::factory_isolation::own_task_branch_task_id(
+                                &self.worker_name,
+                                &actual_branch,
+                            )
+                            .is_some() =>
+                    {
+                        ensure_task_lane_reusable(
+                            &self.worker_name,
+                            &wt.worktree_path,
+                            &actual_branch,
+                        )?;
+                        tracing::info!(
+                            worker = %self.worker_name,
+                            cwd = %wt.worktree_path.display(),
+                            branch = %actual_branch,
+                            reused = true,
+                            "spawn prep: kept worktree reused on its own task lane"
+                        );
+                        reused_branch = actual_branch;
                     }
                     Ok(actual_branch) => {
                         anyhow::bail!(
@@ -729,7 +817,7 @@ impl WorkerSpawnPrep {
                 }
                 let worktree = Worktree::new(
                     Worktree::generate_id(),
-                    wt.branch_name,
+                    reused_branch,
                     wt.parent_branch,
                     wt.worktree_path.clone(),
                 );
@@ -925,7 +1013,28 @@ pub struct FactoryApp {
     director_stores: Option<DirectorStores>,
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
-    lane_ci_pending: std::sync::Mutex<HashMap<(String, String), (std::time::Instant, bool)>>,
+    lane_ci_pending: delivery_evidence::LaneCiCache,
+    /// Cached full epic-status containment, keyed by delivery and target tips.
+    delivery_containment: delivery_evidence::DeliveryContainmentCache,
+    /// Factory loop v2 (cas-223f): the store half of the supervisor-stall
+    /// evidence for the focused epic's parked deliveries, read with each
+    /// director snapshot on the read lane.
+    parked_facts: delivery_evidence::ParkedFactsMap,
+    /// The git half (delivery tips, lane CI, merged state), from the latest
+    /// `CiStatus` job on the external lane. The stall check joins the two in
+    /// memory and only looks them up.
+    git_evidence: delivery_evidence::GitEvidenceMap,
+    /// cas-3b16: the session metadata the supervisor-stall check reads, from
+    /// the latest director snapshot job (never read on the loop).
+    session_progress: SessionProgressRead,
+    /// The supervisor-stall tracker this process last computed. Only this
+    /// daemon writes it, and its write lands off the loop, so a snapshot read
+    /// before the write lands must not roll it back.
+    supervisor_stall_tracker: Option<crate::ui::factory::director::SupervisorStallTracker>,
+    /// A changed tracker waiting to be written to the session metadata
+    /// ([`Self::take_supervisor_stall_write`]).
+    pending_supervisor_stall_write:
+        Option<(PathBuf, crate::ui::factory::director::SupervisorStallTracker)>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1369,7 +1478,7 @@ impl FactoryApp {
             return (Vec::new(), Vec::new(), None);
         }
         let inputs = self
-            .delivery_request()
+            .delivery_request(events)
             .read(self.director_stores.as_ref());
         self.revalidate_and_prompt_for_delivery_from(events, inputs)
     }
@@ -1389,7 +1498,16 @@ impl FactoryApp {
         let DeliveryInputs {
             data: loaded_data,
             blocks_deps,
+            idle_liveness,
+            facts,
+            session: session_progress,
         } = inputs;
+        let session_progress = session_progress.unwrap_or_default();
+        // cas-223f review M3: revalidation joins the fresh read's store facts
+        // with the latest git evidence. It never falls back to cached facts.
+        let evidence = facts
+            .as_ref()
+            .map(|facts| delivery_evidence::combine(facts, &self.git_evidence));
         // cas-ae6d (GH #100): the instant the snapshot backing a "no
         // dispatchable tasks" claim was actually read. That claim is counted
         // from `director_data` (session/epic-scoped — see the comment on
@@ -1398,6 +1516,31 @@ impl FactoryApp {
         // render time would assert a freshness the data may not have.
         let snapshot_at = self.director_data_loaded_at;
         let delivery_state_is_authoritative = loaded_data.is_ok();
+        // cas-223f review round 2, M3: revalidation never decides from the
+        // cache. The daemon retries a failed fresh read first; when it keeps
+        // failing, every event is delivered as detected: no event is
+        // filtered, no merge alert is checked for freshness and no inbox
+        // sweep runs.
+        //
+        // cas-3b16 (C2 review round 3, L-a/L-b): the prompts are then
+        // rendered from the cached snapshot, the latest one applied. It is
+        // never older than the snapshot an event was detected from and can be
+        // newer (a director snapshot may apply between a failed read and its
+        // retry). Rendering still drops a prompt whose own claim that snapshot
+        // contradicts; these are the only decisions the cache makes:
+        // - `TaskCompleted`: the prompt says the task is Open again. A task
+        //   the cache shows in progress or gone has no true prompt to send;
+        //   its close notice is the lifecycle relay's (GH #1124).
+        // - `EpicAllSubtasksClosed`: the prompt says every subtask is closed,
+        //   which a reopened subtask in the cache disproves (it would be false
+        //   advice to close the epic).
+        // - `WorkerIdle` with a task, `WorkerStalled` and `AgentRegistered`:
+        //   the live-session and already-busy guards, which read the
+        //   session-scoped panel data (`director_data`) on every path, fresh
+        //   read or not.
+        // `WorkerIdle` without a task never reaches rendering here (the
+        // durable attention relay delivers it below), so its busy-worker
+        // guard does not apply on this path.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
@@ -1406,13 +1549,11 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
-                // cas-06ca: an unavailable store snapshot is uncertainty,
-                // never positive evidence that an epic-completion occurrence
-                // is stale. Preserve the event rather than suppressing it
+                // cas-06ca / cas-223f: an unavailable store snapshot is
+                // uncertainty, never positive evidence that an event is
+                // stale. Preserve every event rather than suppressing it
                 // against cached data that may itself be out of date.
-                if !delivery_state_is_authoritative
-                    && matches!(event, DirectorEvent::EpicAllSubtasksClosed { .. })
-                {
+                if !delivery_state_is_authoritative {
                     return Some(event.clone());
                 }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
@@ -1424,7 +1565,13 @@ impl FactoryApp {
                         self.event_detector.worker_idle_since(worker),
                     )
                 } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
-                    self.supervisor_stall_event_is_current(event, &unfiltered_data)
+                    let evidence = evidence.clone().unwrap_or_default();
+                    self.supervisor_stall_event_is_current(
+                        event,
+                        &unfiltered_data,
+                        &evidence,
+                        &session_progress,
+                    )
                         .then(|| event.clone())
                 } else {
                     revalidate_event_for_delivery_with_focus(
@@ -1474,8 +1621,15 @@ impl FactoryApp {
             // `NotApplicable` (wrong event shape, task no longer
             // AwaitingMerge, or no resolvable epic branch) falls through to
             // `generate_prompt` unaffected, exactly as before this fix.
+            // cas-223f: without a fresh read there is nothing to check the
+            // alert against; it is delivered as detected.
+            let freshness = if delivery_state_is_authoritative {
+                check_merge_alert_freshness(event, &unfiltered_data, &repo_root)
+            } else {
+                MergeAlertFreshness::NotApplicable
+            };
             let merge_alert_evidence =
-                match check_merge_alert_freshness(event, &unfiltered_data, &repo_root) {
+                match freshness {
                     MergeAlertFreshness::NotApplicable => None,
                     // AC1: branch already carries zero unmerged commits vs
                     // the epic — drop the alert entirely rather than
@@ -1515,9 +1669,12 @@ impl FactoryApp {
                 snapshot_at,
             ) {
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
-                    if let Some(observation) =
-                        super::director::idle_worker_liveness(&self.cas_dir, worker)
-                    {
+                    // cas-223f: observed off the loop beside the delivery read
+                    // (cas-3b16: on the blocking lane). A worker it could not
+                    // observe is uncertain, and an uncertain prompt is
+                    // delivered; it is never observed here, on the loop.
+                    let observation = idle_liveness.get(worker).cloned().flatten();
+                    if let Some(observation) = observation {
                         if !super::director::apply_idle_liveness(&mut prompt, worker, &observation)
                         {
                             continue;
@@ -1532,21 +1689,6 @@ impl FactoryApp {
         (delivery_events, prompts, sweep_data)
     }
 
-    fn try_load_unfiltered_director_data_for_delivery(&self) -> anyhow::Result<DirectorData> {
-        let worktree_root = self.worktree_manager.as_ref().map(|m| m.worktree_root());
-        DirectorData::load_with_stores(
-            &self.cas_dir,
-            worktree_root.as_deref(),
-            false,
-            self.director_stores.as_ref(),
-        )
-    }
-
-    fn load_unfiltered_director_data_for_delivery(&self) -> DirectorData {
-        self.try_load_unfiltered_director_data_for_delivery()
-            .unwrap_or_else(|_| self.unfiltered_director_data.clone())
-    }
-
     /// Re-check a state-bearing prompt at the narrowest point before transport
     /// injection. Batch revalidation happens earlier in the tick; a worker
     /// assignment, epic close, subtask reopen, or — cas-6eab (GH #74) — the
@@ -1554,20 +1696,18 @@ impl FactoryApp {
     /// before this prompt's turn in the delivery loop. The merge case is not
     /// hypothetical: `handle_epic_change` runs merges inside the very same
     /// tick, between prompt generation and this loop.
+    ///
+    /// Always a fresh read. Failure to load authoritative state is
+    /// uncertainty: deliver. Never remove a legitimate notification based on
+    /// cached data. The daemon runs the same check as a `RevalidateFresh` job
+    /// ([`DeliverabilityRequest`], cas-223f); this synchronous form reads on
+    /// the caller's thread.
     pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
-        if prompt.retract_epic.is_some() || prompt.retract_task.is_some() {
-            // Failure to load authoritative state is uncertainty: deliver.
-            // Never remove a legitimate notification based on cached data.
-            return self
-                .try_load_unfiltered_director_data_for_delivery()
-                .map(|data| prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root()))
-                .unwrap_or(true);
-        }
-        if prompt.drop_if_worker_assigned.is_none() {
-            return true;
-        }
-        let data = self.load_unfiltered_director_data_for_delivery();
-        prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root())
+        self.deliverability_request()
+            .read(self.director_stores.as_ref(), std::slice::from_ref(prompt))
+            .first()
+            .copied()
+            .unwrap_or(true)
     }
 
     /// The main checkout every `factory/*` and `epic/*` branch lives in — the
@@ -1575,144 +1715,6 @@ impl FactoryApp {
     /// by `close_ops`/`director.rs` (`.cas`'s parent).
     fn delivery_repo_root(&self) -> std::path::PathBuf {
         self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf()
-    }
-
-    /// Return merged-close-blocked evidence for a parked task only when its
-    /// task-specific delivery anchor is already reachable from the resolved
-    /// target. Missing task/Git evidence is deliberately treated as unknown,
-    /// preserving the existing merge demand rather than inventing a merged
-    /// verdict.
-    fn classify_merged_close_blocked_task(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        factory_branch: &str,
-        target_branch: &str,
-        _factory_tip: Option<&str>,
-        repo_root: &Path,
-    ) -> Option<MergedCloseBlockedTask> {
-        let target_tip = crate::git_evidence::resolve_branch_sha(
-            repo_root,
-            target_branch,
-        )?;
-        let stores = self.director_stores.as_ref()?;
-        let parked = stores.task_store.get(&task.id).ok()?;
-        let anchor = parked
-            .deliverables
-            .factory_branch_anchor
-            .as_deref()
-            .map(str::trim)
-            .filter(|anchor| !anchor.is_empty())?;
-        let anchor_sha =
-            crate::git_evidence::resolve_branch_sha(
-                repo_root, anchor,
-            )?;
-        if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
-            return None;
-        }
-
-        Some(MergedCloseBlockedTask {
-            task_id: task.id.clone(),
-            factory_branch: factory_branch.to_string(),
-            anchor: anchor.to_string(),
-            target_branch: target_branch.to_string(),
-            target_tip,
-            close_rejection: last_close_rejection_reason(&parked.notes)
-                .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
-        })
-    }
-
-    /// cas-58d3: the delivery branch and commit a merge-now alert names for a
-    /// parked task, from its per-task branch, recorded parked branch and
-    /// delivery anchor rather than the worker's base branch.
-    fn resolve_task_delivery(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        worker: &str,
-        repo_root: &Path,
-    ) -> (String, Option<String>) {
-        let parked = self
-            .director_stores
-            .as_ref()
-            .and_then(|stores| stores.task_store.get(&task.id).ok());
-        let deliverables = parked.as_ref().map(|parked| &parked.deliverables);
-        task_delivery_ref(
-            &task.id,
-            worker,
-            deliverables.and_then(|d| d.parked_branch.as_deref()),
-            deliverables.and_then(|d| d.factory_branch_anchor.as_deref()),
-            |branch| {
-                crate::git_evidence::resolve_branch_sha(
-                    repo_root, branch,
-                )
-            },
-            |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
-        )
-    }
-
-    /// GH #896 (cas-e4f8): whether a parked delivery is deliberately waiting
-    /// on a decision, so the stall relay leaves it out of "merge now". Reads
-    /// only: the task's notes (a blocker raised after it last parked) and
-    /// the QA pass rows (a pending or claimed pass whose deadline has not
-    /// passed; the QA gate says not to merge until it records a verdict).
-    /// A held worker is handled by the caller's hold set.
-    fn classify_delivery_hold(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        worker: &str,
-        repo_root: &Path,
-    ) -> Option<DeliveryHold> {
-        if let Some(stores) = self.director_stores.as_ref()
-            && let Ok(parked) = stores.task_store.get(&task.id)
-        {
-            if blocker_note_after_park(&parked.notes) {
-                return Some(DeliveryHold::BlockerNote);
-            }
-            // cas-58d3: a supervisor decision holding the merge.
-            if hold_decision_after_park(&parked.notes) {
-                return Some(DeliveryHold::SupervisorDecision);
-            }
-        }
-        let now = Utc::now();
-        if cas_store::list_qa_passes(&self.cas_dir, &task.id)
-            .ok()?
-            .into_iter()
-            .any(|pass| pass.state.is_active() && pass.deadline_at > now)
-        {
-            return Some(DeliveryHold::QaPassOpen);
-        }
-        self.delivery_ci_pending(task, worker, repo_root)
-            .then_some(DeliveryHold::LaneCiPending)
-    }
-
-    /// cas-207e: a parked delivery whose lane CI is still running is not a
-    /// ready merge. Read through a cache so the stall check stays cheap.
-    fn delivery_ci_pending(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        worker: &str,
-        repo_root: &Path,
-    ) -> bool {
-        let (branch, Some(tip)) = self.resolve_task_delivery(task, worker, repo_root) else {
-            return false;
-        };
-        let key = (branch, tip);
-        let Ok(mut cache) = self.lane_ci_pending.lock() else {
-            return false;
-        };
-        if let Some((at, pending)) = cache.get(&key)
-            && (!pending || at.elapsed() < std::time::Duration::from_secs(60))
-        {
-            return *pending;
-        }
-        let target = crate::ui::factory::director::merge_target_for_task(
-            &self.unfiltered_director_data,
-            task,
-        )
-        .unwrap_or_else(|| "main".to_string());
-        let pending =
-            crate::mcp::tools::core::workflow::delivery_ci_pending(&key.0, &target, repo_root);
-        cache.insert(key, (std::time::Instant::now(), pending));
-        pending
     }
 
     /// Refresh Cassy data from stores and detect state changes
@@ -1732,36 +1734,73 @@ impl FactoryApp {
         let load = self
             .director_refresh_request()
             .read(self.director_stores.as_ref());
-        self.apply_director_refresh(load)
+        // Synchronous callers resolve the git half of the stall evidence
+        // here too; the daemon runs it as a `CiStatus` job instead.
+        if let Some(facts) = load.facts()
+            && let Some(request) = delivery_evidence::CiStatusRequest::new(
+                self.delivery_repo_root(),
+                facts,
+                std::sync::Arc::clone(&self.lane_ci_pending),
+                std::sync::Arc::clone(&self.delivery_containment),
+            )
+        {
+            self.git_evidence = request.run();
+        }
+        let events = self.apply_director_refresh(load);
+        // The daemon writes a changed stall tracker on its store worker;
+        // a synchronous refresh writes it here.
+        if let Some((path, tracker)) = self.take_supervisor_stall_write()
+            && let Err(error) = persist_session_metadata_supervisor_stall_at(&path, &tracker)
+        {
+            tracing::warn!(%error, "failed to persist supervisor stall metric");
+        }
+        events
+    }
+
+    /// Factory loop v2 (cas-223f): stall confirmation asks for worker
+    /// health probes instead of running them on the caller's thread. The
+    /// daemon loop turns this on and runs the probes as jobs.
+    pub(crate) fn set_deferred_worker_health_probes(&mut self, deferred: bool) {
+        self.event_detector.set_deferred_health_probes(deferred);
+    }
+
+    /// Worker health probes the detector asked for since the last call.
+    pub(crate) fn take_worker_health_requests(
+        &mut self,
+    ) -> Vec<super::director::WorkerHealthRequest> {
+        self.event_detector.take_worker_health_requests()
+    }
+
+    /// Apply a finished worker health probe.
+    pub(crate) fn apply_worker_health_report(&mut self, report: super::director::WorkerHealthReport) {
+        self.event_detector.apply_worker_health_report(report);
+    }
+
+    /// A worker health probe that will not report; ask again next tick.
+    pub(crate) fn clear_worker_health_probe(&mut self, worker: &str, task: &str) {
+        self.event_detector.clear_worker_health_probe(worker, task);
     }
 
     fn detect_supervisor_stall(&mut self) -> Option<DirectorEvent> {
         use cas_store::ReminderStatus;
 
         let session = self.factory_session.as_deref()?;
-        let (last_call, mut tracker) = supervisor_progress_from_session_metadata_named(session)?;
+        // cas-3b16: the session metadata arrived with the snapshot job; this
+        // only looks it up. The tracker this process last computed wins over
+        // the file, whose write may not have landed yet.
+        let (last_call, file_tracker) = self.session_progress.progress.clone()?;
+        let mut tracker = self.supervisor_stall_tracker.clone().unwrap_or(file_tracker);
         let before = tracker.clone();
         let now = Utc::now();
-        let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
-        let repo_root = self.delivery_repo_root();
-        let actionable = supervisor_actionable_state_with_classifiers(
+        let held_workers = self.session_progress.held_workers.clone().unwrap_or_default();
+        // cas-223f: the git, CI and task-store evidence arrived with the
+        // snapshot; this only looks it up.
+        let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
+        let actionable = self.supervisor_actionable_from_evidence(
             &self.unfiltered_director_data,
-            self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
-            &self.supervisor_name,
+            &evidence,
             &held_workers,
             now,
-            self.supervisor_stall_after_secs,
-            |task, worker| self.resolve_task_delivery(task, worker, &repo_root),
-            |task, factory_branch, target_branch, factory_tip| {
-                self.classify_merged_close_blocked_task(
-                    task,
-                    factory_branch,
-                    target_branch,
-                    factory_tip,
-                    &repo_root,
-                )
-            },
-            |task, worker| self.classify_delivery_hold(task, worker, &repo_root),
         );
         let supervisor_ids = self
             .unfiltered_director_data
@@ -1792,11 +1831,12 @@ impl FactoryApp {
             self.supervisor_stall_after_secs,
         );
         if tracker != before {
+            // Written off the loop: the daemon hands it to the store worker,
+            // a synchronous refresh writes it in place.
             let path = crate::ui::factory::session::metadata_path(session);
-            if let Err(error) = persist_session_metadata_supervisor_stall_at(&path, &tracker) {
-                tracing::warn!(%error, "failed to persist supervisor stall metric");
-            }
+            self.pending_supervisor_stall_write = Some((path, tracker.clone()));
         }
+        self.supervisor_stall_tracker = Some(tracker);
         observation.wake.map(|next_step| DirectorEvent::SupervisorStalled {
             next_step,
             occurrence: now.to_rfc3339(),
@@ -1808,6 +1848,8 @@ impl FactoryApp {
         &self,
         event: &DirectorEvent,
         data: &DirectorData,
+        evidence: &delivery_evidence::DeliveryEvidenceMap,
+        session_progress: &SessionProgressRead,
     ) -> bool {
         let DirectorEvent::SupervisorStalled {
             next_step,
@@ -1817,10 +1859,11 @@ impl FactoryApp {
         else {
             return false;
         };
-        let Some(session) = self.factory_session.as_deref() else {
+        if self.factory_session.is_none() {
             return false;
-        };
-        let Some((last_call, _)) = supervisor_progress_from_session_metadata_named(session) else {
+        }
+        // cas-3b16: read with the fresh delivery read, off the loop.
+        let Some((last_call, _)) = session_progress.progress.clone() else {
             return false;
         };
         let Ok(detected_at) = occurrence.parse::<DateTime<Utc>>() else {
@@ -1829,29 +1872,34 @@ impl FactoryApp {
         if last_call.is_some_and(|last| last > detected_at) {
             return false;
         }
-        let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
-        let repo_root = self.delivery_repo_root();
+        let held_workers = session_progress.held_workers.clone().unwrap_or_default();
+        self.supervisor_actionable_from_evidence(data, evidence, &held_workers, Utc::now())
+            .as_ref()
+            == Some(next_step)
+    }
+
+    /// The supervisor's next action over `data`, classifying parked
+    /// deliveries from precomputed evidence (cas-223f). No IO.
+    fn supervisor_actionable_from_evidence(
+        &self,
+        data: &DirectorData,
+        evidence: &delivery_evidence::DeliveryEvidenceMap,
+        held_workers: &HashSet<String>,
+        now: DateTime<Utc>,
+    ) -> Option<super::director::SupervisorActionableState> {
         supervisor_actionable_state_with_classifiers(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
-            &held_workers,
-            Utc::now(),
+            held_workers,
+            now,
             self.supervisor_stall_after_secs,
-            |task, worker| self.resolve_task_delivery(task, worker, &repo_root),
-            |task, factory_branch, target_branch, factory_tip| {
-                self.classify_merged_close_blocked_task(
-                    task,
-                    factory_branch,
-                    target_branch,
-                    factory_tip,
-                    &repo_root,
-                )
+            |task, worker| delivery_evidence::evidence_delivery(evidence, task, worker),
+            |task, _factory_branch, target_branch, _factory_tip| {
+                delivery_evidence::evidence_merged_close_blocked(evidence, task, target_branch)
             },
-            |task, worker| self.classify_delivery_hold(task, worker, &repo_root),
+            |task, worker| delivery_evidence::evidence_hold(evidence, task, worker),
         )
-        .as_ref()
-            == Some(next_step)
     }
 
     /// Route worker panes whose registry rows are all non-live through the normal shutdown path.
@@ -2030,7 +2078,30 @@ impl FactoryApp {
         let Some(held_workers) = worker_holds_from_session_metadata_named(session_name) else {
             return;
         };
+        self.apply_worker_holds(&held_workers);
+    }
 
+    /// The holds the latest snapshot job read (cas-3b16); unavailable
+    /// metadata keeps the current holds.
+    pub(super) fn apply_snapshot_worker_holds(&mut self) {
+        if self.factory_session.is_none() {
+            return;
+        }
+        let Some(held_workers) = self.session_progress.held_workers.clone() else {
+            return;
+        };
+        self.apply_worker_holds(&held_workers);
+    }
+
+    /// A changed supervisor-stall tracker to write to the session metadata,
+    /// off the loop (cas-3b16).
+    pub(crate) fn take_supervisor_stall_write(
+        &mut self,
+    ) -> Option<(PathBuf, crate::ui::factory::director::SupervisorStallTracker)> {
+        self.pending_supervisor_stall_write.take()
+    }
+
+    fn apply_worker_holds(&mut self, held_workers: &HashSet<String>) {
         for worker in self.worker_names.clone() {
             if held_workers.contains(&worker) && !self.event_detector.is_worker_held(&worker) {
                 self.event_detector.mark_worker_hold(&worker);
@@ -2445,6 +2516,13 @@ impl FactoryApp {
     }
 
     /// Get the director data
+    /// Replace the cached director snapshot (tests: a stale cache).
+    #[cfg(test)]
+    pub(crate) fn set_director_data_for_test(&mut self, data: DirectorData) {
+        self.director_data = data.clone();
+        self.unfiltered_director_data = data;
+    }
+
     pub fn director_data(&self) -> &DirectorData {
         &self.director_data
     }
@@ -3229,6 +3307,35 @@ pub(crate) fn supervisor_progress_from_session_metadata_named(
         metadata.last_supervisor_mcp_call_at,
         metadata.supervisor_stall,
     ))
+}
+
+/// One read of the session metadata the supervisor-stall check and the
+/// worker-hold gate use (cas-3b16: taken by the snapshot and delivery jobs,
+/// never on the loop).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionProgressRead {
+    /// The supervisor's last MCP call and the persisted stall tracker;
+    /// `None` when the metadata is unavailable or malformed.
+    pub(crate) progress: Option<(
+        Option<chrono::DateTime<chrono::Utc>>,
+        crate::ui::factory::director::SupervisorStallTracker,
+    )>,
+    /// The worker hold set; `None` when the metadata is unavailable.
+    pub(crate) held_workers: Option<HashSet<String>>,
+}
+
+/// Read [`SessionProgressRead`] for one factory session. Blocks on the file.
+pub(crate) fn session_progress_named(session: &str) -> SessionProgressRead {
+    let Some(metadata) = fs::read_to_string(crate::ui::factory::session::metadata_path(session))
+        .ok()
+        .and_then(|data| serde_json::from_str::<SessionMetadata>(&data).ok())
+    else {
+        return SessionProgressRead::default();
+    };
+    SessionProgressRead {
+        progress: Some((metadata.last_supervisor_mcp_call_at, metadata.supervisor_stall)),
+        held_workers: Some(metadata.held_workers.into_iter().collect()),
+    }
 }
 
 pub(crate) fn persist_session_metadata_supervisor_stall_at(
@@ -4552,6 +4659,57 @@ mod tests {
             app.event_detector.is_worker_held(worker),
             "unchanged-DB refresh must apply the durable hold before idle detection"
         );
+    }
+
+    /// cas-3b16 (C2 review round 2, L1): the session metadata the hold gate
+    /// and the supervisor-stall check use is read by the snapshot job. The
+    /// loop applies that read; it never reads the file itself.
+    #[test]
+    fn c3b16_snapshot_applies_the_session_metadata_its_job_read() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", "session-read-off-loop"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let worker = "lively-crow";
+        let session = "session-read-off-loop";
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[worker.to_string()],
+            None,
+            None,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.cas_dir = cas_dir.clone();
+        app.factory_session = Some(session.to_string());
+        app.worker_names = vec![worker.to_string()];
+        app.event_detector.add_worker(worker.to_string());
+        app.director_data.git_loaded = true;
+        app.last_db_fingerprint = Some(super::CasDbFingerprint::from_cas_dir(&cas_dir));
+        app.last_git_refresh = std::time::Instant::now();
+
+        // The job reads the hold; the file moves on before the loop applies.
+        let load = app.director_refresh_request().read(None);
+        super::persist_session_metadata_worker_hold_at(&path, worker, false).unwrap();
+        assert!(app.apply_director_refresh(load).unwrap().is_empty());
+        assert!(
+            app.event_detector.is_worker_held(worker),
+            "the loop applied the job's read, not a read of its own"
+        );
+        // The next snapshot job reads the release.
+        let load = app.director_refresh_request().read(None);
+        app.apply_director_refresh(load).unwrap();
+        assert!(!app.event_detector.is_worker_held(worker));
     }
 
     /// cas-728b simplify pass: hoisted from two near-identical PTY scaffolds
@@ -6295,6 +6453,143 @@ mod spawn_isolation_tests {
             error.contains(&repo.display().to_string()),
             "the refusal must name the shared checkout the path really resolves to: {error}"
         );
+    }
+
+    /// cas-d741: a repo plus a kept worktree for `clever-panther-60` left on
+    /// its own task lane by `task start`, one commit ahead of `main`.
+    fn kept_task_lane_worktree() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        without_spawn_disk_floor(&repo);
+        let worktree_path = repo.join(".cas").join("worktrees").join("clever-panther-60");
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "factory/clever-panther-60-cas-9db0b",
+                worktree_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(worktree_path.join("lane.txt"), "task work\n").unwrap();
+        git(&worktree_path, &["add", "lane.txt"]);
+        git(&worktree_path, &["commit", "-qm", "task work"]);
+        (tmp, repo, worktree_path)
+    }
+
+    fn respawn_prep(repo: &std::path::Path, worktree_path: &std::path::Path) -> WorkerSpawnPrep {
+        WorkerSpawnPrep {
+            worker_name: "clever-panther-60".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.to_path_buf(),
+                branch_name: "factory/clever-panther-60".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo.to_path_buf(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+    }
+
+    fn head_of(path: &std::path::Path) -> (String, String) {
+        let run = |args: &[&str]| {
+            String::from_utf8_lossy(
+                &Command::new("git").args(args).current_dir(path).output().unwrap().stdout,
+            )
+            .trim()
+            .to_string()
+        };
+        (run(&["rev-parse", "--abbrev-ref", "HEAD"]), run(&["rev-parse", "HEAD"]))
+    }
+
+    /// cas-d741 AC1: a same-name respawn onto a clean kept worktree on the
+    /// worker's own task lane reuses it in place; the lane and its commits
+    /// are kept, so the pre-assigned task resumes there.
+    #[test]
+    fn clean_kept_worktree_on_its_task_lane_is_reused_cas_d741() {
+        let (_tmp, repo, worktree_path) = kept_task_lane_worktree();
+        let before = head_of(&worktree_path);
+        let result = respawn_prep(&repo, &worktree_path)
+            .run()
+            .expect("a clean kept task lane is reusable");
+        assert_eq!(result.cwd, worktree_path);
+        assert!(!result.worktree_created, "the kept worktree is reused, not recreated");
+        assert_eq!(
+            result.worktree.as_ref().map(|worktree| worktree.branch.as_str()),
+            Some("factory/clever-panther-60-cas-9db0b")
+        );
+        assert_eq!(head_of(&worktree_path), before, "the task lane is untouched");
+    }
+
+    /// cas-d741 AC2: tracked changes on the kept lane refuse the reuse, and
+    /// the refusal names the lane, the path and the remedy.
+    #[test]
+    fn dirty_kept_task_lane_refuses_with_a_remedy_cas_d741() {
+        let (_tmp, repo, worktree_path) = kept_task_lane_worktree();
+        std::fs::write(worktree_path.join("lane.txt"), "unsaved\n").unwrap();
+        let error = respawn_prep(&repo, &worktree_path)
+            .run()
+            .map(|result| result.cwd)
+            .expect_err("a dirty lane must not be taken over")
+            .to_string();
+        assert!(error.contains("uncommitted tracked changes"), "{error}");
+        assert!(error.contains("factory/clever-panther-60-cas-9db0b"), "{error}");
+        assert!(error.contains("checkout -- ."), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("lane.txt")).unwrap(),
+            "unsaved\n",
+            "the refusal touches nothing"
+        );
+    }
+
+    /// cas-d741 AC2: a kept lane that diverged from its pushed copy refuses,
+    /// naming both reconciliations.
+    #[test]
+    fn diverged_kept_task_lane_refuses_with_a_remedy_cas_d741() {
+        let (_tmp, repo, worktree_path) = kept_task_lane_worktree();
+        let other = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        // origin's copy of the lane took a different commit on top of main.
+        let main = other(&["rev-parse", "main"]);
+        let tree = other(&["rev-parse", "main^{tree}"]);
+        let pushed = other(&["commit-tree", &tree, "-p", &main, "-m", "pushed elsewhere"]);
+        other(&[
+            "update-ref",
+            "refs/remotes/origin/factory/clever-panther-60-cas-9db0b",
+            &pushed,
+        ]);
+        let error = respawn_prep(&repo, &worktree_path)
+            .run()
+            .map(|result| result.cwd)
+            .expect_err("a diverged lane must not be taken over")
+            .to_string();
+        assert!(error.contains("diverged from origin/factory/clever-panther-60-cas-9db0b"), "{error}");
+        assert!(error.contains("pull --rebase origin") && error.contains("reset --hard origin/"), "{error}");
+
+        // A lane that is only behind or ahead of its pushed copy is reusable.
+        other(&[
+            "update-ref",
+            "refs/remotes/origin/factory/clever-panther-60-cas-9db0b",
+            &main,
+        ]);
+        respawn_prep(&repo, &worktree_path)
+            .run()
+            .expect("a lane ahead of its pushed copy is reusable");
     }
 
     /// Respawn 1034 class: the path exists as a real worktree but belongs to

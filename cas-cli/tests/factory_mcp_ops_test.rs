@@ -875,6 +875,7 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
             frame_bytes_p50: None,
             frame_window_ms: 0,
             frames_per_s: None,
+            commander_clients: None,
         },
     )
     .unwrap();
@@ -2779,6 +2780,85 @@ async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
     assert_eq!(spec.model.as_deref(), Some("gpt-5"));
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
     assert_eq!(spec.config_dir.as_deref(), Some(account_dir.to_str().unwrap()));
+}
+
+/// cas-033a: register a recyclable worker with recorded recipe `metadata`.
+fn register_recyclable_worker(env: &FactoryTestEnv, name: &str, recipe: &[(&str, &str)]) {
+    let worker_path = init_sync_repo(env, name);
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    for (key, value) in recipe {
+        metadata.insert((*key).to_string(), (*value).to_string());
+    }
+    let worker_id = env.register_worker_with_metadata(name, metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some("session-recycle".to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+}
+
+/// cas-033a AC1 (GH: clever-panther-60, golden-stork-66): a Claude worker
+/// whose row recorded the supervisor's inherited `worker_cli=codex` is
+/// recycled on Claude with its own model, effort and account.
+#[tokio::test]
+async fn test_recycle_worker_relaunches_a_claude_worker_on_claude_cas_033a() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle")]);
+    let env = FactoryTestEnv::new();
+    let account_dir = env.cas_root.join("claude-account");
+    let account = account_dir.display().to_string();
+    register_recyclable_worker(
+        &env,
+        "clever-panther-60",
+        &[
+            ("worker_cli", "codex"),
+            ("worker_model", "claude-opus-5-5"),
+            ("worker_effort", "high"),
+            ("worker_account_dir", &account),
+        ],
+    );
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("clever-panther-60".to_string());
+    env.service
+        .factory_request(Parameters(req))
+        .await
+        .expect("a Claude worker is recyclable");
+    let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
+    assert_eq!(entries.len(), 1);
+    let spec = entries[0]
+        .worker_spec
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok())
+        .expect("recycle carries the recipe");
+    assert_eq!(spec.cli, SupervisorCli::Claude);
+    assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    assert_eq!(spec.config_dir.as_deref(), Some(account.as_str()));
+}
+
+/// cas-033a AC2: a recorded recipe the routing policy refuses is refused by
+/// recycle_worker itself, while the worker still runs: nothing is queued, so
+/// the daemon never stops it.
+#[tokio::test]
+async fn test_recycle_worker_refuses_an_unlaunchable_recipe_before_stopping_cas_033a() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle")]);
+    let env = FactoryTestEnv::new();
+    register_recyclable_worker(
+        &env,
+        "haiku-worker",
+        &[("worker_cli", "claude"), ("worker_model", "claude-haiku-4-5")],
+    );
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("haiku-worker".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .expect_err("an unlaunchable recipe is refused");
+    assert!(error.message.contains("Nothing was stopped or queued"), "{error:?}");
+    assert!(error.message.contains("routing policy violation"), "{error:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek").is_empty(),
+        "no lifecycle request reaches the daemon"
+    );
 }
 
 /// A worker checkout whose `factory/<worker>` branch is pushed to a bare
@@ -6350,7 +6430,8 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     assert!(text.contains("processed but unacked"), "{text}");
     assert!(text.contains("legacy message"), "{text}");
     assert!(!text.contains("wrong session"), "{text}");
-    assert!(text.contains("at-most-once inbox claim"), "{text}");
+    // pin: the poll states its claim and the once-more resurfacing of unacked rows (cas-6ccb)
+    assert!(text.contains("shown once more at your next turn"), "{text}");
 
     let second = env
         .service
@@ -6361,6 +6442,76 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
         get_text(&second),
         "No unread messages for registered-worker"
     );
+}
+
+/// cas-6ccb (GH #1215): through MCP `inbox_poll`, a row the poll withholds as
+/// already done is settled, so the next turn's one-time repeat of polled but
+/// unacknowledged rows never brings back its body; a row shown in full is
+/// repeated. `inbox_poll notification_id=<id>` reads a row again on request.
+#[tokio::test]
+async fn inbox_poll_settles_withheld_rows_and_reads_a_named_row_again_cas_6ccb() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("registered-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id("registered-worker-id", "registered-worker", None);
+    let task_id = env.create_awaiting_merge_task("already parked", "registered-worker");
+    let queue = env.prompt_queue();
+    let brief = format!(
+        "You were spawned for task {task_id} — \"already parked\" — and it is assigned to you now.\n\
+         Start with `mcp__cas__task action=show id={task_id}`, then `mcp__cas__task action=start id={task_id}` before you change any code."
+    );
+    let stale = queue.enqueue("director", "registered-worker", &brief).unwrap();
+    let kept = queue
+        .enqueue("supervisor", "registered-worker", "rebase onto v43 before parking")
+        .unwrap();
+
+    let polled = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("inbox poll");
+    let text = get_text(&polled);
+    assert!(text.contains("rebase onto v43 before parking"), "{text}");
+    assert!(!text.contains("assigned to you now"), "{text}");
+
+    let later_turn = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let repeated: Vec<i64> = queue
+        .surface_for_recipient_within_budget(
+            "registered-worker",
+            None,
+            cas_store::HookDrain::PolledBefore(later_turn),
+            10,
+            cas_store::HOOK_SURFACE_BUDGET_CHARS,
+        )
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(repeated, vec![kept], "the withheld row {stale} is settled, not repeated");
+    // Settled is not acknowledged: no ack, and status says why (review M-new).
+    let report = queue.message_delivery_report(stale).unwrap().unwrap();
+    assert!(report.confirmed_at.is_none(), "{report:?}");
+    assert!(
+        report
+            .recipient_poll_settled
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("withheld by inbox_poll: assignment for")),
+        "{report:?}"
+    );
+
+    let mut named = coord_req("inbox_poll");
+    named.notification_id = Some(kept);
+    let again = get_text(
+        &env.service
+            .coordination(Parameters(named))
+            .await
+            .expect("named inbox poll"),
+    );
+    assert!(again.contains("rebase onto v43 before parking"), "{again}");
 }
 
 /// cas-5255 / GH #719: a transport-delivered row must remain recoverable by
@@ -7957,6 +8108,50 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
         status_text.contains(&format!("Message {notification_id} status:")),
         "status response must describe the same returned ID: {status_text}"
     );
+}
+
+#[tokio::test]
+async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() {
+    let env = FactoryTestEnv::new();
+    let queue = env.prompt_queue();
+    for (deferred, receipt) in [
+        (true, Some(cas_store::SurfacingSource::TransportClaimed)),
+        (false, None),
+        (true, None),
+        (true, Some(cas_store::SurfacingSource::HookSurfaced)),
+    ] {
+        let held_copy = deferred && receipt == Some(cas_store::SurfacingSource::TransportClaimed);
+        let id = queue
+            .enqueue("supervisor", "swift-fox", "decision")
+            .unwrap();
+        queue
+            .record_pending_reason(
+                id,
+                cas_store::PendingReason::GatedNotReady,
+                Some("same detail in both cases"),
+            )
+            .unwrap();
+        if let Some(receipt) = receipt {
+            queue
+                .record_recipient_surfaced(id, "swift-fox", receipt)
+                .unwrap();
+        }
+        if deferred {
+            queue.record_deferred_inbox(id, 123).unwrap();
+        }
+        let mut req = coord_msg("message_status", "swift-fox", "unused", None);
+        req.notification_id = Some(id);
+        let text = get_text(&env.service.coordination(Parameters(req)).await.unwrap());
+        if held_copy {
+            assert!(text.contains("held inbox:"), "{text}");
+            assert!(text.contains("next tool call or turn start"), "{text}");
+            assert!(!text.contains("retry budget"), "{text}");
+        } else {
+            assert!(text.contains("delivery retry:"), "{text}");
+            assert!(text.contains("900s retry budget"), "{text}");
+            assert!(!text.contains("next tool call"), "{text}");
+        }
+    }
 }
 
 /// cas-893c AC2: `message_status` must expose how long a message has been
@@ -11763,4 +11958,151 @@ async fn worker_status_shows_peers_but_the_summary_does_not_cas_e477() {
             .unwrap(),
     );
     assert!(!summary.contains("Peers"), "{summary}");
+}
+
+/// cas-009c: the id of the newest queued row to `target` whose body contains
+/// `needle`.
+fn queued_row_id(env: &FactoryTestEnv, target: &str, needle: &str) -> i64 {
+    env.prompt_queue()
+        .peek_all(100)
+        .expect("peek queue")
+        .into_iter()
+        .filter(|row| row.target == target && row.prompt.contains(needle))
+        .map(|row| row.id)
+        .max()
+        .unwrap_or_else(|| panic!("no row to {target} containing {needle:?}"))
+}
+
+fn reply(target: &str, message: &str, in_reply_to: i64) -> CoordinationRequest {
+    let mut request = coord_msg("message", target, message, None);
+    request.in_reply_to = Some(in_reply_to);
+    request
+}
+
+/// cas-009c AC1 (supervisor lead 7): a supervisor following up in a thread it
+/// started was refused with "in_reply_to notification 4185839 is supervisor ->
+/// bold-spider-9, not a direct message from bold-spider-9". A follow-up to the
+/// sender's own row threads as a reference; only a direct reply acknowledges.
+#[tokio::test]
+async fn cas009c_supervisor_follow_up_threads_on_its_own_message() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("cosmic-bear-id", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store().register(&supervisor).expect("register supervisor");
+    env.register_worker_with_id("spider-id", "bold-spider-9", None);
+
+    env.service
+        .coordination(Parameters(coord_msg("message", "bold-spider-9", "Rebase onto v43.", None)))
+        .await
+        .expect("supervisor starts the thread");
+    let started = queued_row_id(&env, "bold-spider-9", "Rebase onto v43.");
+
+    env.service
+        .coordination(Parameters(reply("bold-spider-9", "And re-run ct2_p1 after.", started)))
+        .await
+        .expect("a follow-up in the supervisor's own thread is accepted");
+    let follow_up = env
+        .prompt_queue()
+        .queued_prompt(queued_row_id(&env, "bold-spider-9", "And re-run ct2_p1 after."))
+        .expect("read follow-up")
+        .expect("follow-up queued");
+    assert!(
+        // pin: the thread marker the recipient reads, distinct from the ack marker.
+        follow_up.prompt.contains(&format!("[CAS reply: in thread with notification_id={started}]")),
+        "{}",
+        follow_up.prompt
+    );
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(started)
+        .expect("report")
+        .expect("row");
+    assert_ne!(
+        report.confirmation_source,
+        cas_store::ConfirmationSource::ExplicitAck,
+        "the sender's own message is not acknowledged by its own follow-up"
+    );
+}
+
+/// cas-009c AC2: a worker that addresses its supervisor by name replies to a
+/// supervisor→worker row, whose source is the logical `supervisor`. It is a
+/// direct reply and acknowledges the row.
+#[tokio::test]
+async fn cas009c_worker_reply_to_supervisor_by_name_threads_and_acknowledges() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "bold-spider-9"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("spider-id", None);
+    env.register_worker_with_id("spider-id", "bold-spider-9", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store().register(&supervisor).expect("register supervisor");
+    let decision = env
+        .prompt_queue()
+        .enqueue_urgent("supervisor", "bold-spider-9", "Take option B.", None, None, None, false)
+        .expect("supervisor decision");
+
+    env.service
+        .coordination(Parameters(reply("cosmic-bear-43", "Done: took option B.", decision)))
+        .await
+        .expect("a reply addressed to the supervisor by name threads");
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(decision)
+        .expect("report")
+        .expect("row");
+    assert_eq!(report.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+}
+
+/// cas-009c AC3: a lifecycle row, a broadcast and the director's rows are
+/// thread references the reply may cite; a row between two other agents is
+/// still refused.
+#[tokio::test]
+async fn cas009c_lifecycle_and_broadcast_rows_are_thread_references() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("cosmic-bear-id", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store().register(&supervisor).expect("register supervisor");
+    env.register_worker_with_id("spider-id", "bold-spider-9", None);
+    env.register_worker_with_id("koala-id", "watchful-koala-20", None);
+    let queue = env.prompt_queue();
+    let lifecycle = queue
+        .enqueue_urgent("lifecycle-wake:16790", "supervisor", "<task-lifecycle task=\"cas-x\" transition=\"awaiting_merge\"/>", None, None, None, false)
+        .expect("lifecycle row");
+    let broadcast = queue
+        .enqueue_urgent("supervisor", "all_workers", "Epic tip moved.", None, None, None, false)
+        .expect("broadcast");
+    let director = queue
+        .enqueue_urgent("director", "cosmic-bear-43", "bold-spider-9 has gone quiet.", None, None, None, false)
+        .expect("director row");
+    let unrelated = queue
+        .enqueue_urgent("watchful-koala-20", "bold-spider-9", "peer note", None, None, None, false)
+        .expect("peer row");
+
+    for (row, text) in [(lifecycle, "Merging now."), (broadcast, "Rebase please."), (director, "Are you stuck?")] {
+        env.service
+            .coordination(Parameters(reply("bold-spider-9", text, row)))
+            .await
+            .unwrap_or_else(|error| panic!("row {row} is a thread reference: {error:?}"));
+        let report = queue.message_delivery_report(row).expect("report").expect("row");
+        assert_ne!(
+            report.confirmation_source,
+            cas_store::ConfirmationSource::ExplicitAck,
+            "only a direct reply acknowledges (row {row})"
+        );
+    }
+    let refused = env
+        .service
+        .coordination(Parameters(reply("bold-spider-9", "Not my thread.", unrelated)))
+        .await;
+    assert!(refused.is_err(), "a row between two other agents is not this sender's thread");
 }

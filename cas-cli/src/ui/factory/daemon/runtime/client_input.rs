@@ -855,9 +855,11 @@ impl FactoryDaemon {
                 continue;
             }
 
-            // Ctrl+R (0x12) = refresh Cassy data (global)
+            // Ctrl+R (0x12) = refresh Cassy data (global). Factory loop v2
+            // §3.3 (cas-786a6): routed to control as a `DirectorSnapshot`
+            // job on the next pass, never a store read on the input path.
             if byte == 0x12 {
-                let _ = self.app.refresh_data();
+                self.operator_refresh_requested = true;
                 i += 1;
                 continue;
             }

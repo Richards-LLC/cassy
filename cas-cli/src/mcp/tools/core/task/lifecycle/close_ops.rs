@@ -1,4 +1,7 @@
 pub(crate) mod gate_text;
+mod loaded_proof;
+#[cfg(test)]
+mod loaded_proof_tests;
 mod task_attribution;
 mod evidence_only;
 mod delivery_evolution;
@@ -860,7 +863,9 @@ fn has_platform_proof_note(notes: &str) -> bool {
 }
 
 fn has_target_scope(lower: &str) -> bool {
-    [
+    // Structured Rust scope must still declare the whole target. Non-Rust
+    // scope is explicit or uses a named runner; keep all legacy prose forms.
+    loaded_proof::has_structured_target_scope(lower) || [
         &["whole", "target"][..],
         &["entire", "target"],
         &["full", "target"],
@@ -945,42 +950,11 @@ fn platform_proof_missing_evidence(notes: &str) -> Vec<&'static str> {
 /// repeat the run at least three times. Rust and non-Rust receipts use the same
 /// typed contract while retaining common wording variants.
 fn has_loaded_proof_note(notes: &str) -> bool {
-    notes.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.contains("loaded_proof")
-            && has_target_scope(&lower)
-            && has_parallelism_16(&lower)
-            && has_at_least_three_runs(&lower)
-            && has_passing_result(&lower)
-    })
+    loaded_proof::assess_notes(notes).any(|fields| fields.complete())
 }
 
-fn loaded_proof_missing_evidence(notes: &str) -> Vec<&'static str> {
-    let lines = notes
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains("loaded_proof"))
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return vec!["typed note_type=loaded_proof"];
-    }
-
-    let mut missing = Vec::new();
-    if !lines.iter().any(|line| has_target_scope(&line.to_ascii_lowercase())) {
-        missing.push("whole/entire/full target or explicit non-Rust target");
-    }
-    if !lines.iter().any(|line| has_parallelism_16(&line.to_ascii_lowercase())) {
-        missing.push("parallelism at 16 jobs (-j16 or --jobs 16)");
-    }
-    if !lines.iter().any(|line| has_at_least_three_runs(&line.to_ascii_lowercase())) {
-        missing.push("at least 3 loops/runs");
-    }
-    if !lines.iter().any(|line| has_passing_result(&line.to_ascii_lowercase())) {
-        missing.push("passing result (PASS, SUCCESS, exit 0, or status 0)");
-    }
-    if missing.is_empty() {
-        missing.push("all required evidence on the same typed note");
-    }
-    missing
+fn loaded_proof_missing_evidence(notes: &str) -> String {
+    loaded_proof::missing_evidence(notes)
 }
 
 /// A changed Rust source file as a crate-relative module path:
@@ -2207,7 +2181,7 @@ fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String
     if task.risk.contains(&TaskRisk::Concurrency) && !has_loaded_proof_note(&task.notes) {
         gaps.push(format!(
             "loaded_proof missing evidence: {}",
-            loaded_proof_missing_evidence(&task.notes).join(", ")
+            loaded_proof_missing_evidence(&task.notes)
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
@@ -2512,7 +2486,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         && build_proofs == BuildProofs::Required
         && !has_loaded_proof_note(&task.notes)
     {
-        let missing = loaded_proof_missing_evidence(&task.notes).join(", ");
+        let missing = loaded_proof_missing_evidence(&task.notes);
         return Err(format!(
             "TASK CLOSE REJECTED: task {} declares risk=concurrency but its loaded_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=loaded_proof proving the whole or explicit non-Rust target under -j16 for at least 3 loops with a passing result, then retry close.",
             task.id,
@@ -18346,6 +18320,28 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     .unwrap_or_else(|| {
                         count_unmerged_factory_commits(repo_path, refname, parent_branch)
                     });
+                // cas-dbbf: the assignee's bare `factory/<assignee>` lane is
+                // reused for later tasks. When every commit it holds beyond
+                // the target claims another task, none of them is this
+                // child's work, so they strand nothing here (cas-73b8 and
+                // cas-93db applied the same rule to a single task's close).
+                // An unnamed commit, or one naming this child, still counts.
+                let count = if count > 0
+                    && live_factory_branch.as_deref() == Some(commit)
+                    && task_attribution::lane_commits_all_claim_other_tasks(
+                        repo_path,
+                        refname,
+                        parent_branch,
+                        &TaskCommitIdentity {
+                            task_id: Some(t.id.clone()),
+                            known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
+                        },
+                    ) == Some(true)
+                {
+                    0
+                } else {
+                    count
+                };
                 unmerged_count = unmerged_count.max(count);
                 latest_commit_unix = latest_commit_unix.max(
                     git_snapshot
@@ -35566,6 +35562,63 @@ mod epic_status_gate_tests {
                 EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
             ),
             "a respawn must not resurrect a solved epic block"
+        );
+    }
+
+    /// cas-dbbf: a worker reuses its bare `factory/<worker>` lane for later
+    /// tasks. A closed child that delivered on its per-task branch, now
+    /// merged, must not be stranded by the lane's later commits when every
+    /// one of them claims a different task (cas-c5b8 triage: cas-cfd6 and
+    /// cas-c577 on epic cas-829b). The lane is still measured for the
+    /// child's own work: an unmerged commit naming the child keeps blocking.
+    #[test]
+    fn a_reused_lane_holding_another_tasks_commits_does_not_strand_a_delivered_child_cas_dbbf() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-d0e1"]);
+        std::fs::write(p.join("delivered.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: the delivery (cas-d0e1)"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "-m", "land cas-d0e1", "factory/worker-cas-d0e1"]);
+        // The worker's bare lane, reused for the next task and not merged.
+        git(p, &["checkout", "-q", "-b", "factory/worker", "main"]);
+        std::fs::write(p.join("next.rs"), "fn next_task() {}\n").unwrap();
+        git(p, &["add", "next.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task's work (cas-0be7)"]);
+        git(p, &["checkout", "-q", "main"]);
+
+        let mut delivered = child("cas-d0e1", TaskStatus::Closed, Some("worker"));
+        delivered.deliverables.parked_branch = Some("factory/worker-cas-d0e1".to_string());
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "another task's commits on the reused lane strand nothing for this child"
+        );
+        let task = epic("cas-epic-reused-lane");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&delivered)),
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "a reused lane must not block the epic close"
+        );
+
+        // The child's own unmerged work on the same lane is still reported.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(p.join("delivered.rs"), "fn delivered() { follow_up() }\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: follow-up (cas-d0e1)"]);
+        git(p, &["checkout", "-q", "main"]);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
+        assert!(
+            statuses[0].unmerged_count > 0,
+            "this child's own unmerged commit on the bare lane must keep blocking"
         );
     }
 

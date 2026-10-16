@@ -527,6 +527,8 @@ impl DaemonInitPhase {
         let ai_enrichment = self.factory_config.ai_enrichment.clone();
 
         // Return a FactoryDaemon for the main event loop
+        // cas-d2a2: the prompt queue's store work runs on its own job lanes.
+        let queue_jobs = crate::ui::factory::daemon::runtime::prompt_queue_jobs::QueueJobs::start(app.cas_dir().to_path_buf(), app.project_scope());
         Ok(FactoryDaemon {
             session_name: self.session_name,
             app,
@@ -574,7 +576,7 @@ impl DaemonInitPhase {
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
-            commander_mirror_state: Default::default(),
+            queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,
         cancelled_spawns: std::collections::HashSet::new(),
@@ -584,16 +586,20 @@ impl DaemonInitPhase {
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
+            urgent_injects: Default::default(),
+            operator_refresh_requested: false,
             send_receipts: super::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),
+            gate_activity_recorded_at: HashMap::new(),
             last_prompt_poison_sweep: Some(Instant::now()),
         resumed_epic_ids: std::collections::HashSet::new(),
         spawn_started_at: None,
             spawn_cancellation: None,
         last_spawn_queue_stall_scan: None,
         external_wake: Default::default(),
+        reminder_scan_generation: 0,
         pending_ci_wakes: Vec::new(),
         reported_stalled_spawn_requests: std::collections::HashSet::new(),
         })

@@ -127,6 +127,12 @@ pub struct DaemonLoopStatus {
     /// TUI frames per second over the window, to one decimal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_per_s: Option<f64>,
+    /// Commander (WebSocket) clients connected to the daemon when this
+    /// snapshot was written (GH #1196). Operator turns reach a device only
+    /// through one, so `Some(0)` lets a send say so at once. `None` in older
+    /// files: unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commander_clients: Option<u64>,
 }
 
 /// One job lane's occupancy (factory loop v2 §4.2, §6.5).
@@ -433,6 +439,7 @@ mod tests {
             frame_bytes_p50: None,
             frame_window_ms: 0,
             frames_per_s: None,
+            commander_clients: None,
         }
     }
 

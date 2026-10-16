@@ -814,7 +814,7 @@ main {
 .fleet-ops-menu { display: grid; gap: var(--space-1); min-width: 12rem; padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); z-index: 2; }
 .fleet-ops-menu [role="menuitem"] { justify-self: stretch; text-align: left; border-color: transparent; }
 .fleet-ops-separator { height: var(--line-width); margin: var(--space-1) 0; background: var(--line-subtle); }
-.fleet-ops-reason { display: block; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.fleet-ops-reason, .fleet-ops-instruction { display: block; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .fleet-ops-confirm, .fleet-ops-preview { display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
 .fleet-ops-question, .fleet-ops-preview-lead { margin: 0; color: var(--text-hi); }
 .fleet-ops-preview-text { margin: 0; padding: var(--space-2); border-left: 3px solid var(--line-strong); color: var(--text-hi); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -825,7 +825,7 @@ main {
 .fleet-ops-note-subject { font-family: var(--font-mono); }
 .fleet-ops-note-subject--whole { white-space: nowrap; }
 .fleet-ops-header { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-2); }
-.fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
+.fleet-ops-header > .fleet-ops-reason, .fleet-ops-header > .fleet-ops-instruction, .fleet-ops-header > .fleet-ops-menu, .fleet-ops-header > .fleet-ops-panel, .fleet-ops-header > p { flex: 1 1 100%; }
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
 /* cas-ab04: Write access — task, folder, modes and reason; then confirm. */
@@ -2545,7 +2545,6 @@ button.chip:disabled { cursor: default; }
 .paired-machine .fleet-permission-head { margin: 0; color: var(--text-hi); }
 .fleet-permission-state { color: var(--text-mid); }
 .fleet-permission[data-allowed="false"] .fleet-permission-state { color: var(--state-warn); }
-.paired-machine .fleet-permission-control[aria-disabled="true"] { color: var(--text-mid); border-style: dashed; cursor: not-allowed; }
 .fleet-permission-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
 /* cas-d382 QA F01: Copy command is one line, beside or under the command, never wrapped. */
 .fleet-permission-command .fleet-permission-copy { flex: none; white-space: nowrap; }

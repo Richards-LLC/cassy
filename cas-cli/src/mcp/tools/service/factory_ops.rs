@@ -497,10 +497,28 @@ fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort>
 /// Recycling must not silently switch a Codex worker to the supervisor's
 /// default harness or account, so every provider selector is copied from the
 /// agent row rather than re-resolved from current process environment.
+/// cas-033a: the harness a recycle relaunches `agent` on. A Claude worker
+/// spawned before it tagged its own harness recorded the supervisor's
+/// inherited default worker CLI (codex in a mixed fleet) next to its Claude
+/// model. A Claude model runs only on Claude, so that record cannot be right.
+fn recycle_worker_cli(agent: &cas_types::Agent) -> cas_mux::SupervisorCli {
+    let recorded = worker_cli_from_agent(agent);
+    let model_cli = agent
+        .metadata
+        .get("worker_model")
+        .and_then(|model| cas_factory::model_harness(model));
+    match model_cli {
+        Some(cas_mux::SupervisorCli::Claude) if recorded != cas_mux::SupervisorCli::Claude => {
+            cas_mux::SupervisorCli::Claude
+        }
+        _ => recorded,
+    }
+}
+
 fn worker_spec_from_agent(agent: &cas_types::Agent) -> cas_mux::WorkerSpec {
     cas_mux::WorkerSpec {
         name: Some(agent.name.clone()),
-        cli: worker_cli_from_agent(agent),
+        cli: recycle_worker_cli(agent),
         model: agent.metadata.get("worker_model").cloned(),
         effort: worker_effort_from_agent(agent),
         config_dir: agent.metadata.get("worker_account_dir").cloned(),
@@ -3453,6 +3471,25 @@ impl CasService {
         }
 
         let spec = worker_spec_from_agent(&worker);
+        // cas-033a: the daemon stops the worker before it relaunches it, so a
+        // recipe the routing policy refuses must be refused here, while the
+        // worker is still running, not after it is gone.
+        if let Err(error) =
+            cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "recycle_worker refused: {worker_name}'s recorded recipe (cli={}, model={}, \
+                     effort={}) would not relaunch: {error}. Nothing was stopped or queued. \
+                     Respawn it explicitly with spawn_workers cli=<harness> model=<model> \
+                     effort=<effort> once it is idle.",
+                    spec.cli.backend().name(),
+                    spec.model.as_deref().unwrap_or("default"),
+                    spec.effort.map(|effort| effort.to_string()).unwrap_or_else(|| "default".into()),
+                ),
+            ));
+        }
         let spec_json = serde_json::to_string(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -6786,6 +6823,8 @@ impl CasService {
                 use crate::cloud::peer_claims::Acquire;
                 let claimed = {
                     let epic = epic.clone();
+                    let cas_root = cas_root.clone();
+                    let agent = agent.clone();
                     budget
                         .run(move || {
                             crate::cloud::peer_claims::claim_epic_focus(&cas_root, &epic, &agent)
@@ -6793,10 +6832,15 @@ impl CasService {
                         .await
                 };
                 match claimed {
-                    Ok(Some(Acquire::PeerHolds(hold))) => hold.shared_epic_note(
-                        &epic,
-                        &crate::mcp::tools::core::guidance::caller_prefix(),
-                    ),
+                    Ok(Some(Acquire::PeerHolds(hold))) => {
+                        drop(crate::supervisor_notices::remote_focus_conflict(
+                            &cas_root, &agent, &epic, &hold,
+                        ));
+                        hold.shared_epic_note(
+                            &epic,
+                            &crate::mcp::tools::core::guidance::caller_prefix(),
+                        )
+                    }
                     Ok(Some(Acquire::Unavailable(why))) | Err(why) => format!(
                         "\n\n⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable ({}), so whether a session on another machine already works {epic} could not be checked.",
                         crate::mcp::tools::truncate_str(&why, 200),
@@ -10115,6 +10159,47 @@ pub(crate) fn worker_liveness_for_agent(
     super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs)
 }
 
+/// cas-9bf6: the execution evidence `worker_status` reports for `worker`,
+/// reused by the director's stall classifier so the two surfaces agree.
+/// `executing` is the worker_status liveness verdict (turn evidence within
+/// `stall_secs`, or a CPU-busy harness); `worktree_activity_age` is the
+/// freshest scoped dirty-file or HEAD commit age, using the same probe as
+/// is-wedged. Only this registered worker's checkout is read.
+/// `None` when the worker is unknown.
+pub(crate) fn worker_stall_evidence(
+    cas_root: &std::path::Path,
+    worker: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    stall_secs: i64,
+) -> Option<WorkerStallEvidence> {
+    let store = crate::store::open_agent_store(cas_root).ok()?;
+    let agents = store.list(None).ok()?;
+    let agent = agents
+        .iter()
+        .filter(|agent| agent.name == worker)
+        .max_by_key(|agent| agent.registered_at)?;
+    let observation = worker_liveness_for_agent(cas_root, agent, now, stall_secs);
+    let clone_path = match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => Some(path),
+        WorkerClonePathResolve::NotOnDisk { .. } => None,
+    };
+    let worktree_activity_age = clone_path.as_deref()
+        .and_then(crate::cli::factory::wedged::worktree_recent_edit_age);
+    Some(WorkerStallEvidence {
+        executing: observation.state == super::worker_liveness::Liveness::Executing,
+        detail: observation.detail(),
+        worktree_activity_age,
+    })
+}
+
+/// See [`worker_stall_evidence`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerStallEvidence {
+    pub executing: bool,
+    pub detail: String,
+    pub worktree_activity_age: Option<std::time::Duration>,
+}
+
 pub(crate) fn worker_liveness_rows(
     cas_root: &std::path::Path,
     store: &dyn cas_store::AgentStore,
@@ -11655,6 +11740,38 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cas_6eec_stall_evidence_counts_only_the_workers_scoped_edits_and_commits() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let repo = root.join("worktrees/active-codex");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(&repo)
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z").output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "factory/active-codex"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join("app"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "old task baseline"]);
+        let mut worker = cas_types::Agent::new_with_role("codex-owned-session".into(), "active-codex".into(), cas_types::AgentRole::Worker);
+        worker.metadata.insert("clone_path".into(), repo.to_string_lossy().into());
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        // Outside file churn cannot masquerade as this worker's work.
+        std::fs::write(project.path().join("unrelated-file"), "outside worker\n").unwrap();
+        let quiet = worker_stall_evidence(&root, "active-codex", chrono::Utc::now(), 600).unwrap();
+        assert!(quiet.worktree_activity_age.is_some_and(|age| age.as_secs() > 600));
+        std::fs::write(repo.join("app"), "editing now\n").unwrap();
+        let active = worker_stall_evidence(&root, "active-codex", chrono::Utc::now(), 600).unwrap();
+        assert!(active.worktree_activity_age.is_some_and(|age| age.as_secs() < 5), "fresh worker edit must veto quiet: {active:?}");
+    }
 
     async fn spawn_build_check_case(
         session: &str,
@@ -16756,6 +16873,69 @@ effort = "high"
             .metadata
             .insert("worker_cli".to_string(), "grok".to_string());
         assert_eq!(worker_cli_from_agent(&agent), cas_mux::SupervisorCli::Grok);
+    }
+
+    /// cas-033a AC3: each harness's worker recipe round-trips from the env
+    /// its own MCP server sees, through the registry row, into the recycle
+    /// spec, and the routing policy accepts it.
+    #[test]
+    fn worker_recipe_round_trips_for_every_harness_cas_033a() {
+        use cas_mux::SupervisorCli;
+        for cli in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
+        ] {
+            let model = cas_factory::default_worker_model_for_cli(cli);
+            let effort = cas_factory::default_worker_effort_for_cli(cli);
+            let account = format!("/accounts/{}", cli.backend().name());
+            let _env = crate::test_support::TestEnvGuard::with_vars(&[
+                ("CAS_AGENT_ROLE", "worker"),
+                ("CAS_FACTORY_WORKER_CLI", cli.backend().name()),
+                ("CAS_FACTORY_WORKER_MODEL", model),
+                ("CAS_FACTORY_WORKER_EFFORT", effort.as_str()),
+                ("CAS_FACTORY_WORKER_ACCOUNT_DIR", &account),
+            ]);
+            let mut agent = cas_types::Agent::new("sess".into(), format!("{cli:?}-worker"));
+            agent.role = cas_types::AgentRole::Worker;
+            crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+            let spec = worker_spec_from_agent(&agent);
+            assert_eq!(spec.cli, cli);
+            assert_eq!(spec.model.as_deref(), Some(model), "{cli:?}");
+            assert_eq!(spec.effort, Some(effort), "{cli:?}");
+            assert_eq!(spec.config_dir.as_deref(), Some(account.as_str()), "{cli:?}");
+            cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+                .unwrap_or_else(|error| panic!("{cli:?} recipe must relaunch: {error}"));
+        }
+    }
+
+    /// cas-033a AC1: a Claude worker whose row recorded the supervisor's
+    /// inherited default CLI (codex) next to its Claude model is recycled on
+    /// Claude, keeping its own model, effort and account.
+    #[test]
+    fn recycle_of_a_misrecorded_claude_worker_relaunches_on_claude_cas_033a() {
+        let mut agent = cas_types::Agent::new("sess".into(), "clever-panther-60".into());
+        for (key, value) in [
+            ("worker_cli", "codex"),
+            ("worker_model", "claude-opus-5-5"),
+            ("worker_effort", "high"),
+            ("worker_account_dir", "/home/u/.claude-support"),
+        ] {
+            agent.metadata.insert(key.into(), value.into());
+        }
+        let spec = worker_spec_from_agent(&agent);
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+        assert_eq!(spec.config_dir.as_deref(), Some("/home/u/.claude-support"));
+        cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
+            .expect("the repaired recipe relaunches");
+
+        // A record that agrees with its model is kept as recorded.
+        agent.metadata.insert("worker_cli".into(), "codex".into());
+        agent.metadata.insert("worker_model".into(), "gpt-6-luna".into());
+        assert_eq!(worker_spec_from_agent(&agent).cli, cas_mux::SupervisorCli::Codex);
     }
 
     #[test]

@@ -348,6 +348,22 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
 
 /** The header's reason line for a missing permission: one per scope. */
 const headerReasonId = (gate: FleetControlGate): string => `fleet-reason-header-${gate.scope}`;
+const HEADER_REASON_LEAD_ID = "fleet-reason-header-lead";
+const HEADER_INSTRUCTION_ID = "fleet-instruction-header";
+type MissingFleetControlGate = Extract<FleetControlGate, { readonly allowed: false }>;
+
+function permissionName(reason: string): string {
+  return reason.replace(/^Needs the /, "").replace(/ permission\.$/, "");
+}
+
+function headerInstruction(groups: readonly { gate: MissingFleetControlGate; names: string[] }[]): string {
+  const actions = groups.map(({ gate }) => gate.grantable
+    ? "allow managing workers"
+    : `pair again to add the ${permissionName(gate.reason)} permission`);
+  if (actions.length === 1 && groups[0]!.gate.grantable) return "Allow managing workers in Paired machines.";
+  if (actions.length === 1) return `Pair again from Paired machines to add the ${permissionName(groups[0]!.gate.reason)} permission.`;
+  return `In Paired machines, ${actions.join(", then ")}.`;
+}
 
 /** The section header's Add worker… and Focus epic…, with their small panels. */
 export function headerControls(document: Document, context: FleetOpsViewContext, panel: FleetHeaderPanel | undefined): HTMLElement {
@@ -369,20 +385,41 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   gateDisabled(grant, grantGate, headerReasonId(grantGate));
   wrap.append(add, focus);
   if (context.writeAccess) wrap.append(grant);
-  // cas-a217: one line per missing permission, naming the controls it gates,
-  // so Write access (factory:manage) never borrows Add worker's remedy.
+  // cas-ba64: one shared lead, short scope-specific lines, and one instruction
+  // that describes the grant or pairing command the Paired machines surface has.
   const gated: [FleetControlGate, string][] = [[addGate, "Add worker"], [focusGate, "Focus epic"]];
   if (context.writeAccess) gated.push([grantGate, "Write access"]);
-  const byScope = new Map<string, { gate: FleetControlGate; names: string[] }>();
+  const byScope = new Map<string, { gate: MissingFleetControlGate; names: string[] }>();
   for (const [gate, name] of gated) {
     if (gate.allowed) continue;
     const group = byScope.get(gate.scope) ?? { gate, names: [] };
     group.names.push(name);
     byScope.set(gate.scope, group);
   }
-  for (const { gate, names } of byScope.values()) {
-    const reason = reasonLine(document, gate, headerReasonId(gate), names.join(" and "));
-    if (reason) wrap.append(reason);
+  const groups = [...byScope.values()];
+  if (groups.length) {
+    const lead = document.createElement("small");
+    lead.className = "fleet-ops-reason";
+    lead.id = HEADER_REASON_LEAD_ID;
+    lead.textContent = `${groups[0]!.gate.state}.`;
+    wrap.append(lead);
+    for (const { gate, names } of groups) {
+      const reason = document.createElement("small");
+      reason.className = "fleet-ops-reason";
+      reason.id = headerReasonId(gate);
+      reason.textContent = `${names.join(", ")}: needs ${permissionName(gate.reason)}.`;
+      wrap.append(reason);
+    }
+    const instruction = document.createElement("small");
+    instruction.className = "fleet-ops-instruction";
+    instruction.id = HEADER_INSTRUCTION_ID;
+    instruction.textContent = headerInstruction(groups);
+    wrap.append(instruction);
+    for (const [gate, control] of [[addGate, add], [focusGate, focus], [grantGate, grant]] as const) {
+      if (!gate.allowed && (control !== grant || context.writeAccess)) {
+        control.setAttribute("aria-describedby", `${HEADER_REASON_LEAD_ID} ${headerReasonId(gate)} ${HEADER_INSTRUCTION_ID}`);
+      }
+    }
   }
   if (panel === "add" && addGate.allowed) {
     const form = document.createElement("div");

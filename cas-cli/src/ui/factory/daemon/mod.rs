@@ -280,7 +280,9 @@ pub struct FactoryDaemon {
     reported_permission_requests: std::collections::HashSet<String>,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
-    commander_mirror_state: runtime::MirrorScanState,
+    /// Factory loop v2 C3 (cas-d2a2): the prompt queue's selection, stamps,
+    /// in-flight rows, inbox retraction and Commander mirror scan as jobs.
+    queue_jobs: runtime::prompt_queue_jobs::QueueJobs,
     /// cas-8a55: workers whose harness refused a turn for an account reason
     /// (revoked Codex token, expired Claude session). Agent id -> evidence
     /// occurrence, so the supervisor is told once per failure rather than once
@@ -345,6 +347,12 @@ pub struct FactoryDaemon {
     /// records the pane's output byte count at inject time; a later poll
     /// resolves it against the pane's current count.
     urgent_wake_probes: HashMap<i64, crate::ui::factory::daemon::runtime::UrgentWakeProbe>,
+    /// cas-786a6 (factory loop v2 C4a): urgent injects between their turn
+    /// break and their payload, by mux ticket, with who owns each outcome.
+    urgent_injects: runtime::inject_commands::UrgentInjects,
+    /// cas-786a6 (spec §3.3): the operator pressed Ctrl+R. The loop's next
+    /// pass submits the `DirectorSnapshot` job instead of reading inline.
+    operator_refresh_requested: bool,
     /// cas-bea6: receipts for recent Commander sends by `client_ref`, so a
     /// resent message is answered with its first receipt and queued once.
     send_receipts: runtime::send_dedupe::SendReceipts,
@@ -360,6 +368,9 @@ pub struct FactoryDaemon {
     /// Wall-clock, because the queue poll is 100ms — counting polls would make
     /// "sustained silence" mean a third of a second.
     pane_silent_since: HashMap<String, std::time::Instant>,
+    /// cas-d5ab: when a busy-recipient gate decline was last recorded as
+    /// each worker's activity.
+    gate_activity_recorded_at: HashMap<String, std::time::Instant>,
     /// Last bounded sweep that terminalized aged prompts for targets no
     /// longer belonging to this factory session.
     last_prompt_poison_sweep: Option<std::time::Instant>,
@@ -376,6 +387,8 @@ pub struct FactoryDaemon {
     /// GH #1208: background scan of durable external reminder conditions;
     /// the loop only collects finished scans.
     external_wake: runtime::external_wake::ExternalWakeScanner,
+    /// Generation of the last `ReminderScan` job.
+    reminder_scan_generation: u64,
     /// cas-0f05: satisfied `ci_completed` reminders from the GitHub watcher,
     /// fired on the next reminder pass.
     pending_ci_wakes: Vec<runtime::ci_watch::CiWake>,

@@ -496,3 +496,40 @@ mod ambient_scrub_tests {
         }
     }
 }
+
+/// Private no-op `cas` for preflight/hook fixtures. Keep it alive with the
+/// child and pass `path()` through Command.env. Before calling Pty::spawn,
+/// re-execute the selected test in that child: the PTY preflight reads ambient
+/// PATH, not PtyConfig.env. No process environment is changed; tests of Cassy
+/// behavior use the built binary.
+#[cfg(unix)]
+pub(crate) struct FakeCasOnPath {
+    bin: TempDir,
+    path: OsString,
+}
+
+#[cfg(unix)]
+impl FakeCasOnPath {
+    pub(crate) fn path(&self) -> &OsStr {
+        &self.path
+    }
+    pub(crate) fn bin(&self) -> &Path {
+        self.bin.path()
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn fake_cas_on_path() -> FakeCasOnPath {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir().expect("private cas stand-in directory");
+    let cas = bin.path().join("cas");
+    std::fs::write(&cas, "#!/bin/sh\nexit 0\n").expect("write private cas stand-in");
+    std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o700))
+        .expect("make private cas stand-in executable");
+    let previous = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&previous)),
+    )
+    .expect("join fixture PATH");
+    FakeCasOnPath { bin, path }
+}

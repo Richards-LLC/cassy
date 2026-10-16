@@ -5106,7 +5106,8 @@ impl CasCore {
     /// but identity, registration, role, and liveness checks are identical.
     /// cas-7f60 (GH #1232): a live registered supervisor adopts an epic whose
     /// `epic_verification_owner` is a registered agent with positive evidence
-    /// of death, instead of a manual owner transfer. The adoption is persisted
+    /// that it is gone (shut down, or its harness process dead by the daemon's
+    /// liveness gate), instead of a manual owner transfer. The adoption is persisted
     /// with a decision note naming the dead owner's evidence. Unknown owners
     /// (perhaps a supervisor on another machine) are never adopted.
     fn adopt_dead_owner_epic(
@@ -5128,7 +5129,12 @@ impl CasCore {
             return false;
         };
         let Some(evidence) =
-            epic_autoclose::dead_owner_adoption(owner, &agents, chrono::Utc::now())
+            epic_autoclose::dead_owner_adoption(
+                owner,
+                &agents,
+                chrono::Utc::now(),
+                epic_autoclose::owner_process,
+            )
         else {
             return false;
         };

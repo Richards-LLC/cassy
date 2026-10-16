@@ -168,23 +168,53 @@ fn cas_7f60_dead_owner_is_adoptable_with_evidence() {
     let agents = vec![
         agent("id-dead", "old-sup", Shutdown, 7_300),
         agent("id-crashed", "crashed-sup", Active, 3 * 3_600),
+        agent("id-idle", "idle-sup", Active, 2 * 3_600),
+        agent("id-nopid", "nopid-sup", Stale, 5 * 3_600),
         agent("id-live", "live-sup", Active, 30),
-        agent("id-slow", "slow-sup", Active, 600),
     ];
-    // By id, name and session; shutdown or long-silent rows are dead.
-    let why = dead_owner_adoption("id-dead", &agents, now).expect("shutdown owner");
-    assert!(why.contains("old-sup") && why.contains("shutdown") && why.contains("2h"), "{why}");
-    assert!(dead_owner_adoption("crashed-sup", &agents, now).is_some());
-    assert!(dead_owner_adoption("old-sup-session", &agents, now).is_some());
-    // Live, briefly silent, unknown and empty owners are never adopted.
-    assert_eq!(dead_owner_adoption("live-sup", &agents, now), None);
-    assert_eq!(dead_owner_adoption("slow-sup", &agents, now), None);
-    assert_eq!(dead_owner_adoption("someone-elsewhere", &agents, now), None);
-    assert_eq!(dead_owner_adoption("  ", &agents, now), None);
+    // The process probe stands in for the daemon's liveness gate.
+    let probe = |agent: &cas_types::Agent| match agent.name.as_str() {
+        "crashed-sup" | "old-sup" => OwnerProcess::Dead,
+        "nopid-sup" => OwnerProcess::Unknown,
+        _ => OwnerProcess::Alive,
+    };
+    // By id, name and session: shut down, or its process is gone.
+    let why = dead_owner_adoption("id-dead", &agents, now, probe).expect("shut down owner");
+    assert!(why.contains("old-sup") && why.contains("shut down") && why.contains("2h"), "{why}");
+    let why = dead_owner_adoption("crashed-sup", &agents, now, probe).expect("dead process");
+    assert!(why.contains("harness process gone"), "{why}");
+    assert!(dead_owner_adoption("old-sup-session", &agents, now, probe).is_some());
+    // Age is never evidence: an owner idle for 2h with a live process, or
+    // stale with no process recorded, keeps its epic.
+    assert_eq!(dead_owner_adoption("idle-sup", &agents, now, probe), None);
+    assert_eq!(dead_owner_adoption("nopid-sup", &agents, now, probe), None);
+    // Live, unknown and empty owners are never adopted.
+    assert_eq!(dead_owner_adoption("live-sup", &agents, now, probe), None);
+    assert_eq!(dead_owner_adoption("someone-elsewhere", &agents, now, probe), None);
+    assert_eq!(dead_owner_adoption("  ", &agents, now, probe), None);
     // Any live registration under the owner's name keeps the owner.
     let mut both = agents.clone();
     both.push(agent("id-dead-2", "old-sup", Active, 5));
-    assert_eq!(dead_owner_adoption("old-sup", &both, now), None);
+    let probe_second_live = |agent: &cas_types::Agent| {
+        if agent.id == "id-dead-2" { OwnerProcess::Alive } else { probe(agent) }
+    };
+    assert_eq!(dead_owner_adoption("old-sup", &both, now, probe_second_live), None);
+}
+
+/// The production probe reads the real process table: an idle owner whose
+/// registered harness is this very test process is alive, however old its
+/// heartbeat; one with no recorded process is unknown.
+#[test]
+fn cas_7f60_idle_owner_with_live_process_is_not_adopted() {
+    let pid = std::process::id();
+    let mut idle = agent("id-idle", "idle-sup", cas_types::AgentStatus::Active, 6 * 3_600);
+    idle.pid = Some(pid);
+    crate::mcp::daemon::stamp_pid_fingerprint(&mut idle, pid);
+    assert_eq!(owner_process(&idle), OwnerProcess::Alive);
+    assert_eq!(dead_owner_adoption("idle-sup", &[idle], Utc::now(), owner_process), None);
+    let nopid = agent("id-nopid", "nopid-sup", cas_types::AgentStatus::Active, 6 * 3_600);
+    assert_eq!(owner_process(&nopid), OwnerProcess::Unknown);
+    assert_eq!(dead_owner_adoption("nopid-sup", &[nopid], Utc::now(), owner_process), None);
 }
 
 struct HandlerClose {

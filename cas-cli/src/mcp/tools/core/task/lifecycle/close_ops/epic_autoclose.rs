@@ -6,7 +6,8 @@
 //! branch. This module holds the decisions that remove those steps:
 //!
 //! * [`dead_owner_adoption`]: a live registered supervisor adopts an epic
-//!   whose `epic_verification_owner` is a registered agent that is dead.
+//!   whose `epic_verification_owner` is a registered agent that is gone:
+//!   shut down, or its harness process dead. Heartbeat age is never evidence.
 //! * [`landed_on_default_branch`]: a child branch the epic-branch gate calls
 //!   stranded is not stranded when the default branch already carries its
 //!   content, measured by ancestry (`rev-list --count`) or patch-equivalence
@@ -16,12 +17,6 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 
-/// An owner whose newest heartbeat is older than this is dead, even when its
-/// row still says active (a crashed session never writes `shutdown`). Three
-/// times the 5-minute stale window used elsewhere, so a slow or briefly
-/// suspended supervisor is never adopted out from under itself.
-pub(crate) const EPIC_OWNER_DEAD_SECS: i64 = 15 * 60;
-
 fn age(secs: i64) -> String {
     match secs {
         s if s < 3600 => format!("{}m", s / 60),
@@ -30,17 +25,54 @@ fn age(secs: i64) -> String {
     }
 }
 
+/// What the owner's harness process says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerProcess {
+    /// The registered process (pid + starttime) is running, or a live
+    /// process carries the agent's name.
+    Alive,
+    /// The registered process is gone and no live process carries its name.
+    Dead,
+    /// No process is recorded for the agent, so nothing can be proven.
+    Unknown,
+}
+
+/// The daemon's own liveness gate (cas-2749/cas-ea46/cas-3e56): the
+/// registered pid + starttime, then a scan for a live process by name.
+pub(crate) fn owner_process(agent: &cas_types::Agent) -> OwnerProcess {
+    use crate::mcp::daemon::{LivenessOutcome, evaluate_liveness, pid_alive, pid_matches_fingerprint};
+    match evaluate_liveness(agent, pid_alive, pid_matches_fingerprint) {
+        LivenessOutcome::NoPidRecorded => OwnerProcess::Unknown,
+        LivenessOutcome::Alive { .. } => OwnerProcess::Alive,
+        LivenessOutcome::Dead { .. } => {
+            let by_name = crate::cli::factory::wedged::find_worker_pid(
+                &crate::cli::factory::wedged::RealProcessTable,
+                &agent.name,
+            );
+            if by_name.is_some() {
+                OwnerProcess::Alive
+            } else {
+                OwnerProcess::Dead
+            }
+        }
+    }
+}
+
 /// Why `owner` may be adopted, or `None` when it must not be.
 ///
 /// The owner is matched against every registered agent by id, name or
-/// factory session. Adoption needs positive evidence of death: every
-/// matching agent is shut down, stale, or silent for longer than
-/// [`EPIC_OWNER_DEAD_SECS`]. An owner no registered agent matches is unknown
-/// (it may be a supervisor on another machine) and is never adopted.
+/// factory session. Adoption needs positive evidence that every matching
+/// agent is gone: it shut down, or its harness process is dead by the
+/// daemon's liveness gate (`process`). Heartbeat age alone is never
+/// evidence: the daemon refreshes an idle supervisor's heartbeat every 30s,
+/// and a stalled daemon must not cost a live supervisor its epic. An owner
+/// no registered agent matches is unknown (it may be a supervisor on
+/// another machine) and is never adopted.
 pub(crate) fn dead_owner_adoption(
     owner: &str,
     agents: &[cas_types::Agent],
     now: DateTime<Utc>,
+    process: impl Fn(&cas_types::Agent) -> OwnerProcess,
 ) -> Option<String> {
     let owner = owner.trim();
     if owner.is_empty() {
@@ -62,20 +94,17 @@ pub(crate) fn dead_owner_adoption(
     }
     let mut evidence = Vec::new();
     for agent in matching {
-        let silent = (now - agent.last_heartbeat).num_seconds().max(0);
-        let dead = matches!(
-            agent.status,
-            cas_types::AgentStatus::Shutdown | cas_types::AgentStatus::Stale
-        ) || silent > EPIC_OWNER_DEAD_SECS;
-        if !dead {
+        let silent = age((now - agent.last_heartbeat).num_seconds().max(0));
+        let gone = if agent.status == cas_types::AgentStatus::Shutdown {
+            "shut down".to_string()
+        } else if process(agent) == OwnerProcess::Dead {
+            format!("{} with its harness process gone", agent.status)
+        } else {
             return None;
-        }
+        };
         evidence.push(format!(
-            "`{}` ({}) is {}, last heartbeat {} ago",
-            agent.name,
-            agent.id,
-            agent.status,
-            age(silent)
+            "`{}` ({}) is {gone}, last heartbeat {silent} ago",
+            agent.name, agent.id
         ));
     }
     Some(evidence.join("; "))

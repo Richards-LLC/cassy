@@ -218,7 +218,10 @@ pub(super) fn landed_on_default_notes(
         return notes;
     }
     for row in candidates {
-        let Some(refs) = row
+        // Every ref the gate read, plus the recorded delivery anchor: a live
+        // lane can be fully merged while the task's own anchor still holds a
+        // work commit that never landed anywhere.
+        let Some(mut refs) = row
             .checked_ref_reads
             .iter()
             .map(|read| read.read_ref())
@@ -227,6 +230,11 @@ pub(super) fn landed_on_default_notes(
         else {
             continue;
         };
+        if let Some(anchor) = row.recorded_anchor.as_deref()
+            && !refs.contains(&anchor)
+        {
+            refs.push(anchor);
+        }
         let verdicts: Option<Vec<String>> = refs
             .iter()
             .map(|reference| match landed_on_default_branch(repo, &default_ref, reference) {

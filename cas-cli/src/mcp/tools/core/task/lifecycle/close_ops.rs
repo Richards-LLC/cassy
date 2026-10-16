@@ -35511,11 +35511,17 @@ mod epic_status_gate_tests {
             EpicCloseGateOutcome::ProceedWithNote(_)
         ));
 
+        // Without its own target the child is measured against the follow-up
+        // branch, which lacks it. cas-7f60 (GH #1232): the default branch
+        // already carries its patch, so it is not stranded; the decision
+        // note records that measurement instead of a hard block.
         landed.deliverables.work_target = None;
-        assert!(matches!(
-            run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed]),
-            EpicCloseGateOutcome::Reject(_)
-        ));
+        match run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed]) {
+            EpicCloseGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains("cas-7f60") && note.contains("main"), "{note}");
+            }
+            other => panic!("content already on main must not hard-block: {other:?}"),
+        }
     }
 
     #[test]

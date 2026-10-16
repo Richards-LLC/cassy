@@ -567,6 +567,27 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
             .collect::<Vec<_>>(),
         ["worker-a"]
     );
+    let parked_head = a
+        .work
+        .waiting_merges
+        .iter()
+        .find(|w| w.kind == "parked_delivery")
+        .unwrap();
+    assert_eq!(
+        parked_head.head_sha.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    let queue_head = a
+        .work
+        .waiting_merges
+        .iter()
+        .find(|w| w.kind == "merge_queue")
+        .unwrap();
+    assert_eq!(
+        queue_head.head_sha.as_deref(),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+    assert_eq!(queue_head.observed_at, Some(observed));
     let b = details.iter().find(|d| d.owner == "sup-b").unwrap();
     assert_eq!(b.work.observations_status.state, "stale");
     assert_eq!(b.work.prs_status.state, "unavailable");

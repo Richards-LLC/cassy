@@ -2,7 +2,7 @@ use cas_types::{Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::str::FromStr;
+pub(crate) use cas_types::{LifecycleEnvelope, parse_lifecycle_envelope};
 
 const MERGE_ENVELOPE_OPEN: &str = "<cas-merge-request>";
 const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
@@ -398,19 +398,6 @@ pub(crate) fn merge_request_request_changes_guidance(
     format!(
         "Cassy suppressed your merge request for {task_id}: delivery tip {branch_tip} was already declined by the supervisor with request_changes (task is {status}). Do not ask the supervisor to merge that reviewed tip again; start a fresh task cycle and send only a new corrective tip."
     )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LifecycleEnvelope {
-    pub task_id: String,
-    pub new_status: TaskStatus,
-    pub occurrence: DateTime<Utc>,
-    /// The lifecycle kind is optional for compatibility with envelopes from
-    /// before the relay supersession contract was added.
-    pub transition: Option<String>,
-    /// Merge-boundary tip captured when an awaiting-merge/close-rejected relay
-    /// was emitted. A later close cycle must not revive the old relay.
-    pub branch_tip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1534,26 +1521,6 @@ fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let start = tag.find(&needle)? + needle.len();
     let end = tag[start..].find('"')? + start;
     Some(&tag[start..end])
-}
-
-pub(crate) fn parse_lifecycle_envelope(prompt: &str) -> Option<LifecycleEnvelope> {
-    let tag_end = prompt.find('>')?;
-    let tag = &prompt[..tag_end];
-    if !tag.starts_with("<task-lifecycle ") {
-        return None;
-    }
-    let task_id = xml_attribute(tag, "task_id")?.to_string();
-    let new_status = TaskStatus::from_str(xml_attribute(tag, "new")?).ok()?;
-    let occurrence = DateTime::parse_from_rfc3339(xml_attribute(tag, "occurrence")?)
-        .ok()?
-        .with_timezone(&Utc);
-    Some(LifecycleEnvelope {
-        task_id,
-        new_status,
-        occurrence,
-        transition: xml_attribute(tag, "transition").map(str::to_string),
-        branch_tip: xml_attribute(tag, "branch_tip").map(str::to_string),
-    })
 }
 
 pub(crate) fn revalidate_lifecycle_prompt(

@@ -4125,6 +4125,9 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
         return;
     }
     for words in shell_statement_words(command) {
+        if let Some(payload) = env_split_string_payload(&words) {
+            collect_shell_invocations(&payload, depth + 1, found);
+        }
         let Some(index) = unwrapped_command_index(&words) else {
             continue;
         };
@@ -4134,7 +4137,8 @@ fn collect_shell_invocations(command: &str, depth: usize, found: &mut Vec<(Strin
             // Wrappers whose option value is itself a shell command.
             "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser" => {
                 for (position, arg) in args.iter().enumerate() {
-                    let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                    let flags_c =
+                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
                     if (flags_c || arg == "--command")
                         && let Some(payload) = args.get(position + 1)
                     {
@@ -4227,8 +4231,8 @@ fn normalize_cas_substitutions(command: &str) -> String {
 }
 
 /// Options taking a separate value, for each wrapper the structural pass
-/// unwraps. Words starting with `-` and numeric or duration words (`30`,
-/// `1.5m`) are skipped generically.
+/// unwraps. Duration words belong only to timeout; positional values are
+/// consumed only by wrappers that define one.
 fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
     match wrapper {
         "timeout" => &["-s", "--signal", "-k", "--kill-after"],
@@ -4266,8 +4270,8 @@ fn unwrapped_command_index(words: &[String]) -> Option<usize> {
         }
         let value_options = wrapper_value_options(name);
         let mut next = index + 1;
-        // `flock FILE cmd` and `timeout DURATION cmd` take one positional.
-        let mut positional = matches!(name, "flock" | "timeout");
+        // File/FD, duration and scheduling priority, respectively.
+        let mut positional = matches!(name, "flock" | "timeout" | "chrt");
         while next < words.len() {
             let word = words[next].as_str();
             if word == "--" {
@@ -4276,8 +4280,10 @@ fn unwrapped_command_index(words: &[String]) -> Option<usize> {
             }
             if value_options.contains(&word) {
                 next += 2;
-            } else if word.starts_with('-') || is_duration_word(word) {
-                if is_duration_word(word) && !word.starts_with('-') {
+            } else if name == "xargs" && xargs_short_option_needs_value(word, value_options) {
+                next += 2;
+            } else if word.starts_with('-') || (name == "timeout" && is_duration_word(word)) {
+                if name == "timeout" && is_duration_word(word) && !word.starts_with('-') {
                     positional = false;
                 }
                 next += 1;
@@ -4292,6 +4298,25 @@ fn unwrapped_command_index(words: &[String]) -> Option<usize> {
         index = next + executable_word_index(rest)?;
     }
     Some(index)
+}
+
+/// A required short-option value is either attached or the next word. Stop
+/// at the first value-taking option; the remaining letters are its value.
+fn xargs_short_option_needs_value(word: &str, options: &[&str]) -> bool {
+    if !word.starts_with('-') || word.starts_with("--") || word.len() <= 2 {
+        return false;
+    }
+    let mut flags = word[1..].chars().peekable();
+    while let Some(flag) = flags.next() {
+        // These GNU short options take only an optional attached value.
+        if matches!(flag, 'i' | 'e' | 'l') {
+            return false;
+        }
+        if options.iter().any(|option| *option == format!("-{flag}")) {
+            return flags.peek().is_none();
+        }
+    }
+    false
 }
 
 /// `30`, `1.5`, `30s`, `2m`: a number or `timeout` duration.
@@ -4337,36 +4362,32 @@ fn runs_substitution(words: &[String]) -> bool {
 /// non-read-only statement).
 fn read_only_statement(words: &[String]) -> bool {
     let Some(index) = unwrapped_command_index(words) else {
-        // cas-b7b2: a statement of bare assignments changes the environment
-        // later statements run with (PATH, or anything under `set -a`).
-        return !words.iter().any(|word| {
-            word.split_once('=')
-                .is_some_and(|(name, _)| is_shell_variable_name(name))
-        });
+        return words.is_empty();
     };
     let args = &words[index + 1..];
+    if words
+        .first()
+        .is_some_and(|word| shell_word_basename(word) == "xargs")
+    {
+        return policy_xargs_search(words);
+    }
     match shell_word_basename(&words[index]) {
-        "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "cat" | "less" | "more" | "head"
-        | "tail" | "wc" | "sort" | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd"
-        | "true" | "false" | "test" | "[" => true,
-        // cas-b7b2: `set` is read-only unless it turns on allexport, which
-        // exports every later assignment.
-        "set" => !args.iter().any(|arg| {
-            arg == "allexport"
-                || ((arg.starts_with('-') || arg.starts_with('+'))
-                    && !arg.starts_with("--")
-                    && arg[1..].contains('a'))
-        }),
-        "git" => args
+        name @ ("grep" | "egrep" | "fgrep" | "rg" | "cat" | "head" | "tail" | "wc" | "sort"
+        | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd" | "true" | "false"
+        | "test" | "[") => index == 0 && policy_reader_flags(name, args),
+        "set" => index == 0 && policy_set_flags(args),
+        "git" => index == 0 && policy_git_flags(args),
+        "cas" => args
             .iter()
-            .find(|arg| !arg.starts_with('-'))
-            .is_some_and(|sub| {
-                matches!(sub.as_str(), "log" | "show" | "grep" | "diff" | "status" | "blame" | "commit")
+            .position(|arg| arg == "config")
+            .is_some_and(|at| {
+                args.get(at + 1).is_some_and(|sub| {
+                    matches!(
+                        sub.as_str(),
+                        "get" | "describe" | "list" | "search" | "docs"
+                    )
+                })
             }),
-        "cas" => args.iter().position(|arg| arg == "config").is_some_and(|at| {
-            args.get(at + 1)
-                .is_some_and(|sub| matches!(sub.as_str(), "get" | "describe" | "list" | "search" | "docs"))
-        }),
         // cas-b7b2: searches that cas-1768 QA found refused, judged by
         // POSITIVE allowlists that fail closed. No environment assignment or
         // env/sudo-style prefix may precede them: awk and find read
@@ -4382,6 +4403,401 @@ fn read_only_statement(words: &[String]) -> bool {
         "jq" => index == 0 && read_only_jq(args),
         _ => false,
     }
+}
+
+/// Positive flag sets only. Operands are data, including words after `--`.
+/// Short clusters contain only listed switches; value options stay separate
+/// (or use `=`). The legacy numeric count is limited to tools that define it.
+fn policy_output_flags(
+    args: &[String],
+    switches: &[&str],
+    values: &[&str],
+    numeric_count: bool,
+) -> bool {
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        let word = word.as_str();
+        if word == "--" {
+            return true;
+        }
+        if switches.contains(&word) {
+            index += 1;
+            continue;
+        }
+        if values.contains(&word) {
+            if args.get(index + 1).is_none() {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if word
+            .split_once('=')
+            .is_some_and(|(flag, _)| values.contains(&flag))
+        {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') && word != "-" {
+            let short = &word[1..];
+            let count = numeric_count
+                && !short.is_empty()
+                && short.bytes().all(|byte| byte.is_ascii_digit());
+            let cluster = !short.is_empty()
+                && short
+                    .chars()
+                    .all(|flag| switches.contains(&format!("-{flag}").as_str()));
+            if !count && !cluster {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Keep a small output-only set per reader. Pagers and configurable search
+/// frontends are intentionally absent rather than treated as generic reads.
+fn policy_reader_flags(name: &str, args: &[String]) -> bool {
+    let (switches, values, count): (&[&str], &[&str], bool) = match name {
+        "grep" | "egrep" | "fgrep" => (
+            &[
+                "-n",
+                "-i",
+                "-r",
+                "-R",
+                "-l",
+                "-c",
+                "-E",
+                "-F",
+                "-w",
+                "-v",
+                "-h",
+                "-H",
+                "-q",
+                "-s",
+                "--line-number",
+                "--ignore-case",
+                "--recursive",
+                "--files-with-matches",
+                "--count",
+                "--extended-regexp",
+                "--fixed-strings",
+                "--word-regexp",
+                "--invert-match",
+                "--color",
+            ],
+            &["-e", "--regexp", "--color"],
+            false,
+        ),
+        "rg" => (
+            &[
+                "-n",
+                "-i",
+                "-l",
+                "-c",
+                "-F",
+                "-w",
+                "-v",
+                "-H",
+                "-s",
+                "-S",
+                "--line-number",
+                "--ignore-case",
+                "--files-with-matches",
+                "--count",
+                "--fixed-strings",
+                "--word-regexp",
+                "--invert-match",
+                "--hidden",
+                "--files",
+                "--no-heading",
+                "--heading",
+                "--json",
+            ],
+            &[
+                "-e",
+                "--regexp",
+                "-g",
+                "--glob",
+                "-t",
+                "--type",
+                "-T",
+                "--type-not",
+                "--color",
+            ],
+            false,
+        ),
+        "cat" => (
+            &[
+                "-n",
+                "-b",
+                "-s",
+                "-E",
+                "-T",
+                "-A",
+                "-v",
+                "--number",
+                "--number-nonblank",
+                "--squeeze-blank",
+                "--show-ends",
+                "--show-tabs",
+                "--show-all",
+            ],
+            &[],
+            false,
+        ),
+        "head" | "tail" => (
+            &["-q", "-v", "--quiet", "--verbose"],
+            &["-n", "--lines", "-c", "--bytes"],
+            true,
+        ),
+        "wc" => (
+            &[
+                "-l",
+                "-w",
+                "-c",
+                "-m",
+                "-L",
+                "--lines",
+                "--words",
+                "--bytes",
+                "--chars",
+                "--max-line-length",
+            ],
+            &[],
+            false,
+        ),
+        "sort" => (
+            &[
+                "-n",
+                "-r",
+                "-u",
+                "-f",
+                "-b",
+                "-h",
+                "-V",
+                "--numeric-sort",
+                "--reverse",
+                "--unique",
+                "--ignore-case",
+                "--ignore-leading-blanks",
+                "--human-numeric-sort",
+                "--version-sort",
+            ],
+            &["-k", "--key", "-t", "--field-separator"],
+            false,
+        ),
+        "uniq" => (
+            &[
+                "-c",
+                "-d",
+                "-u",
+                "-i",
+                "--count",
+                "--repeated",
+                "--unique",
+                "--ignore-case",
+            ],
+            &[
+                "-f",
+                "--skip-fields",
+                "-s",
+                "--skip-chars",
+                "-w",
+                "--check-chars",
+            ],
+            false,
+        ),
+        "cut" => (
+            &["-s", "--only-delimited", "--complement"],
+            &[
+                "-b",
+                "--bytes",
+                "-c",
+                "--characters",
+                "-f",
+                "--fields",
+                "-d",
+                "--delimiter",
+            ],
+            false,
+        ),
+        "ls" => (
+            &[
+                "-l",
+                "-a",
+                "-A",
+                "-h",
+                "-R",
+                "-d",
+                "-1",
+                "--all",
+                "--almost-all",
+                "--human-readable",
+                "--recursive",
+                "--directory",
+            ],
+            &[],
+            false,
+        ),
+        "echo" => (&["-n", "-e", "-E"], &[], false),
+        "printf" | "true" | "false" => (&[], &[], false),
+        "cd" | "pwd" => (&["-L", "-P"], &[], false),
+        "test" | "[" => (
+            &[
+                "-n", "-z", "-e", "-f", "-d", "-r", "-w", "-x", "-s", "-L", "-h", "-a", "-o",
+                "-eq", "-ne", "-lt", "-le", "-gt", "-ge",
+            ],
+            &[],
+            false,
+        ),
+        _ => return false,
+    };
+    policy_output_flags(args, switches, values, count)
+}
+
+fn policy_set_flags(args: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        let Some(short) = word.strip_prefix('-').filter(|short| !short.is_empty()) else {
+            return false;
+        };
+        let mut flags = short.chars().peekable();
+        while let Some(flag) = flags.next() {
+            if flag == 'o'
+                && flags.peek().is_none()
+                && args.get(index + 1).is_some_and(|value| value == "pipefail")
+            {
+                index += 1;
+            } else if !"eufxC".contains(flag) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    true
+}
+
+/// The one wrapper exception: direct xargs, known separate-word options,
+/// then grep/rg whose own flags pass. No generic wrapper unwrapping here.
+fn policy_xargs_search(words: &[String]) -> bool {
+    let mut index = 1;
+    while let Some(word) = words.get(index) {
+        match word.as_str() {
+            "-0" | "--null" | "-r" | "--no-run-if-empty" => index += 1,
+            "-n" | "-P" => {
+                if !words
+                    .get(index + 1)
+                    .is_some_and(|number| number.parse::<u32>().is_ok())
+                {
+                    return false;
+                }
+                index += 2;
+            }
+            flag if flag.starts_with('-') => return false,
+            _ => break,
+        }
+    }
+    words.get(index).is_some_and(|word| {
+        let name = shell_word_basename(word);
+        matches!(name, "grep" | "rg") && policy_reader_flags(name, &words[index + 1..])
+    })
+}
+
+fn policy_git_flags(args: &[String]) -> bool {
+    let Some((sub, rest)) = args.split_first() else {
+        return false;
+    };
+    let (switches, values, count): (&[&str], &[&str], bool) = match sub.as_str() {
+        "log" => (
+            &[
+                "--oneline",
+                "--stat",
+                "--name-only",
+                "--name-status",
+                "--graph",
+                "--all",
+                "--reverse",
+                "--no-merges",
+                "--no-color",
+            ],
+            &[
+                "-n",
+                "--max-count",
+                "--grep",
+                "--author",
+                "--since",
+                "--until",
+            ],
+            true,
+        ),
+        "show" => (
+            &[
+                "--oneline",
+                "--stat",
+                "--name-only",
+                "--name-status",
+                "--summary",
+                "--no-patch",
+                "-s",
+                "--no-color",
+            ],
+            &[],
+            false,
+        ),
+        "diff" => (
+            &[
+                "--stat",
+                "--name-only",
+                "--name-status",
+                "--numstat",
+                "--shortstat",
+                "--summary",
+                "--no-patch",
+                "--cached",
+                "--staged",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+            ],
+            &[],
+            false,
+        ),
+        "status" => (
+            &["-s", "-b", "--short", "--branch", "--porcelain"],
+            &[],
+            false,
+        ),
+        "grep" => return policy_reader_flags("grep", rest),
+        "commit" => return policy_git_commit_message(rest),
+        _ => return false,
+    };
+    policy_output_flags(rest, switches, values, count)
+}
+
+/// Approved message-data exception, without wrappers or global git options.
+fn policy_git_commit_message(args: &[String]) -> bool {
+    let mut index = 0;
+    let mut message = false;
+    while let Some(word) = args.get(index) {
+        match word.as_str() {
+            "-q" | "--quiet" | "-s" | "--signoff" | "--allow-empty" => index += 1,
+            "-m" | "--message" => {
+                if args.get(index + 1).is_none() {
+                    return false;
+                }
+                message = true;
+                index += 2;
+            }
+            value if value.starts_with("--message=") || value.starts_with("-m=") => {
+                message = true;
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    message
 }
 
 /// cas-b7b2: a jq run with only known flags (security round 2, L1). Module
@@ -6124,6 +6540,174 @@ mod workspace_contract_tests {
             "python3 -c 'print(1)'",
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+    }
+
+    #[test]
+    fn cas_3b2f_policy_mentions_require_positive_tool_flags() {
+        let allowed = [
+            "grep -rn grant-write docs",
+            "egrep -n grant-write docs",
+            "fgrep -n grant-write docs",
+            "rg -n --hidden grant-write docs",
+            "cat -n grant-write.md",
+            "head -n 20 grant-write.md",
+            "tail -n 20 grant-write.md",
+            "wc -l grant-write.md",
+            "sort -nr grant-write.md",
+            "uniq -c grant-write.md",
+            "cut -f 1 grant-write.md",
+            "ls -la grant-write.md",
+            "echo -n grant-write",
+            "printf '%s' grant-write",
+            "cd docs && grep grant-write .",
+            "pwd -P; grep grant-write docs",
+            "true; grep grant-write docs",
+            "false; grep grant-write docs",
+            "test -n grant-write",
+            "[ -n grant-write ]",
+            "set -euo pipefail; grep grant-write docs",
+        ];
+        for command in allowed {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let tools = [
+            "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc", "sort", "uniq", "cut",
+            "ls", "echo", "printf", "cd", "pwd", "true", "false", "test", "[", "set", "less",
+            "more", "ag", "ack",
+        ];
+        let admitted: Vec<_> = tools
+            .into_iter()
+            .map(|tool| format!("{tool} --zz-not-a-flag grant-write"))
+            .filter(|command| operator_policy_command_denial(command).is_none())
+            .collect();
+        assert!(
+            admitted.is_empty(),
+            "unknown flags must fail closed: {admitted:?}"
+        );
+        assert!(
+            operator_policy_command_denial("grep --color --zz-not-a-flag grant-write").is_some()
+        );
+        assert_eq!(
+            operator_policy_command_denial("grep --color=never -n grant-write docs"),
+            None
+        );
+    }
+
+    #[test]
+    fn cas_3b2f_git_policy_mentions_require_subcommand_flags() {
+        for command in [
+            "git log --oneline -5 --grep grant-write",
+            "git show --stat HEAD -- grant-write.md",
+            "git diff --stat --name-only -- grant-write.md",
+            "git status --short -- grant-write.md",
+            "git grep -n grant-write",
+            "git commit -m 'document grant-write' -q -s --allow-empty",
+            "git commit --message='document grant-write' --quiet --signoff",
+        ] {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let mut refused: Vec<String> = ["log", "show", "diff", "status", "grep", "commit"]
+            .into_iter()
+            .map(|sub| format!("git {sub} --zz-not-a-flag grant-write"))
+            .collect();
+        refused.extend(
+            [
+                "git -c color.ui=never log --grep grant-write",
+                "git --zz-not-a-global log --grep grant-write",
+                "git zz-not-a-subcommand grant-write",
+                "env git log --grep grant-write",
+                "git commit --quiet; grep grant-write docs",
+            ]
+            .map(str::to_string),
+        );
+        let admitted: Vec<_> = refused
+            .into_iter()
+            .filter(|command| operator_policy_command_denial(command).is_none())
+            .collect();
+        assert!(
+            admitted.is_empty(),
+            "unlisted git forms must fail closed: {admitted:?}"
+        );
+    }
+
+    #[test]
+    fn cas_3b2f_only_tiny_xargs_search_prefix_is_allowed() {
+        for command in [
+            "find docs -name '*.md' | xargs grep -n grant-write",
+            "xargs -0 -r -n 2 -P 1 rg -n grant-write docs",
+            "xargs --null --no-run-if-empty grep -l grant-write",
+        ] {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let mut refused = vec![
+            "xargs --zz-not-a-flag grep grant-write".to_string(),
+            "xargs -zz grep grant-write".to_string(),
+            "xargs -n2 grep grant-write".to_string(),
+            "xargs cat grant-write.md".to_string(),
+            "xargs grep --zz-not-a-flag grant-write".to_string(),
+        ];
+        refused.extend(
+            [
+                "env",
+                "nice",
+                "timeout 1",
+                "sudo",
+                "command",
+                "exec",
+                "stdbuf -oL",
+            ]
+            .map(|prefix| format!("{prefix} grep -n grant-write docs")),
+        );
+        let admitted: Vec<_> = refused
+            .into_iter()
+            .filter(|command| operator_policy_command_denial(command).is_none())
+            .collect();
+        assert!(
+            admitted.is_empty(),
+            "unlisted wrappers must fail closed: {admitted:?}"
+        );
+    }
+
+    #[test]
+    fn cas_3b2f_nonempty_statement_needs_a_command_word() {
+        assert!(read_only_statement(&[]));
+        for words in [vec!["command"], vec!["env", "--"], vec!["MODE=value"]] {
+            let words: Vec<String> = words.into_iter().map(str::to_string).collect();
+            assert!(
+                !read_only_statement(&words),
+                "nonempty statement: {words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cas_3b2f_structural_reader_visits_benign_env_payload() {
+        let found = shell_invocations("env --split-string 'printf sample'");
+        assert!(
+            found
+                .iter()
+                .any(|(name, args)| name == "printf" && args == &["sample"])
+        );
+        for command in ["xargs -rI item printf sample", "xargs -Iitem printf sample"] {
+            assert!(
+                shell_invocations(command)
+                    .iter()
+                    .any(|(name, args)| name == "printf" && args == &["sample"])
+            );
+        }
+    }
+
+    #[test]
+    fn cas_3b2f_duration_words_belong_only_to_timeout() {
+        for (words, expected) in [
+            (vec!["timeout", "2m", "printf", "sample"], 2),
+            (vec!["nohup", "2m", "sample"], 1),
+            (vec!["nice", "2", "sample"], 1),
+            (vec!["chrt", "-f", "10", "printf", "sample"], 3),
+        ] {
+            let words: Vec<String> = words.into_iter().map(str::to_string).collect();
+            assert_eq!(unwrapped_command_index(&words), Some(expected), "{words:?}");
         }
     }
 

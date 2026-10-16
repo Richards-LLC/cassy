@@ -165,6 +165,7 @@ async fn c4491f_correlated_deaths_relay_writes_nothing_on_the_loop() {
                 worker: worker.into(),
                 status: "exit 1".into(),
                 death: None,
+                recording: false,
             });
     }
     {
@@ -785,13 +786,14 @@ async fn cas_26c8_a_retrying_group_does_not_hold_back_a_later_death() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
     // The stuck group's relay never gets its prompt queued; a lone death relays.
-    daemon.relay_jobs.death_group_override = Some(|_, group, _| group.len() < 2);
+    daemon.relay_jobs.death_group_override = Some(|_, _, group, _| group.len() < 2);
     let t0 = chrono::Utc::now() - chrono::Duration::seconds(60);
     let exit = |worker: &str, offset_ms: i64| super::ObservedWorkerExit {
         at: t0 + chrono::Duration::milliseconds(offset_ms),
         worker: worker.into(),
         status: "exit 1".into(),
         death: None,
+        recording: false,
     };
     daemon.recent_worker_exits = vec![exit("stuck-a", 0), exit("stuck-b", 500), exit("lone-c", 20_000)];
 
@@ -844,4 +846,110 @@ fn c54a2_shutdown_drain_is_bounded() {
     assert!(!daemon.finish_shutdown_writes(&worker, Duration::from_millis(50)));
     assert!(started.elapsed() < Duration::from_secs(10), "shutdown waited {:?}", started.elapsed());
     release.send(()).unwrap();
+}
+
+/// cas-ff42 C6: exit handling runs inside the loop's enforced PTY-exchange
+/// step. The crash-time stale mark and death record are written on the store
+/// worker, so the step stays clean; the exit waits, recording, until they
+/// report.
+#[tokio::test]
+async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.queue_jobs.store(&cas_dir).unwrap();
+    let at = chrono::Utc::now();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    {
+        let lane = super::loop_watchdog::enforced_daemon_step(
+            &progress,
+            super::loop_watchdog::LoopPhase::ClientInput,
+        );
+        let store_free = cas_store::wait_budget::forbid_store_access();
+        let before = cas_store::lane_guard::thread_violations();
+        daemon.recent_worker_exits.push(super::ObservedWorkerExit {
+            at,
+            worker: "relay-worker".into(),
+            status: "exited with code 1".into(),
+            death: None,
+            recording: true,
+        });
+        daemon.mark_registered_worker_stale(
+            "relay-worker",
+            "exited with code 1",
+            None,
+            crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+            Some(at),
+        );
+        assert_eq!(
+            cas_store::lane_guard::thread_violations(),
+            before,
+            "the stale mark ran blocking work in the enforced step: {:?}",
+            cas_store::lane_guard::last_thread_violation()
+        );
+        drop(store_free);
+        drop(lane);
+    }
+    settle_relays(&mut daemon).await;
+    let exit = &daemon.recent_worker_exits[0];
+    assert!(!exit.recording, "the record reported");
+    assert!(exit.death.is_some(), "the death was recorded on the store worker");
+    let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert_eq!(agent.status, cas_types::AgentStatus::Stale, "the registration is stale");
+}
+
+/// cas-ff42 C6 control: the old shape, writing the death record inline in
+/// the enforced step, trips the lane guard. This is what makes the test above
+/// a real proof rather than a guard that never fires.
+#[tokio::test]
+#[should_panic(expected = "enforce mode: move it to the jobs lane")]
+async fn cas_ff42_inline_death_record_trips_the_enforced_step() {
+    let (_dir, cas_dir) = project_with_worker();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    let _lane = super::loop_watchdog::enforced_daemon_step(
+        &progress,
+        super::loop_watchdog::LoopPhase::ClientInput,
+    );
+    let _store_free = cas_store::wait_budget::forbid_store_access();
+    super::queue_and_events::record_worker_death_io(
+        &cas_dir,
+        "provision-test",
+        "relay-worker",
+        Some("w-1"),
+        "exited with code 1",
+        None,
+        crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+        None,
+    );
+}
+
+/// cas-ff42 review M: a death record job that panics reports nothing. Its
+/// exit is settled without a death instead of staying `recording`, so its
+/// group and the sweep's hold on that worker are released.
+#[tokio::test]
+async fn cas_ff42_a_panicked_death_record_does_not_hold_its_exit_forever() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.relay_jobs.death_record_override = Some(|_, _, _, _, _, _, _, _| panic!("record job panicked"));
+    let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+    daemon.recent_worker_exits.push(super::ObservedWorkerExit {
+        at,
+        worker: "relay-worker".into(),
+        status: "exited with code 1".into(),
+        death: None,
+        recording: true,
+    });
+    daemon.mark_registered_worker_stale(
+        "relay-worker",
+        "exited with code 1",
+        None,
+        crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+        Some(at),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !daemon.recent_worker_exits.is_empty() {
+        daemon.relay_correlated_worker_deaths();
+        assert!(Instant::now() < deadline, "the exit stayed recording: {:?}", daemon.recent_worker_exits);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    settle_relays(&mut daemon).await;
 }

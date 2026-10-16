@@ -2158,16 +2158,33 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );
     }
 
+    /// cas-a8dc: a slot is an flock on an open file description. A child
+    /// that another test thread forks holds a copy of every descriptor until
+    /// it execs (O_CLOEXEC closes it only then), so under a parallel
+    /// `cargo test` the slot could stay held past `drop(first)`. The body runs
+    /// alone in a re-executed test process, where nothing else forks.
     #[test]
     fn slots_enforce_cap_and_release_when_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = acquire_slot(dir.path(), 2).unwrap();
-        let second = acquire_slot(dir.path(), 2).unwrap();
-        assert!(acquire_slot(dir.path(), 2).is_err());
-        drop(first);
-        assert!(acquire_slot(dir.path(), 2).is_ok());
-        drop(second);
-        assert!(acquire_slot(dir.path(), 0).is_err());
+        const CHILD: &str = "CAS_WORKER_SLOT_CAP_CHILD";
+        const NAME: &str = "factory_worker_check::tests::slots_enforce_cap_and_release_when_closed";
+        if std::env::var_os(CHILD).is_some() {
+            let dir = tempfile::tempdir().unwrap();
+            let first = acquire_slot(dir.path(), 2).unwrap();
+            let second = acquire_slot(dir.path(), 2).unwrap();
+            assert!(acquire_slot(dir.path(), 2).is_err());
+            drop(first);
+            assert!(acquire_slot(dir.path(), 2).is_ok());
+            drop(second);
+            assert!(acquire_slot(dir.path(), 0).is_err());
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), NAME);
     }
 
     #[cfg(unix)]

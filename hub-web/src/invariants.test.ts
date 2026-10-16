@@ -565,8 +565,30 @@ describe("binding Cassy Cloud browser invariants", () => {
   // Consumer: Commander application render and event handlers (main.ts), operating the conversation header.
   it("takes control for an interrupt as a send does, and says when it took it from another device", async () => {
     const source = await readSource("main.ts");
-    // Interrupt's stale-lease recovery is covered through the real bundle in
-    // HUB-J18, including a 409 arriving before the holder read completes.
+    const interrupt = source.match(/async function interruptSupervisor\(\): Promise<void> \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const recovery = source.match(/async function takeControlForInterrupt\([\s\S]*?\n\}/)?.[0] ?? "";
+    expect(interrupt).not.toBe("");
+    expect(recovery).not.toBe("");
+    // pin: Interrupt must consume the holder returned by the 409 recovery.
+    expect(interrupt).toContain("const take = await takeControlForInterrupt(machine, session, force);");
+    // pin: the refreshed holder must flow into the success attribution.
+    expect(interrupt).toContain("holder ??= take.holder;");
+    // pin: a takeover from another device must be named in the success toast.
+    expect(interrupt).toContain("`Took control from ${holder}. `");
+    // pin: keep Interrupt's user-visible success outcome attached to that attribution.
+    expect(interrupt).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });");
+    // pin: only a non-forced request refused with HTTP 409 starts holder recovery.
+    expect(recovery).toContain("error.status !== 409");
+    // pin: 409 recovery must refresh the stale lease before reading its holder.
+    expect(recovery).toContain("await loadLease(machine.id, session);");
+    // pin: derive the holder from the refreshed lease, never an unverified label.
+    expect(recovery).toContain("const holder = lease && !lease.held_by_me ? lease.controller_label ?? undefined : undefined;");
+    // pin: the forced retry is allowed only after a holder is confirmed on hub-admin.
+    expect(recovery).toContain('if (!holder || !machine.scopes.includes("hub-admin")) return { taken: false, holder };');
+    // pin: the confirmed administrator takeover must actually use force.
+    expect(recovery).toContain("requestControl(session, true);");
+    // pin: successful recovery returns the holder so Interrupt can name it.
+    expect(recovery).toContain("return { taken: leases.get(key)?.held_by_me === true, holder };");
   });
 
   // Contract: never caches an asynchronously-created terminal against a detached render.

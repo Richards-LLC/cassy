@@ -383,7 +383,8 @@ pub(super) fn spend_body_in_tx(
         "UPDATE violet_body_permits SET state='spent'
         WHERE prompt_id=?1 AND recipient=?2 AND factory_session=?3 AND state='armed'
           AND EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id=?1
-            AND q.target=?2 AND q.factory_session=?3 AND q.processed_at IS NULL)",
+            AND q.target=?2 AND q.factory_session=?3 AND q.processed_at IS NULL
+            AND (q.acked_at IS NULL OR COALESCE(q.acked_via,'')<>'explicit_ack'))",
         params![prompt_id, recipient, session],
     )? == 1)
 }

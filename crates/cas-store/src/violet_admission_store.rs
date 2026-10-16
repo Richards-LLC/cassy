@@ -722,9 +722,12 @@ pub struct SqliteVioletAdmissionStore {
 impl SqliteVioletAdmissionStore {
     /// Restore Cloud's existing admission on a successor machine. No lease
     /// token or new admission acknowledgement is invented by this path.
-    pub fn restore_admitted(&self, _input: &VioletAdmissionInput, _expected_generation: i64,
-        _consumption: VioletConsumption) -> Result<VioletRecoveryReceipt> {
-        Err(StoreError::Other("fresh admission restoration is not implemented".into()))
+    pub fn restore_admitted(&self, input: &VioletAdmissionInput, expected_generation: i64,
+        consumption: VioletConsumption) -> Result<VioletRecoveryReceipt> {
+        if !input.lease_token.is_empty() || expected_generation < 1 {
+            return Err(StoreError::Other("restore requires an admitted delivery without a lease".into()));
+        }
+        self.persist(input, Some((expected_generation, consumption)))
     }
     pub fn pending_lease_fences(&self, project: &str) -> Result<Vec<VioletLeaseFence>> {
         let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
@@ -981,6 +984,14 @@ impl SqliteVioletAdmissionStore {
 
     /// Only a committed receipt may authorize an admission acknowledgement.
     pub fn admit(&self, input: &VioletAdmissionInput) -> Result<VioletAdmissionReceipt> {
+        if input.lease_token.trim().is_empty() {
+            return Err(StoreError::Other("Violet admission requires a lease token".into()));
+        }
+        self.persist(input, None).map(|receipt| receipt.admission)
+    }
+
+    fn persist(&self, input: &VioletAdmissionInput,
+        recovery: Option<(i64, VioletConsumption)>) -> Result<VioletRecoveryReceipt> {
         for value in [
             &input.delivery_id,
             &input.occurrence_id,
@@ -991,7 +1002,6 @@ impl SqliteVioletAdmissionStore {
             &input.channel_id,
             &input.factory_session,
             &input.recipient,
-            &input.lease_token,
         ] {
             if value.trim().is_empty() {
                 return Err(StoreError::Other(
@@ -1005,6 +1015,15 @@ impl SqliteVioletAdmissionStore {
             ));
         }
         slack_timestamp_parts(&input.message_ts)?;
+        let recover = |tx: &Connection, expected_generation, consumption| {
+            recover_known_in_tx(tx, &VioletAdmissionRebind {
+                delivery_id: input.delivery_id.clone(), occurrence_id: input.occurrence_id.clone(),
+                reader_slot_id: input.reader_slot_id.clone(), project_id: input.project_id.clone(),
+                registration_id: input.registration_id.clone(), expected_generation,
+                delivery_generation: input.delivery_generation,
+                factory_session: input.factory_session.clone(), recipient: input.recipient.clone(),
+            }, consumption, RecoveryAuthority::Rebind)
+        };
         let receipt = crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
             let existing: Option<(String, i64, String, i64, String, String, String, String)> = tx
                 .query_row(
@@ -1037,11 +1056,16 @@ impl SqliteVioletAdmissionStore {
                 recipient,
             )) = existing
             {
-                if id != input.delivery_id
-                    || registration != input.registration_id
-                    || generation != input.delivery_generation
-                    || project != input.project_id
+                if id != input.delivery_id || project != input.project_id
                     || target != input.target_json
+                {
+                    return Err(StoreError::Other("conflicting restored Violet identity or target".into()));
+                }
+                if let Some((expected, consumption)) = recovery {
+                    return recover(tx, expected, consumption);
+                }
+                if registration != input.registration_id
+                    || generation != input.delivery_generation
                     || session != input.factory_session
                     || recipient != input.recipient
                 {
@@ -1050,10 +1074,11 @@ impl SqliteVioletAdmissionStore {
                 }
                 tx.execute("UPDATE violet_admissions SET lease_token=?2,ack_pending=1 WHERE delivery_id=?1",
                     params![id,input.lease_token])?;
-                return Ok(VioletAdmissionReceipt {
+                return Ok(VioletRecoveryReceipt { admission: VioletAdmissionReceipt {
                     delivery_id: id,
                     prompt_id,
                     created: false,
+                }, consumption: VioletConsumption::Queued, recovery_prompt_id: None
                 });
             }
             let key =
@@ -1068,11 +1093,11 @@ impl SqliteVioletAdmissionStore {
             let prompt_id = tx.last_insert_rowid();
             tx.execute("INSERT INTO violet_admissions
                 (delivery_id,occurrence_id,reader_slot_id,registration_id,delivery_generation,
-                 route_generation,project_id,target_json,factory_session,recipient,prompt_id,lease_token)
-                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 route_generation,project_id,target_json,factory_session,recipient,prompt_id,lease_token,ack_pending)
+                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                 params![input.delivery_id,input.occurrence_id,input.reader_slot_id,input.registration_id,
                     input.delivery_generation,input.route_generation,input.project_id,input.target_json,
-                    input.factory_session,input.recipient,prompt_id,input.lease_token])?;
+                    input.factory_session,input.recipient,prompt_id,input.lease_token,i64::from(recovery.is_none())])?;
             let cursor: Option<String> = tx
                 .query_row(
                     "SELECT message_ts FROM violet_admission_cursors
@@ -1092,13 +1117,19 @@ impl SqliteVioletAdmissionStore {
                     params![input.reader_slot_id,input.workspace_id,input.channel_id,input.message_ts])?;
             }
             let _ = capture_message_event(tx, &source, &input.recipient);
-            Ok(VioletAdmissionReceipt {
+            let mut receipt = if let Some((expected, consumption)) = recovery {
+                recover(tx, expected, consumption)?
+            } else {
+                VioletRecoveryReceipt { admission: VioletAdmissionReceipt {
                 delivery_id: input.delivery_id.clone(),
                 prompt_id,
-                created: true,
-            })
+                created: false,
+                }, consumption: VioletConsumption::Queued, recovery_prompt_id: None }
+            };
+            receipt.admission.created = true;
+            Ok(receipt)
         })?;
-        if receipt.created {
+        if receipt.admission.created && receipt.consumption != VioletConsumption::Consumed {
             self.queue.signal_inbox(&input.recipient);
         }
         Ok(receipt)

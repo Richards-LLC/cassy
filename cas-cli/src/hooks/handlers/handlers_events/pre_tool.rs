@@ -7594,6 +7594,7 @@ mod workspace_contract_tests {
         env.set("CAS_AGENT_ROLE", "worker");
         env.set("CAS_AGENT_NAME", "worker-e460");
         env.set("CAS_CLONE_PATH", &worktree);
+        let mut mismatches = Vec::new();
         for (command, denied) in [
             ("cd ../../operator && printf x > write-policy.toml", true),
             ("cd ../.. && printf x > config.toml", true),
@@ -7612,8 +7613,11 @@ mod workspace_contract_tests {
             let output = handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
             let value = serde_json::to_value(output).unwrap();
             let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
-            assert_eq!(decision == "deny", denied, "{command}: {value}");
+            if (decision == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
+            }
         }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside

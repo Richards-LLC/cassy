@@ -2995,8 +2995,24 @@ impl CloudSyncer {
     ) -> Result<SyncResult, CasError> {
         let start = Instant::now();
 
+        // cas-9b5d: a team-linked store syncs in team scope only, as
+        // `cas cloud sync` has since cas-421e. Cloud keys a team project's
+        // rows by team, so it refuses a personal push from that project as
+        // team_owned_project, and a personal pull never returns teammates'
+        // rows. The daemon used to do both every tick. Prowl's team-linked
+        // stores filled with refused rows, and their team watermark moved only
+        // on a manual sync. Personal rows stay queued and untouched; they push
+        // again only if the project returns to personal scope. A team-only
+        // store still runs the personal push, which retires its personal rows
+        // and sends nothing.
+        let team_id = self.cloud_config.active_team_id();
+
         // Push personal changes first (with sessions).
-        let push_result = self.push_with_sessions(sessions)?;
+        let push_result = if team_id.is_some() && !self.cloud_config.team_only {
+            SyncResult::default()
+        } else {
+            self.push_with_sessions(sessions)?
+        };
 
         // Team-scoped writes are queued separately from personal writes. The
         // automatic daemon enters through this method, so omitting this drain
@@ -3006,26 +3022,39 @@ impl CloudSyncer {
         // Keep team failure isolated from pull, matching `cas cloud sync`:
         // push_team records per-row HTTP failures, while setup/config errors
         // are surfaced in the aggregate result without suppressing pull.
-        let team_push_result = match self.cloud_config.active_team_id() {
-            Some(team_id) => self.push_team(&team_id).unwrap_or_else(|error| SyncResult {
+        let team_push_result = match team_id.as_deref() {
+            Some(team_id) => self.push_team(team_id).unwrap_or_else(|error| SyncResult {
                 errors: vec![format!("Team push failed: {error}")],
                 ..SyncResult::default()
             }),
             None => SyncResult::default(),
         };
 
-        // Then pull
-        let pull_result = self.pull(
-            store,
-            task_store,
-            rule_store,
-            skill_store,
-            spec_store,
-            event_store,
-            prompt_store,
-            file_change_store,
-            commit_link_store,
-        )?;
+        // Then pull: team scope for a team-linked store, else personal.
+        let pull_result = match team_id.as_deref() {
+            Some(team_id) => {
+                let project_id = self.personal_push_project_id()?;
+                self.pull_team(
+                    team_id,
+                    &project_id,
+                    store,
+                    task_store,
+                    rule_store,
+                    skill_store,
+                )?
+            }
+            None => self.pull(
+                store,
+                task_store,
+                rule_store,
+                skill_store,
+                spec_store,
+                event_store,
+                prompt_store,
+                file_change_store,
+                commit_link_store,
+            )?,
+        };
 
         // Combine results
         Ok(SyncResult {

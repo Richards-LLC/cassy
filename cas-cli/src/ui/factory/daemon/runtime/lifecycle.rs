@@ -344,7 +344,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     failing_job: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
@@ -352,12 +352,12 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let Some(supervisor) =
-        resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
-    else {
-        return WorkerAttentionRelayOutcome::Pending;
+    let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
+    let kind = if worker.is_empty() {
+        "Epic PR"
+    } else {
+        "Delivery PR"
     };
-    let kind = if worker.is_empty() { "Epic PR" } else { "Delivery PR" };
     let mut detail = match failed_run_id {
         Some(run_id) => format!(
             "{kind} #{pr_number} for {task_id} left the merge queue after failed merge_group run {run_id}."
@@ -389,7 +389,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     })
     .to_string();
     let notification_id = match supervisor_queue.notify_idempotent(
-        &supervisor.agent_id,
+        &supervisor.id,
         "merge_queue_ejected",
         &payload,
         NotificationPriority::High,
@@ -420,12 +420,20 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
     );
+    let supervisor_body = if supervisor.id == "operator" {
+        match crate::supervisor_notices::operator_prompt(&supervisor_body, "merge queue ejected") {
+            Ok(body) => body,
+            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+        }
+    } else {
+        supervisor_body
+    };
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if prompt_queue.enqueue_idempotent(
         &source,
-        "supervisor",
+        &supervisor.name,
         &supervisor_body,
-        factory_session.as_deref(),
+        supervisor.session.as_deref(),
         Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-outbox:{notification_id}"),
@@ -555,9 +563,13 @@ fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
     let Ok(pq) = crate::store::open_prompt_queue_store(cas_dir) else {
         return;
     };
-    match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox(
+    let Ok(agents) = crate::store::open_agent_store(cas_dir) else {
+        return;
+    };
+    match crate::mcp::tools::core::task::lifecycle::supervisor_push::drain_lifecycle_outbox_with_agents(
         sq.as_ref(),
         pq.as_ref(),
+        agents.as_ref(),
         50,
     ) {
         Ok(report) if report.recovered > 0 || report.failed > 0 => {
@@ -918,7 +930,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
-        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
@@ -927,11 +939,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         tracing::warn!("worker attention relay skipped: agent store unavailable");
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let Some(supervisor) =
-        resolve_owning_supervisor(agent_store.as_ref(), factory_session.as_deref())
-    else {
-        return WorkerAttentionRelayOutcome::Pending;
-    };
+    let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         tracing::warn!(worker = %worker, kind, "worker attention relay skipped: supervisor queue unavailable");
         return WorkerAttentionRelayOutcome::Pending;
@@ -962,7 +970,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     })
     .to_string();
     let notification_id = match supervisor_queue.notify_idempotent(
-        &supervisor.agent_id,
+        &supervisor.id,
         kind,
         &payload,
         NotificationPriority::High,
@@ -994,7 +1002,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     // after a durable-only write. Missing harness evidence stays neutral; the
     // daemon's own process environment does not describe the receiving agent.
     let prefix = agent_store
-        .get(&supervisor.agent_id)
+        .get(&supervisor.id)
         .ok()
         .as_ref()
         .and_then(crate::harness_policy::agent_tool_prefix)
@@ -1008,12 +1016,18 @@ fn enqueue_worker_attention_relay_detail_with_key(
     if kind == "supervisor_stalled" {
         body = crate::prompt_revalidation::attach_blocker_envelope(&body, "ready work", task_id);
     }
+    if supervisor.id == "operator" {
+        body = match crate::supervisor_notices::operator_prompt(&body, kind) {
+            Ok(body) => body,
+            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+        };
+    }
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if let Err(error) = prompt_queue.enqueue_idempotent(
         &source,
-        "supervisor",
+        &supervisor.name,
         &body,
-        factory_session.as_deref(),
+        supervisor.session.as_deref(),
         Some(&format!("{kind}: {worker}")),
         Some(NotificationPriority::High),
         &format!("worker-attention-outbox:{notification_id}"),
@@ -1667,7 +1681,7 @@ mod worker_attention_tests {
     }
 
     #[test]
-    fn lifecycle_recovery_missing_and_shutdown_recipient_preserve_relay_policy() {
+    fn lifecycle_recovery_missing_and_shutdown_recipient_route_to_operator() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CAS_FACTORY_SESSION", "recovery-unknown"),
             ("CAS_FACTORY_SUPERVISOR_CLI", "codex"),
@@ -1678,16 +1692,19 @@ mod worker_attention_tests {
             worker: "gold-fox".into(),
             active_task: None,
         };
-        assert_eq!(
+        assert!(matches!(
             enqueue_worker_attention_relay(&cas_dir, &event),
-            WorkerAttentionRelayOutcome::Pending
-        );
-        assert!(
-            crate::store::open_prompt_queue_store(&cas_dir)
-                .unwrap()
-                .peek_all(10)
-                .unwrap()
-                .is_empty()
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let initial = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].target, "operator");
+        assert_eq!(
+            initial[0].factory_session.as_deref(),
+            Some("recovery-unknown")
         );
         register_supervisor(&cas_dir, "recovery-unknown");
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
@@ -1697,8 +1714,8 @@ mod worker_attention_tests {
             .metadata
             .insert("supervisor_cli".into(), "unknown".into());
         agents.update(&supervisor).unwrap();
-        // Owning-supervisor resolution already retains shutdown rows as the
-        // last candidate. Rendering must neither drop nor authorize that row.
+        // A newly registered but shutdown row cannot capture the same event;
+        // the operator fallback is idempotent and remains harness-neutral.
         assert!(matches!(
             enqueue_worker_attention_relay(&cas_dir, &event),
             WorkerAttentionRelayOutcome::Persisted { .. }
@@ -1708,11 +1725,11 @@ mod worker_attention_tests {
             .peek_all(10)
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(
-            rows[0]
-                .prompt
-                .contains("`factory action=worker_status`")
-        );
+        assert_eq!(rows[0].target, "operator");
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&rows[0].prompt).unwrap();
+        // pin: operator fallback must provide the harness-neutral recovery command.
+        assert!(payload.message.contains("`factory action=worker_status`"));
         assert!(!rows[0].prompt.contains("mcp__"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }

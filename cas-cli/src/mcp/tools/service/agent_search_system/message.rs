@@ -870,6 +870,29 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        // Resolve cross-machine peers before applying the local inbox cap.
+        // Their Cloud body must be readable on the receiving machine: spilling
+        // first sent a path on the sender's disk instead of the full text
+        // (communication contract P3.6, cas-5c2c). Local messages retain their
+        // existing cap/spill policy; peer urgency and identity checks still run.
+        if role == "supervisor"
+            && let Some(sender) = agent_from_store.as_ref()
+            && let Some(sent) = self
+                .peer_message_send(
+                    sender,
+                    &target,
+                    &summary,
+                    &message,
+                    req.in_reply_to,
+                    req.urgent.unwrap_or(false),
+                    req.kind.as_deref(),
+                    req.blocker.unwrap_or(false),
+                )
+                .await?
+        {
+            return Ok(sent);
+        }
+
         if let Some(refusal) = over_cap_refusal {
             let to_operator = target.eq_ignore_ascii_case("operator") || commander_target;
             if role != "supervisor" || to_operator {
@@ -947,27 +970,6 @@ impl CasService {
                     .map(|a| a.name)
             })
         };
-
-        // cas-f9c7: a supervisor addressing a peer supervisor of this repo on
-        // another machine (or replying to one) goes through the cloud peer
-        // mailbox; everything else stays on the local queue below.
-        if role == "supervisor"
-            && let Some(sender) = agent_from_store.as_ref()
-            && let Some(sent) = self
-                .peer_message_send(
-                    sender,
-                    &target,
-                    &summary,
-                    &message,
-                    req.in_reply_to,
-                    req.urgent.unwrap_or(false),
-                    req.kind.as_deref(),
-                    req.blocker.unwrap_or(false),
-                )
-                .await?
-        {
-            return Ok(sent);
-        }
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let addressed_operator = target.eq_ignore_ascii_case("operator") || commander_target;

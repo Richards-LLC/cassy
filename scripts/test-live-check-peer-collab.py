@@ -26,10 +26,77 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS / "live_check_peer_collab"))
 import standin_cloud  # noqa: E402
+import harness  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("live_check", SCRIPTS / "live-check-peer-collab.py")
 live_check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(live_check)
+
+
+class OvercapProbeTest(unittest.TestCase):
+    def test_queue_find_hashes_explicit_probe_body_after_routing_blank_lines(self):
+        import contextlib
+        import hashlib
+        import io
+        import sqlite3
+        from types import SimpleNamespace
+        token = "live-overcap-send-fixture"
+        body = token + "\nreadable π\n" + token
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo" / ".cas"
+            root.mkdir(parents=True)
+            with sqlite3.connect(root / "cas.db") as db:
+                db.execute("CREATE TABLE prompt_queue (id INTEGER, source TEXT, target TEXT, prompt TEXT, summary TEXT)")
+                db.execute("INSERT INTO prompt_queue VALUES (1, 'peer:alpha', 'beta', ?, ?)",
+                           ("routing metadata\n\nmore routing instructions\n\n" + body, token))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                harness.cmd_queue_find(SimpleNamespace(run_dir=tmp, token=token))
+            row = json.loads(output.getvalue())["rows"][0]
+            self.assertEqual(row["peer_body_sha256"], hashlib.sha256(body.encode()).hexdigest())
+            self.assertEqual(row["peer_body_bytes"], len(body.encode()))
+
+    def run_probe(self, corrupt=False):
+        import hashlib
+        from types import SimpleNamespace
+        run = object.__new__(live_check.Run)
+        run.args = SimpleNamespace(cloud_url="https://live.example", delivery_timeout=1)
+        run.rid = "probe-fixture"
+        run.names = {"a": "alpha", "b": "beta"}
+        class Machine:
+            def tool(self, *args, **kwargs):
+                return {"text": "delivered"}
+        run.a = Machine()
+        run.b = Machine()
+        bodies = {}
+        def message(machine, agent, target, summary, body, **extra):
+            bodies[target] = body
+            return {"text": "Sent via Cassy Cloud (peer message pm_1)", "is_error": False}
+        run.message = message
+        run.delivered_locally = lambda *args: 9
+        def rows(machine, token):
+            body = next(body for body in bodies.values() if token in body)
+            if corrupt:
+                body = "Body spilled to /tmp/local-artifact.md"
+            return [{"id": 9, "peer_body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                     "peer_body_bytes": len(body.encode())}]
+        run.queued_rows = rows
+        run.wait_for = lambda label, probe, timeout: probe()[1]
+        evidence = {}
+        run.step_overcap_message_reply_status(evidence, [])
+        return evidence
+
+    def test_overcap_probe_records_both_digests_and_receipts(self):
+        evidence = self.run_probe()
+        self.assertEqual(evidence["receipt_scope"], "live-cloud")
+        for direction in ("send", "reply"):
+            self.assertGreater(evidence[direction]["body_bytes"], 30000)
+            self.assertEqual(evidence[direction]["notification_id"], 9)
+            self.assertIn("received_at", evidence[direction])
+
+    def test_overcap_probe_rejects_destination_local_pointer(self):
+        with self.assertRaises(live_check.StepFailed):
+            self.run_probe(corrupt=True)
 
 
 class StandinCloudTest(unittest.TestCase):

@@ -839,8 +839,8 @@ main {
 .write-grant-modes label { display: inline-flex; align-items: center; gap: var(--space-1); min-height: var(--rail-item-min); }
 .write-grant-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .write-grant-confirm p { margin: 0; color: var(--text-hi); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-/* cas-68d0 F02: brought into view clear of the glass rail's bottom fade. */
-.write-grant-result { margin: 0; overflow-wrap: anywhere; scroll-margin-block-end: calc(var(--space-8) + var(--space-2)); }
+/* cas-a8d9 F03: include the rail's bottom padding as well as the fade gap. */
+.write-grant-result { margin: 0; overflow-wrap: anywhere; scroll-margin-block-end: calc(var(--space-8) + var(--space-2) + var(--space-6)); }
 .write-grant-id { white-space: nowrap; }
 .write-grant-title { margin: 0; font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); color: var(--text-hi); }
 .write-grant-lead, .write-grant-where { margin: 0; font-size: var(--fs-meta); color: var(--text-mid); overflow-wrap: anywhere; }

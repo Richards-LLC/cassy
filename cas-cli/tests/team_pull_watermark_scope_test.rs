@@ -467,3 +467,62 @@ async fn old_global_per_team_key_is_deleted_on_first_new_write() {
         );
     }
 }
+
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+
+/// Exercise the actual purge dry-run command: it must use the active scope
+/// without rewriting either watermark or deleting any row.
+#[test]
+fn cas_7e38_real_purge_dry_run_uses_active_team_freshness() {
+    let env = test_env_guard::TestEnvGuard::temp_home();
+    let project = env.home().join("purge-project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = cas::store::init_cas_dir(&project).unwrap();
+    cas::cloud::set_canonical_id_in_config_toml(&root, "purge-project").unwrap();
+    let mut cloud = cas::cloud::CloudConfig::default();
+    cloud.endpoint = "http://127.0.0.1:1".into();
+    cloud.token = Some("synthetic-test-token".into());
+    cloud.set_team(TEST_TEAM, "fixture");
+    cloud.save_to_cas_dir(&root).unwrap();
+    let queue = SyncQueue::open(&root).unwrap();
+    queue.init().unwrap();
+    let key = format!("last_team_pull_at_{TEST_TEAM}_purge-project");
+    let fresh = chrono::Utc::now().to_rfc3339();
+    queue
+        .set_metadata("last_pull_at", "2020-01-01T00:00:00Z")
+        .unwrap();
+    queue.set_metadata(&key, &fresh).unwrap();
+    let run = || {
+        let output = std::process::Command::new(cas::test_paths::cas_binary())
+            .current_dir(&project)
+            .env("CAS_ROOT", &root)
+            .args(["--json", "cloud", "purge-foreign", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let safe = run();
+    assert_eq!(safe["project_id"], "purge-project");
+    assert_eq!(safe["would_refuse"], false);
+    assert!(safe["refusals"].as_array().unwrap().is_empty());
+    assert_eq!(
+        queue.get_metadata(&key).unwrap().as_deref(),
+        Some(fresh.as_str())
+    );
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2020-01-01T00:00:00Z")
+    );
+    queue.set_metadata("last_pull_at", &fresh).unwrap();
+    queue.delete_metadata(&key).unwrap();
+    let unsafe_scope = run();
+    assert_eq!(unsafe_scope["would_refuse"], true);
+    assert_eq!(unsafe_scope["refusals"][0]["code"], "never_pulled");
+    assert!(queue.get_metadata(&key).unwrap().is_none());
+}

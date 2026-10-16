@@ -502,6 +502,15 @@ fn no_code_external_ref_guidance(task: &Task) -> &'static str {
     }
 }
 
+/// Task start carries the no-code close requirement, or for any other task
+/// the one-line test principle (cas-5a52).
+fn start_guidance(task: &Task) -> String {
+    match no_code_external_ref_guidance(task) {
+        "" => format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE),
+        no_code => no_code.to_string(),
+    }
+}
+
 fn title_terms(title: &str) -> std::collections::HashSet<String> {
     title
         .split(|c: char| !c.is_alphanumeric())
@@ -2708,8 +2717,8 @@ impl CasCore {
                 crate::mcp::tools::truncate_str(&cited_issues, 1_021),
                 related_context,
                 execution_state.unwrap_or_default(),
+                start_guidance(&task),
                 own_notes,
-                no_code_external_ref_guidance(&task),
                 push_note,
             );
             // `truncate_str` appends three bytes when it truncates, hence the
@@ -2737,7 +2746,7 @@ impl CasCore {
             wt_info,
             sibling_notes_info.unwrap_or_default(),
             self.workflow_guidance(),
-            no_code_external_ref_guidance(&task),
+            start_guidance(&task),
             push_note,
         )))
     }

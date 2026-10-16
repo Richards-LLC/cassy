@@ -10,6 +10,8 @@ expression: review
 M	input.txt
 ```
 
+**Lines:** test +0 -0 · source +1 -1 · docs +0 -0
+
 ## Evidence
 
 - ci: 38827289892 green

@@ -28,7 +28,7 @@ Every task spec must include:
 - **Interface definition** — Inputs, outputs, and error states defined explicitly
 - **Layer boundary** — Which files/modules the worker owns and must not touch outside of; boundary violation is a rejection condition
 - **Explicit non-goals** — What the task deliberately does NOT do, stated to prevent scope creep
-- **Test guidance** — Name the specific scenarios the worker must test, including at least one error path. Don't leave test design entirely to the worker.
+- **Test guidance** — Name the behaviour each test must catch; the error path only when the change touches it. Ask for the [fewest tests](../../cas-tdd/SKILL.md#fewest-tests), not a scenario list.
 - **Evidence-source plan** — For report/investigation/evidence tasks, explicitly name the MCP/log/recording/task-record sources the worker should use. Treat live `.cas/cas.db` access as an exception: only require it when safer surfaces are insufficient, and then specify read-only URI or copied-snapshot access.
 
 **Task-description specificity (observed 2026-08-11):** Bad: `Improve issue intake (GH #221).`
@@ -56,10 +56,7 @@ Canonical template:
 **Approach:** Key design or sequencing decision
 **Execution note:** test-first | characterization-first | additive-only | value-only | (omit)
 **Patterns to follow:** Reference existing code to mirror
-**Test scenarios:**
-  - Happy path: input X -> expected Y
-  - Edge case: empty input -> returns error Z
-  - Error path: network failure -> retries 3x then fails
+**Test scenarios:** one per changed behaviour, e.g. empty input -> returns error Z
 **Verification:** Observable outcomes when complete
 ```
 
@@ -72,7 +69,7 @@ Field purposes (write decisions, not code — "Approach" is 1–3 sentences of s
 - **Approach** — the sequencing or design decision already made. Not a code sketch, not a pseudocode draft. If you find yourself writing pseudocode, you are doing the worker's job.
 - **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, `value-only`, or omitted. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. Use `value-only` for copy/i18n edits to existing values; it permits M but rejects A/C/D/R and still goes through normal review. For broader edits, omit the field.
 - **Patterns to follow** — pointer to existing code or a prior commit the worker should mirror. Reduces stylistic drift.
-- **Test scenarios** — the Spec Requirements test guidance, as named scenarios.
+- **Test scenarios** — the Spec Requirements test guidance: one scenario per changed behaviour.
 - **Verification** — observable outcome. What can be demonstrated when done. Maps to `demo_statement`.
 
 EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can be `N/A` or omitted when not applicable.
@@ -100,14 +97,12 @@ EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can b
 
 Supervisor has rejection authority. Work is sent back with specific, actionable reasons.
 
-- **Tests added or updated** — No untested code ships; the tests run once at the Phase 4 final gate (the merge queue, where base has one)
-- **Failure paths tested** — Test suite covers error states and edge cases, not just happy path
+- **Fewest tests** — Each changed behaviour has one test that fails without the change ([Fewest tests](../../cas-tdd/SKILL.md#fewest-tests)); they run once at the Phase 4 final gate. Near-duplicates, matrices, restated implementation, sleeps and retry-wrapped flakes are findings; read the merge request's line delta.
 - **DRY violation scan** — Duplication flagged and sent back; "clean up later" is not accepted
 - **SRP violation scan** — Multi-responsibility modules or functions are sent back
 - **Layer breach** — Work outside declared boundary is automatic rejection
 - **Interface compliance** — Output matches the declared interface exactly; surprises are rejected
 - **Config compliance** — No magic numbers or hardcoded values that should be configurable
-- **Test quality** — Tests must verify behavior, not just pass
 - **Flag obvious SOLID violations** — with specifics; don't rubber-stamp "SOLID compliance verified"
 - **Verify, don't trust** — Read the actual diff and delivery evidence before accepting. Worker self-reports are inputs, not verdicts.
 - **Rejection format** — Every rejection names: (1) which gate failed, (2) the specific code/file, (3) what needs to change. "SRP violation" alone is not actionable; "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split into two functions" is.

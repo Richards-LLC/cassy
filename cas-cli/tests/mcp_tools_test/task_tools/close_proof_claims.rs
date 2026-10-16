@@ -56,7 +56,9 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
             .cas_task_create(Parameters(
                 serde_json::from_value(serde_json::json!({
                     "title": "Proof claim boundary", "priority": 2,
-                    "task_type": "task", "risk": "none"
+                    "task_type": "task", "risk": "none",
+                    // One project, one fresh task per reason: same title by design.
+                    "confirm_warning": true
                 }))
                 .unwrap(),
             ))

@@ -11,9 +11,13 @@
 //! Factory loop v2 (cas-223f): the daemon runs these reads as jobs on the
 //! jobs runtime's read lane (`DirectorSnapshot`, `RevalidateFresh`). The
 //! snapshot also carries the supervisor-stall delivery evidence
-//! ([`super::delivery_evidence`]), the delivery read carries the idle-worker
-//! liveness observations, and [`DeliverabilityRequest`] is the inject loop's
-//! final fresh re-check. None of them decides from cached data.
+//! ([`super::delivery_evidence`]), the session metadata the supervisor-stall
+//! check reads and the stall candidates' transcript fingerprints (cas-3b16),
+//! the delivery read is joined with the idle-worker liveness observed by a
+//! blocking-lane job ([`IdleLivenessRequest`]), and [`DeliverabilityRequest`]
+//! is the inject loop's final fresh re-check. Revalidation never decides from
+//! cached data; see `revalidate_and_prompt_for_delivery_from` for what the
+//! cached snapshot still does on a failed read.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,10 +27,20 @@ use cas_factory::SourceChangesInfo;
 
 use super::delivery_evidence::{CiStatusRequest, GitEvidenceMap, ParkedFactsMap, StallEvidenceRequest};
 use super::{
-    CasDbFingerprint, FactoryApp, merge_director_data_preserving_git, unfiltered_snapshot_from,
+    CasDbFingerprint, FactoryApp, SessionProgressRead, merge_director_data_preserving_git,
+    session_progress_named, unfiltered_snapshot_from,
 };
 use crate::mcp::tools::service::worker_liveness::Observation;
-use crate::ui::factory::director::{DirectorData, DirectorEvent, DirectorStores, Prompt};
+use crate::ui::factory::director::{
+    DirectorData, DirectorEvent, DirectorStores, Prompt, TranscriptFingerprint,
+    transcript_fingerprint,
+};
+
+/// Each idle worker's liveness, `None` when it could not be observed.
+pub(crate) type IdleLivenessMap = HashMap<String, Option<Observation>>;
+
+/// The stall candidates' transcript fingerprints, by path (cas-3b16).
+pub(crate) type TranscriptFingerprints = HashMap<PathBuf, TranscriptFingerprint>;
 
 /// Everything a director refresh read needs, captured on the loop.
 #[derive(Debug, Clone)]
@@ -44,6 +58,12 @@ pub(crate) struct DirectorRefreshRequest {
     /// The supervisor-stall delivery evidence to compute with the snapshot
     /// (`None` without a factory session or focused epic).
     stall: Option<StallEvidenceRequest>,
+    /// The factory session whose metadata the supervisor-stall check reads
+    /// (cas-3b16: read here, not on the loop).
+    session: Option<String>,
+    /// Transcripts of the stall candidates whose cached verdict a write
+    /// invalidates (cas-3b16: stat here, not on the loop).
+    transcript_paths: Vec<PathBuf>,
 }
 
 /// The result of a director refresh read.
@@ -54,6 +74,9 @@ pub(crate) struct DirectorRefreshLoad {
     requested_after: Instant,
     /// The store half of the supervisor-stall evidence.
     facts: Option<ParkedFactsMap>,
+    /// The session metadata, read with the snapshot.
+    session: Option<SessionProgressRead>,
+    transcript_fingerprints: TranscriptFingerprints,
 }
 
 impl DirectorRefreshLoad {
@@ -105,6 +128,12 @@ impl DirectorRefreshRequest {
             director,
             requested_after: self.requested_after,
             facts,
+            session: self.session.as_deref().map(session_progress_named),
+            transcript_fingerprints: self
+                .transcript_paths
+                .iter()
+                .map(|path| (path.clone(), transcript_fingerprint(path)))
+                .collect(),
         }
     }
 }
@@ -116,10 +145,39 @@ pub(crate) struct DeliveryRequest {
     worktree_root: Option<PathBuf>,
     project_id: Option<String>,
     /// Workers named by `WorkerIdle` events, whose liveness (agent store,
-    /// config, `/proc`) is observed with the read.
+    /// config, `/proc`) is observed with the read. The daemon moves them to
+    /// an [`IdleLivenessRequest`] on the blocking lane
+    /// ([`Self::take_idle_liveness`]); a synchronous read observes them here.
     idle_workers: Vec<String>,
     /// Delivery evidence for revalidating a `SupervisorStalled` event.
     stall: Option<StallEvidenceRequest>,
+    /// The session whose metadata a `SupervisorStalled` event is revalidated
+    /// against (cas-3b16: read here, not on the loop).
+    session: Option<String>,
+}
+
+/// The idle-worker liveness a delivery read is joined with: agent store,
+/// config, transcripts and `/proc`, so the daemon runs it on the blocking
+/// lane (cas-3b16, C2 review round 2, L2).
+#[derive(Debug, Clone)]
+pub(crate) struct IdleLivenessRequest {
+    cas_dir: PathBuf,
+    workers: Vec<String>,
+}
+
+impl IdleLivenessRequest {
+    /// Observe each worker. Runs on any thread.
+    pub(crate) fn read(&self) -> IdleLivenessMap {
+        self.workers
+            .iter()
+            .map(|worker| {
+                (
+                    worker.clone(),
+                    crate::ui::factory::director::idle_worker_liveness(&self.cas_dir, worker),
+                )
+            })
+            .collect()
+    }
 }
 
 /// The delivery stage's fresh read: the unfiltered snapshot events are
@@ -132,6 +190,9 @@ pub(crate) struct DeliveryInputs {
     /// Supervisor-stall store facts against the fresh read; `None` when the
     /// read failed (uncertain) or no `SupervisorStalled` event needs them.
     pub(super) facts: Option<ParkedFactsMap>,
+    /// The session metadata a `SupervisorStalled` event is revalidated
+    /// against, read with the facts.
+    pub(super) session: Option<SessionProgressRead>,
 }
 
 impl DeliveryInputs {
@@ -145,7 +206,19 @@ impl DeliveryInputs {
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
             facts: None,
+            session: None,
         }
+    }
+
+    /// The idle-worker liveness joined with this read (tests).
+    #[cfg(test)]
+    pub(crate) fn idle_liveness_for_test(&self) -> &IdleLivenessMap {
+        &self.idle_liveness
+    }
+
+    /// Join the idle-worker liveness observed beside this read.
+    pub(crate) fn set_idle_liveness(&mut self, liveness: IdleLivenessMap) {
+        self.idle_liveness = liveness;
     }
 
     /// Whether the fresh read succeeded. A failed read is retried before
@@ -160,6 +233,18 @@ impl DeliveryInputs {
 }
 
 impl DeliveryRequest {
+    /// Move the idle-worker liveness out of this read, for a job of its own
+    /// on the blocking lane. `None` when no `WorkerIdle` event needs it.
+    pub(crate) fn take_idle_liveness(&mut self) -> Option<IdleLivenessRequest> {
+        if self.idle_workers.is_empty() {
+            return None;
+        }
+        Some(IdleLivenessRequest {
+            cas_dir: self.cas_dir.clone(),
+            workers: std::mem::take(&mut self.idle_workers),
+        })
+    }
+
     /// Read the delivery snapshot. Runs on any thread.
     pub(crate) fn read(&self, stores: Option<&DirectorStores>) -> DeliveryInputs {
         let data = DirectorData::load_with_stores_for_project(
@@ -178,18 +263,17 @@ impl DeliveryRequest {
                 .ok()
             })
             .unwrap_or_default();
-        let idle_liveness = self
-            .idle_workers
-            .iter()
-            .map(|worker| {
-                (
-                    worker.clone(),
-                    crate::ui::factory::director::idle_worker_liveness(&self.cas_dir, worker),
-                )
-            })
-            .collect();
+        let idle_liveness = IdleLivenessRequest {
+            cas_dir: self.cas_dir.clone(),
+            workers: self.idle_workers.clone(),
+        }
+        .read();
         let facts = match (&self.stall, &data) {
             (Some(stall), Ok(fresh)) => Some(stall.facts(Some(fresh), stores)),
+            _ => None,
+        };
+        let session = match (&self.session, &facts) {
+            (Some(session), Some(_)) => Some(session_progress_named(session)),
             _ => None,
         };
         DeliveryInputs {
@@ -197,6 +281,7 @@ impl DeliveryRequest {
             blocks_deps,
             idle_liveness,
             facts,
+            session,
         }
     }
 }
@@ -296,6 +381,8 @@ impl FactoryApp {
             project_id: self.project_scope(),
             requested_after: self.last_refresh,
             stall: self.stall_evidence_request(),
+            session: self.factory_session.clone(),
+            transcript_paths: self.event_detector.stall_transcript_paths(),
         }
     }
 
@@ -345,12 +432,14 @@ impl FactoryApp {
             .any(|event| matches!(event, DirectorEvent::SupervisorStalled { .. }))
             .then(|| self.stall_evidence_request())
             .flatten();
+        let session = stall.as_ref().and(self.factory_session.clone());
         DeliveryRequest {
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),
             idle_workers,
             stall,
+            session,
         }
     }
 
@@ -380,6 +469,11 @@ impl FactoryApp {
         if let Some(facts) = load.facts {
             self.parked_facts = facts;
         }
+        if let Some(session) = load.session {
+            self.session_progress = session;
+        }
+        self.event_detector
+            .observe_transcript_fingerprints(load.transcript_fingerprints);
         let db_changed = match load.director {
             DirectorLoad::Loaded(loaded) => {
                 self.director_data =
@@ -411,9 +505,8 @@ impl FactoryApp {
                 // They must be reconciled even on the unchanged-DB path;
                 // otherwise a just-written hold leaks one more WorkerIdle
                 // event before unrelated database activity occurs.
-                timed("worker holds", || {
-                    self.apply_session_metadata_worker_holds()
-                });
+                // cas-3b16: read with the snapshot, off the loop.
+                timed("worker holds", || self.apply_session_metadata_worker_holds());
                 return Ok(timed("supervisor stall", || self.detect_supervisor_stall())
                     .into_iter()
                     .collect());
@@ -429,9 +522,7 @@ impl FactoryApp {
         // Sync session_id → pane_name mappings from agent store
         timed("session mappings", || self.sync_session_mappings());
         timed("epic focus", || self.apply_session_metadata_focus());
-        timed("worker holds", || {
-            self.apply_session_metadata_worker_holds()
-        });
+        timed("worker holds", || self.apply_session_metadata_worker_holds());
 
         // cas-e98e AC3: drop phantom worker panes when registry says the
         // worker is no longer supervision-live.

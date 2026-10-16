@@ -637,6 +637,49 @@ fn flv2_retraction_reads_fresh_through_the_daemon() {
     assert!(pruner.unread_alerts("supervisor").is_empty(), "a fresh read showing the assignment retracts it");
 }
 
+/// cas-3b16 (C2 review round 1, L8): the refresh's delivery step is what
+/// starts the retraction. One delivered batch, with no prompts at all, runs
+/// it as a job against a fresh read; the stale cache never retracts.
+#[tokio::test]
+async fn c3b16_refresh_delivery_runs_the_inbox_retraction() {
+    let (_root, cas_dir) = project();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let teams_root = tempfile::tempdir().unwrap();
+    let teams = super::super::teams::TeamsManager::rooted_at(teams_root.path().join("t"), "t");
+    std::fs::create_dir_all(teams_root.path().join("t").join("inboxes")).unwrap();
+    teams
+        .write_to_inbox_for_worker_idle("supervisor", "director", "worker-a is idle", None, None, "worker-a")
+        .unwrap();
+    let pruner = teams.inbox_pruner();
+    daemon.teams = Some(teams);
+    let mut assigned = cas_types::Task::new("cas-live".into(), "live".into());
+    assigned.status = cas_types::TaskStatus::InProgress;
+    assigned.assignee = Some("worker-a".into());
+    crate::store::open_task_store_local(&cas_dir).unwrap().add(&assigned).unwrap();
+    // The cached snapshot is stale: it does not show the assignment.
+    daemon.app.set_director_data_for_test(data(Vec::new()));
+
+    let mut refresh = super::super::director_refresh::DirectorRefresh::new();
+    daemon
+        .deliver_director_events(
+            &mut refresh,
+            Vec::new(),
+            (Vec::new(), Vec::new(), None),
+            std::time::Instant::now(),
+            0.0,
+            super::super::store_worker::global(),
+            &super::super::loop_watchdog::LoopProgress::new(),
+        )
+        .await;
+    daemon.queue_jobs.apply_completions();
+    daemon.queue_jobs.apply_completions();
+    assert_eq!(daemon.queue_jobs.prunes_done, 1, "the delivery step started the retraction");
+    assert!(
+        pruner.unread_alerts("supervisor").is_empty(),
+        "decided from the fresh read, which shows worker-a assigned"
+    );
+}
+
 /// Review round 2: a stamp the lane refuses (closed at shutdown) is handed
 /// to the StoreWorker, never dropped and never written on the caller.
 #[test]

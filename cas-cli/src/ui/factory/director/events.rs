@@ -1232,8 +1232,12 @@ struct StallProbeCache {
     next_probe_at: DateTime<chrono::Utc>,
     delay_secs: i64,
     path: Option<std::path::PathBuf>,
-    fingerprint: Option<(std::time::SystemTime, u64)>,
+    fingerprint: TranscriptFingerprint,
 }
+
+/// A transcript's modification time and length; `None` when it could not be
+/// read. A changed fingerprint means the worker wrote to its transcript.
+pub(crate) type TranscriptFingerprint = Option<(std::time::SystemTime, u64)>;
 
 /// Factory loop v2 (cas-223f, spec §4.3): one `WorkerHealthProbe` job, the
 /// IO half of stall confirmation (`resolve_worker`, the `/proc` scan and the
@@ -1262,7 +1266,8 @@ pub(crate) struct WorkerHealthReport {
     pub(crate) confirmed: bool,
     pub(crate) transcript_path: Option<std::path::PathBuf>,
     /// Transcript mtime and length when probed, so a later write invalidates
-    /// the cached verdict at once.
+    /// the cached verdict (with deferred probes, once the next snapshot job
+    /// reads the new fingerprint; cas-3b16).
     pub(crate) fingerprint: Option<(std::time::SystemTime, u64)>,
     /// Latest activity the probe saw (open tool call, background process or
     /// a fresh transcript write).
@@ -1380,6 +1385,25 @@ fn stall_verdict(
     (confirmed, activity)
 }
 
+/// Whether `observed` shows a transcript write after the probe that read
+/// `probed`. A snapshot can read the fingerprint before a probe that applies
+/// after it, so an observation older than the probe's (an earlier
+/// modification time) is not a write.
+fn transcript_written_since(probed: TranscriptFingerprint, observed: TranscriptFingerprint) -> bool {
+    match (probed, observed) {
+        (Some((probed_at, probed_len)), Some((observed_at, observed_len))) => {
+            observed_at > probed_at || (observed_at == probed_at && observed_len != probed_len)
+        }
+        (probed, observed) => probed != observed,
+    }
+}
+
+/// Read a transcript's [`TranscriptFingerprint`]. Blocks on the filesystem,
+/// so the daemon calls it from its snapshot job, never on the loop (cas-3b16).
+pub(crate) fn transcript_fingerprint(path: &std::path::Path) -> TranscriptFingerprint {
+    stall_transcript_fingerprint(path)
+}
+
 fn stall_transcript_fingerprint(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
@@ -1454,6 +1478,10 @@ pub struct DirectorEventDetector {
     deferred_health_probes: bool,
     /// Probes asked for and not yet applied, one per (worker, task).
     health_probes_in_flight: HashSet<(String, String)>,
+    /// cas-3b16: with deferred probes, the cached transcripts' fingerprints
+    /// as the latest snapshot job read them. A cached verdict is invalidated
+    /// by a change seen here, never by a `stat` on the loop.
+    observed_transcript_fingerprints: HashMap<std::path::PathBuf, TranscriptFingerprint>,
     /// Requests the daemon has not collected yet.
     health_probe_requests: Vec<WorkerHealthRequest>,
     #[cfg(test)]
@@ -1580,6 +1608,7 @@ impl DirectorEventDetector {
             stall_probe_cache: HashMap::new(),
             deferred_health_probes: false,
             health_probes_in_flight: HashSet::new(),
+            observed_transcript_fingerprints: HashMap::new(),
             health_probe_requests: Vec::new(),
             #[cfg(test)]
             stall_probe_count: 0,
@@ -1728,8 +1757,13 @@ impl DirectorEventDetector {
         let mut delay = 5;
         let mut cached_verdict = None;
         if let Some(cached) = self.stall_probe_cache.get(&key) {
-            let unchanged = cached.path.as_deref().map(stall_transcript_fingerprint)
-                .unwrap_or(None) == cached.fingerprint;
+            let unchanged = match cached.path.as_deref() {
+                None => cached.fingerprint.is_none(),
+                // cas-3b16: no IO on the loop. The snapshot job read the
+                // fingerprint; one it has not read yet counts as unchanged
+                // until the next snapshot.
+                Some(path) => stall_transcript_fingerprint(path) == cached.fingerprint,
+            };
             if now < cached.next_probe_at && unchanged { return Some(cached.confirmed); }
             if unchanged {
                 delay = (cached.delay_secs * 2).min(60);
@@ -1764,6 +1798,31 @@ impl DirectorEventDetector {
     /// reading transcripts on the caller's thread.
     pub(crate) fn set_deferred_health_probes(&mut self, deferred: bool) {
         self.deferred_health_probes = deferred;
+    }
+
+    /// The transcripts whose cached stall verdict a write would invalidate,
+    /// for the next snapshot job to fingerprint (cas-3b16). Empty unless
+    /// probes are deferred.
+    pub(crate) fn stall_transcript_paths(&self) -> Vec<std::path::PathBuf> {
+        if !self.deferred_health_probes {
+            return Vec::new();
+        }
+        let mut paths: Vec<std::path::PathBuf> = self
+            .stall_probe_cache
+            .values()
+            .filter_map(|cached| cached.path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// The fingerprints a snapshot job read for [`Self::stall_transcript_paths`].
+    pub(crate) fn observe_transcript_fingerprints(
+        &mut self,
+        fingerprints: HashMap<std::path::PathBuf, TranscriptFingerprint>,
+    ) {
+        self.observed_transcript_fingerprints = fingerprints;
     }
 
     /// Probes asked for since the last call, at most one per (worker, task)

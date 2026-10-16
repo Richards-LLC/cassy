@@ -9955,6 +9955,9 @@ impl FactoryDaemon {
             ci_wakes,
         };
         self.reminder_scan_generation += 1;
+        // cas-3b16 (C2 review round 2, L2): edges are consumed once, so a
+        // pass carrying them keeps a copy in case the runtime refuses it.
+        let refused_fallback: Option<ReminderScanInput> = None;
         let submitted = self.queue_jobs.submit_external(
             super::factory_jobs::reminder_scan_spec(carries_edges, self.reminder_scan_generation),
             move || {
@@ -9967,6 +9970,15 @@ impl FactoryDaemon {
             super::jobs::Submitted::Closed | super::jobs::Submitted::LaneMismatch { .. }
         ) {
             tracing::warn!(?submitted, "reminder scan refused by the job runtime");
+            // The write lane runs on the store worker; hand the scan to it
+            // directly so the pass's events and observations still fire
+            // their reminders. A time-only pass is simply retried next tick.
+            if let Some(scan) = refused_fallback
+                && !super::store_worker::global()
+                    .submit("reminder scan (job runtime refused)", move || run_reminder_scan(scan))
+            {
+                tracing::error!("reminder scan refused and the store worker is gone; its edges are lost");
+            }
         }
     }
 
@@ -10253,6 +10265,7 @@ pub(super) fn ci_completed_candidates(
 /// `triggering_event` is the event or external condition that caused this
 /// reminder to fire. Its context is included in the durable payload and
 /// delivered prompt so the recipient knows what happened.
+#[derive(Clone)]
 struct ReminderTriggerContext {
     event_type: String,
     data: serde_json::Value,
@@ -10317,6 +10330,7 @@ fn resolve_reminder_delivery_target(
 }
 
 /// What one reminder pass needs, captured on the loop (cas-223f).
+#[derive(Clone)]
 struct ReminderScanInput {
     cas_dir: std::path::PathBuf,
     session_name: String,

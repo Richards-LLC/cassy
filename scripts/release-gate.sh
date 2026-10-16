@@ -21,7 +21,7 @@ readonly -a gate_check_ids=(
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
-    journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed
     fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
@@ -1765,6 +1765,10 @@ check_doctor_snapshot() {
     fi
 }
 
+check_communication_slos() {
+    python3 scripts/check-communication-slos.py
+}
+
 check_migration_registry() {
     if ! lane_touches cas-cli/src/migration scripts/check-migration-registry.py; then
         printf 'migration-registry: no migration change\n'
@@ -2281,6 +2285,9 @@ gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (de
     check_builtin_skill_limits
 gate_row doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
     check_doctor_snapshot
+# cas-7e24: <5s fixture measurement in existing no-build fast/integration stage.
+gate_row communication-slos 'five communication SLOs against fixture factory session' \
+    check_communication_slos
 gate_row migration-registry 'python3 scripts/check-migration-registry.py (every migration declared, registered, in order)' \
     check_migration_registry
 gate_row ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \

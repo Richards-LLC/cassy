@@ -4808,6 +4808,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(PROMPT_QUEUE_SCHEMA)?;
+            crate::communication_slo::ensure_schema(&conn)?;
             for sql in OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS {
                 conn.execute(sql, [])?;
             }
@@ -6416,7 +6417,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            conn.execute(
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let changed = tx.execute(
                 "INSERT INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
                  VALUES (?, ?, ?, ?)
@@ -6432,6 +6434,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     source.as_str()
                 ],
             )?;
+            if changed > 0 && matches!(source, SurfacingSource::HookSurfaced | SurfacingSource::InboxPoll | SurfacingSource::ObservedWake) {
+                crate::communication_slo::observe_body(&tx, prompt_id, recipient)?;
+            }
+            tx.commit()?;
             Ok(())
         })
     }
@@ -9074,6 +9080,8 @@ impl SqlitePromptQueueStore {
                         takes_claim,
                         resurfaces_poll
                     ])?;
+                    // Count every returned body, including intentional poll recovery.
+                    crate::communication_slo::observe_body(&tx, prompt.id, recipient)?;
                 }
                 drop(stmt);
 

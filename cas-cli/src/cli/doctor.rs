@@ -25,6 +25,7 @@ use crate::ui::theme::{ActiveTheme, Icons};
 use crate::cli::Cli;
 
 mod slack_transport;
+mod communication;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -257,7 +258,8 @@ impl CheckGroup {
             | "cross-project rows"
             | "foreign knowledge pages"
             | "supervisor relay"
-            | "delivery retries" => Self::Cloud,
+            | "delivery retries"
+            | "communication slos" => Self::Cloud,
             "configuration"
             | "config repair"
             | "mcp config"
@@ -2478,6 +2480,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // a recipient is unreachable — visible here BEFORE the row exhausts its
     // budget and dies, which is the only window in which anyone can act.
     checks.push(delivery_retries_check(&cas_root));
+    checks.push(communication::check(&cas_root));
 
     recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a
@@ -11490,6 +11493,18 @@ fn write_finding(
     width: usize,
     verbose: bool,
 ) -> std::io::Result<()> {
+    if check.name == "communication SLOs" {
+        fmt.write_raw("  ")?;
+        fmt.mark(status_verdict(&check.status))?;
+        fmt.write_bold_plain(" communication SLOs")?;
+        fmt.newline()?;
+        for line in check.message.lines() {
+            for part in wrap_report_text(line, width.saturating_sub(4), fmt.unicode()) {
+                write_report_line(fmt, &format!("    {part}"))?;
+            }
+        }
+        return Ok(());
+    }
     let max_lines = if verbose { usize::MAX } else { FINDING_MAX_LINES };
     let times = if fmt.unicode() { "\u{00d7}" } else { "x" };
     let name = if repeats > 1 {
@@ -11658,7 +11673,7 @@ fn render_report(
         let ok_checks: Vec<&Check> = section
             .iter()
             .copied()
-            .filter(|check| matches!(check.status, CheckStatus::Ok))
+            .filter(|check| matches!(check.status, CheckStatus::Ok) && check.name != "communication SLOs")
             .collect();
         if ok_checks.len() == section.len() {
             write_ok_section_line(fmt, group, &ok_checks, width)?;
@@ -11784,7 +11799,7 @@ fn collapse_findings<'a>(section: &[&'a Check]) -> Vec<(&'a Check, usize)> {
     for check in section
         .iter()
         .copied()
-        .filter(|check| !matches!(check.status, CheckStatus::Ok))
+        .filter(|check| !matches!(check.status, CheckStatus::Ok) || check.name == "communication SLOs")
     {
         match findings.last_mut() {
             Some((last, repeats))

@@ -73,7 +73,10 @@ pub(super) fn check_for(report: &crate::backlog_hygiene::BacklogReport) -> Check
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog_hygiene::{BacklogReport, CommitRecord, DeliveredOpen, FinishedEpic, IdleOpen};
+    use crate::backlog_hygiene::{
+        BacklogReport, CitationKind, CommitRecord, DeliveredOpen, FinishedEpic, GoneCitation,
+        IdleOpen, StaleCitations,
+    };
 
     fn report() -> BacklogReport {
         BacklogReport {
@@ -103,6 +106,8 @@ mod tests {
                 assignee: Some("w".into()),
                 idle_days: 21,
             }],
+            stale_citations: vec![],
+            citations_unchecked: 0,
         }
     }
 
@@ -125,6 +130,29 @@ mod tests {
 
         let idle_only = check_for(&BacklogReport { finished_epics: vec![], delivered: vec![], ..report() });
         assert!(matches!(idle_only.status, CheckStatus::Info), "idle alone informs: {}", idle_only.message);
+
+        // cas-d9038: kind 4 informs (review, never close) and stays bounded.
+        let stale = |n: usize| StaleCitations {
+            task_id: format!("cas-s{n}"),
+            title: "z".repeat(120),
+            status: "open".into(),
+            gone: vec![GoneCitation {
+                kind: CitationKind::File,
+                cited: format!("cas-cli/src/removed_{n}.rs"),
+                removed_in: "abc123456".into(),
+                removed_on: "2026-10-01".into(),
+            }],
+        };
+        let only_stale = check_for(&BacklogReport {
+            stale_citations: (0..40).map(stale).collect(),
+            citations_unchecked: 3,
+            ..BacklogReport::default()
+        });
+        assert!(matches!(only_stale.status, CheckStatus::Info), "{}", only_stale.message);
+        assert!(only_stale.message.starts_with("0 delivered but open, 0 finished epics open, 0 idle 14+ days, 40 citing removed code"), "{}", only_stale.message);
+        assert!(only_stale.message.contains("cas-cli/src/removed_0.rs") && only_stale.message.contains("+30 more"), "{}", only_stale.message);
+        assert!(only_stale.message.contains("3 open tasks not checked"), "{}", only_stale.message);
+        assert!(only_stale.message.len() <= 6_000, "doctor row bounded: {} bytes", only_stale.message.len());
 
         let unknown = check_for(&BacklogReport { delivery_unknown: Some("no git repository".into()), ..BacklogReport::default() });
         assert!(unknown.message.contains("no git repository"), "{}", unknown.message);

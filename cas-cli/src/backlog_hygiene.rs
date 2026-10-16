@@ -7,7 +7,11 @@
 //! 1. an open task whose delivery commit is on the default branch: a
 //!    non-merge commit whose subject names the task;
 //! 2. an open epic whose children have all closed or been cancelled;
-//! 3. an open task idle for [`IDLE_DAYS`] or more.
+//! 3. an open task idle for [`IDLE_DAYS`] or more;
+//! 4. an open task whose cited code is all gone (cas-d9038): every file path
+//!    or qualified symbol it names is absent from the default branch, and git
+//!    history dates each removal. Citations git never saw (planned code, typos)
+//!    do not count either way.
 //!
 //! Each finding carries its evidence. Kinds 1 and 2 also carry the one call
 //! that closes them through the ordinary close gates; nothing here closes,
@@ -65,6 +69,62 @@ pub(crate) struct IdleOpen {
     pub idle_days: i64,
 }
 
+/// What a cited piece of code is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CitationKind {
+    File,
+    Symbol,
+}
+
+/// One cited path or symbol that the default branch no longer has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoneCitation {
+    pub kind: CitationKind,
+    /// The path, or the symbol as the task wrote it.
+    pub cited: String,
+    /// The commit that removed it, short form.
+    pub removed_in: String,
+    /// That commit's date, `YYYY-MM-DD`.
+    pub removed_on: String,
+}
+
+/// Kind 4: an open task whose every dated citation is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleCitations {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub gone: Vec<GoneCitation>,
+}
+
+/// How much kind 4 may spend. Tree checks are one `ls-tree` and one batched
+/// `grep`; each symbol's removal date is a `git log -S` bounded to the task's
+/// lifetime, and those are capped and timed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CitationBudget {
+    /// Open tasks whose text is read for citations.
+    pub max_tasks: usize,
+    /// `git log -S` lookups for removed symbols.
+    pub max_symbol_lookups: usize,
+    /// Wall time for all removal lookups.
+    pub lookup_deadline: std::time::Duration,
+}
+
+impl CitationBudget {
+    /// `cas doctor`: thorough.
+    pub(crate) const DOCTOR: Self = Self {
+        max_tasks: 500,
+        max_symbol_lookups: 40,
+        lookup_deadline: std::time::Duration::from_secs(10),
+    };
+    /// A supervisor's SessionStart: a fraction of the hook's budget.
+    pub(crate) const SESSION_START: Self = Self {
+        max_tasks: 200,
+        max_symbol_lookups: 6,
+        lookup_deadline: std::time::Duration::from_millis(1_500),
+    };
+}
+
 /// What one scan found.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BacklogReport {
@@ -75,12 +135,41 @@ pub(crate) struct BacklogReport {
     pub delivered: Vec<DeliveredOpen>,
     pub finished_epics: Vec<FinishedEpic>,
     pub idle: Vec<IdleOpen>,
+    /// Kind 4 (cas-d9038).
+    pub stale_citations: Vec<StaleCitations>,
+    /// Open tasks kind 4 could not finish within its budget.
+    pub citations_unchecked: usize,
 }
 
 impl BacklogReport {
     pub(crate) fn is_clean(&self) -> bool {
-        self.delivered.is_empty() && self.finished_epics.is_empty() && self.idle.is_empty()
+        self.delivered.is_empty()
+            && self.finished_epics.is_empty()
+            && self.idle.is_empty()
+            && self.stale_citations.is_empty()
     }
+}
+
+/// File paths (with at least one directory) and qualified symbols cited in
+/// `text`, each once, in order of first mention. A `:line` suffix is dropped;
+/// URLs and absolute paths are not citations of the tree.
+pub(crate) fn extract_citations(_text: &str) -> (Vec<String>, Vec<String>) {
+    (Vec::new(), Vec::new())
+}
+
+/// Kind 4 against `reference` in `repo`.
+pub(crate) fn stale_citations(
+    _repo: &Path,
+    _reference: &str,
+    _tasks: &[Task],
+    _budget: CitationBudget,
+) -> (Vec<StaleCitations>, usize) {
+    (Vec::new(), 0)
+}
+
+/// One kind-4 line: the task and each removal, with a call to review.
+pub(crate) fn stale_citation_line(_finding: &StaleCitations) -> String {
+    String::new()
 }
 
 /// Kind 1 over `commits` (the default branch's non-merge history, newest
@@ -170,6 +259,15 @@ pub(crate) fn idle_open(tasks: &[Task], now: DateTime<Utc>) -> Vec<IdleOpen> {
 /// task store; kind 1 also reads the default branch of the project's git
 /// repository (the store's parent directory), and says why when it cannot.
 pub(crate) fn scan(cas_root: &Path, now: DateTime<Utc>) -> Result<BacklogReport, String> {
+    scan_with(cas_root, now, CitationBudget::DOCTOR)
+}
+
+/// [`scan`] with kind 4 bounded by `budget`.
+pub(crate) fn scan_with(
+    cas_root: &Path,
+    now: DateTime<Utc>,
+    _budget: CitationBudget,
+) -> Result<BacklogReport, String> {
     let store = crate::store::open_task_store_local(cas_root).map_err(|error| error.to_string())?;
     let tasks = store.list(None).map_err(|error| error.to_string())?;
     let deps = store

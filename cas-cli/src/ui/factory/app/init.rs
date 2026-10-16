@@ -807,11 +807,12 @@ impl FactoryApp {
     }
 }
 
-/// cas-10c8: the Cassy store the initial panes are rooted in. Claude worker
-/// MCP isolation (`cas_only`) writes its strict config there.
-pub(crate) fn initial_mux_cas_root(enable_worktrees: bool, cas_dir: &std::path::Path) -> Option<PathBuf> {
-    // cas-10c8 red: only isolated fleets are rooted today.
-    enable_worktrees.then(|| cas_dir.to_path_buf())
+/// cas-10c8: the Cassy store the initial panes are rooted in, with or
+/// without worktrees. Claude worker MCP isolation (`cas_only`) writes its
+/// strict config there; a `--no-worktrees` fleet used to get none and every
+/// Claude worker refused to launch.
+pub(crate) fn initial_mux_cas_root(_enable_worktrees: bool, cas_dir: &std::path::Path) -> Option<PathBuf> {
+    Some(cas_dir.to_path_buf())
 }
 
 #[cfg(test)]

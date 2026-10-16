@@ -969,10 +969,13 @@ impl WorkerSpawnPrep {
                 isolated = false,
                 "spawn prep: non-isolated worker — sharing process cwd"
             );
+            // cas-10c8: a non-isolated worker shares the project's store; it
+            // is rooted there so Claude MCP isolation can provision it.
+            let cas_root = crate::store::find_cas_root_from(&cwd).ok();
             Ok(WorkerSpawnResult {
                 worker_name: self.worker_name,
                 cwd,
-                cas_root: None,
+                cas_root,
                 worktree: None,
                 worktree_created: false,
                 target_seed: None,

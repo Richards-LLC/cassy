@@ -24,6 +24,7 @@ use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
 
+mod backlog_hygiene;
 mod idle_sync;
 mod slack_transport;
 mod communication;
@@ -2487,6 +2488,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // budget and dies, which is the only window in which anyone can act.
     checks.push(delivery_retries_check(&cas_root));
     checks.push(communication::check(&cas_root));
+    // cas-e8d1 (GH #1233): open work the record says is done.
+    checks.push(backlog_hygiene::check(&cas_root));
 
     recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a

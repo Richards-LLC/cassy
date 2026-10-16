@@ -83,6 +83,8 @@ pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub(crate) mod task_assignment;
 pub mod qa_pass;
+/// cas-e8d1 (GH #1233): open work the record says is done.
+pub(crate) mod backlog_hygiene;
 pub(crate) mod qa_batch;
 pub(crate) mod review_body;
 pub mod retrieval_eval;

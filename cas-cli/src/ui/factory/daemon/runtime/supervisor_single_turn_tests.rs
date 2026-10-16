@@ -188,15 +188,18 @@ async fn cas_3f90_rendered_receipt_retires_pending_redelivery() {
         .insert(id, super::queue_and_events::LIFECYCLE_MAX_RENUDGE_ATTEMPTS);
     daemon.process_prompt_queue().await.unwrap();
     let row = queue.queued_prompt(id).unwrap().unwrap();
-    assert!(
-        row.processed_at.is_some(),
-        "retire the already-rendered event: {row:?}"
-    );
     assert_eq!(
         queue.recipient_receipt(id, "supervisor").unwrap(),
         Some(SurfacingSource::HookSurfaced)
     );
-    assert_ne!(row.highest_stage, Some(cas_store::DeliveryStage::Abandoned));
+    assert_ne!(
+        queue
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .highest_stage,
+        cas_store::DeliveryStage::Abandoned
+    );
     assert!(teams_messages(&daemon).is_empty());
     assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
 }

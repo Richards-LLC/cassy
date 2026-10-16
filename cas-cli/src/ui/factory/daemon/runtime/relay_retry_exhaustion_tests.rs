@@ -91,3 +91,28 @@ async fn cas_af23_exhausted_unknown_task_blocker_fails_open() {
         "Need supervisor help; the task could not be resolved.", "worker", None,
     ), "unresolved blocker").await;
 }
+
+#[tokio::test]
+async fn cas_af23_missing_lifecycle_task_has_no_positive_stale_evidence() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let root = tempfile::tempdir().unwrap();
+    let cas = crate::store::init_cas_dir(root.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas);
+    let body = format!(
+        "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-absent\" \
+         old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" \
+         notification_id=\"3386\" occurrence=\"{}\">parked</task-lifecycle>",
+        chrono::Utc::now().to_rfc3339(),
+    );
+    let queue = open_prompt_queue_store(&cas).unwrap();
+    let id = queue.enqueue_urgent_with_outcome(
+        "lifecycle-wake:task_awaiting_merge:cas-absent", "supervisor", &body,
+        Some(&daemon.session_name), Some("cas-absent awaiting merge"),
+        Some(cas_store::NotificationPriority::High), false, Some(&cas_store::QueueOrigin::Daemon),
+    ).unwrap().id();
+    daemon.process_prompt_queue().await.unwrap();
+    let row = queue.queued_prompt(id).unwrap().unwrap();
+    assert!(row.processed_at.is_none(), "missing task is not evidence that it moved on: {row:?}");
+    assert!(queue.poll_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20)
+        .unwrap().iter().any(|row| row.id == id && row.prompt == body));
+}

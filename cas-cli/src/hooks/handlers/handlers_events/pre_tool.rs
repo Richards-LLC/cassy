@@ -4365,29 +4365,21 @@ fn read_only_statement(words: &[String]) -> bool {
         return words.is_empty();
     };
     let args = &words[index + 1..];
-    if words
-        .first()
-        .is_some_and(|word| shell_word_basename(word) == "xargs")
-    {
+    if words.first().is_some_and(|word| word == "xargs") {
         return policy_xargs_search(words);
     }
-    match shell_word_basename(&words[index]) {
+    // Eligibility is for bare command names, never a path's basename.
+    match words[index].as_str() {
         name @ ("grep" | "egrep" | "fgrep" | "rg" | "cat" | "head" | "tail" | "wc" | "sort"
         | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd" | "true" | "false"
         | "test" | "[") => index == 0 && policy_reader_flags(name, args),
         "set" => index == 0 && policy_set_flags(args),
         "git" => index == 0 && policy_git_flags(args),
-        "cas" => args
-            .iter()
-            .position(|arg| arg == "config")
-            .is_some_and(|at| {
-                args.get(at + 1).is_some_and(|sub| {
-                    matches!(
-                        sub.as_str(),
-                        "get" | "describe" | "list" | "search" | "docs"
-                    )
-                })
-            }),
+        "cas" => {
+            index == 0
+                && matches!(args, [verb, action, key]
+            if verb == "config" && action == "get" && !key.is_empty() && !key.starts_with('-'))
+        }
         // cas-b7b2: searches that cas-1768 QA found refused, judged by
         // POSITIVE allowlists that fail closed. No environment assignment or
         // env/sudo-style prefix may precede them: awk and find read
@@ -4680,7 +4672,7 @@ fn policy_set_flags(args: &[String]) -> bool {
 }
 
 /// The one wrapper exception: direct xargs, known separate-word options,
-/// then grep/rg whose own flags pass. No generic wrapper unwrapping here.
+/// then bare grep whose own flags pass. No generic wrapper unwrapping here.
 fn policy_xargs_search(words: &[String]) -> bool {
     let mut index = 1;
     while let Some(word) = words.get(index) {
@@ -4699,10 +4691,9 @@ fn policy_xargs_search(words: &[String]) -> bool {
             _ => break,
         }
     }
-    words.get(index).is_some_and(|word| {
-        let name = shell_word_basename(word);
-        matches!(name, "grep" | "rg") && policy_reader_flags(name, &words[index + 1..])
-    })
+    words
+        .get(index)
+        .is_some_and(|word| word == "grep" && policy_reader_flags("grep", &words[index + 1..]))
 }
 
 fn policy_git_flags(args: &[String]) -> bool {
@@ -6545,7 +6536,10 @@ mod workspace_contract_tests {
 
     #[test]
     fn cas_f99e_config_read_shape_is_exact_and_direct() {
-        for command in ["cas config get factory.write_roots", "cas config get ordinary.key"] {
+        for command in [
+            "cas config get factory.write_roots",
+            "cas config get ordinary.key",
+        ] {
             let mention = format!("{command}; echo grant-write");
             assert_eq!(operator_policy_command_denial(&mention), None, "{command}");
         }
@@ -6553,17 +6547,27 @@ mod workspace_contract_tests {
             "env cas config get ordinary.key",
             "timeout 1 cas config get ordinary.key",
             "MODE=value cas config get ordinary.key",
-            "cas config list", "cas config describe ordinary.key",
-            "cas config search ordinary.key", "cas config docs",
+            "cas config list",
+            "cas config describe ordinary.key",
+            "cas config search ordinary.key",
+            "cas config docs",
             "cas zz-not-a-subcommand ordinary.key",
             "cas --zz-not-a-flag config get ordinary.key",
             "cas config get ordinary.key --zz-not-a-flag",
             "cas config get --zz-not-a-flag",
-            "cas config get", "cas config get ordinary.key extra",
+            "cas config get",
+            "cas config get ordinary.key extra",
         ];
-        let admitted: Vec<_> = commands.into_iter()
-            .filter(|command| operator_policy_command_denial(&format!("{command}; echo grant-write")).is_none()).collect();
-        assert!(admitted.is_empty(), "only direct exact config reads qualify: {admitted:?}");
+        let admitted: Vec<_> = commands
+            .into_iter()
+            .filter(|command| {
+                operator_policy_command_denial(&format!("{command}; echo grant-write")).is_none()
+            })
+            .collect();
+        assert!(
+            admitted.is_empty(),
+            "only direct exact config reads qualify: {admitted:?}"
+        );
     }
 
     #[test]
@@ -6575,28 +6579,51 @@ mod workspace_contract_tests {
         ] {
             assert_eq!(operator_policy_command_denial(command), None, "{command}");
         }
-        let commands = ["xargs rg -n grant-write docs", "xargs grep --zz-not-a-flag grant-write"];
-        let admitted: Vec<_> = commands.into_iter().filter(|command| operator_policy_command_denial(command).is_none()).collect();
-        assert!(admitted.is_empty(), "only allowlisted grep qualifies after xargs: {admitted:?}");
+        let commands = [
+            "xargs rg -n grant-write docs",
+            "xargs grep --zz-not-a-flag grant-write",
+        ];
+        let admitted: Vec<_> = commands
+            .into_iter()
+            .filter(|command| operator_policy_command_denial(command).is_none())
+            .collect();
+        assert!(
+            admitted.is_empty(),
+            "only allowlisted grep qualifies after xargs: {admitted:?}"
+        );
     }
 
     #[test]
     fn cas_f99e_policy_readers_require_bare_command_words() {
-        for command in ["grep -n grant-write docs/guide.md", "cat -n docs/grant-write.md",
-            "git log --oneline --grep grant-write", "awk '/grant-write/' docs/guide.md"] {
+        for command in [
+            "grep -n grant-write docs/guide.md",
+            "cat -n docs/grant-write.md",
+            "git log --oneline --grep grant-write",
+            "awk '/grant-write/' docs/guide.md",
+        ] {
             assert_eq!(operator_policy_command_denial(command), None, "{command}");
         }
         let commands = [
-            "/usr/bin/grep -n grant-write docs", "./grep -n grant-write docs",
-            "tools/cat -n grant-write.md", "./git log --grep grant-write",
-            "./awk '/grant-write/' docs", "./find docs -name '*grant-write*'",
+            "/usr/bin/grep -n grant-write docs",
+            "./grep -n grant-write docs",
+            "tools/cat -n grant-write.md",
+            "./git log --grep grant-write",
+            "./awk '/grant-write/' docs",
+            "./find docs -name '*grant-write*'",
             "./jq .grant_write_events grant-write.json",
             "./cas config get ordinary.key; echo grant-write",
-            "./xargs grep -n grant-write docs", "xargs ./grep -n grant-write docs",
+            "./xargs grep -n grant-write docs",
+            "xargs ./grep -n grant-write docs",
             "./grep --zz-not-a-flag grant-write docs",
         ];
-        let admitted: Vec<_> = commands.into_iter().filter(|command| operator_policy_command_denial(command).is_none()).collect();
-        assert!(admitted.is_empty(), "path-qualified command words do not qualify: {admitted:?}");
+        let admitted: Vec<_> = commands
+            .into_iter()
+            .filter(|command| operator_policy_command_denial(command).is_none())
+            .collect();
+        assert!(
+            admitted.is_empty(),
+            "path-qualified command words do not qualify: {admitted:?}"
+        );
     }
 
     #[test]
@@ -6691,7 +6718,7 @@ mod workspace_contract_tests {
     fn cas_3b2f_only_tiny_xargs_search_prefix_is_allowed() {
         for command in [
             "find docs -name '*.md' | xargs grep -n grant-write",
-            "xargs -0 -r -n 2 -P 1 rg -n grant-write docs",
+            "xargs -0 -r -n 2 -P 1 grep -n grant-write docs",
             "xargs --null --no-run-if-empty grep -l grant-write",
         ] {
             assert_eq!(operator_policy_command_denial(command), None, "{command}");

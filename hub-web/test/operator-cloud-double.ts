@@ -1,3 +1,4 @@
+import { ReplyGrantDouble } from "./reply-grant-double";
 // A protocol double of the petra-stella-cloud operator inbox (wire v1).
 //
 // It implements the device-facing routes of the cloud contract
@@ -182,6 +183,8 @@ function iso(ms: number): string {
 }
 
 export class OperatorCloudDouble {
+  readonly replyGrants = new ReplyGrantDouble(() => this.now(), id => this.devices.get(id),
+    (hub, project) => [...this.machines.values()].some(m => m.hubId === hub && m.status === "active" && m.projects.includes(project)));
   readonly baseUrl: string;
   readonly audience: string;
   readonly accountId: string;
@@ -627,7 +630,11 @@ export class OperatorCloudDouble {
     const device = await this.authenticate(request, { allowStaleGeneration: method === "GET" && path === "/api/operator/grants/me" });
     if (isResponse(device)) return device;
 
-    if (method === "GET" && path === "/api/operator/grants/me") return json(200, { wire_version: 1, grant: this.grantView(device) });
+    if (method === "GET" && path === "/api/operator/grants/me") return json(200, { wire_version: 1, grant: this.grantView(device), features: this.replyGrants.enabled ? ["reply-grant-upgrade-v1"] : [] });
+    if (path.startsWith("/api/operator/reply-grant-requests")) {
+      const reply = this.replyGrants.route(method, path, request.body, device);
+      return json(reply.status, reply.body);
+    }
     if (method === "POST" && path === "/api/operator/grants/renew") {
       device.expiresAt = this.now() + 90 * DAY_MS;
       return json(200, { wire_version: 1, grant: this.grantView(device) });

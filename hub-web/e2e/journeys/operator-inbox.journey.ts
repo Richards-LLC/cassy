@@ -407,3 +407,125 @@ test("HUB-J19 terminal question and supervisor answer survive cloud replay on tw
     expect(cloud.enrollments.size).toBe(2);
   });
 });
+
+// cas-874b: proposed Cloud #174. No production advertisement means no control.
+async function replyUpgradeCloud(enabled = true) {
+  const cloud = operatorCloudDouble();
+  cloud.replyGrants.enabled = enabled;
+  const key = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  await cloud.enrollMachine(HUB, [PROJECT], new Uint8Array(await crypto.subtle.exportKey("raw", key.publicKey)), "soundwave");
+  await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId, plaintext: {
+    type: "cas.operator.turn", v: 1, session_name: SESSION,
+    snapshot: { prompt_id: 874, source: "terminal", target: "terminal-history", prompt: "Keep this conversation.", operator: null, factory_session: SESSION, created_at: journeyDay(1, 12) },
+  } });
+  return cloud;
+}
+async function enrollReplyBrowser(reader: import("@playwright/test").Page, cloud: Awaited<ReturnType<typeof replyUpgradeCloud>>, label: string, owner = false) {
+  await reader.getByRole("button", { name: "Operator inbox", exact: true }).click();
+  const inbox = reader.getByRole("dialog", { name: "Operator inbox" });
+  await inbox.getByLabel("Name this browser").fill(label);
+  await inbox.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+  const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
+  await cloud.approve(code, { capabilities: ["feed:read", ...(owner ? ["account:manage"] : [])] });
+  await expect(inbox.getByRole("button", { name: /soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
+  return inbox;
+}
+
+test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (cas-874b)", journeyPart, async ({ page, journey, browser }) => {
+  const cloud = await replyUpgradeCloud();
+  await routeOperatorCloud(page.context(), cloud);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+  const peer = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  let readerId = "";
+  try {
+    await journey.stage("The read-only phone asks by keyboard and keeps its conversation", async () => {
+      await journey.open();
+      await enrollReplyBrowser(page, cloud, "Reader phone");
+      await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+      await expect(inbox.getByText("Keep this conversation.", { exact: true })).toBeVisible();
+      await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+      readerId = [...cloud.devices.values()].find(d => d.label === "Reader phone")!.id;
+      await inbox.getByRole("button", { name: "Ask to reply", exact: true }).press("Enter");
+      await expect(inbox.getByText("Waiting for the account owner to allow replies. Your messages stay here.", { exact: true })).toBeVisible();
+      expect(cloud.devices.get(readerId)!.scopes).toEqual([]);
+    });
+    const owner = await peer.newPage();
+    await owner.clock.install({ time: journeyNow() });
+    await routeOperatorCloud(peer, cloud);
+    await journey.stage("The owner sees the browser, origin and conversation, then allows just this reply scope", async () => {
+      await owner.goto(page.url());
+      const ownerInbox = await enrollReplyBrowser(owner, cloud, "Owner desktop", true);
+      const requests = ownerInbox.getByRole("region", { name: "Reply requests", exact: true });
+      await expect(requests.getByText(/Reader phone.*asks to reply to soundwave · amber-fox-29/)).toBeVisible({ timeout: 15_000 });
+      await requests.getByRole("button", { name: /Allow Reader phone/ }).press("Enter");
+      await expect(ownerInbox.getByText("Replying allowed for Reader phone.", { exact: true })).toBeVisible();
+      expect(cloud.devices.get(readerId)!.scopes).toEqual([{ hub_id: HUB, project_id: PROJECT, session_id: sessionId, operations: ["operator_message"] }]);
+    });
+    await journey.stage("The existing phone can reply without signing out or pairing again", async () => {
+      const reply = inbox.getByRole("textbox", { name: /Reply — soundwave/ });
+      await expect(reply).toBeVisible({ timeout: 15_000 });
+      await reply.fill("Thanks, I can reply now.");
+      await inbox.getByRole("button", { name: "Queue reply", exact: true }).press("Enter");
+      await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();
+      expect(cloud.commands.size).toBe(1);
+      expect(cloud.devices.size).toBe(2);
+    });
+    await journey.stage("Reload preserves the old history, the upgraded device and one reply", async () => {
+      await page.reload();
+      await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+      await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+      await expect(inbox.getByText("Keep this conversation.", { exact: true })).toBeVisible();
+      await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();
+      await expect(inbox.getByRole("textbox", { name: /Reply — soundwave/ })).toBeVisible();
+      expect(cloud.devices.get(readerId)!.generation).toBe(2n);
+      expect(cloud.log.filter(r => r.method === "POST" && r.path === "/api/operator/enrollments")).toHaveLength(2);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  } finally { await peer.close(); }
+});
+
+test("HUB-J19 Ask to reply names denial and expiry without granting permission (cas-874b)", journeyPart, async ({ page, journey, browser }) => {
+  const cloud = await replyUpgradeCloud();
+  await routeOperatorCloud(page.context(), cloud);
+  const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+  const peer = await browser.newContext();
+  try {
+    await journey.stage("Reader asks and the owner denies", async () => {
+      await journey.open(); await enrollReplyBrowser(page, cloud, "Denied phone");
+      await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+      await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
+      const owner = await peer.newPage(); await owner.clock.install({ time: journeyNow() });
+      await routeOperatorCloud(peer, cloud); await owner.goto(page.url());
+      const ownerInbox = await enrollReplyBrowser(owner, cloud, "Owner", true);
+      await ownerInbox.getByRole("button", { name: /Deny Denied phone/ }).click();
+      await expect(inbox.getByText("The owner denied this reply request. This browser is still read-only.", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+    });
+    await journey.stage("An expired request is shown honestly after a reload", async () => {
+      await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
+      await expect(inbox.getByText(/Waiting for the account owner/)).toBeVisible();
+      const pending = [...cloud.replyGrants.requests.values()].find(r => r.status === "pending")!;
+      // Only the server double's deadline changes; no browser sleeps/clock advance.
+      pending.expires_at = new Date(cloud.now() - 1).toISOString();
+      await page.reload(); await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+      await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+      await expect(inbox.getByText("This reply request expired. This browser is still read-only.", { exact: true })).toBeVisible();
+      await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toBeVisible();
+      await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+    });
+  } finally { await peer.close(); }
+});
+
+test("HUB-J19 unshipped Cloud never offers Ask to reply (cas-874b)", journeyPart, async ({ page, journey }) => {
+  const cloud = await replyUpgradeCloud(false);
+  await routeOperatorCloud(page.context(), cloud);
+  await journey.stage("The old cloud keeps the honest existing reply guidance and no dead control", async () => {
+    await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only");
+    await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+    await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toHaveCount(0);
+    await expect(inbox.getByText(/This browser can read this conversation but not reply/)).toBeVisible();
+    expect(cloud.log.some(r => r.path.includes("reply-grant-requests"))).toBe(false);
+  });
+});

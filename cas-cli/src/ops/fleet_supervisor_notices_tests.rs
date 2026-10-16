@@ -85,3 +85,47 @@ fn ct2_p3_integration_conflict_notifies_both() {
         "a repeated focus does not repeat the conflict"
     );
 }
+
+#[test]
+fn integration_conflict_for_dead_owner_reaches_remaining_live_owner() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let tasks = crate::store::open_task_store(&root).unwrap();
+    let mut live = Agent::new_with_role("live".into(), "live".into(), AgentRole::Supervisor);
+    live.factory_session = Some("live-session".into());
+    agents.register(&live).unwrap();
+    let mut dead = Agent::new_with_role("dead".into(), "dead".into(), AgentRole::Supervisor);
+    dead.status = cas_types::AgentStatus::Shutdown;
+    dead.factory_session = Some("dead-session".into());
+    agents.register(&dead).unwrap();
+    for (id, owner) in [("cas-live", "live"), ("cas-dead", "dead")] {
+        let mut epic = Task::new(id.into(), id.into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/shared".into());
+        epic.epic_verification_owner = Some(owner.into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        tasks.add(&epic).unwrap();
+    }
+    crate::supervisor_notices::integration_overlap(
+        &root,
+        &tasks.get("cas-live").unwrap(),
+        "live-session",
+    )
+    .unwrap();
+    let rows = crate::store::open_prompt_queue_store(&root)
+        .unwrap()
+        .peek_all(10)
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "both interested readers resolve to the one live owner"
+    );
+    assert_eq!(rows[0].target, live.name);
+    assert_eq!(rows[0].factory_session, live.factory_session);
+    assert!(rows[0].prompt.contains("cas-dead"));
+}

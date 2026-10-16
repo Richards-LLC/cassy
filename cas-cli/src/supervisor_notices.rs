@@ -238,10 +238,16 @@ pub(crate) fn integration_overlap(
         let Some(owner) = other.epic_verification_owner.as_deref() else {
             continue;
         };
-        let second = resolve(&agents, Some(owner), None);
-        if first.id == second.id {
+        // Skip one supervisor's own lanes, but do not drop an ended owner's
+        // conflict merely because recovery resolves both readers to one peer.
+        if focused.epic_verification_owner.as_deref() == Some(owner)
+            || agents
+                .iter()
+                .any(|a| a.id == first.id && (a.id == owner || a.name == owner))
+        {
             continue;
         }
+        let second = resolve(&agents, Some(owner), None);
         let detail = format!(
             "Integration lanes overlap: {} ({}) and {} ({}) use {} / {} in {}. Coordinate merges before changing either lane.",
             focused.id,
@@ -286,7 +292,15 @@ pub(crate) async fn remote_focus_conflict(
 ) {
     use crate::cloud::peer_mailbox::{PeerMailbox, PeerSend, http_mailbox};
     use sha2::{Digest, Sha256};
-    let label = format!("{}:{}:{}", sender, epic, hold.agent_id);
+    let label = format!(
+        "{}:{}:{}:{}",
+        sender,
+        epic,
+        hold.agent_id,
+        hold.expires_at
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_default()
+    );
     let detail = format!(
         "Epic focus conflict: supervisor {sender} also focused {epic}, held by {}. Coordinate ownership and integration lanes before proceeding.",
         hold.describe()

@@ -3005,6 +3005,9 @@ impl FactoryDaemon {
                 self.flush_ws_client_output().await;
             }
 
+            // GH #1196: an operator send can tell from loop.json that no
+            // Commander client is connected.
+            loop_progress.set_commander_clients(self.ws_clients.len());
             loop_progress.set_spawn_snapshot(
                 self.pending_spawns.len(),
                 self.spawn_task.as_ref().map(|(name, ..)| {

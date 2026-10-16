@@ -4231,8 +4231,8 @@ fn normalize_cas_substitutions(command: &str) -> String {
 }
 
 /// Options taking a separate value, for each wrapper the structural pass
-/// unwraps. Words starting with `-` and numeric or duration words (`30`,
-/// `1.5m`) are skipped generically.
+/// unwraps. Duration words belong only to timeout; positional values are
+/// consumed only by wrappers that define one.
 fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
     match wrapper {
         "timeout" => &["-s", "--signal", "-k", "--kill-after"],
@@ -4270,8 +4270,8 @@ fn unwrapped_command_index(words: &[String]) -> Option<usize> {
         }
         let value_options = wrapper_value_options(name);
         let mut next = index + 1;
-        // `flock FILE cmd` and `timeout DURATION cmd` take one positional.
-        let mut positional = matches!(name, "flock" | "timeout");
+        // File/FD, duration and scheduling priority, respectively.
+        let mut positional = matches!(name, "flock" | "timeout" | "chrt");
         while next < words.len() {
             let word = words[next].as_str();
             if word == "--" {
@@ -6704,6 +6704,7 @@ mod workspace_contract_tests {
             (vec!["timeout", "2m", "printf", "sample"], 2),
             (vec!["nohup", "2m", "sample"], 1),
             (vec!["nice", "2", "sample"], 1),
+            (vec!["chrt", "-f", "10", "printf", "sample"], 3),
         ] {
             let words: Vec<String> = words.into_iter().map(str::to_string).collect();
             assert_eq!(unwrapped_command_index(&words), Some(expected), "{words:?}");

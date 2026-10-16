@@ -349,7 +349,7 @@ pub(crate) fn stale_citation_line(finding: &StaleCitations) -> String {
         .map(|gone| {
             format!(
                 "{} removed in {} ({})",
-                clip(&gone.cited, 60),
+                clip(&gone.cited, 40),
                 gone.removed_in,
                 gone.removed_on
             )

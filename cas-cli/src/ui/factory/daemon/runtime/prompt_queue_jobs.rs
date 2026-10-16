@@ -94,6 +94,9 @@ pub(crate) enum QueueStamp {
         failed: u32,
         detail: Option<String>,
     },
+    /// A Teams inbox copy was written while the row stays pending for a
+    /// later wake (GH #751, cas-786a6 L4).
+    DeferredInbox { pane_bytes: u64 },
     /// No write: completes after every earlier stamp for the same row and
     /// recipient, and clears the row's in-flight entry.
     Settled,
@@ -113,6 +116,7 @@ impl QueueStamp {
             Self::Suppressed { .. } => "suppressed",
             Self::Abandoned { .. } => "abandoned",
             Self::BroadcastOutcome { .. } => "broadcast_outcome",
+            Self::DeferredInbox { .. } => "deferred_inbox",
             Self::Settled => "settled",
         }
     }
@@ -147,6 +151,7 @@ impl QueueStamp {
                 failed,
                 detail,
             } => queue.mark_broadcast_outcome(row, *attempted, *succeeded, *failed, detail.as_deref()),
+            Self::DeferredInbox { pane_bytes } => queue.record_deferred_inbox(row, *pane_bytes),
             Self::Settled => Ok(()),
         }
     }

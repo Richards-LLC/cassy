@@ -12,6 +12,7 @@ pub(crate) mod director_refresh;
 #[cfg(test)]
 mod delivery_matrix_tests;
 mod gui_client;
+pub(crate) mod inject_commands;
 #[cfg(test)]
 mod inject_command_tests;
 mod injection_events;

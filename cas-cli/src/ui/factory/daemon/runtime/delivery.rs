@@ -79,6 +79,9 @@ impl NudgeReport {
 pub(crate) enum ContextResetDelivery {
     /// The harness's reset command was typed into the pane.
     Injected,
+    /// The turn break went out; the command follows once the pane settles,
+    /// reported by `Mux::advance_injects` under this ticket (cas-786a6).
+    Started(cas_mux::InjectTicket),
     /// The pane is not ready for injection yet — retry on a later tick.
     NotReady,
     /// The recipient's harness has no verified in-place reset command. This is
@@ -1354,13 +1357,17 @@ impl FactoryDaemon {
             "lifecycle-wake:context-reset",
             None,
         );
+        // cas-786a6: the settle is a per-pane state, not an inline await.
+        // A destructive control: no composer preservation, as before.
         match self
             .app
             .mux
-            .interrupt_and_inject(&pane_target, command, settle)
+            .begin_interrupt_and_inject(&pane_target, command, settle, false)
             .await
         {
-            Ok(()) => ContextResetDelivery::Injected,
+            Ok(cas_mux::InjectStart::Started(ticket)) => ContextResetDelivery::Started(ticket),
+            // Another urgent inject is settling on this pane.
+            Ok(cas_mux::InjectStart::Deferred) => ContextResetDelivery::NotReady,
             Err(error) => ContextResetDelivery::Failed {
                 detail: format!("pane inject failed: {error}"),
             },

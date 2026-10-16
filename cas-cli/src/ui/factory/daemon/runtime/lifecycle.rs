@@ -3,6 +3,8 @@ use crate::ui::factory::daemon::imports::*;
 /// The daemon's refresh tick: reminders and GitHub watcher results are
 /// handled at this cadence.
 pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the loop runs while an urgent inject is settling (cas-786a6).
+const URGENT_INJECT_POLL_MS: u64 = 25;
 
 /// Stable identity for one alarm episode, independent of delivery retries.
 /// Session scope belongs to the caller's outer key. Tuple encoding prevents
@@ -2195,6 +2197,7 @@ impl FactoryDaemon {
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
+            urgent_injects: Default::default(),
             send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
@@ -2478,6 +2481,10 @@ impl FactoryDaemon {
             // This stays outside process_prompt_queue so a deferred inject
             // never blocks the input loop that can make its target clean.
             self.app.mux.flush_deferred_injections().await;
+            // cas-786a6 (factory loop v2 C4a): urgent injects whose pane has
+            // settled type their payload now. A settle is a per-pane state;
+            // no pass waits for one.
+            self.advance_urgent_injects().await;
 
             // Poll prompt queue (on notification or timer)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
@@ -3037,6 +3044,13 @@ impl FactoryDaemon {
                 8
             } else {
                 500 // Headless: no rendering needed, sleep longer
+            };
+            // cas-786a6: a settling urgent inject is advanced promptly; its
+            // readiness is judged once per pass.
+            let sleep_ms = if self.app.mux.has_pending_injects() {
+                sleep_ms.min(URGENT_INJECT_POLL_MS)
+            } else {
+                sleep_ms
             };
             let sleep_dur = Duration::from_millis(sleep_ms);
             if let Some(ref mut notify) = self.notify_rx {

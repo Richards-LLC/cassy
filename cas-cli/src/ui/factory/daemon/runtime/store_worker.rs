@@ -232,6 +232,16 @@ pub(crate) fn persist_or_defer_on<E: std::fmt::Display>(
     }
 }
 
+/// Run a store write on the store worker from the start, never on the
+/// caller's thread (factory loop v2 C4a): for writes the loop must not make.
+/// Retried there like a deferred write; see [`persist_or_defer`].
+pub(crate) fn submit_write<E: std::fmt::Display>(
+    label: &'static str,
+    write: impl Fn() -> Result<(), E> + Send + 'static,
+) -> Persisted {
+    defer_on(global(), label, "queued off the daemon loop", write)
+}
+
 /// Queue a write that already failed on the caller's thread, so the store
 /// worker retries it without a budget. See [`persist_or_defer`].
 pub(crate) fn defer<E: std::fmt::Display>(

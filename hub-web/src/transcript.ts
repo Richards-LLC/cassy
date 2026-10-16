@@ -1,21 +1,57 @@
-import { GHOSTTY_CELL_WIDE, type GhosttyCell, type GhosttyColor, type GhosttyRow } from "./terminal/ghostty/core";
+/** An sRGB colour, as the daemon's style runs carry it. */
+export interface TranscriptColor {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+}
+
+/** How a cell occupies the grid: a wide glyph's trailing half carries no text. */
+export const TRANSCRIPT_CELL_WIDE = {
+  narrow: 0,
+  wide: 1,
+  spacerTail: 2,
+  spacerHead: 3,
+} as const;
+
+/** One styled run of a pane row: a single cell, or several sharing a style. */
+export interface TranscriptCell {
+  readonly text: string;
+  readonly wide: number;
+  readonly foreground: TranscriptColor;
+  readonly background: TranscriptColor;
+  readonly bold: boolean;
+  readonly italic: boolean;
+  readonly invisible: boolean;
+  readonly strikethrough: boolean;
+  readonly underline: boolean;
+}
+
+/** One row of a pane's screen, with its soft-wrap links when they are known. */
+export interface TranscriptRow {
+  readonly cells: readonly TranscriptCell[];
+  readonly text: string;
+  readonly isWrapContinuation: boolean;
+  /** Whether this row soft-wraps onto the next row. */
+  readonly wrapsToNext: boolean;
+}
+
 
 /**
  * The transcript is the reflowed reading view of a pane: the emulator's own
  * logical lines rendered as wrapping text at UI size, instead of a fixed grid
  * squeezed into a phone's CSS width.
  *
- * It is built client-side from the Ghostty row snapshot, which already carries
- * the two facts a reflow needs — `isWrapContinuation` / `wrapsToNext` for soft
- * wraps, and per-cell colour and weight for ANSI styling. See hub-web/DESIGN.md
- * for the seam decision.
+ * It is built client-side from rows of the pane's screen: the daemon's own
+ * rendered rows (cas-f285), whose style runs carry ANSI colour and weight, and
+ * soft-wrap links where a source knows them. See hub-web/DESIGN.md for the
+ * seam decision.
  */
 
 export interface TranscriptSegment {
   readonly text: string;
-  readonly foreground: GhosttyColor;
+  readonly foreground: TranscriptColor;
   /** Null when the cell keeps the theme background; a colour when it highlights. */
-  readonly background: GhosttyColor | null;
+  readonly background: TranscriptColor | null;
   readonly bold: boolean;
   readonly italic: boolean;
   readonly underline: boolean;
@@ -34,8 +70,8 @@ export interface TranscriptLine {
 }
 
 export interface TranscriptTheme {
-  readonly foreground: GhosttyColor;
-  readonly background: GhosttyColor;
+  readonly foreground: TranscriptColor;
+  readonly background: TranscriptColor;
 }
 
 /**
@@ -49,17 +85,17 @@ const GUTTER_MARKERS = new Set([
 /** A hanging indent wide enough to swallow a phone line is worse than none. */
 const MAX_INDENT = 10;
 
-function sameColor(left: GhosttyColor, right: GhosttyColor): boolean {
+function sameColor(left: TranscriptColor, right: TranscriptColor): boolean {
   return left.r === right.r && left.g === right.g && left.b === right.b;
 }
 
-function cellText(cell: GhosttyCell): string {
-  if (cell.wide === GHOSTTY_CELL_WIDE.spacerTail) return "";
+function cellText(cell: TranscriptCell): string {
+  if (cell.wide === TRANSCRIPT_CELL_WIDE.spacerTail) return "";
   if (cell.invisible) return " ";
   return cell.text || " ";
 }
 
-function sameStyle(left: TranscriptSegment, cell: GhosttyCell, background: GhosttyColor | null): boolean {
+function sameStyle(left: TranscriptSegment, cell: TranscriptCell, background: TranscriptColor | null): boolean {
   return sameColor(left.foreground, cell.foreground)
     && (left.background === null ? background === null : background !== null && sameColor(left.background, background))
     && left.bold === cell.bold
@@ -84,7 +120,7 @@ export function transcriptIndent(text: string): number {
   return Math.min(index, MAX_INDENT);
 }
 
-function buildLine(cells: readonly GhosttyCell[], theme: TranscriptTheme): TranscriptLine {
+function buildLine(cells: readonly TranscriptCell[], theme: TranscriptTheme): TranscriptLine {
   const segments: TranscriptSegment[] = [];
   let text = "";
   for (const cell of cells) {
@@ -134,8 +170,8 @@ function buildLine(cells: readonly GhosttyCell[], theme: TranscriptTheme): Trans
  * are rejoined, blank padding is trimmed, and interior blank runs collapse to a
  * single break so a redrawn TUI screen reads as a transcript rather than a form.
  */
-export function transcriptLines(rows: readonly GhosttyRow[], theme: TranscriptTheme): TranscriptLine[] {
-  const groups: GhosttyCell[][] = [];
+export function transcriptLines(rows: readonly TranscriptRow[], theme: TranscriptTheme): TranscriptLine[] {
+  const groups: TranscriptCell[][] = [];
   let previousWraps = false;
   for (const row of rows) {
     const continuation = row.isWrapContinuation || previousWraps;

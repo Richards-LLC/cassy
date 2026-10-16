@@ -4,15 +4,16 @@ import { SCOPES, type HubDouble } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 
 // cas-0546: Conversations is Commander's only surface. The supervisor's
-// Interrupt and its read-only Raw output live in the conversation header;
-// the pane surface behind Raw output sits in a hidden, inert host.
+// Interrupt and its read-only Raw output live in the conversation header.
+// cas-f285: Raw output reads the daemon's rendered rows; no pane host or
+// terminal surface stands behind the thread.
 
 /** Tab, from wherever focus is, until `target` has it: a keyboard-only route. */
 async function tabTo(page: Page, target: Locator, max = 60): Promise<number> {
   for (let presses = 0; presses <= max; presses++) {
     if (await target.evaluate((node) => node === document.activeElement)) return presses;
-    const inHost = await page.evaluate(() => Boolean(document.activeElement?.closest(".pane-host")));
-    expect(inHost, "Tab never stops inside the hidden pane host").toBe(false);
+    const inTerminal = await page.evaluate(() => Boolean(document.activeElement?.closest(".pane-host, .terminal-mount, canvas")));
+    expect(inTerminal, "Tab never stops inside a terminal").toBe(false);
     await page.keyboard.press("Tab");
   }
   throw new Error(`Tab did not reach ${target} in ${max} presses`);
@@ -20,14 +21,10 @@ async function tabTo(page: Page, target: Locator, max = 60): Promise<number> {
 
 const interrupts = (hub: HubDouble) => hub.frames.filter((frame) => frame.kind === "InterruptPane");
 
-/** Only the thread shows: the pane host is attached for Raw output but hidden, inert and unspoken. */
+/** Only the thread shows: no pane host, terminal mount or canvas, and the pane's text is unspoken. */
 async function expectOnlyTheThread(page: Page): Promise<void> {
-  const host = page.locator("#pane-grid > .pane-host");
-  await expect(host).toBeAttached();
-  await expect(host).toBeHidden();
-  await expect(host).toHaveAttribute("inert", "");
-  await expect(host).toHaveAttribute("aria-hidden", "true");
-  await expect(page.locator("#pane-grid > .conversation-thread-slot")).toBeVisible();
+  await expect(page.locator(".pane-host, .terminal-mount, canvas")).toHaveCount(0);
+  await expect(page.locator("#conversation-stage > .conversation-thread-slot")).toBeVisible();
   await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
   expect(await page.locator("body").ariaSnapshot(), "the pane's text is not in the accessibility tree").not.toContain("The supervisor is ready.");
   // No Terminal view anywhere: not a button, a link, a palette command or a word on screen.
@@ -59,7 +56,7 @@ async function readRawOutput(page: Page, hub: HubDouble, sheet: boolean): Promis
   await page.keyboard.type("q");
   await page.keyboard.press("Control+c");
   expect(hub.sends.length, "typing in Raw output sends no message").toBe(sends);
-  expect(hub.frames.slice(before).filter((frame) => !["RequestPaneKeyframe", "ConversationHistoryRequest", "GetState"].includes(frame.kind)), "typing in Raw output reaches no pane").toEqual([]);
+  expect(hub.frames.slice(before).filter((frame) => !["ScrollbackRequest", "ConversationHistoryRequest", "GetState"].includes(frame.kind)), "typing in Raw output reaches no pane").toEqual([]);
   const box = (await drawer.boundingBox())!;
   const viewport = page.viewportSize()!;
   if (sheet) {

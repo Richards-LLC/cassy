@@ -1491,7 +1491,7 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         .to_owned();
     for required in [
         "default-src 'none'",
-        "script-src 'self' 'wasm-unsafe-eval'",
+        "script-src 'self';",
         "style-src 'self'",
         "object-src 'none'",
         "base-uri 'none'",
@@ -1503,7 +1503,8 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
     }
     assert!(!csp.contains("'unsafe-inline'"));
     assert!(!csp.contains("'unsafe-eval'"));
-    assert!(csp.contains("'wasm-unsafe-eval'"));
+    // cas-f285: Commander runs no WebAssembly terminal, so the CSP grants none.
+    assert!(!csp.contains("wasm-unsafe-eval"));
     assert!(csp.contains("http://127.0.0.1:*"));
     assert!(csp.contains("ws://127.0.0.1:*"));
     assert!(!csp.contains(" http: "));

@@ -27,10 +27,11 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
+import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
 
 export type ConnectionState = ConnectionSnapshot;
 
@@ -80,7 +81,8 @@ export interface HubCallbacks {
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
   onSessions(sessions: HubSession[], freshnessThresholdSecs?: number): void;
   onMachineEvent(event: Record<string, unknown>): void;
-  onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
+  /** `scrollback` is a pre-v3 daemon's raw pane bytes; a v3 daemon sends pane_bootstrap instead (cas-f285). */
+  onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onMessageQueued?(session: string, queued: MessageQueued, fence?: CredentialFence): void;
   onOperatorMessage?(session: string, message: ConversationHistoryMessage): void;
@@ -94,8 +96,9 @@ export interface HubCallbacks {
   /** The session attached without durable history: no first page will come (cas-010f). */
   onConversationHistoryUnavailable?(session: string): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
-  onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
-  onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
+  /** A page of the pane's rendered rows, answering requestScrollback (cas-f285). */
+  onScrollbackPage?(session: string, page: ScrollbackPage): void;
+  /** The hub dropped output for this session under backpressure: rows read before may be stale. */
   onFlowControlReset?(session: string): void;
   onSocketError(session: string, detail: string): void;
 }
@@ -246,7 +249,8 @@ export class HubConnectionSupervisor {
     phase: "idle", stage: "idle", since: Date.now(), attempt: 0, missedHeartbeats: 0, degraded: false,
   };
   private readonly sockets = new Map<string, WebSocket>();
-  private readonly keyframeRequests = new Set<string>();
+  /** Each session's per-pane attach metadata from its last Welcome (cas-f285). */
+  private readonly paneBootstraps = new Map<string, PaneBootstrap[]>();
   private readonly attachLifecycles = new Map<string, AttachSnapshot>();
   private readonly socketAttempts = new Map<string, number>();
   /**
@@ -282,7 +286,6 @@ export class HubConnectionSupervisor {
   private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
-  private readonly sessionPanes = new Map<string, PaneInfo[]>();
   private healthPing?: { id: number; startedAt: number };
   private readonly eventRecovery = new EventRecovery();
   private readonly diagnostics = new ConnectionDiagnostics();
@@ -332,7 +335,7 @@ export class HubConnectionSupervisor {
     this.machineSocketOpening = undefined;
     this.desiredSessions.clear();
     this.machineSubscriptions.clear();
-    this.sessionPanes.clear();
+    this.paneBootstraps.clear();
     this.healthPing = undefined;
     for (const socket of this.sockets.values()) socket.close(1000, "machine removed");
     this.sockets.clear();
@@ -986,7 +989,6 @@ export class HubConnectionSupervisor {
     this.probeTimer = undefined;
     for (const socket of this.sockets.values()) this.retireLegacySocket(socket);
     this.sockets.clear();
-    this.keyframeRequests.clear();
     this.clearAttachTimeouts();
     for (const session of this.desiredSessions) {
       const retry = this.attachRetryTimers.get(session);
@@ -1034,7 +1036,6 @@ export class HubConnectionSupervisor {
         this.retireLegacySocket(socket);
         this.sockets.delete(session);
         this.clearAttachTimeouts(session);
-        for (const key of this.keyframeRequests) if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
         this.transitionAttach(session, "failed", "dialing", { reason });
       }
     }
@@ -1695,12 +1696,18 @@ export class HubConnectionSupervisor {
     this.upstreamRefusalStreak.delete(session);
   }
 
-  requestPaneKeyframe(session: string, paneId: string): boolean {
-    const key = `${session}:${paneId}`;
-    if (this.keyframeRequests.has(key)) return true;
-    if (!this.send(session, { RequestPaneKeyframe: { pane_id: paneId } })) return false;
-    this.keyframeRequests.add(key);
-    return true;
+  /**
+   * The pane's attach metadata, when its daemon announced it: the generation
+   * and row range Raw output pages through (cas-f285). Undefined for a daemon
+   * that predates paged rows.
+   */
+  paneBootstrap(session: string, paneId: string): PaneBootstrap | undefined {
+    return this.paneBootstraps.get(session)?.find((pane) => pane.pane_id === paneId);
+  }
+
+  /** Request a bounded page of the pane's rendered rows (cas-f285); answered by onScrollbackPage. */
+  requestScrollback(session: string, paneId: string, generation: number, startRow: number, count: number): boolean {
+    return this.send(session, { ScrollbackRequest: { pane_id: paneId, generation, start_row: startRow, count } });
   }
 
   /** Request a private, device-scoped page of durable Commander turns. */
@@ -1731,11 +1738,8 @@ export class HubConnectionSupervisor {
       const session = decoder.decode(bytes.subarray(9, 9 + sessionLength));
       const pane = decoder.decode(bytes.subarray(9 + sessionLength, payloadStart));
       const payload = bytes.slice(payloadStart);
+      // Kind 2 is a pane keyframe: Commander never asks for one (cas-f285).
       if (kind === 1) this.callbacks.onOutput(session, pane, payload);
-      else if (kind === 2) {
-        this.keyframeRequests.delete(`${session}:${pane}`);
-        this.callbacks.onPaneKeyframe(session, pane, payload);
-      }
       return;
     }
     let envelope: Record<string, any>;
@@ -1768,11 +1772,9 @@ export class HubConnectionSupervisor {
       ? envelope.channel.slice(4) : undefined;
     if (!session) return;
     if (envelope.keyframe_required) {
-      for (const key of this.keyframeRequests) {
-        if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
-      }
+      // Output was dropped under backpressure. Commander keeps no terminal
+      // state to rebuild; Raw output re-reads its rows (cas-f285).
       this.callbacks.onFlowControlReset?.(session);
-      for (const pane of this.sessionPanes.get(session) ?? []) this.requestPaneKeyframe(session, pane.id);
       return;
     }
     if (envelope.closed) {
@@ -1869,7 +1871,6 @@ export class HubConnectionSupervisor {
       if (this.attachLifecycles.get(session)?.phase === "live"
         && (this.lifecycle.phase === "backoff" || this.lifecycle.phase === "failed")) this.networkChanged();
       const welcome = message.Welcome;
-      this.sessionPanes.set(session, welcome.state.panes);
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3
         && Array.isArray(welcome.capabilities)
         && welcome.capabilities.includes("authoritative_pane_keyframes");
@@ -1883,27 +1884,17 @@ export class HubConnectionSupervisor {
       } else {
         this.callbacks.onConversationHistoryUnavailable?.(session);
       }
-      for (const key of this.keyframeRequests) {
-        if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
-      }
-      if (authoritative) {
-        // The metadata identifies roles, so supervisor content is requested in
-        // the first client turn; mounted workers are requested by the renderer.
-        const supervisor = welcome.state.panes.find((pane: PaneInfo) => pane.kind === "Supervisor");
-        if (supervisor) this.requestPaneKeyframe(session, supervisor.id);
-        this.callbacks.onSessionState(session, welcome.state, undefined, true);
-      } else {
-        this.callbacks.onSessionState(session, welcome.state, welcome.scrollback, false);
-      }
-    } else if (message.PaneKeyframe) {
-      const keyframe = message.PaneKeyframe;
-      this.keyframeRequests.delete(`${session}:${keyframe.pane_id}`);
-      this.callbacks.onPaneKeyframe(session, keyframe.pane_id, new Uint8Array(keyframe.ansi));
-    } else if (message.PaneSize) {
-      const size = message.PaneSize;
-      this.callbacks.onPaneSize?.(session, size.pane_id, size.cols, size.rows, String(size.authority));
+      // cas-f285: no terminal emulator runs here, so no keyframe is asked
+      // for. A daemon that announces its panes' rows is read through them;
+      // an older one's raw bytes are the only text it offers.
+      const bootstrap = Array.isArray(welcome.pane_bootstrap) ? welcome.pane_bootstrap as PaneBootstrap[] : [];
+      if (bootstrap.length > 0) this.paneBootstraps.set(session, bootstrap); else this.paneBootstraps.delete(session);
+      this.callbacks.onSessionState(session, welcome.state, bootstrap.length > 0 || authoritative ? undefined : welcome.scrollback);
+    } else if (message.ScrollbackPage) {
+      this.callbacks.onScrollbackPage?.(session, message.ScrollbackPage as ScrollbackPage);
+    } else if (message.PaneKeyframe || message.PaneSize) {
+      // Terminal geometry and keyframes are for terminal clients (cas-f285).
     } else if (message.StateUpdate) {
-      this.sessionPanes.set(session, message.StateUpdate.state.panes);
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));

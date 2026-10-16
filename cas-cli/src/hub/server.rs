@@ -105,12 +105,6 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
-        .route("/commander/ghostty-vt.wasm", get(commander_ghostty_wasm))
-        .route(
-            "/commander/ghostty-write-pty.wasm",
-            get(commander_ghostty_write_wasm),
-        )
-        .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -360,27 +354,6 @@ fn commander_brand_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         })
 }
 
-async fn commander_ghostty_wasm() -> Response {
-    commander_asset(
-        include_bytes!("../../../hub-web/dist/ghostty-vt.wasm"),
-        "application/wasm",
-    )
-}
-
-async fn commander_ghostty_write_wasm() -> Response {
-    commander_asset(
-        include_bytes!("../../../hub-web/dist/ghostty-write-pty.wasm"),
-        "application/wasm",
-    )
-}
-
-async fn commander_symbols_font() -> Response {
-    commander_asset(
-        include_bytes!("../../../hub-web/dist/symbols.woff2"),
-        "font/woff2",
-    )
-}
-
 /// cas-9b7d: the one reviewed cloud operator inbox API source in the hub's
 /// CSP connect-src (production origin, operator path prefix only).
 #[cfg(test)]
@@ -417,7 +390,7 @@ async fn security_headers(
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"
         )),

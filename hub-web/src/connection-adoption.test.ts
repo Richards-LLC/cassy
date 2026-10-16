@@ -76,7 +76,7 @@ describe("adopting a peer tab's rotated credential (cas-d308)", () => {
     }));
     const connection = new HubConnectionSupervisor(stale, {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
-      onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onOutput: () => {}, onSocketError: () => {},
     });
 
     const [sessions, devices] = await Promise.all([
@@ -103,7 +103,7 @@ describe("adopting a peer tab's rotated credential (cas-d308)", () => {
     }));
     const connection = new HubConnectionSupervisor(current, {
       onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
-      onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {},
+      onOutput: () => {}, onSocketError: () => {},
     });
     await expect(connection.request("GET", "/v1/auth/devices")).rejects.toMatchObject({ kind: "revoked", message: "pairing was revoked" });
     // No different credential exists to adopt, so nothing is retried with one.

@@ -53,7 +53,7 @@ import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest }
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
-import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { OutputBytesSource, ScrollbackTail, appendOutputTail, type ScrollbackPage } from "./raw-output";
 import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { relativeTimestamp } from "./time";
@@ -159,7 +159,8 @@ const statuses = new Map<string, Record<string, unknown>>();
 /** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
 const statusPending = new Set<string>();
 const leases = new Map<string, LeaseState>();
-const surfaces = new Map<string, TerminalSurface>();
+/** Conversation views mounted for a session's supervisor pane, by pane key (cas-f285). */
+const mountedThreads = new Set<string>();
 // Pebble 3: ask and blocker render as the fused-tray objects on the Pebble 2 seam.
 installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
@@ -267,12 +268,11 @@ const sessionStates = new Map<string, SessionState>();
 // Shared data source for session drawers, status rows, pane tooltips, and the
 // Cmd+K integration lane. Values are produced once by the daemon.
 export const sessionSummaries = new Map<string, SessionCardSummary>();
-const paneBuffers = new Map<string, number[]>();
+/** A pre-v3 daemon's recent pane output, by pane key: Raw output's only text for it (cas-f285). */
+const paneOutput = new Map<string, Uint8Array>();
 const paneLastActivity = new Map<string, number>();
 /** Pane output this recent keeps the thread's working line lit. */
 const WORKING_WINDOW_MS = 30_000;
-const authoritativeSessions = new Set<string>();
-const paneKeyframesReady = new Set<string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
 /** How often an open session held by another device is re-checked for release (journey F5). */
@@ -356,23 +356,21 @@ function phoneLayout(): boolean { return window.matchMedia(PHONE_MEDIA_QUERY).ma
 function keyboardHintOffered(): boolean { return window.matchMedia(KEYBOARD_HINT_MEDIA_QUERY).matches; }
 
 /**
- * A session's supervisor pane is read through one hidden terminal surface
- * (cas-0546): it keeps the attach, the keyframes and the raw text the Raw
- * output drawer shows. Releasing it takes the thread it fed with it.
+ * The thread mounted for a session's supervisor pane (cas-f285: no terminal
+ * surface stands behind it). Releasing it disposes its view; the Raw output
+ * drawer follows.
  */
-function releaseSurface(key: string, surface: TerminalSurface): void {
+function releaseThread(key: string): void {
   conversationViews.get(key)?.dispose();
   conversationViews.delete(key);
-  surface.dispose();
-  surfaces.delete(key);
+  mountedThreads.delete(key);
   syncRawOutput();
 }
 
 /**
- * The conversation thread for a session's supervisor pane, in the visible
- * thread slot beside (never inside) the hidden pane host. It goes up as soon
- * as the pane is known — before the hidden surface finishes loading — so
- * opening a conversation never shows a bare panel (cas-04ee).
+ * The conversation thread for a session's supervisor pane, in the stage's
+ * thread slot (cas-f285). It goes up as soon as the pane is known, so opening
+ * a conversation never shows a bare panel (cas-04ee).
  */
 function mountConversation(key: string, mount: HTMLElement): void {
   let conversation = conversationViews.get(key);
@@ -494,7 +492,7 @@ const earlyThreadKey = (threadKey: string): string => `${threadKey}:${EARLY_THRE
  * is nothing to show, it goes away and the pane's thread takes over.
  */
 function syncEarlyThread(): void {
-  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const grid = document.querySelector<HTMLElement>("#conversation-stage");
   const threadKey = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
   const wanted = Boolean(grid && threadKey && grid.dataset.sessionKey === threadKey)
     && threadBeforePanes({ placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) });
@@ -787,32 +785,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (selectedMachineId === machine.id && selectedSession) void loadStatus(machine.id, selectedSession);
       if (selectedMachineId === machine.id && selectedSession) void loadLease(machine.id, selectedSession);
     },
-    onSessionState: (session, state, scrollback, authoritativeKeyframes) => {
-      void renderSessionState(machine.id, session, state, scrollback, authoritativeKeyframes);
+    onSessionState: (session, state, scrollback) => {
+      void renderSessionState(machine.id, session, state, scrollback);
     },
-    onPaneKeyframe: (session, pane, data) => {
-      const key = paneKey(machine.id, session, pane);
-      paneKeyframesReady.add(key);
-      paneBuffers.set(key, [...data]);
-      surfaces.get(key)?.write(data);
-    },
-    onPaneSize: (session, pane, cols, rows) => {
-      applyPaneAuthority(machine.id, session, pane, cols, rows);
-    },
-    onFlowControlReset: (session) => {
-      const prefix = `${sessionKey(machine.id, session)}:`;
-      for (const key of paneKeyframesReady) {
-        if (key.startsWith(prefix)) paneKeyframesReady.delete(key);
-      }
-    },
+    onScrollbackPage: (session, page) => acceptRawOutputPage(machine.id, session, page),
+    // Output was dropped under backpressure: the open drawer re-reads its rows.
+    onFlowControlReset: (session) => refreshRawOutput(machine.id, session),
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       paneLastActivity.set(key, Date.now());
       refreshWorkingLines();
-      if (authoritativeSessions.has(sessionKey(machine.id, session)) && !paneKeyframesReady.has(key)) return;
-      const buffered = [...(paneBuffers.get(key) ?? []), ...data];
-      paneBuffers.set(key, buffered.slice(-2_000_000));
-      surfaces.get(key)?.write(data);
+      // cas-f285: only a daemon without paged rows needs its bytes kept.
+      if (!connections.get(machine.id)?.paneBootstrap(session, pane)) paneOutput.set(key, appendOutputTail(paneOutput.get(key), data));
+      if (rawOutput?.key === key) refreshRawOutput(machine.id, session);
     },
     onMessageQueued: (session, receipt, frameFence) => {
       const accepted = machines.get(machine.id);
@@ -1628,7 +1613,7 @@ async function attachSelectedSession(machineId: string, session: string): Promis
 
 function renderTerminalConnecting(machineId: string, session: string): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
-  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
@@ -1737,7 +1722,7 @@ function conversationLabel(machineId: string, session: string): string {
  */
 function bannerStatesConnection(machineId: string, session: string | undefined): boolean {
   if (!session) return false;
-  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session) || !grid.querySelector(".pane")) return false;
   const snapshot = attachStates.get(sessionKey(machineId, session)) ?? connectionStates.get(machineId);
   return snapshot !== undefined && shouldRetainDisconnectedFrame(snapshot);
@@ -1745,7 +1730,7 @@ function bannerStatesConnection(machineId: string, session: string | undefined):
 
 function renderConnectionSurface(machineId: string, session: string, snapshot: ConnectionState, now = Date.now()): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
-  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   // A fatal machine verdict wins over a session's last retry snapshot.
   const machineState = connectionStates.get(machineId);
@@ -1858,7 +1843,7 @@ function syncConnectionViewTicker(): void {
 
 function renderTerminalFailure(machineId: string, session: string, detail: string): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
-  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
@@ -1937,31 +1922,6 @@ async function loadLease(machineId: string, session: string): Promise<void> {
 }
 
 /**
- * The PTY geometry the daemon reports for each pane (cas-37f8). Commander
- * never sizes a pane (cas-0546): its one surface per session is hidden, so it
- * is pinned to the pane's real grid, and the raw output reads the lines the
- * supervisor's terminal actually wrapped.
- */
-const paneGeometry = new Map<string, { cols: number; rows: number }>();
-
-/** A pane with no reported size yet reads at the session's own size, else a standard terminal. */
-const FALLBACK_PANE_GEOMETRY = { cols: 80, rows: 24 } as const;
-
-function paneGrid(key: string, state: SessionState | undefined): { cols: number; rows: number } {
-  const reported = paneGeometry.get(key);
-  if (reported) return reported;
-  if (state && state.cols > 0 && state.rows > 0) return { cols: state.cols, rows: state.rows };
-  return FALLBACK_PANE_GEOMETRY;
-}
-
-function applyPaneAuthority(machineId: string, session: string, paneId: string, cols: number, rows: number): void {
-  if (!(cols > 0 && rows > 0)) return;
-  const key = paneKey(machineId, session, paneId);
-  paneGeometry.set(key, { cols, rows });
-  surfaces.get(key)?.setAuthoritativeSize({ cols, rows });
-}
-
-/**
  * The pane the conversation reads (cas-0546): the session's supervisor,
  * chosen deterministically, never by layout or focus. Workers and the
  * director are never mounted.
@@ -1972,34 +1932,21 @@ function supervisorPane(machineId: string, session: string, state: SessionState 
   return (visible.find((pane) => pane.kind === "Supervisor") ?? visible[0])?.id;
 }
 
-async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): Promise<void> {
+async function renderSessionState(machineId: string, session: string, state: SessionState, scrollback?: Record<string, number[][]>): Promise<void> {
   const selectedKey = sessionKey(machineId, session);
   sessionStates.set(selectedKey, state);
-  if (authoritativeKeyframes === true) {
-    authoritativeSessions.add(selectedKey);
-    for (const pane of state.panes) {
-      const key = paneKey(machineId, session, pane.id);
-      paneBuffers.delete(key);
-      paneKeyframesReady.delete(key);
-    }
-  } else if (authoritativeKeyframes === false) {
-    authoritativeSessions.delete(selectedKey);
-  }
   if (scrollback) {
     for (const [pane, chunks] of Object.entries(scrollback)) {
-      paneBuffers.set(paneKey(machineId, session, pane), chunks.flat().slice(-2_000_000));
+      paneOutput.set(paneKey(machineId, session, pane), appendOutputTail(undefined, new Uint8Array(chunks.flat())));
     }
   }
   if (selectedMachineId !== machineId || selectedSession !== session) return;
-  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (!grid) return;
   handFocusFromConnectionCard(grid);
   const paneId = supervisorPane(machineId, session, state);
   if (paneId === undefined) {
-    for (const [key, surface] of surfaces) {
-      if (!key.startsWith(`${machineId}:${session}:`)) continue;
-      releaseSurface(key, surface);
-    }
+    for (const key of [...mountedThreads]) if (key.startsWith(`${machineId}:${session}:`)) releaseThread(key);
     const empty = document.createElement("div");
     empty.className = "empty empty-pane-slot";
     const emptyTitle = document.createElement("p");
@@ -2025,58 +1972,20 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   // conversation thread's empty state and deleted it, leaving a re-opened
   // conversation on a blank panel (cas-04ee).
   grid.querySelector(":scope > .empty")?.remove();
-  // cas-0546: the thread has its own visible slot; the pane's surface lives in
-  // a host that renders nothing (hidden, inert, out of the accessibility tree)
-  // and never contains the thread.
-  const { slot, host } = ensureConversationStage(grid);
+  // cas-f285: the thread mounts straight into the stage; no pane host or
+  // terminal surface stands behind it.
+  const slot = ensureConversationStage(grid);
   // cas-fc2c: the pane is up, so the thread shown before it gives way to the
   // one mounted for the supervisor pane below.
   syncEarlyThread();
   const key = paneKey(machineId, session, paneId);
-  for (const [other, surface] of surfaces) {
-    if (other.startsWith(`${machineId}:${session}:`) && other !== key) releaseSurface(other, surface);
+  for (const other of [...mountedThreads]) {
+    if (other.startsWith(`${machineId}:${session}:`) && other !== key) releaseThread(other);
   }
-  let card = host.querySelector<HTMLElement>(`:scope > .pane[data-pane-id="${CSS.escape(paneId)}"]`);
-  let mount = card?.querySelector<HTMLElement>(".terminal-mount");
-  if (!card || !mount) {
-    card = document.createElement("section");
-    card.className = "pane";
-    card.dataset.paneId = paneId;
-    card.dataset.paneRole = state.panes.find((pane) => pane.id === paneId)?.kind.toLowerCase() ?? "supervisor";
-    mount = document.createElement("div"); mount.className = "terminal-mount";
-    card.append(mount);
-    host.replaceChildren(card);
-  }
-  const existingSurface = surfaces.get(key);
-  if (existingSurface && (existingSurface.element !== mount || !existingSurface.element.isConnected)) releaseSurface(key, existingSurface);
-  // The thread goes up before the surface loads in the hidden host, so the
-  // reader sees the conversation at once.
   mountConversation(key, slot);
-  if (!surfaces.has(key)) {
-    const surface = await createTerminalSurface(mount, {
-      // Read-only (cas-0546): Commander never types into a pane or sizes it.
-      onData: () => undefined,
-      onResize: () => undefined,
-      // The thread and the raw output follow the emulator's own tick
-      // instead of polling it.
-      onRender: () => { conversationViews.get(key)?.update(); if (rawOutput?.key === key) rawOutput.view.update(); },
-    });
-    const currentMount = document.querySelector<HTMLElement>(`#pane-grid .pane-host [data-pane-id="${CSS.escape(paneId)}"] .terminal-mount`);
-    if (selectedMachineId !== machineId || selectedSession !== session || !mount.isConnected || currentMount !== mount) {
-      surface.dispose();
-      return;
-    }
-    surfaces.set(key, surface);
-    surface.setCanvasPainting(false);
-    // Pinned before the replay, so the buffer is never written at a grid
-    // that is about to change (cas-37f8).
-    surface.setAuthoritativeSize(paneGrid(key, state));
-    const buffered = paneBuffers.get(key);
-    if (buffered) surface.write(new Uint8Array(buffered));
+  if (!mountedThreads.has(key)) {
+    mountedThreads.add(key);
     syncRawOutput();
-  }
-  if (authoritativeSessions.has(selectedKey) && !paneKeyframesReady.has(key)) {
-    connections.get(machineId)?.requestPaneKeyframe(session, paneId);
   }
   syncConversationActions();
 }
@@ -2121,17 +2030,16 @@ function rawOutputUnavailableReason(): string | undefined {
   if (!machine || !session) return "Open a conversation to read its raw output.";
   const outage = conversationOutageReason(machine, session);
   if (outage) return outage;
-  if (!selectedSurface()) return "Raw output appears once the conversation is connected.";
+  if (!selectedPane()) return "Raw output appears once the conversation is connected.";
   return undefined;
 }
 
-/** The open conversation's one pane surface, keyed by pane, if it is up. */
-function selectedSurface(): { key: string; surface: TerminalSurface } | undefined {
+/** The open conversation's supervisor pane, once its thread is mounted. */
+function selectedPane(): { key: string; machineId: string; session: string; paneId: string } | undefined {
   if (!selectedMachineId || !selectedSession) return undefined;
   const paneId = supervisorPane(selectedMachineId, selectedSession);
   const key = paneId === undefined ? undefined : paneKey(selectedMachineId, selectedSession, paneId);
-  const surface = key ? surfaces.get(key) : undefined;
-  return key && surface ? { key, surface } : undefined;
+  return key && paneId !== undefined && mountedThreads.has(key) ? { key, machineId: selectedMachineId, session: selectedSession, paneId } : undefined;
 }
 
 /** The header's Interrupt and Raw output follow what they can do now, without a shell rebuild. */
@@ -2237,9 +2145,16 @@ async function interruptSupervisor(): Promise<void> {
   }
 }
 
-/** The transcript the open Raw output drawer shows, and the thread it was opened for. */
-let rawOutput: { key: string; view: TranscriptView } | undefined;
+/**
+ * The transcript the open Raw output drawer shows: the pane it reads, the
+ * view, and its text source (cas-f285: the daemon's rendered rows, or an old
+ * daemon's recent bytes). And the thread it was opened for.
+ */
+let rawOutput: { key: string; view: TranscriptView; source: ScrollbackTail | OutputBytesSource } | undefined;
 let rawOutputThread: string | undefined;
+/** A pending re-read of the open drawer's rows: output arrives in bursts. */
+let rawOutputRefreshTimer: number | undefined;
+const RAW_OUTPUT_REFRESH_MS = 400;
 
 /** The drawer lives on document.body, so a shell rebuild never closes it. */
 function rawOutputDialog(): HTMLDialogElement {
@@ -2285,31 +2200,58 @@ function openRawOutput(): void {
 }
 
 function releaseRawOutputView(): void {
+  window.clearTimeout(rawOutputRefreshTimer);
+  rawOutputRefreshTimer = undefined;
   if (!rawOutput) return;
   rawOutput.view.dispose();
   rawOutput.view.element.remove();
   rawOutput = undefined;
 }
 
+/** New output, or output the hub dropped: the open drawer reads the session's rows again shortly. */
+function refreshRawOutput(machineId: string, session: string): void {
+  if (!rawOutput?.key.startsWith(`${sessionKey(machineId, session)}:`) || rawOutputRefreshTimer !== undefined) return;
+  rawOutputRefreshTimer = window.setTimeout(() => {
+    rawOutputRefreshTimer = undefined;
+    if (rawOutput?.source instanceof ScrollbackTail) rawOutput.source.refresh();
+    else rawOutput?.view.update();
+  }, RAW_OUTPUT_REFRESH_MS);
+}
+
+/** A page of rendered rows for the open drawer's pane. */
+function acceptRawOutputPage(machineId: string, session: string, page: ScrollbackPage): void {
+  if (rawOutput?.key !== paneKey(machineId, session, page.pane_id) || !(rawOutput.source instanceof ScrollbackTail)) return;
+  if (rawOutput.source.accept(page)) rawOutput.view.update();
+}
+
 /**
- * Keep the open drawer on the open conversation's surface: it attaches once
- * the surface is up, follows a remount, and closes when the operator moves
- * to another conversation.
+ * Keep the open drawer on the open conversation's supervisor pane: it starts
+ * reading once the thread is up, follows a new pane or a reattach, and closes
+ * when the operator moves to another conversation.
  */
 function syncRawOutput(): void {
   const dialog = document.querySelector<HTMLDialogElement>("#raw-output");
   if (!dialog?.open) { releaseRawOutputView(); return; }
   const thread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
   if (thread !== rawOutputThread) { dialog.close(); return; }
-  const current = selectedSurface();
-  if (rawOutput && rawOutput.key !== current?.key) releaseRawOutputView();
+  const current = selectedPane();
+  const connection = current ? connections.get(current.machineId) : undefined;
+  const bootstrap = current ? connection?.paneBootstrap(current.session, current.paneId) : undefined;
+  // A reattach brings a new daemon generation: the rows are read afresh.
+  const stale = rawOutput && (rawOutput.key !== current?.key || (rawOutput.source instanceof ScrollbackTail ? rawOutput.source.generation !== bootstrap?.epoch : bootstrap !== undefined));
+  if (stale) releaseRawOutputView();
   dialog.querySelector<HTMLElement>(".raw-output-empty")!.hidden = current !== undefined;
   if (!current) return;
   if (!rawOutput) {
-    const view = new TranscriptView(document, current.surface.transcript);
+    const source = bootstrap
+      ? new ScrollbackTail(current.paneId, bootstrap.epoch, bootstrap.scrollback_end_row,
+        (start, count) => connection?.requestScrollback(current.session, current.paneId, bootstrap.epoch, start, count) ?? false)
+      : new OutputBytesSource(() => paneOutput.get(current.key));
+    const view = new TranscriptView(document, source);
     view.element.setAttribute("aria-label", "Raw output");
     dialog.querySelector<HTMLElement>(".raw-output-body")!.append(view.element);
-    rawOutput = { key: current.key, view };
+    rawOutput = { key: current.key, view, source };
+    if (source instanceof ScrollbackTail) source.open();
   }
   rawOutput.view.update();
 }
@@ -3784,7 +3726,7 @@ function render(captureDraft = true): void {
   const preservedAttention = attentionPanel?.dataset.viewScope === attentionViewScope() ? attentionPanel : undefined;
   const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
   preservedAttention?.remove();
-  const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
+  const currentGrid = document.querySelector<HTMLElement>("#conversation-stage");
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();
@@ -3800,7 +3742,7 @@ function render(captureDraft = true): void {
   if (preservedGrid) {
     preservedGrid.remove();
   } else {
-    for (const [key, surface] of surfaces) releaseSurface(key, surface);
+    for (const key of [...mountedThreads]) releaseThread(key);
   }
   app.innerHTML = `
     ${browserNotice ? `<p class="browser-unsupported" role="alert">${escapeHtml(browserNotice)}</p>` : ""}
@@ -3888,7 +3830,7 @@ function conversationRegions(preservedGrid: HTMLElement | undefined, threadKey: 
     template.innerHTML = markup;
     return template.content.firstElementChild as HTMLElement;
   };
-  const grid = preservedGrid ?? build(`<section id="pane-grid" class="pane-grid"${threadKey ? ` data-session-key="${escapeAttr(threadKey)}"` : ""}><div class="empty"></div></section>`);
+  const grid = preservedGrid ?? build(`<section id="conversation-stage" class="conversation-stage"${threadKey ? ` data-session-key="${escapeAttr(threadKey)}"` : ""}><div class="empty"></div></section>`);
   return {
     grid,
     composer: build(composerMarkup(supervisor)),

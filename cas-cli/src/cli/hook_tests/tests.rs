@@ -306,7 +306,7 @@ fn test_configure_codex_creates_config() {
     );
     assert_eq!(
         hooks.pointer("/hooks/PreToolUse/0/hooks/0/timeout"),
-        Some(&serde_json::json!(3))
+        Some(&serde_json::json!(cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS))
     );
     assert_eq!(
         hooks.pointer("/hooks/PostToolUse/0/matcher"),
@@ -594,7 +594,7 @@ fn test_configure_codex_merges_hooks_and_is_idempotent() {
     );
     assert_eq!(
         pre_tool[1].pointer("/hooks/0/timeout"),
-        Some(&serde_json::json!(3))
+        Some(&serde_json::json!(cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS))
     );
 
     let first_hooks_bytes = std::fs::read_to_string(&hooks_path).unwrap();

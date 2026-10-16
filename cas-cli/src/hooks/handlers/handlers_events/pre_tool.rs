@@ -17,14 +17,63 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // cas-38e7: worker browser/JS suites are no longer rewritten through
-    // scripts/worker-memory.py; the shared-host memory admission is retired.
-    handle_pre_tool_use_inner(input, cas_root)
+    // Select the literal capped Cargo route before policy stores or provider
+    // lookups. Every protection still evaluates the rewritten command below.
+    if worker_cargo_request(input) {
+        let command = input
+            .tool_input
+            .as_ref()
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let (args, suffix) = worker_check_command(command).expect("route was selected");
+        let Some(root) = cas_root else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "Worker check needs a Cassy root for max_concurrent_builders admission",
+            ));
+        };
+        if let Some(reason) = worker_check_log_denial(input, &suffix) {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        }
+        let executable = std::env::current_exe()?;
+        let rewritten = format!(
+            "{} factory worker-check --cas-root {} -- {}{}",
+            shell_quote_path(&executable),
+            shell_quote_path(root),
+            args.iter()
+                .map(|arg| if arg.trim_start().starts_with("test(") {
+                    format!("'{arg}'")
+                } else {
+                    arg.clone()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            suffix
+        );
+        let mut updated = input.tool_input.clone().unwrap_or_default();
+        updated["command"] = serde_json::Value::String(rewritten);
+        return handle_pre_tool_use_inner(input, cas_root, Some(updated));
+    }
+    handle_pre_tool_use_inner(input, cas_root, None)
 }
 
+/// Pure admission selection; safe before logging, DB discovery or telemetry.
+pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
+    crate::harness_policy::is_worker(input)
+        && input.tool_name.as_deref() == Some("Bash")
+        && input
+            .tool_input
+            .as_ref()
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .and_then(worker_check_command)
+            .is_some()
+}
 fn handle_pre_tool_use_inner(
     input: &HookInput,
     cas_root: Option<&Path>,
+    prepared_cargo_input: Option<serde_json::Value>,
 ) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -130,50 +179,14 @@ fn handle_pre_tool_use_inner(
                  A workspace normalization requires separate operator approval and must not be run from a worker.",
             ));
         }
-        // Only the literal package-scoped Cargo shapes may compile. Rewrite through the
-        // capped runner; a snapshot alone cannot prevent simultaneous starts.
-        if let Some((args, suffix)) = command.and_then(worker_check_command) {
-            let Some(root) = cas_root else {
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    "Worker check needs a Cassy root for max_concurrent_builders admission",
-                ));
-            };
-            if let Some(reason) = worker_check_log_denial(input, &suffix) {
-                return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
-            }
-            let executable = std::env::current_exe()?;
-            let rewritten = format!(
-                "{} factory worker-check --cas-root {} -- {}{}",
-                shell_quote_path(&executable),
-                shell_quote_path(root),
-                args.iter()
-                    .map(|arg| {
-                        if arg.trim_start().starts_with("test(") {
-                            format!("'{}'", arg)
-                        } else {
-                            arg.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                suffix,
-            );
-            let mut updated = input.tool_input.clone().unwrap_or_default();
-            updated["command"] = serde_json::Value::String(rewritten);
+        if let Some(updated) = prepared_cargo_input {
             let mut rewritten_input = input.clone();
             rewritten_input.tool_input = Some(updated.clone());
-            // Evaluate every existing protection against the command that
-            // will actually run, including early rule-based approvals.
-            let mut output = handle_pre_tool_use(&rewritten_input, cas_root)?;
-            // cas-980d: in the shape the harness applies. Codex honours the
-            // rewrite only with permissionDecision "allow" and otherwise runs
-            // the raw command; a deny from a later guard stands.
+            let mut output = handle_pre_tool_use_inner(&rewritten_input, cas_root, None)?;
             output.rewrite_pre_tool_input(updated);
             return Ok(output);
-        } else if let Some(what) =
-            command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
-        {
+        }
+        if let Some(what) = command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd))) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
@@ -6267,7 +6280,7 @@ mod workspace_contract_tests {
 
         // The PreToolUse hook applies it to an agent's Bash call.
         let input = bash_input("cas mcp remove vercel", root.path());
-        let output = handle_pre_tool_use_inner(&input, Some(root.path())).expect("hook");
+        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None).expect("hook");
         let rendered = serde_json::to_string(&output).expect("serialize");
         assert!(
             rendered.contains("deny") && rendered.contains("supervisor-only"),

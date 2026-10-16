@@ -886,9 +886,9 @@ pub fn provision_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
 /// Install Cassy's command guards and task-anchor hook using Codex's native
 /// `hooks.json` schema.
 ///
-/// The timeout is three seconds (Codex timeout units are seconds, unlike the
-/// millisecond values in Claude's settings). Existing non-Cassy hook groups are
-/// preserved, while older Cassy entries are converged to these exact matchers and
+/// PreToolUse gets a generous response budget; PostToolUse remains three
+/// seconds. Codex timeout units are seconds, unlike Claude's settings. Existing
+/// non-Cassy hook groups are preserved, while older Cassy entries are converged to these exact matchers and
 /// handlers.
 fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
     let hooks_path = codex_dir.join("hooks.json");
@@ -945,7 +945,7 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
             "hooks": [{
                 "type": "command",
                 "command": command,
-                "timeout": 3
+                "timeout": if event == "PreToolUse" { cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS } else { 3 }
             }]
         }));
     }

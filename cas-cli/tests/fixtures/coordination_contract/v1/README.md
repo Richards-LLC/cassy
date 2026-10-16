@@ -15,6 +15,15 @@ are. [MANIFEST.json](MANIFEST.json) pins each file's sha256, and the Cassy test
 refuses a local edit. To update them, re-vendor from a newer Cloud ref. A
 breaking change means a new `v2/`.
 
+Cloud PR #169 (issue #167), at `193102bbe54518f2e70584a86a862bde7d9fcf48`,
+adds three byte-pinned read fixtures under `MANIFEST.vendored_cloud_recovery`.
+`deliveries--recover.json` lists the reader's unconsumed admissions and targets;
+`deliveries--lookup.json` resolves one admission after rebind, including consumed
+history without replay; `bindings--activation.json` supplies per-binding strict
+activation and v1 publication/leasing/late-ack fences with quiescence receipts.
+An admitted delivery is recovered through these reads, never by re-leasing it.
+The original 14 pins remain unchanged.
+
 | File | Surface | Route |
 | --- | --- | --- |
 | `external_work--claim.json` | `external_work.claim` | `POST /api/coordination/external-work/claim` |
@@ -29,6 +38,9 @@ breaking change means a new `v2/`.
 | `violet_activity--ack_v2.json` | `violet_activity.ack_v2` | `POST /api/violet/activity/ack` with `schema` |
 | `deliveries--rebind.json` | `deliveries.rebind` | `POST /api/coordination/activity/deliveries/{id}/rebind` |
 | `deliveries--receipts.json` | `deliveries.receipts` | `POST /api/coordination/activity/deliveries/{id}/receipts` |
+| `deliveries--recover.json` | `deliveries.recover` | `GET /api/coordination/activity/deliveries` |
+| `deliveries--lookup.json` | `deliveries.lookup` | `GET /api/coordination/activity/deliveries/{id}` |
+| `bindings--activation.json` | `bindings.activation` | `GET /api/coordination/bindings/activation` |
 | `external_work--reply_intents.json` | `external_work.reply_intents` | `POST /api/coordination/external-work/{id}/reply-intents` |
 | `reply_intents--dispatch.json` | `reply_intents.dispatch` | `POST /api/coordination/reply-intents/{id}/dispatch` (relay only) |
 

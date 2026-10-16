@@ -426,6 +426,86 @@ pub(crate) fn evidence_merged_close_blocked(
 mod tests {
     use super::*;
 
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn cas_f439_contained_deliveries_await_worker_close() {
+        use crate::ui::factory::director::events::supervisor_actionable_state_with_classifiers;
+        use crate::ui::factory::director::{SupervisorActionableState, SupervisorStallTracker};
+        use crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-b", "main"]);
+        git(repo, &["config", "user.name", "Fixture"]);
+        git(repo, &["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join("app"), "base\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "base"]);
+        git(repo, &["checkout", "-b", "factory/wa-cas-a"]);
+        std::fs::write(repo.join("app"), "delivered\n").unwrap();
+        git(repo, &["commit", "-am", "cas-a: delivery"]);
+        let anchor = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-b", "epic/x", "main"]);
+        std::fs::write(repo.join("other"), "epic work\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "other task"]);
+
+        let mut facts = parked("cas-a", "wa", None);
+        facts.anchor = Some(anchor.clone());
+        let mut child = cas_types::Task::new("cas-a".into(), "delivery".into());
+        child.status = cas_types::TaskStatus::AwaitingMerge;
+        child.assignee = Some("wa".into());
+        child.deliverables.parked_branch = facts.parked_branch.clone();
+        child.deliverables.factory_branch_anchor = facts.anchor.clone();
+        let ci = LaneCiCache::default();
+        ci.lock().unwrap().insert(("factory/wa-cas-a".into(), anchor.clone()), (std::time::Instant::now(), false));
+        let classify = |facts: &ParkedFacts| {
+            let request = CiStatusRequest::new(repo.into(), &HashMap::from([("cas-a".into(), facts.clone())]), Arc::clone(&ci)).unwrap();
+            let git = request.run();
+            let evidence = combine(&HashMap::from([("cas-a".into(), facts.clone())]), &git);
+            let mut data = DirectorData::default();
+            data.in_progress_tasks.push(facts.task.clone());
+            let mut epic = facts.task.clone();
+            epic.id = "cas-epic".into();
+            epic.status = cas_types::TaskStatus::InProgress;
+            epic.task_type = cas_types::TaskType::Epic;
+            epic.branch = Some("epic/x".into());
+            data.epic_tasks.push(epic);
+            supervisor_actionable_state_with_classifiers(&data, Some("cas-epic"), "supervisor", &Default::default(), Utc::now(), 600,
+                |task, worker| evidence_delivery(&evidence, task, worker),
+                |task, _, target, _| evidence_merged_close_blocked(&evidence, task, target),
+                |task, worker| evidence_hold(&evidence, task, worker))
+        };
+        assert!(collect_epic_branch_statuses(&[child.clone()], "epic/x", repo)[0].unmerged_count > 0);
+        assert!(matches!(classify(&facts), Some(SupervisorActionableState::MergeBranches { .. })), "genuinely unmerged delivery stays merge-now");
+
+        git(repo, &["cherry-pick", &anchor]);
+        // A rewritten delivery has the same app tree on its target, without
+        // the reviewed anchor's ancestry. epic_status already reconciles it.
+        let row = collect_epic_branch_statuses(&[child], "epic/x", repo).remove(0);
+        assert_eq!(row.unmerged_count, 0, "fixture must match epic_status: {row:?}");
+        let state = classify(&facts).expect("contained delivery needs a close notice");
+        assert!(!matches!(state, SupervisorActionableState::MergeBranches { .. }), "contained delivery cannot demand another merge: {state:?}");
+        assert!(state.next_step_text().contains("awaiting worker close"));
+        let now = Utc::now();
+        let mut tracker = SupervisorStallTracker::default();
+        let activity = Some(now - chrono::Duration::seconds(600));
+        assert!(tracker.observe(Some(state.clone()), activity, false, now, 600).wake.is_some());
+        assert!(tracker.observe(Some(state), activity, false, now + chrono::Duration::seconds(1200), 600).wake.is_none());
+
+        // Legacy tasks can lack an anchor while their actual delivery tip is merged.
+        git(repo, &["merge", "-s", "ours", "--no-edit", "factory/wa-cas-a"]);
+        facts.anchor = None;
+        let state = classify(&facts).unwrap();
+        assert!(!matches!(state, SupervisorActionableState::MergeBranches { .. }), "merged live tip cannot demand another merge: {state:?}");
+    }
+
     fn parked(task_id: &str, worker: &str, store_hold: Option<DeliveryHold>) -> ParkedFacts {
         ParkedFacts {
             task: TaskSummary {

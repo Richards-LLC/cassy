@@ -1,5 +1,7 @@
 # QA evidence bundle at close (design, cas-0cd5)
 
+For the opt-in `qa.mode=batch` staging-ledger workflow, see [batch QA](batch-qa.md).
+
 Status: draft for supervisor approval, 2026-09-23.
 
 ## Problem

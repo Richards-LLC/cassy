@@ -150,6 +150,20 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
         .await
         .expect("one supervisor receipt must cover the staging walk");
     assert!(extract_text(recorded).contains("Batch QA receipt"));
+    let status: VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action":"qa_status", "task_id":"cas-bq01"
+    }))
+    .unwrap();
+    let status = extract_text(
+        fx.supervisor
+            .verification(Parameters(status))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        status.contains("Batch QA PASS") && status.contains(&fx.artifact),
+        "{status}"
+    );
     for id in ["cas-bq01", "cas-bq02"] {
         let result = fx.close(id).await;
         assert_eq!(

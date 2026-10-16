@@ -14,6 +14,13 @@ to the operator continue to be recorded. Existing conversation history is retain
 
 ## Coordination messages and reminders
 
+Projects that review a batch once on staging can select `qa.mode=batch`.
+Unmerged user-facing deliveries park with evidence deferred and no automatic
+per-task QA pass. A registered supervisor records the shared published ledger
+with `verification action=batch_receipt`; each listed delivery must be contained
+in that task's configured target. See [batch QA](../../docs/qa/batch-qa.md).
+Unset or `per_task` keeps the existing per-delivery gates.
+
 Message bodies default to 1,200 characters, or 2,500 for blocker and merge
 requests; task note bodies default to 1,500. These limits are configurable via
 `factory.message_max_chars`, `factory.message_max_chars_escalation` and

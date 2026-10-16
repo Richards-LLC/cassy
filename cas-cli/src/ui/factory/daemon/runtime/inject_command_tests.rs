@@ -102,7 +102,7 @@ async fn flv2_inject_is_a_command() {
         daemon.process_prompt_queue().await.unwrap();
         slowest = slowest.max(pass.elapsed());
         echoed.push_str(&drain(&mut daemon));
-        if echoed.contains("C4A-MARKER") && daemon.urgent_wake_probes.contains_key(&id) {
+        if echoed.contains("C4A-MARKER") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -113,13 +113,28 @@ async fn flv2_inject_is_a_command() {
     );
     assert!(echoed.contains("C4A-MARKER"), "the redirect reached the pane: {echoed:?}");
     assert!(
-        daemon.urgent_wake_probes.contains_key(&id),
-        "the urgent row awaits its wake probe, as before C4a"
-    );
-    assert!(
         started.elapsed() >= Duration::from_millis(1200),
         "the payload still waits out the settle"
     );
-    let row = open_prompt_queue_store(&cas_dir).unwrap().queued_prompt(id).unwrap().unwrap();
-    assert!(row.processed_at.is_none(), "the row waits for evidence the pane took the turn");
+    // The outcome came back as an event on a later pass and was recorded as
+    // before C4a: the wake fired, and the row waits for (or already has)
+    // evidence the pane took the turn rather than being consumed on the
+    // keystrokes alone.
+    let report = open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .message_delivery_report(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.wake_attempt, cas_store::WakeAttempt::Fired, "{report:?}");
+    assert!(
+        daemon.urgent_wake_probes.contains_key(&id)
+            || open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some(),
+        "the urgent row is held for its wake probe or consumed on an observed wake"
+    );
 }

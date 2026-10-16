@@ -881,7 +881,7 @@ fn serve_execute() -> anyhow::Result<()> {
     // ends through its normal shutdown path.
     crate::server_signals::ignore_sigpipe_for_server();
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    crate::mcp::server::memory::configure_allocator();
+    crate::mcp::configure_serve_allocator();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
